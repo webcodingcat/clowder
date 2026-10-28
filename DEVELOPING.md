@@ -89,3 +89,25 @@ reports never depend on a volume.
 `.github/workflows/ci.yml` runs `bin/dev lint`, `bin/dev test` and `bin/dev package` on every
 push and pull request and keeps `dist/` as an artifact. The live tests need `/dev/kvm` and
 stay manual.
+
+## Releases
+
+A tag `v<major>.<minor>.<patch>` starts `.github/workflows/release.yml`:
+
+1. `bin/dev all` (lint, test, package); the version comes from the tag.
+2. CLI archives for Linux, macOS (`.tar.gz`) and Windows (`.zip`).
+3. `packaging/apt/publish.sh` adds the Debian packages to the public APT repository
+   `webcodingcat/clowder-apt` with reprepro and signs it; GitHub Pages serves it at
+   `https://webcodingcat.github.io/clowder-apt` (distribution `trixie`, component `main`,
+   public key `clowder.asc`). Its `README.md` shows how a host adds it.
+4. A GitHub release with the packages and the archives.
+
+The workflow needs two secrets in this repository:
+
+| Secret | What |
+|---|---|
+| `APT_SIGNING_KEY` | ASCII-armoured private OpenPGP key without passphrase that signs the APT repository |
+| `APT_DEPLOY_KEY` | private SSH key; its public half is a deploy key with write access on `webcodingcat/clowder-apt` |
+
+`publish.sh` imports the key into a throw-away keyring and publishes the public half as
+`clowder.asc`; `conf/` and `db/` stay in the APT repository so the next release adds to it.

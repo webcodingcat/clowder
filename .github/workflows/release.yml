@@ -1,0 +1,56 @@
+# On a tag v*: check and package as CI does, add the Debian packages to the
+# APT repository webcodingcat/clowder-apt (GitHub Pages), and publish a GitHub
+# release with the packages and the CLI archives.
+# Secrets: APT_SIGNING_KEY (ASCII-armoured private key without passphrase),
+# APT_DEPLOY_KEY (SSH key with write access to clowder-apt).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Lint, test, package
+        run: bin/dev all
+      - name: CLI archives
+        working-directory: dist
+        run: |
+          for target in linux-amd64 darwin-amd64 darwin-arm64; do
+            tar -czf "clowder_${GITHUB_REF_NAME}_${target}.tar.gz" -C "${target}" clowder
+          done
+          (cd windows-amd64 && zip -q "../clowder_${GITHUB_REF_NAME}_windows-amd64.zip" clowder.exe)
+      - uses: actions/checkout@v7
+        with:
+          repository: webcodingcat/clowder-apt
+          path: apt
+          ssh-key: ${{ secrets.APT_DEPLOY_KEY }}
+      - name: Add the packages to the APT repository
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          docker run --rm -v "${PWD}:/src" -w /src -e APT_SIGNING_KEY \
+            debian:trixie-slim bash packaging/apt/publish.sh apt dist/*.deb
+          sudo chown -R "$(id -u):$(id -g)" apt
+      - name: Push the APT repository
+        working-directory: apt
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Add clowder ${GITHUB_REF_NAME}"
+          git push
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes \
+            dist/*.deb dist/*.tar.gz dist/*.zip
