@@ -1,0 +1,53 @@
+# nfpm: the Debian package of the agent. VERSION comes from bin/dev package.
+# drbd-dkms and drbd-utils come from LINBIT's public repository (dist
+# proxmox-9); the host's APT sources must list it (operator base).
+name: clowderd
+arch: amd64
+platform: linux
+version: ${VERSION}
+version_schema: none
+section: admin
+priority: optional
+maintainer: Christoph Friedrich <531870+SaijSaij@users.noreply.github.com>
+description: Agent of a clowder cluster
+homepage: https://github.com/webcodingcat/clowder
+depends:
+  - docker.io
+  - docker-cli
+  - docker-compose
+  - wireguard-tools
+  - nftables
+  - iptables
+  - conntrack
+  - lvm2
+  - thin-provisioning-tools
+  - restic
+  - git
+  - e2fsprogs
+  - util-linux
+  - linux-headers-amd64
+  - gcc
+  - libc6-dev
+  - make
+  - coccinelle
+  - drbd-dkms
+  - drbd-utils (>= 9.28)
+contents:
+  - src: dist/linux-amd64/clowderd
+    dst: /usr/bin/clowderd
+    file_info:
+      mode: 0755
+  - src: packaging/systemd/clowderd.service
+    dst: /usr/lib/systemd/system/clowderd.service
+    file_info:
+      mode: 0644
+  - src: packaging/systemd/clowder-tasks.slice
+    dst: /usr/lib/systemd/system/clowder-tasks.slice
+    file_info:
+      mode: 0644
+  - dst: /var/lib/clowder
+    type: dir
+    file_info:
+      mode: 0700
+scripts:
+  postinstall: packaging/scripts/postinstall.sh

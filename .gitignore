@@ -3,3 +3,4 @@
 *.tfstate.*
 spike/results/
 spike-*.out
+dist/

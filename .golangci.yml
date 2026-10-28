@@ -1,0 +1,61 @@
+version: "2"
+
+linters:
+  enable:
+    - depguard
+    - errorlint
+    - gocritic
+    - misspell
+    - revive
+    - unconvert
+    - unparam
+  settings:
+    depguard:
+      rules:
+        # The CLI runs on Linux, macOS and Windows: it must not import the
+        # packages that only work on a Linux host. This checks direct imports;
+        # the cross build (bin/dev build) catches the indirect ones.
+        cli-portable:
+          files:
+            - "**/cmd/clowder/**"
+            - "**/internal/cli/**"
+          deny:
+            - pkg: github.com/webcodingcat/clowder/internal/agent
+              desc: Linux only (clowderd)
+            - pkg: github.com/webcodingcat/clowder/internal/supervisor
+              desc: Linux only (clowderd)
+            - pkg: github.com/webcodingcat/clowder/internal/raftnode
+              desc: Linux only (clowderd)
+            - pkg: github.com/webcodingcat/clowder/internal/controller
+              desc: Linux only (clowderd)
+            - pkg: github.com/webcodingcat/clowder/internal/network
+              desc: Linux only (clowderd)
+            - pkg: github.com/webcodingcat/clowder/internal/storage
+              desc: Linux only (clowderd)
+            - pkg: github.com/webcodingcat/clowder/internal/docker
+              desc: Linux only (clowderd)
+            - pkg: github.com/webcodingcat/clowder/internal/hostcheck
+              desc: Linux only (clowderd)
+            - pkg: github.com/vishvananda/netlink
+              desc: Linux only
+            - pkg: golang.zx2c4.com/wireguard/wgctrl
+              desc: Linux only
+    misspell:
+      locale: US
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+        - name: var-naming
+        - name: indent-error-flow
+        - name: error-strings
+        - name: receiver-naming
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/webcodingcat/clowder

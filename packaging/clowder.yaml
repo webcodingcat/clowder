@@ -1,0 +1,16 @@
+# nfpm: the Debian package of the CLI. VERSION comes from bin/dev package.
+name: clowder
+arch: amd64
+platform: linux
+version: ${VERSION}
+version_schema: none
+section: admin
+priority: optional
+maintainer: Christoph Friedrich <531870+SaijSaij@users.noreply.github.com>
+description: CLI of a clowder cluster
+homepage: https://github.com/webcodingcat/clowder
+contents:
+  - src: dist/linux-amd64/clowder
+    dst: /usr/bin/clowder
+    file_info:
+      mode: 0755

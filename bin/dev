@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# Development commands. Everything runs in pinned Docker images, so the host
+# needs only Bash and Docker (Linux, macOS; Git Bash or WSL on Windows).
+# Usage: bin/dev <command>
+#   lint      golangci-lint (with gofumpt, goimports, the import rule), shellcheck,
+#             shfmt, yamllint, tofu fmt
+#   format    apply what the formatters can fix
+#   test      the unit tests (no VMs)
+#   build     clowderd for linux/amd64, clowder for linux, darwin and windows
+#             into dist/
+#   package   build, then the Debian packages of clowder and clowderd into dist/
+#   all       lint, test, package (what CI runs)
+set -euo pipefail
+# Docker gets Windows paths from pwd -W; Git Bash must not rewrite them. Native
+# tools that take a path (git) are called after a cd instead.
+export MSYS_NO_PATHCONV=1
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly ROOT
+# The repository as Docker sees it (a Windows path under Git Bash).
+DOCKER_ROOT="$(cd "${ROOT}" && (pwd -W 2>/dev/null || pwd) )"
+readonly DOCKER_ROOT
+
+readonly GO_IMAGE=golang:1.27.3
+readonly LINT_IMAGE=golangci/golangci-lint:v2.15.0
+readonly NFPM_IMAGE=goreleaser/nfpm:v2.48.0
+readonly SHELLCHECK_IMAGE=koalaman/shellcheck:v0.11.0
+readonly SHFMT_IMAGE=mvdan/shfmt:v3.14.1
+readonly YAMLLINT_IMAGE=cytopia/yamllint:1
+readonly TOFU_IMAGE=ghcr.io/opentofu/opentofu:1
+# Go's module and build cache survive between runs.
+readonly CACHE_VOLUME=clowder-gocache
+
+# in_image <image> <command...>: Run a command in an image with the repository
+# mounted at /src as the working directory.
+in_image() {
+  local image="$1"
+  shift
+  docker run --rm -v "${DOCKER_ROOT}:/src" -w /src -v "${CACHE_VOLUME}:/go" \
+    -e GOFLAGS=-buildvcs=false "${image}" "$@"
+}
+
+# version: Print the version for the build without a leading v: a tag
+# (v1.2.3 -> 1.2.3), otherwise 0.0.0~dev+<commit>, which sorts before any
+# release in Debian's version order.
+version() {
+  local tag commit
+  if tag="$(cd "${ROOT}" && git describe --tags --exact-match 2>/dev/null)"; then
+    echo "${tag#v}"
+    return
+  fi
+  commit="$(cd "${ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  echo "0.0.0~dev+${commit}"
+}
+
+# shell_files: Print the shell scripts of the repository.
+shell_files() {
+  (cd "${ROOT}" && git ls-files --cached --others --exclude-standard bin/dev '*.sh')
+}
+
+cmd_lint() {
+  local scripts
+  in_image "${LINT_IMAGE}" golangci-lint run ./...
+  mapfile -t scripts < <(shell_files)
+  in_image "${SHELLCHECK_IMAGE}" "${scripts[@]}"
+  in_image "${SHFMT_IMAGE}" -i 2 -ci -bn -d "${scripts[@]}"
+  in_image "${YAMLLINT_IMAGE}" .
+  if [[ -d "${ROOT}/deploy/opentofu" ]]; then
+    in_image "${TOFU_IMAGE}" fmt -check -recursive deploy/opentofu
+  fi
+}
+
+cmd_format() {
+  local scripts
+  in_image "${LINT_IMAGE}" golangci-lint fmt ./...
+  mapfile -t scripts < <(shell_files)
+  in_image "${SHFMT_IMAGE}" -i 2 -ci -bn -w "${scripts[@]}"
+}
+
+cmd_test() {
+  in_image "${GO_IMAGE}" go test ./...
+}
+
+cmd_build() {
+  local ldflags target goos goarch
+  ldflags="-s -w -X github.com/webcodingcat/clowder/internal/buildinfo.Version=$(version)"
+  rm -rf "${ROOT}/dist"
+  in_image "${GO_IMAGE}" env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags "${ldflags}" -o dist/linux-amd64/clowderd ./cmd/clowderd
+  for target in linux/amd64 darwin/amd64 darwin/arm64 windows/amd64; do
+    goos="${target%/*}"
+    goarch="${target#*/}"
+    in_image "${GO_IMAGE}" env CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
+      go build -trimpath -ldflags "${ldflags}" \
+      -o "dist/${goos}-${goarch}/clowder$([[ "${goos}" == windows ]] && echo .exe)" \
+      ./cmd/clowder
+  done
+}
+
+cmd_package() {
+  local package version
+  cmd_build
+  version="$(version)"
+  for package in clowder clowderd; do
+    # the image's entrypoint is nfpm itself
+    docker run --rm -v "${DOCKER_ROOT}:/src" -w /src -e VERSION="${version}" \
+      "${NFPM_IMAGE}" package --config "packaging/${package}.yaml" --packager deb \
+      --target dist/
+  done
+  ls -1 "${ROOT}/dist"/*.deb
+}
+
+cmd_all() {
+  cmd_lint
+  cmd_test
+  cmd_package
+}
+
+main() {
+  case "${1:-}" in
+    lint | format | test | build | package | all) "cmd_$1" ;;
+    *)
+      sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
