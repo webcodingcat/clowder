@@ -95,6 +95,13 @@ cmd_build() {
       -o "dist/${goos}-${goarch}/clowder$([[ "${goos}" == windows ]] && echo .exe)" \
       ./cmd/clowder
   done
+  give_back_dist
+}
+
+# give_back_dist: The containers write dist/ as root; on Linux (CI as well)
+# hand it to the caller so later steps can write next to the binaries.
+give_back_dist() {
+  in_image "${GO_IMAGE}" chown -R "$(id -u):$(id -g)" dist
 }
 
 cmd_package() {
@@ -107,6 +114,7 @@ cmd_package() {
       "${NFPM_IMAGE}" package --config "packaging/${package}.yaml" --packager deb \
       --target dist/
   done
+  give_back_dist
   ls -1 "${ROOT}/dist"/*.deb
 }
 
