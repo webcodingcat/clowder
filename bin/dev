@@ -5,7 +5,8 @@
 #   lint      golangci-lint (with gofumpt, goimports, the import rule), shellcheck,
 #             shfmt, yamllint, tofu fmt
 #   format    apply what the formatters can fix
-#   test      the unit tests (no VMs)
+#   test      the unit tests (no VMs); arguments go to go test, e.g.
+#             bin/dev test ./internal/compose -update (rewrite golden files)
 #   build     clowderd for linux/amd64, clowder for linux, darwin and windows
 #             into dist/
 #   package   build, then the Debian packages of clowder and clowderd into dist/
@@ -78,7 +79,11 @@ cmd_format() {
 }
 
 cmd_test() {
-  in_image "${GO_IMAGE}" go test ./...
+  # extra arguments go to go test, e.g. bin/dev test ./internal/compose -update
+  if (($# == 0)); then
+    set -- ./...
+  fi
+  in_image "${GO_IMAGE}" go test "$@"
 }
 
 cmd_build() {
@@ -126,7 +131,8 @@ cmd_all() {
 
 main() {
   case "${1:-}" in
-    lint | format | test | build | package | all) "cmd_$1" ;;
+    lint | format | build | package | all) "cmd_$1" ;;
+    test) cmd_test "${@:2}" ;;
     *)
       sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' >&2
       exit 2

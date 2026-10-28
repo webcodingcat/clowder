@@ -58,6 +58,37 @@ The package layout is planned for the whole of v1; packages appear as the phases
 - **Changes the host**: `agent`, `supervisor` and the drivers `network`, `storage`, `docker`,
   `ingress`.
 
+## Stacks (`internal/compose`)
+
+- `Load` reads Compose files with compose-go and checks what clowder cannot run: `build`,
+  host or container network modes, `pid`/`ipc: host`, `container_name`, devices, more than one
+  replica, bind mounts (except `/etc/localtime` read-only), anonymous and external volumes,
+  port ranges, host addresses and reserved ports. It reports every problem at once
+  (`Problems`).
+- The `x-clowder` blocks are decoded strictly: an unknown key is an error, not ignored.
+- `Render` writes the file docker compose gets on a host: `restart: "no"` (the agent restarts),
+  the agent's resolver, each port on the Floating IP and the node address, labels, a fixed
+  bridge name per network (`BridgeName`), volumes bound to `<mount>/data`.
+- The rendered example `testdata/shop/rendered.golden.yaml` is the golden file. After an
+  intended change: `bin/dev test ./internal/compose -update`, then review the diff.
+
+## Cluster directory (`internal/clusterdir`)
+
+- `Find` picks the directory (`--cluster`, `$CLOWDER_CLUSTER`, the working directory), `Load`
+  reads `cluster.yaml` strictly and `Check` lists every problem.
+- `Secrets` and `Credentials` decrypt `secrets.sops.yaml` and `credentials/<user>.sops.yaml`
+  with the user's age key, as SOPS finds it (`SOPS_AGE_KEY_FILE`, `SOPS_AGE_KEY`, SOPS's
+  default path). `testdata/test-age-key.txt` is a test-only key for the fixtures.
+- `Schema` makes the JSON schema of `cluster.yaml` from the Go types.
+
+## Host check (`internal/hostcheck`, `clowderd check`)
+
+Checks the operator base and changes nothing: sysctls, time sync, watchdog, WireGuard, DRBD 9
+built for the running kernel, drbd-utils ≥ 9.28, DRBD autostart and usage report off, LVM
+filter, thin pools (`--pool`), Docker's `daemon.json`, docker compose, unattended-upgrades and
+the Floating IP (`--floating-ip`). Each check reads through the `Host` interface, so the unit
+tests use a fake host; exit status 1 if any check fails.
+
 ## Volumes
 
 Without quorum, DRBD suspends I/O (`on-no-quorum suspend-io`): a write then hangs in the

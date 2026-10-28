@@ -1,0 +1,28 @@
+name: prod
+seeds: [203.0.113.10, 203.0.113.11]
+hoster: hetzner
+hoster_token: {secret: hcloud-token}
+network: private
+ingress:
+  floating_ip: 198.51.100.7
+  preferred_hosts: [node0, node1]
+storage_classes:
+  fast: {pool: vg-nvme/thin, reserve: 20%}
+  bulk: {pool: vg-bulk/thin, reserve: 20%}
+  any: {fallback: [fast, bulk]}
+replication:
+  resync_rate: 50M
+priorities:
+  default: normal
+  categories: {critical: 900, high: 700, normal: 500, low: 200}
+defaults:
+  reservations: {memory: 128M, cpus: "0.1"}
+system_reserve: {memory: 512M, cpus: "0.25"}
+backup:
+  target: {type: restic, url: "sftp:u12345@u12345.your-storagebox.de:/clowder"}
+  password: {secret: restic-password}
+alerts:
+  channels:
+    - type: discord
+      webhook: {secret: discord-webhook}
+      min_severity: warning
