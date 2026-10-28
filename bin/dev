@@ -7,10 +7,12 @@
 #   format    apply what the formatters can fix
 #   test      the unit tests (no VMs); arguments go to go test, e.g.
 #             bin/dev test ./internal/compose -update (rewrite golden files)
+#   test-sops the tests of internal/sopsage against the real sops (Alpine's
+#             package)
 #   build     clowderd for linux/amd64, clowder for linux, darwin and windows
 #             into dist/
 #   package   build, then the Debian packages of clowder and clowderd into dist/
-#   all       lint, test, package (what CI runs)
+#   all       lint, test, test-sops, package (what CI runs)
 set -euo pipefail
 # Docker gets Windows paths from pwd -W; Git Bash must not rewrite them. Native
 # tools that take a path (git) are called after a cd instead.
@@ -23,6 +25,8 @@ DOCKER_ROOT="$(cd "${ROOT}" && (pwd -W 2>/dev/null || pwd) )"
 readonly DOCKER_ROOT
 
 readonly GO_IMAGE=golang:1.27.3
+# Alpine packages sops, so the cross-tests install it in seconds.
+readonly GO_SOPS_IMAGE=golang:1.27.3-alpine
 readonly LINT_IMAGE=golangci/golangci-lint:v2.15.0
 readonly NFPM_IMAGE=goreleaser/nfpm:v2.48.0
 readonly SHELLCHECK_IMAGE=koalaman/shellcheck:v0.11.0
@@ -86,6 +90,11 @@ cmd_test() {
   in_image "${GO_IMAGE}" go test "$@"
 }
 
+cmd_test_sops() {
+  in_image "${GO_SOPS_IMAGE}" sh -c \
+    'apk add --no-cache sops >/dev/null && go test -tags sops ./internal/sopsage'
+}
+
 cmd_build() {
   local ldflags target goos goarch
   ldflags="-s -w -X github.com/webcodingcat/clowder/internal/buildinfo.Version=$(version)"
@@ -126,6 +135,7 @@ cmd_package() {
 cmd_all() {
   cmd_lint
   cmd_test
+  cmd_test_sops
   cmd_package
 }
 
@@ -133,6 +143,7 @@ main() {
   case "${1:-}" in
     lint | format | build | package | all) "cmd_$1" ;;
     test) cmd_test "${@:2}" ;;
+    test-sops) cmd_test_sops ;;
     *)
       sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' >&2
       exit 2

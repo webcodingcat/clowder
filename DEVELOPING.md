@@ -81,6 +81,24 @@ The package layout is planned for the whole of v1; packages appear as the phases
   default path). `testdata/test-age-key.txt` is a test-only key for the fixtures.
 - `Schema` makes the JSON schema of `cluster.yaml` from the Go types.
 
+## SOPS files (`internal/sopsage`)
+
+The SOPS library brings the SDKs of every cloud KMS along (the CLI grew from 2.5 to 44 MB),
+so `sopsage` implements the part of the SOPS format clowder needs: YAML files with age keys,
+read and written.
+
+- `Decrypt` opens the data key with one of the identities, decrypts every value (AES-256-GCM,
+  the key path as additional data) and checks the MAC; `Encrypt` writes what `sops encrypt`
+  writes with default settings. Comments are dropped.
+- `LoadIdentities` looks where SOPS looks: the SSH key, `SOPS_AGE_KEY`, `SOPS_AGE_KEY_FILE`
+  or `sops/age/keys.txt` in the user's config directory. `SOPS_AGE_KEY_CMD` is not
+  supported.
+- Files with settings it does not implement (`*_regex`, key groups, no age recipient) are
+  refused, not guessed at.
+- `testdata/plain*.sops.yaml` were written by the real sops from `testdata/plain.yaml`.
+  `bin/dev test-sops` (part of `all` and CI) runs `cross_test.go` (build tag `sops`)
+  against Alpine's sops in both directions.
+
 ## Host check (`internal/hostcheck`, `clowderd check`)
 
 Checks the operator base and changes nothing: sysctls, time sync, watchdog, WireGuard, DRBD 9
@@ -117,15 +135,15 @@ reports never depend on a volume.
 
 ## CI
 
-`.github/workflows/ci.yml` runs `bin/dev lint`, `bin/dev test` and `bin/dev package` on every
-push and pull request and keeps `dist/` as an artifact. The live tests need `/dev/kvm` and
-stay manual.
+`.github/workflows/ci.yml` runs `bin/dev lint`, `bin/dev test`, `bin/dev test-sops` and
+`bin/dev package` on every push and pull request and keeps `dist/` as an artifact. The live
+tests need `/dev/kvm` and stay manual.
 
 ## Releases
 
 A tag `v<major>.<minor>.<patch>` starts `.github/workflows/release.yml`:
 
-1. `bin/dev all` (lint, test, package); the version comes from the tag.
+1. `bin/dev all` (lint, test, test-sops, package); the version comes from the tag.
 2. CLI archives for Linux, macOS (`.tar.gz`) and Windows (`.zip`).
 3. `packaging/apt/publish.sh` adds the Debian packages to the public APT repository
    `webcodingcat/clowder-apt` with reprepro and signs it; GitHub Pages serves it at

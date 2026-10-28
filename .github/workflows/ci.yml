@@ -22,6 +22,8 @@ jobs:
         run: bin/dev lint
       - name: Unit tests
         run: bin/dev test
+      - name: SOPS format against the real sops
+        run: bin/dev test-sops
       - name: Build and package
         run: bin/dev package
       - uses: actions/upload-artifact@v7

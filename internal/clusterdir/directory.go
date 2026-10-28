@@ -12,8 +12,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/getsops/sops/v3/decrypt"
 	"go.yaml.in/yaml/v3"
+
+	"github.com/webcodingcat/clowder/internal/sopsage"
 )
 
 // File names inside a cluster directory.
@@ -126,11 +127,19 @@ func (d *Directory) Credentials(user string) (*Credentials, error) {
 
 // decryptInto decrypts a SOPS file and decodes it strictly into target.
 func (d *Directory) decryptInto(file string, target any) error {
-	cleartext, err := decrypt.File(file, "yaml")
+	sealed, err := os.ReadFile(file)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("%s is missing: %w", file, err)
 		}
+		return fmt.Errorf("read %s: %w", file, err)
+	}
+	identities, err := sopsage.LoadIdentities()
+	if err != nil {
+		return fmt.Errorf("load the age key for %s: %w", file, err)
+	}
+	cleartext, err := sopsage.Decrypt(sealed, identities)
+	if err != nil {
 		return fmt.Errorf("decrypt %s (is your age key set up for SOPS?): %w", file, err)
 	}
 	if err := decodeStrict(cleartext, target); err != nil {

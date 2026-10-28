@@ -19,9 +19,10 @@ are not needed on the host.
 | `bin/dev lint` | golangci-lint (gofumpt, goimports, the import rule), shellcheck, shfmt, yamllint, `tofu fmt` |
 | `bin/dev format` | apply what the formatters can fix |
 | `bin/dev test` | the unit tests (seconds, no VMs) |
+| `bin/dev test-sops` | the tests of `internal/sopsage` against the real sops |
 | `bin/dev build` | `clowderd` for Linux, `clowder` for Linux, macOS and Windows into `dist/` |
 | `bin/dev package` | build, then the Debian packages into `dist/` |
-| `bin/dev all` | lint, test, package – what CI runs |
+| `bin/dev all` | lint, test, test-sops, package – what CI runs |
 
 ## Rules that are easy to break
 
