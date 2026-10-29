@@ -6,14 +6,12 @@ import (
 	"maps"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/compose-spec/compose-go/v2/loader"
 	"github.com/compose-spec/compose-go/v2/types"
 	"go.yaml.in/yaml/v3"
 
-	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
@@ -102,31 +100,56 @@ func check(project *types.Project) (*Stack, error) {
 		Services: map[string]Service{},
 		Volumes:  map[string]Volume{},
 	}
-	var problems Problems
-	report := func(format string, args ...any) {
-		problems = append(problems, fmt.Sprintf(format, args...))
-	}
-
-	var stackExtension rawStackExtension
-	if err := decodeExtension(project.Extensions, &stackExtension); err != nil {
-		report("stack: %v", err)
-	}
-	priority, err := parsePriority(stackExtension.Priority)
-	if err != nil {
-		report("stack: %v", err)
-	}
-	stack.Priority = priority
-	stack.Exports = stackExtension.Exports
-	stack.Imports = stackExtension.Imports
-	stack.SecretsFile = stackExtension.SecretsFile
-
+	problems := readStackExtension(project.Extensions, stack)
 	for _, name := range slices.Sorted(maps.Keys(project.Volumes)) {
 		volume, volumeProblems := checkVolume(name, project.Volumes[name])
 		problems = append(problems, volumeProblems...)
 		stack.Volumes[name] = volume
 	}
-	for _, name := range slices.Sorted(maps.Keys(project.Networks)) {
-		network := project.Networks[name]
+	problems = append(problems, checkNetworks(project.Networks)...)
+	problems = append(problems, checkSecretsAndConfigs(project)...)
+	for _, name := range slices.Sorted(maps.Keys(project.Services)) {
+		service, serviceProblems := checkService(project.Services[name], project.Volumes)
+		problems = append(problems, serviceProblems...)
+		stack.Services[name] = service
+	}
+	problems = append(problems, checkPortsUnique(stack.Services)...)
+	problems = append(problems, checkReferences(stack)...)
+	if len(problems) > 0 {
+		return nil, problems
+	}
+	stack.Project = withoutExtensions(project)
+	stack.source = project
+	return stack, nil
+}
+
+// readStackExtension reads the stack's own x-clowder block.
+func readStackExtension(extensions types.Extensions, stack *Stack) Problems {
+	var problems Problems
+	var raw rawStackExtension
+	if err := decodeExtension(extensions, &raw); err != nil {
+		problems = append(problems, fmt.Sprintf("stack: %v", err))
+	}
+	priority, err := parsePriority(raw.Priority)
+	if err != nil {
+		problems = append(problems, fmt.Sprintf("stack: %v", err))
+	}
+	stack.Priority = priority
+	stack.Exports = raw.Exports
+	stack.Imports = raw.Imports
+	stack.SecretsFile = raw.SecretsFile
+	return problems
+}
+
+// checkNetworks refuses what clowder sets itself: Docker's bridges with
+// their address pools, one per stack network.
+func checkNetworks(networks types.Networks) Problems {
+	var problems Problems
+	report := func(format string, args ...any) {
+		problems = append(problems, fmt.Sprintf(format, args...))
+	}
+	for _, name := range slices.Sorted(maps.Keys(networks)) {
+		network := networks[name]
 		if network.External {
 			report("network %s: external networks are not supported", name)
 		}
@@ -140,23 +163,35 @@ func check(project *types.Project) (*Stack, error) {
 			report("network %s: x-clowder is not used on networks", name)
 		}
 	}
-	// a file named here lives on this machine, not on the host that runs the
-	// stack, and a variable would be read from the agent's environment there
+	return problems
+}
+
+// checkSecretsAndConfigs refuses Compose's secrets and configs that come
+// from a file or a variable: a file named here lives on this machine, not on
+// the host that runs the stack, and a variable would be read from the
+// agent's environment there. Secrets come with x-clowder.secrets instead.
+func checkSecretsAndConfigs(project *types.Project) Problems {
+	var problems Problems
 	for _, name := range slices.Sorted(maps.Keys(project.Secrets)) {
-		report("secret %s: Compose's secrets are not supported; a service asks with x-clowder.secrets", name)
+		problems = append(problems, fmt.Sprintf(
+			"secret %s: Compose's secrets are not supported; a service asks with x-clowder.secrets", name))
 	}
 	for _, name := range slices.Sorted(maps.Keys(project.Configs)) {
 		config := project.Configs[name]
 		if config.File != "" || config.Environment != "" {
-			report("config %s: file and environment are not supported; use content", name)
+			problems = append(problems, fmt.Sprintf("config %s: file and environment are not supported; use content", name))
 		}
 	}
-	for _, name := range slices.Sorted(maps.Keys(project.Services)) {
-		service, serviceProblems := checkService(project.Services[name], project.Volumes)
-		problems = append(problems, serviceProblems...)
-		stack.Services[name] = service
+	return problems
+}
+
+// checkReferences checks the names the stack's x-clowder fields refer to:
+// exported services, imports, the services of backup hooks.
+func checkReferences(stack *Stack) Problems {
+	var problems Problems
+	report := func(format string, args ...any) {
+		problems = append(problems, fmt.Sprintf(format, args...))
 	}
-	problems = append(problems, checkPortsUnique(stack.Services)...)
 	for _, export := range stack.Exports {
 		if _, ok := stack.Services[export]; !ok {
 			report("stack: exports %q, which is not a service of this stack", export)
@@ -176,12 +211,7 @@ func check(project *types.Project) (*Stack, error) {
 			}
 		}
 	}
-	if len(problems) > 0 {
-		return nil, problems
-	}
-	stack.Project = withoutExtensions(project)
-	stack.source = project
-	return stack, nil
+	return problems
 }
 
 // Source is the stack as one self-contained Compose file: variables filled
@@ -290,228 +320,6 @@ func checkVolume(name string, config types.VolumeConfig) (Volume, Problems) {
 	return volume, problems
 }
 
-// checkService checks what clowder cannot run in a service and reads its
-// clowder fields.
-func checkService(config types.ServiceConfig, volumes types.Volumes) (Service, Problems) {
-	service := Service{Name: config.Name, Restart: config.Restart, RestartUnhealthy: true}
-	var problems Problems
-	report := func(format string, args ...any) {
-		problems = append(problems, fmt.Sprintf("service %s: ", config.Name)+fmt.Sprintf(format, args...))
-	}
-
-	if config.Build != nil {
-		report("build is not supported; use a prebuilt image")
-	}
-	if config.NetworkMode == "host" || strings.HasPrefix(config.NetworkMode, "container:") ||
-		strings.HasPrefix(config.NetworkMode, "service:") {
-		report("network_mode %q is not supported", config.NetworkMode)
-	}
-	for _, namespace := range []struct{ field, value string }{
-		{"pid", config.Pid},
-		{"ipc", config.Ipc},
-		{"uts", config.Uts},
-		{"userns_mode", config.UserNSMode},
-		{"cgroup", config.Cgroup},
-	} {
-		if namespace.value == "host" {
-			report("%s: host is not supported", namespace.field)
-		}
-	}
-	if config.ContainerName != "" {
-		report("container_name is set by clowder")
-	}
-	if len(config.Devices) > 0 {
-		report("devices are not supported")
-	}
-	if (config.Scale != nil && *config.Scale > 1) ||
-		(config.Deploy != nil && config.Deploy.Replicas != nil && *config.Deploy.Replicas > 1) {
-		report("more than one replica per service is not supported")
-	}
-	if !validRestart(config.Restart) {
-		report("restart %q is not one of no, always, on-failure[:n], unless-stopped", config.Restart)
-	}
-	for _, mount := range config.Volumes {
-		if problem := checkMount(mount, volumes); problem != "" {
-			report("%s", problem)
-		}
-	}
-	for _, port := range config.Ports {
-		published, problem := checkPort(port)
-		if problem != "" {
-			report("%s", problem)
-			continue
-		}
-		service.Ports = append(service.Ports, published)
-	}
-	service.Privileges = privileges(config)
-	service.DependsOn = slices.Sorted(maps.Keys(config.DependsOn))
-	if config.Deploy != nil && config.Deploy.Resources.Reservations != nil {
-		service.MemoryReservation = int64(config.Deploy.Resources.Reservations.MemoryBytes)
-		// compose-go names the field NanoCPUs but keeps whole CPUs in it (0.5)
-		service.CPUReservation = float64(config.Deploy.Resources.Reservations.NanoCPUs)
-	}
-
-	var raw rawServiceExtension
-	if err := decodeExtension(config.Extensions, &raw); err != nil {
-		report("%v", err)
-		return service, problems
-	}
-	priority, err := parsePriority(raw.Priority)
-	if err != nil {
-		report("%v", err)
-	}
-	service.Priority = priority
-	if raw.RestartUnhealthy != nil {
-		service.RestartUnhealthy = *raw.RestartUnhealthy
-	}
-	if raw.HTTP != nil {
-		if raw.HTTP.Host == "" || raw.HTTP.Port == 0 {
-			report("x-clowder.http needs host and port")
-		}
-		service.HTTP = &HTTPRoute{Host: raw.HTTP.Host, Port: raw.HTTP.Port, Path: raw.HTTP.Path}
-	}
-	if len(config.Secrets) > 0 {
-		report("secrets: Compose's secrets are not supported; use x-clowder.secrets")
-	}
-	for _, name := range raw.Secrets {
-		if !names.ValidSecret(name) {
-			report("x-clowder.secrets: %q is not a secret name (lowercase letters, digits, - and _)", name)
-		}
-	}
-	if len(slices.Compact(slices.Sorted(slices.Values(raw.Secrets)))) != len(raw.Secrets) {
-		report("x-clowder.secrets: a secret is named twice")
-	}
-	for _, variable := range slices.Sorted(maps.Keys(raw.SecretEnv)) {
-		switch {
-		case !names.ValidVariable(variable):
-			report("x-clowder.secret_env: %q is not a variable name", variable)
-		case !names.ValidSecret(raw.SecretEnv[variable]):
-			report("x-clowder.secret_env: %q is not a secret name", raw.SecretEnv[variable])
-		}
-		if _, ok := config.Environment[variable]; ok {
-			report("x-clowder.secret_env: %s is set in environment as well", variable)
-		}
-	}
-	service.Secrets, service.SecretEnv = raw.Secrets, raw.SecretEnv
-	return service, problems
-}
-
-// harmlessCapabilities act only inside the container's own namespaces (its
-// network, its processes): Docker's default set, and a few that services
-// commonly add. Any other capability reaches the host.
-var harmlessCapabilities = map[string]bool{
-	"AUDIT_WRITE": true, "CHOWN": true, "DAC_OVERRIDE": true, "FOWNER": true, "FSETID": true,
-	"KILL": true, "MKNOD": true, "NET_BIND_SERVICE": true, "NET_RAW": true, "SETFCAP": true,
-	"SETGID": true, "SETPCAP": true, "SETUID": true, "SYS_CHROOT": true,
-	"NET_ADMIN": true, "NET_BROADCAST": true, "IPC_LOCK": true, "SYS_NICE": true,
-}
-
-// privileges lists what a service asks for beyond a normal container: such
-// a container can read the host's keys, other stacks' volumes and secrets,
-// and change the network rules that keep containers apart.
-func privileges(config types.ServiceConfig) []string {
-	var asked []string
-	if config.Privileged {
-		asked = append(asked, "privileged")
-	}
-	for _, capability := range config.CapAdd {
-		name := strings.TrimPrefix(strings.ToUpper(capability), "CAP_")
-		if !harmlessCapabilities[name] {
-			asked = append(asked, "cap_add "+name)
-		}
-	}
-	for _, option := range config.SecurityOpt {
-		if option != "no-new-privileges" && option != "no-new-privileges:true" {
-			asked = append(asked, "security_opt "+option)
-		}
-	}
-	if config.CgroupParent != "" {
-		asked = append(asked, "cgroup_parent")
-	}
-	return asked
-}
-
-// validRestart tells whether a Compose restart rule is one the agent applies.
-func validRestart(restart string) bool {
-	switch {
-	case restart == "", restart == "no", restart == "always", restart == "unless-stopped",
-		restart == "on-failure":
-		return true
-	case strings.HasPrefix(restart, "on-failure:"):
-		count, err := strconv.Atoi(strings.TrimPrefix(restart, "on-failure:"))
-		return err == nil && count > 0
-	default:
-		return false
-	}
-}
-
-// checkMount allows named volumes with x-clowder fields, tmpfs, and
-// /etc/localtime read-only; it returns what is wrong, or "".
-func checkMount(mount types.ServiceVolumeConfig, volumes types.Volumes) string {
-	switch mount.Type {
-	case types.VolumeTypeVolume:
-		if mount.Source == "" {
-			return fmt.Sprintf("the anonymous volume at %s needs a name and x-clowder fields", mount.Target)
-		}
-		if _, ok := volumes[mount.Source]; !ok {
-			return fmt.Sprintf("volume %s is not declared under volumes", mount.Source)
-		}
-		return ""
-	case types.VolumeTypeTmpfs:
-		return ""
-	case types.VolumeTypeBind:
-		if mount.Source == "/etc/localtime" && mount.ReadOnly {
-			return ""
-		}
-		return fmt.Sprintf("bind mount %s is not supported (only /etc/localtime read-only)", mount.Source)
-	default:
-		return fmt.Sprintf("mount type %s at %s is not supported", mount.Type, mount.Target)
-	}
-}
-
-// checkPort reads a published port; ports without a single host port, with
-// a host address, or on a reserved port are refused.
-func checkPort(port types.ServicePortConfig) (PublishedPort, string) {
-	published := PublishedPort{Protocol: port.Protocol, Target: port.Target}
-	if published.Protocol == "" {
-		published.Protocol = "tcp"
-	}
-	if published.Protocol != "tcp" && published.Protocol != "udp" {
-		return published, fmt.Sprintf("port %d: protocol %s is not supported", port.Target, port.Protocol)
-	}
-	if port.HostIP != "" {
-		return published, fmt.Sprintf("port %d: the host address is set by clowder", port.Target)
-	}
-	number, err := strconv.ParseUint(port.Published, 10, 16)
-	if err != nil || number == 0 {
-		return published, fmt.Sprintf("port %d: needs exactly one published port (got %q)", port.Target, port.Published)
-	}
-	published.Published = uint16(number)
-	if ReservedPort(published.Published) {
-		return published, fmt.Sprintf("port %d is reserved for clowder or the host", number)
-	}
-	return published, ""
-}
-
-// ReservedPort tells whether a port is used by the host or by clowder itself
-// and may not be published by a stack.
-func ReservedPort(port uint16) bool {
-	switch {
-	case port == 22, port == 53, port == 80, port == 443: // SSH, DNS, Traefik
-		return true
-	case port >= 7400 && port <= 7499: // Raft, agent API, metrics, ACME, Traefik inside
-		return true
-	case port >= 10000 && port <= 10999: // DRBD: 10000 + minor (state.MaxMinor)
-		return true
-	case port >= 20000 && port <= 29999: // exported services
-		return true
-	case port >= 51800 && port <= 51831: // WireGuard: 51800 + host ID (state.MaxHosts)
-		return true
-	default:
-		return false
-	}
-}
-
 // withoutExtensions returns a copy of the project without x-clowder fields.
 func withoutExtensions(project *types.Project) *types.Project {
 	clean := *project
@@ -537,21 +345,4 @@ func without(extensions types.Extensions) types.Extensions {
 	clean := maps.Clone(extensions)
 	delete(clean, extensionKey)
 	return clean
-}
-
-// checkPortsUnique: two services of a stack cannot publish the same port.
-func checkPortsUnique(services map[string]Service) Problems {
-	var problems Problems
-	owners := map[string]string{}
-	for _, name := range slices.Sorted(maps.Keys(services)) {
-		for _, port := range services[name].Ports {
-			key := fmt.Sprintf("%s/%d", port.Protocol, port.Published)
-			if owner, taken := owners[key]; taken {
-				problems = append(problems, fmt.Sprintf("service %s: port %s is published by %s already", name, key, owner))
-				continue
-			}
-			owners[key] = name
-		}
-	}
-	return problems
 }
