@@ -22,7 +22,7 @@ linters:
     # command, never from the clock.
     forbidigo:
       forbid:
-        - pattern: ^time\.Now$
+        - pattern: ^time\.(Now|Since|Until)$
           msg: the state takes the time from the command (Command.At)
     depguard:
       rules:

@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -236,14 +237,16 @@ func (d Driver) ensureFilesystem(ctx context.Context, device string) error {
 // ensureMounted mounts the device and creates data/ inside it.
 func (d Driver) ensureMounted(ctx context.Context, volume Volume, device string) error {
 	mountPoint := d.MountPoint(volume)
-	if err := os.MkdirAll(mountPoint, 0o700); err != nil {
-		return fmt.Errorf("create the mount point of %s: %w", volume.ID, err)
-	}
 	isMounted, err := d.mounted(ctx, mountPoint)
 	if err != nil {
 		return err
 	}
 	if !isMounted {
+		// the agent touches the mount point only while nothing is mounted
+		// there: a mounted volume's root could hang on suspended DRBD
+		if err := os.MkdirAll(mountPoint, 0o700); err != nil {
+			return fmt.Errorf("create the mount point of %s: %w", volume.ID, err)
+		}
 		if _, err := d.Run(ctx, shortTimeout, "mount", "-t", "ext4", device, mountPoint); err != nil {
 			return fmt.Errorf("mount %s: %w", volume.ID, err)
 		}
@@ -287,11 +290,16 @@ func (d Driver) Remove(ctx context.Context, volume Volume) error {
 		name := volume.Resource.Name
 		resourceFile := filepath.Join(d.ResourceDir, name+".res")
 		// without its file drbdadm knows the resource no more: it was down
-		// before the file went
-		if _, err := os.Stat(resourceFile); err == nil {
+		// before the file went. Any other error leaves it unknown whether the
+		// resource is up, and the LV below it must not go then.
+		_, err := os.Stat(resourceFile)
+		switch {
+		case err == nil:
 			if _, err := d.Run(ctx, shortTimeout, "drbdadm", "down", name); err != nil {
 				return fmt.Errorf("take down the DRBD resource of %s: %w", volume.ID, err)
 			}
+		case !errors.Is(err, fs.ErrNotExist):
+			return fmt.Errorf("look for the DRBD resource of %s: %w", volume.ID, err)
 		}
 		leftovers = append(leftovers, resourceFile, d.marker(name, "metadata"), d.marker(name, "primary"))
 	}

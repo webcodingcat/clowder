@@ -107,6 +107,12 @@ Known gaps to close in phase 2. They do no harm on a single host:
 - `examples/hetzner` ignores later changes to the server's user data, so a storage class
   added later gets a volume but no thin pool on an existing host.
 
+Before users get permissions (they have none yet: every user may do everything): the
+leader trusts a user command that a host forwards (`/v1/internal/propose`). The checks of
+the agent that took the request (the stack against the cluster, privileges, host actions)
+are not repeated on the leader. That holds while root on any host has every key anyway;
+with permissions the checks must move into the leader's commit path.
+
 What the spike of phase 0 showed on three HLab hosts, before any clowder code existed, and
 what the design rests on:
 

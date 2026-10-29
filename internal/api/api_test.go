@@ -297,6 +297,16 @@ func TestCallersAreCheckedOnEveryCall(t *testing.T) {
 	}
 }
 
+func TestInternalStackRoutesTakeOnlyStackNames(t *testing.T) {
+	cluster := newTestCluster(t)
+	host1 := cluster.client(cluster.hostCertificate(1), testVersion, 0)
+	for _, route := range []string{"/v1/internal/stacks/Not_A_Stack/ps", "/v1/internal/stacks/Not_A_Stack/logs"} {
+		if err := host1.Get(context.Background(), route, &[]ContainerInfo{}); statusOf(err) != http.StatusBadRequest {
+			t.Errorf("%s: want HTTP 400, got %v", route, err)
+		}
+	}
+}
+
 func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 	cluster := newTestCluster(t)
 	host1 := cluster.client(cluster.hostCertificate(1), testVersion, 0)

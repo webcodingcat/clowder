@@ -15,6 +15,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -284,7 +285,7 @@ func (s *Server) stackPs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if host != s.config.HostID {
-		s.relay(w, r, host, "/v1/internal/stacks/"+url.PathEscape(name)+"/ps")
+		s.relay(w, r, s.forwarder, host, "/v1/internal/stacks/"+url.PathEscape(name)+"/ps")
 		return
 	}
 	s.localPs(w, r)
@@ -298,18 +299,33 @@ func (s *Server) stackLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if host != s.config.HostID {
-		s.relay(w, r, host, "/v1/internal/stacks/"+url.PathEscape(name)+"/logs?"+r.URL.RawQuery)
+		s.relay(w, r, s.streamer, host, "/v1/internal/stacks/"+url.PathEscape(name)+"/logs?"+r.URL.RawQuery)
 		return
 	}
 	s.localLogs(w, r)
 }
 
+// localStack is the stack name of an internal route: only hosts call
+// these, but the name becomes a path on this host, so it must be a stack's.
+func localStack(w http.ResponseWriter, r *http.Request) (string, bool) {
+	name := r.PathValue("name")
+	if !names.ValidStack(name) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%q is not a stack name", name))
+		return "", false
+	}
+	return name, true
+}
+
 func (s *Server) localPs(w http.ResponseWriter, r *http.Request) {
+	name, ok := localStack(w, r)
+	if !ok {
+		return
+	}
 	if s.config.Containers == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("this agent runs no containers"))
 		return
 	}
-	containers, err := s.config.Containers.Ps(r.Context(), r.PathValue("name"))
+	containers, err := s.config.Containers.Ps(r.Context(), name)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
@@ -318,6 +334,10 @@ func (s *Server) localPs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) localLogs(w http.ResponseWriter, r *http.Request) {
+	name, ok := localStack(w, r)
+	if !ok {
+		return
+	}
 	if s.config.Containers == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("this agent runs no containers"))
 		return
@@ -326,7 +346,7 @@ func (s *Server) localLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	writer := flushingWriter{w}
-	if err := s.config.Containers.Logs(r.Context(), r.PathValue("name"), follow, writer); err != nil {
+	if err := s.config.Containers.Logs(r.Context(), name, follow, writer); err != nil {
 		_, _ = fmt.Fprintf(writer, "\nclowder: the logs broke off: %v\n", err) // the status is sent already
 	}
 }
@@ -344,9 +364,10 @@ func (f flushingWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
-// relay asks another host's internal endpoint and passes its answer on, as
-// it streams.
-func (s *Server) relay(w http.ResponseWriter, r *http.Request, host state.HostID, path string) {
+// relay asks another host's internal endpoint with client and passes its
+// answer on, as it streams: the forwarder for answers that must come
+// within its timeout, the streamer for logs that follow.
+func (s *Server) relay(w http.ResponseWriter, r *http.Request, client *http.Client, host state.HostID, path string) {
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
 		"https://"+s.config.APIAddress(host)+path, nil)
 	if err != nil {
@@ -354,7 +375,7 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, host state.HostID
 		return
 	}
 	request.Header.Set(VersionHeader, s.config.Version)
-	response, err := s.streamer.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Errorf("ask host %d: %w", host, err))
 		return
