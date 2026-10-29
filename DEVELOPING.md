@@ -93,7 +93,8 @@ Packages in *italics* do not exist yet.
   services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
   changes the host.
 - **Changes the host**: `agent`, *`supervisor`*, `raftnode` (Raft over mTLS), `datakey` (the
-  key file) and the drivers `network` (so far `clowder0`), *`storage`*, *`docker`*, *`ingress`*.
+  key file), `command` (host tools with a timeout) and the drivers `network`, `storage`,
+  *`docker`*, *`ingress`*.
 - **Reads the host**: `hostcheck` (for `clowderd check`). It compiles anywhere, but only the
   agent uses it, so depguard keeps it out of the CLI like the packages above.
 
@@ -293,6 +294,27 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   the host's resolvers (`/etc/resolv.conf`). Names of exported services come with exports.
 - Published ports (DNAT to the stack's host, 1b) and the marks for answers over WireGuard
   (phase 2) join the ruleset later.
+
+## Storage (`internal/storage`)
+
+- A copy of a volume is a thin LV in a pool of its storage class. With replicas, a DRBD 9
+  resource sits on it (`RenderResource`, golden files in `testdata/`, checked with the real
+  `drbdadm`): quorum majority with `suspend-io`, `auto-promote no`, node-id = host ID, port
+  10000 + minor on the node address, `max-peers 4`. With replicas 0 it is a plain LV.
+- `Driver.Ensure` does only what is missing: the LV, the resource (new metadata only for a
+  resource it created itself; a marker in `/var/lib/clowder/storage` remembers that), the
+  primary role (`--force` only the first time), ext4, the mount under
+  `/var/lib/clowder/volumes/<stack>/<volume>` and `data/` in it. It refuses an LV it never
+  wrote metadata on, and a device with another file system: those it leaves to a human.
+- The mount guard: containers get `data/`, which exists only in the mounted file system, so a
+  container whose volume is not mounted fails to start instead of writing to the root file
+  system.
+- Every command runs through `internal/command`: with a timeout, and left behind if it hangs
+  (also `mkdir` of `data/`, a write to the volume). `hostcheck` uses the same.
+- `Fits` is the accounting without overcommit: the volumes of a pool and a new one stay
+  within the pool less its reserve. `PoolUsage` reads how full data and metadata are.
+- `Trim` (fstrim) gives deleted blocks back to the pool; the agent runs it weekly once it
+  places volumes (1a.8), as it calls `Ensure` and `Remove` from then on.
 - The test of the package goes the whole way on 127.0.0.1: init, the agent with a notify
   socket, the user's bootstrap (and a wrong key, a second user refused), apply and diff.
 

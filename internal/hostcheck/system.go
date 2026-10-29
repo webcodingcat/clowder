@@ -6,8 +6,9 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"os/exec"
 	"time"
+
+	"github.com/webcodingcat/clowder/internal/command"
 )
 
 // System is the real host.
@@ -22,30 +23,10 @@ func (System) ReadFile(path string) ([]byte, error) {
 // while DRBD suspends I/O, and a check must never hang with them.
 const commandTimeout = 10 * time.Second
 
-// Run runs a command and returns its standard output. A command that does not
-// finish in time is left behind: a process in state D ignores even SIGKILL,
-// so waiting for it would hang the check.
+// Run runs a command and returns its standard output; one that hangs is
+// left behind after commandTimeout.
 func (System) Run(ctx context.Context, name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
-	defer cancel()
-	type result struct {
-		output []byte
-		err    error
-	}
-	done := make(chan result, 1)
-	go func() {
-		output, err := exec.CommandContext(ctx, name, args...).Output()
-		done <- result{output, err}
-	}()
-	select {
-	case finished := <-done:
-		if finished.err != nil {
-			return string(finished.output), fmt.Errorf("%s: %w", name, finished.err)
-		}
-		return string(finished.output), nil
-	case <-ctx.Done():
-		return "", fmt.Errorf("%s: no answer within %s: %w", name, commandTimeout, ctx.Err())
-	}
+	return command.Run(ctx, commandTimeout, name, args...)
 }
 
 // Addresses returns the IPv4 addresses on the host's interfaces.
