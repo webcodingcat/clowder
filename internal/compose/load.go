@@ -288,6 +288,7 @@ func checkService(config types.ServiceConfig, volumes types.Volumes) (Service, P
 		}
 		service.Ports = append(service.Ports, published)
 	}
+	service.Privileges = privileges(config)
 	service.DependsOn = slices.Sorted(maps.Keys(config.DependsOn))
 	if config.Deploy != nil && config.Deploy.Resources.Reservations != nil {
 		service.MemoryReservation = int64(config.Deploy.Resources.Reservations.MemoryBytes)
@@ -315,6 +316,41 @@ func checkService(config types.ServiceConfig, volumes types.Volumes) (Service, P
 		service.HTTP = &HTTPRoute{Host: raw.HTTP.Host, Port: raw.HTTP.Port, Path: raw.HTTP.Path}
 	}
 	return service, problems
+}
+
+// harmlessCapabilities act only inside the container's own namespaces (its
+// network, its processes): Docker's default set, and a few that services
+// commonly add. Any other capability reaches the host.
+var harmlessCapabilities = map[string]bool{
+	"AUDIT_WRITE": true, "CHOWN": true, "DAC_OVERRIDE": true, "FOWNER": true, "FSETID": true,
+	"KILL": true, "MKNOD": true, "NET_BIND_SERVICE": true, "NET_RAW": true, "SETFCAP": true,
+	"SETGID": true, "SETPCAP": true, "SETUID": true, "SYS_CHROOT": true,
+	"NET_ADMIN": true, "NET_BROADCAST": true, "IPC_LOCK": true, "SYS_NICE": true,
+}
+
+// privileges lists what a service asks for beyond a normal container: such
+// a container can read the host's keys, other stacks' volumes and secrets,
+// and change the network rules that keep containers apart.
+func privileges(config types.ServiceConfig) []string {
+	var asked []string
+	if config.Privileged {
+		asked = append(asked, "privileged")
+	}
+	for _, capability := range config.CapAdd {
+		name := strings.TrimPrefix(strings.ToUpper(capability), "CAP_")
+		if !harmlessCapabilities[name] {
+			asked = append(asked, "cap_add "+name)
+		}
+	}
+	for _, option := range config.SecurityOpt {
+		if option != "no-new-privileges" && option != "no-new-privileges:true" {
+			asked = append(asked, "security_opt "+option)
+		}
+	}
+	if config.CgroupParent != "" {
+		asked = append(asked, "cgroup_parent")
+	}
+	return asked
 }
 
 // validRestart tells whether a Compose restart rule is one the agent applies.

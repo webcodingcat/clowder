@@ -47,6 +47,10 @@ type Service struct {
 	MemoryReservation int64
 	CPUReservation    float64
 	Ports             []PublishedPort
+	// Privileges are what the service asks for beyond a normal container
+	// (privileged, a capability that reaches beyond the container, a
+	// security_opt); only stacks the cluster allows them may have them.
+	Privileges []string
 }
 
 // HTTPRoute sends requests for Host (and Path) to Port of the service.

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
@@ -57,6 +58,11 @@ func Check(config Config) Problems {
 		}
 	}
 	problems = append(problems, checkPriorities(config.Priorities)...)
+	for _, stack := range config.Stacks.Privileged {
+		if !names.ValidStack(stack) {
+			report("stacks.privileged: %q is not a stack name", stack)
+		}
+	}
 	problems = append(problems, checkResources("defaults.reservations", config.Defaults.Reservations)...)
 	problems = append(problems, checkResources("system_reserve", config.SystemReserve)...)
 	if backup := config.Backup; backup != nil {

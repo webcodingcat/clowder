@@ -137,6 +137,23 @@ func TestPrioritiesAreNumbersOrCategories(t *testing.T) {
 	}
 }
 
+func TestPrivilegesBeyondTheContainerAreNamed(t *testing.T) {
+	stack, err := loadText(t, `services:
+  plain: {image: x, cap_add: [NET_ADMIN, cap_chown], security_opt: [no-new-privileges:true]}
+  root: {image: x, privileged: true, cap_add: [SYS_ADMIN], security_opt: [seccomp:unconfined]}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if privileges := stack.Services["plain"].Privileges; len(privileges) != 0 {
+		t.Errorf("a plain service asks for %v", privileges)
+	}
+	want := "privileged, cap_add SYS_ADMIN, security_opt seccomp:unconfined"
+	if got := strings.Join(stack.Services["root"].Privileges, ", "); got != want {
+		t.Errorf("privileges %q, want %q", got, want)
+	}
+}
+
 func TestWhatClowderCannotRunIsReported(t *testing.T) {
 	cases := map[string]struct{ compose, problem string }{
 		"build": {

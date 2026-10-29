@@ -25,6 +25,7 @@ type Config struct {
 	StorageClasses map[string]StorageClass `yaml:"storage_classes" json:"storage_classes" jsonschema:"required"`
 	Replication    Replication             `yaml:"replication,omitempty" json:"replication,omitempty"`
 	Priorities     Priorities              `yaml:"priorities,omitempty" json:"priorities,omitempty"`
+	Stacks         Stacks                  `yaml:"stacks,omitempty" json:"stacks,omitempty"`
 	Defaults       Defaults                `yaml:"defaults,omitempty" json:"defaults,omitempty"`
 	SystemReserve  Resources               `yaml:"system_reserve,omitempty" json:"system_reserve,omitempty"`
 	Backup         *Backup                 `yaml:"backup,omitempty" json:"backup,omitempty"`
@@ -107,6 +108,15 @@ func (c StorageClass) ReservePercent() int {
 type Replication struct {
 	// ResyncRate per host, e.g. "50M" (bytes per second).
 	ResyncRate string `yaml:"resync_rate,omitempty" json:"resync_rate,omitempty"`
+}
+
+// Stacks holds what the cluster allows single stacks beyond the rules for
+// all of them.
+type Stacks struct {
+	// Privileged stacks may use privileged, capabilities beyond the harmless
+	// ones and security_opt: they reach everything on their host, the data
+	// and secrets of other stacks included.
+	Privileged []string `yaml:"privileged,omitempty" json:"privileged,omitempty"`
 }
 
 // Defaults apply to services without their own values.

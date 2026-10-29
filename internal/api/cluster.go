@@ -1,13 +1,18 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -56,12 +61,48 @@ func (s *Server) applyCluster(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("read the request: %w", err))
 		return
 	}
+	if err := s.checkStacksAgainst(r.Context(), apply.Spec.WithDefaults()); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	payload, err := s.sealApply(apply)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	s.write(w, r, state.KindApplyConfig, payload)
+}
+
+// checkStacksAgainst refuses a cluster.yaml that a stack of the cluster
+// would not pass: a storage class it uses, a priority category it names, its
+// place in stacks.privileged must not go while the stack is there.
+func (s *Server) checkStacksAgainst(ctx context.Context, config clusterdir.Config) error {
+	sources := map[string]string{}
+	s.config.Cluster.Read(func(current *state.State) {
+		for name, stack := range current.Stacks {
+			sources[name] = stack.Source
+		}
+	})
+	var problems compose.Problems
+	for _, name := range slices.Sorted(maps.Keys(sources)) {
+		stack, err := compose.Parse(ctx, name, []byte(sources[name]))
+		if err != nil {
+			continue // a stack the cluster cannot read is no reason to refuse cluster.yaml
+		}
+		if _, err := checkAgainstCluster(stack, config); err != nil {
+			var stackProblems compose.Problems
+			if !errors.As(err, &stackProblems) {
+				return err
+			}
+			for _, problem := range stackProblems {
+				problems = append(problems, "stack "+name+": "+problem)
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("cluster.yaml would break stacks of the cluster: %w", problems)
+	}
+	return nil
 }
 
 func (s *Server) sealApply(apply ClusterApply) (state.ApplyConfig, error) {

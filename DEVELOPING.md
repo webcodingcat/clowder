@@ -101,8 +101,9 @@ Known gaps to close in phase 2, harmless on a single host:
 The package layout is planned for the whole of v1; packages appear as the phases add them.
 Packages in *italics* do not exist yet.
 
-- **Portable**: `cli`, `api`, `clusterdir`, `sopsage`, `pki`, `compose`, `units`,
-  `buildinfo`, `logging`, `atomicfile` (files written whole or not at all). The CLI may import
+- **Portable**: `cli`, `api`, `clusterdir`, `sopsage`, `pki`, `compose`, `units`, `names`
+  (the rules for names users give), `buildinfo`, `logging`, `atomicfile` (files written whole
+  or not at all). The CLI may import
   only these. `.golangci.yml` (depguard, rule
   `cli-portable`) refuses direct imports of the Linux-only packages in `cmd/clowder` and
   `internal/cli`; the cross build for Windows and macOS in `bin/dev build` catches indirect
@@ -126,9 +127,15 @@ Packages in *italics* do not exist yet.
   `configs` from files, devices, anonymous and external volumes, external networks), what
   shares the host's namespaces (`network_mode: host`, `pid`/`ipc: host`), and what clowder
   sets itself (`build`, `container_name`, replicas, network drivers and subnets, port ranges,
-  host addresses, reserved ports). It does not restrict what a container may do on its host
-  (`privileged`, capabilities): stacks run the operator's own code. Every problem is reported
-  at once (`Problems`); only an unknown key ends the checks of its `x-clowder` block.
+  host addresses, reserved ports). Every problem is reported at once (`Problems`); only an
+  unknown key ends the checks of its `x-clowder` block.
+- What reaches beyond the container (`privileged`, a capability other than Docker's default
+  set and the few that act in the container's own namespaces, `security_opt` other than
+  `no-new-privileges`, `cgroup_parent`) is listed per service (`Service.Privileges`). Such a
+  container can read the host's keys, other stacks' volumes and secrets, and change the rules
+  that keep containers apart, so the API allows it only for stacks that `cluster.yaml` names
+  in `stacks.privileged`; and `cluster apply` refuses a `cluster.yaml` that a stack of the
+  cluster would no longer pass (its privileges, storage classes, priorities).
 - `Source` fills in the variables and env files of the user's machine; the result is stored
   in the cluster state and on the stack's host as it is, not sealed. Passwords in a Compose
   file are readable to whoever reads the state; stacks have no sealed secrets yet.

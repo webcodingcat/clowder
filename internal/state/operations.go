@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/webcodingcat/clowder/internal/names"
 )
 
 // Operation is a long task (moving a stack, fencing a host, a backup) as a
@@ -51,11 +53,11 @@ func volumeLock(id string) string { return "volume/" + id }
 // nothing would never conflict, and so protect nothing.
 func validLock(lock string) bool {
 	if name, ok := strings.CutPrefix(lock, "stack/"); ok {
-		return stackName.MatchString(name)
+		return names.ValidStack(name)
 	}
 	if id, ok := strings.CutPrefix(lock, "volume/"); ok {
 		stack, volume, ok := strings.Cut(id, "/")
-		return ok && stackName.MatchString(stack) && volume != ""
+		return ok && names.ValidStack(stack) && volume != ""
 	}
 	return false
 }

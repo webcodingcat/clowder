@@ -90,9 +90,18 @@ func checkAgainstCluster(stack *compose.Stack, config clusterdir.Config) (int, e
 	if err != nil {
 		problems = append(problems, "stack: "+err.Error())
 	}
+	privileged := slices.Contains(config.Stacks.Privileged, stack.Name)
 	for _, name := range slices.Sorted(maps.Keys(stack.Services)) {
-		if _, err := PriorityOf(stack.Services[name].Priority, config.Priorities); err != nil {
+		service := stack.Services[name]
+		if _, err := PriorityOf(service.Priority, config.Priorities); err != nil {
 			problems = append(problems, fmt.Sprintf("service %s: %v", name, err))
+		}
+		for _, privilege := range service.Privileges {
+			if !privileged {
+				problems = append(problems, fmt.Sprintf(
+					"service %s: %s reaches beyond the container; only stacks named in stacks.privileged "+
+						"of cluster.yaml may have it", name, privilege))
+			}
 		}
 	}
 	if len(problems) > 0 {

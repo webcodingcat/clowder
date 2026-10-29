@@ -4,11 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/names"
 )
 
 // ApplyConfig replaces cluster.yaml and the secrets with what the user
@@ -49,13 +49,9 @@ type PutStack struct {
 	Operation string `json:"operation,omitempty"`
 }
 
-// stackName is what Compose allows as a project name; it has no "/", which
-// separates the stack from the volume in a volume ID.
-var stackName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
-
 func applyPutStack(s *State, _ Command, payload PutStack) error {
 	switch {
-	case !stackName.MatchString(payload.Name):
+	case !names.ValidStack(payload.Name):
 		return fmt.Errorf("stack name %q: use lowercase letters, digits, - and _", payload.Name)
 	case payload.Owner == "":
 		return errors.New("the stack needs an owner")

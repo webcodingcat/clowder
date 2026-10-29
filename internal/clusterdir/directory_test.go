@@ -160,6 +160,7 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 		},
 		Replication: Replication{ResyncRate: "fast"},
 		Priorities:  Priorities{Default: "medium", Categories: map[string]int{"top": 2000}},
+		Stacks:      Stacks{Privileged: []string{"Monitoring"}},
 		Defaults:    Defaults{Reservations: Resources{Memory: "lots", CPUs: "-1"}},
 		Backup:      &Backup{Target: BackupTarget{Type: "borg"}},
 		Alerts: &Alerts{
@@ -177,7 +178,7 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 		"name is required", `"10.0.0.1:99999"`, "hoster is required", "hoster_token",
 		`network "both"`, "not an IPv4 address", `pool "nopool"`, `reserve "95%"`,
 		`falls back to "slow"`, "storage class empty", "resync_rate", "top: 2000",
-		`default "medium"`, "reservations.memory", "reservations.cpus", `"borg"`,
+		`default "medium"`, `"Monitoring" is not a stack name`, "reservations.memory", "reservations.cpus", `"borg"`,
 		"webhook: {secret", "type is not discord", `min_severity "loud"`, "url: {secret",
 		"heartbeat.url", `interval "often"`, `listen "everywhere"`, "backup.target.url", "backup.password",
 		"smtp needs host and port",
