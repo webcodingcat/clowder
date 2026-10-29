@@ -28,6 +28,9 @@ func newCheck() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("--floating-ip: %w", err)
 				}
+				if !address.Is4() {
+					return fmt.Errorf("--floating-ip %s: clowder uses IPv4 Floating IPs", address)
+				}
 				options.FloatingIP = address
 			}
 			results := hostcheck.Run(cmd.Context(), hostcheck.System{}, options)

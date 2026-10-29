@@ -37,7 +37,8 @@ func (f fakeHost) Addresses() ([]netip.Addr, error) {
 	return f.addresses, nil
 }
 
-// goodHost is a host set up as the plan describes.
+// goodHost is a host with the operator base as DEVELOPING.md describes it:
+// every check passes.
 func goodHost() fakeHost {
 	return fakeHost{
 		files: map[string]string{
@@ -123,6 +124,12 @@ func TestEachMissingPieceFailsItsCheck(t *testing.T) {
 		"no lvm filter": {
 			func(h *fakeHost) { delete(h.commands, "lvmconfig devices/global_filter") }, "lvm filter", "global_filter",
 		},
+		"lvm filter accepts drbd": {
+			func(h *fakeHost) {
+				h.commands["lvmconfig devices/global_filter"] = `global_filter="a|^/dev/drbd.*|"` + "\n"
+			},
+			"lvm filter", "global_filter",
+		},
 		"pool missing": {
 			func(h *fakeHost) { delete(h.commands, "lvs --noheadings --options lv_attr vg-bulk/thin") },
 			"thin pools", "vg-bulk/thin",
@@ -140,7 +147,7 @@ func TestEachMissingPieceFailsItsCheck(t *testing.T) {
 		},
 		"unattended upgrades for everything": {
 			func(h *fakeHost) {
-				h.commands["dpkg-query --show unattended-upgrades"] = "unattended-upgrades 2.12"
+				h.commands["dpkg-query --show --showformat=${db:Status-Status} unattended-upgrades"] = "installed"
 				h.commands["apt-config dump Unattended-Upgrade::Package-Blacklist"] = `"linux-";`
 			},
 			"unattended upgrades", "docker, drbd, clowder",

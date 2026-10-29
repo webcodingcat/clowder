@@ -11,7 +11,7 @@ type Config struct {
 	Seeds []string `yaml:"seeds" jsonschema:"required,minItems=1"`
 	// Hoster is the hoster plugin, e.g. hetzner.
 	Hoster      string    `yaml:"hoster" jsonschema:"required"`
-	HosterToken SecretRef `yaml:"hoster_token"`
+	HosterToken SecretRef `yaml:"hoster_token" jsonschema:"required"`
 	// Network the hosts use for WireGuard: private or public.
 	Network        string                  `yaml:"network,omitempty" jsonschema:"enum=private,enum=public"`
 	Ingress        Ingress                 `yaml:"ingress" jsonschema:"required"`
@@ -41,6 +41,19 @@ func DefaultPriorities() Priorities {
 		Default:    "normal",
 		Categories: map[string]int{"critical": 900, "high": 700, "normal": 500, "low": 200},
 	}
+}
+
+// withDefaults fills in what cluster.yaml leaves out: without categories the
+// default ones, and their default unless another one is named.
+func (p Priorities) withDefaults() Priorities {
+	if len(p.Categories) > 0 {
+		return p
+	}
+	defaults := DefaultPriorities()
+	if p.Default != "" {
+		defaults.Default = p.Default
+	}
+	return defaults
 }
 
 // SecretRef points to a value in secrets.sops.yaml.
@@ -89,7 +102,7 @@ type Backup struct {
 
 // BackupTarget is a restic repository.
 type BackupTarget struct {
-	Type string `yaml:"type" jsonschema:"required"`
+	Type string `yaml:"type" jsonschema:"required,enum=restic"`
 	URL  string `yaml:"url" jsonschema:"required"`
 }
 

@@ -87,8 +87,8 @@ func TestPrioritiesAreNumbersOrCategories(t *testing.T) {
 			t.Errorf("%v: %v", c.raw, err)
 		case c.category != "" && priority.Category != c.category:
 			t.Errorf("%v: category %q", c.raw, priority.Category)
-		case c.category == "" && !c.fails && *priority.Value != c.value:
-			t.Errorf("%v: value %d", c.raw, *priority.Value)
+		case c.category == "" && !c.fails && (priority.Value == nil || *priority.Value != c.value):
+			t.Errorf("%v: value %v, want %d", c.raw, priority.Value, c.value)
 		}
 	}
 }
@@ -137,14 +137,37 @@ func TestWhatClowderCannotRunIsReported(t *testing.T) {
 		"unknown x-clowder key": {
 			"services: {web: {image: x, x-clowder: {priorty: high}}}", `unknown field "priorty"`,
 		},
+		"volume without class": {
+			"services: {web: {image: x}}\nvolumes: {data: {x-clowder: {size: 1G, replicas: 1}}}", "class is required",
+		},
 		"volume without size": {
-			"services: {web: {image: x}}\nvolumes: {data: {x-clowder: {replicas: 1}}}", "size is required",
+			"services: {web: {image: x}}\nvolumes: {data: {x-clowder: {class: fast, replicas: 1}}}", "size is required",
 		},
 		"volume without replicas": {
-			"services: {web: {image: x}}\nvolumes: {data: {x-clowder: {size: 1G}}}", "replicas is required",
+			"services: {web: {image: x}}\nvolumes: {data: {x-clowder: {class: fast, size: 1G}}}", "replicas is required",
 		},
 		"too many replicas": {
-			"services: {web: {image: x}}\nvolumes: {data: {x-clowder: {size: 1G, replicas: 4}}}", "replicas 4",
+			"services: {web: {image: x}}\nvolumes: {data: {x-clowder: {class: fast, size: 1G, replicas: 4}}}", "replicas 4",
+		},
+		"negative keep": {
+			"services: {web: {image: x}}\nvolumes: {data: {x-clowder: {class: fast, size: 1G, replicas: 1, backup: {schedule: daily, keep: -1}}}}",
+			"keep -1",
+		},
+		"backup hook without command": {
+			"services: {web: {image: x}}\nvolumes: {data: {x-clowder: {class: fast, size: 1G, replicas: 1, backup: {schedule: daily, pre: {service: web}}}}}",
+			"pre needs service and command",
+		},
+		"overlay network": {
+			"services: {web: {image: x}}\nnetworks: {default: {driver: overlay}}", `driver "overlay"`,
+		},
+		"own subnet": {
+			"services: {web: {image: x}}\nnetworks: {default: {ipam: {config: [{subnet: 10.77.0.0/24}]}}}", "ipam",
+		},
+		"secret from a file": {
+			"services: {web: {image: x}}\nsecrets: {token: {file: ./token.txt}}", "secret token: file",
+		},
+		"config from a file": {
+			"services: {web: {image: x}}\nconfigs: {app: {file: ./app.conf}}", "config app: file",
 		},
 		"external volume": {
 			"services: {web: {image: x}}\nvolumes: {data: {external: true}}", "external volumes",

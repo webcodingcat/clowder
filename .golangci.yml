@@ -1,5 +1,10 @@
 version: "2"
 
+run:
+  # cross_test.go runs only with the real sops (bin/dev test-sops)
+  build-tags:
+    - sops
+
 linters:
   enable:
     - depguard
@@ -27,15 +32,17 @@ linters:
             - pkg: github.com/webcodingcat/clowder/internal/raftnode
               desc: Linux only (clowderd)
             - pkg: github.com/webcodingcat/clowder/internal/controller
-              desc: Linux only (clowderd)
+              desc: "agent only (clowderd): the leader's loops run inside the agent"
             - pkg: github.com/webcodingcat/clowder/internal/network
               desc: Linux only (clowderd)
             - pkg: github.com/webcodingcat/clowder/internal/storage
               desc: Linux only (clowderd)
             - pkg: github.com/webcodingcat/clowder/internal/docker
               desc: Linux only (clowderd)
-            - pkg: github.com/webcodingcat/clowder/internal/hostcheck
+            - pkg: github.com/webcodingcat/clowder/internal/ingress
               desc: Linux only (clowderd)
+            - pkg: github.com/webcodingcat/clowder/internal/hostcheck
+              desc: "agent only (clowderd); compiles anywhere but the CLI has no use for it"
             - pkg: github.com/vishvananda/netlink
               desc: Linux only
             - pkg: golang.zx2c4.com/wireguard/wgctrl

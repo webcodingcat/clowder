@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -34,6 +35,60 @@ func TestTheExampleDirectoryLoads(t *testing.T) {
 	}
 }
 
+func TestLoadFillsInTheDefaultPriorities(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("testdata", "prod", ConfigFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := "priorities:\n  default: normal\n  categories: {critical: 900, high: 700, normal: 500, low: 200}\n"
+	if !strings.Contains(string(content), block) {
+		t.Fatal("the fixture's priorities block changed")
+	}
+	dir := t.TempDir()
+	without := strings.Replace(string(content), block, "", 1)
+	if err := os.WriteFile(filepath.Join(dir, ConfigFile), []byte(without), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(directory.Config.Priorities, DefaultPriorities()) {
+		t.Errorf("priorities: %+v", directory.Config.Priorities)
+	}
+}
+
+func TestPriorityDefaultsAreCheckedAndFilledIn(t *testing.T) {
+	tests := map[string]struct {
+		priorities  Priorities
+		wantProblem string
+		wantDefault string
+	}{
+		"nothing":                     {Priorities{}, "", "normal"},
+		"default of the defaults":     {Priorities{Default: "high"}, "", "high"},
+		"misspelled default":          {Priorities{Default: "hihg"}, `"hihg" is not one of`, ""},
+		"own categories, no default":  {Priorities{Categories: map[string]int{"top": 900}}, "default is required", ""},
+		"own categories with default": {Priorities{Default: "top", Categories: map[string]int{"top": 900}}, "", "top"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			problems := checkPriorities(test.priorities)
+			if test.wantProblem == "" {
+				if len(problems) > 0 {
+					t.Fatal(problems)
+				}
+				if got := test.priorities.withDefaults().Default; got != test.wantDefault {
+					t.Errorf("default %q, want %q", got, test.wantDefault)
+				}
+				return
+			}
+			if len(problems) == 0 || !strings.Contains(problems.Error(), test.wantProblem) {
+				t.Errorf("want a problem with %q, got %v", test.wantProblem, problems)
+			}
+		})
+	}
+}
+
 func TestSecretsAreDecryptedWithTheUsersAgeKey(t *testing.T) {
 	useTestKey(t)
 	directory, err := Load(filepath.Join("testdata", "prod"))
@@ -56,6 +111,9 @@ func TestSecretsAreDecryptedWithTheUsersAgeKey(t *testing.T) {
 	}
 	if credentials.Certificate != "TEST-CERT-PEM" {
 		t.Errorf("credentials: %+v", credentials)
+	}
+	if _, err := directory.Credentials("../secrets"); err == nil || !strings.Contains(err.Error(), "user name") {
+		t.Errorf("want an error about the user name, got %v", err)
 	}
 }
 
@@ -100,14 +158,25 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 		Priorities:  Priorities{Default: "medium", Categories: map[string]int{"top": 2000}},
 		Defaults:    Defaults{Reservations: Resources{Memory: "lots", CPUs: "-1"}},
 		Backup:      &Backup{Target: BackupTarget{Type: "borg"}},
-		Alerts:      &Alerts{Channels: []AlertChannel{{Type: "discord"}, {Type: "pager"}}},
+		Alerts: &Alerts{
+			Channels: []AlertChannel{
+				{Type: "discord"},
+				{Type: "pager"},
+				{Type: "webhook", MinSeverity: "loud"},
+				{Type: "email", SMTP: &SMTP{}, From: "clowder@example.com", To: []string{"ops@example.com"}},
+			},
+			Heartbeat: &Heartbeat{Interval: "often"},
+		},
+		Metrics: Metrics{Listen: "everywhere"},
 	}
 	want := []string{
 		"name is required", `"10.0.0.1:99999"`, "hoster is required", "hoster_token",
 		`network "both"`, "not an IPv4 address", `pool "nopool"`, `reserve "95%"`,
 		`falls back to "slow"`, "storage class empty", "resync_rate", "top: 2000",
 		`default "medium"`, "reservations.memory", "reservations.cpus", `"borg"`,
-		"webhook: {secret", "type is not discord",
+		"webhook: {secret", "type is not discord", `min_severity "loud"`, "url: {secret",
+		"heartbeat.url", `interval "often"`, `listen "everywhere"`, "backup.target.url", "backup.password",
+		"smtp needs host and port",
 	}
 	problems := Check(config)
 	text := problems.Error()
@@ -134,11 +203,11 @@ func TestEverySecretReferenceIsFound(t *testing.T) {
 
 func TestFindPrefersTheFlagThenTheEnvironment(t *testing.T) {
 	t.Setenv(EnvVar, "/from/env")
-	if dir, _ := Find("/from/flag"); dir != "/from/flag" {
-		t.Errorf("flag: %s", dir)
+	if dir, err := Find("/from/flag"); err != nil || dir != "/from/flag" {
+		t.Errorf("flag: %s, %v", dir, err)
 	}
-	if dir, _ := Find(""); dir != "/from/env" {
-		t.Errorf("env: %s", dir)
+	if dir, err := Find(""); err != nil || dir != "/from/env" {
+		t.Errorf("env: %s, %v", dir, err)
 	}
 	t.Setenv(EnvVar, "")
 	t.Chdir(t.TempDir())
@@ -147,7 +216,7 @@ func TestFindPrefersTheFlagThenTheEnvironment(t *testing.T) {
 	}
 }
 
-func TestTheSchemaDescribesCluterYAML(t *testing.T) {
+func TestTheSchemaDescribesClusterYAML(t *testing.T) {
 	encoded, err := Schema()
 	if err != nil {
 		t.Fatal(err)
@@ -164,8 +233,12 @@ func TestTheSchemaDescribesCluterYAML(t *testing.T) {
 			t.Errorf("schema lacks %s", key)
 		}
 	}
-	if !strings.Contains(strings.Join(schema.Required, ","), "seeds") {
-		t.Errorf("seeds not required: %v", schema.Required)
+	// what the schema requires, Check reports as missing in an empty file
+	missing := Check(Config{}).Error()
+	for _, key := range schema.Required {
+		if !strings.Contains(missing, key) {
+			t.Errorf("the schema requires %s, but Check does not report it missing:\n%s", key, missing)
+		}
 	}
 }
 

@@ -7,21 +7,27 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 var update = flag.Bool("update", false, "write the golden files anew")
 
-func TestRenderedShopMatchesTheGoldenFile(t *testing.T) {
+// loadShop loads the example stack in testdata/shop.
+func loadShop(t *testing.T) *Stack {
+	t.Helper()
 	stack, err := Load(context.Background(), LoadOptions{
-		Name:       "shop",
-		WorkingDir: "testdata/shop",
-		Files:      []string{"testdata/shop/compose.yaml"},
+		Name: "shop", WorkingDir: "testdata/shop", Files: []string{"testdata/shop/compose.yaml"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rendered, err := Render(stack, Target{
+	return stack
+}
+
+// shopTarget is a host where every volume of the shop is mounted.
+func shopTarget() Target {
+	return Target{
 		Generation:  3,
 		FloatingIP:  netip.MustParseAddr("203.0.113.11"),
 		NodeAddress: netip.MustParseAddr("10.77.0.3"),
@@ -30,7 +36,11 @@ func TestRenderedShopMatchesTheGoldenFile(t *testing.T) {
 			"pgdata":    {Dir: "/var/lib/clowder/volumes/shop-pgdata", Generation: 1},
 			"cachedata": {Dir: "/var/lib/clowder/volumes/shop-cachedata", Generation: 2},
 		},
-	})
+	}
+}
+
+func TestRenderedShopMatchesTheGoldenFile(t *testing.T) {
+	rendered, err := Render(loadShop(t), shopTarget())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,15 +61,15 @@ func TestRenderedShopMatchesTheGoldenFile(t *testing.T) {
 	}
 }
 
-func TestRenderNeedsEveryVolumeMounted(t *testing.T) {
-	stack, err := Load(context.Background(), LoadOptions{
-		Name: "shop", WorkingDir: "testdata/shop", Files: []string{"testdata/shop/compose.yaml"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Render(stack, Target{Volumes: map[string]MountedVolume{}}); err == nil {
-		t.Error("no error for unmounted volumes")
+func TestRenderNeedsACompleteTarget(t *testing.T) {
+	unmounted := shopTarget()
+	unmounted.Volumes = map[string]MountedVolume{}
+	noFloatingIP := shopTarget()
+	noFloatingIP.FloatingIP = netip.Addr{}
+	for want, target := range map[string]Target{"not mounted": unmounted, "no floating IP": noFloatingIP} {
+		if _, err := Render(loadShop(t), target); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("want an error with %q, got %v", want, err)
+		}
 	}
 }
 

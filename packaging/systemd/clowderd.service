@@ -3,19 +3,24 @@ Description=clowder agent
 Documentation=https://github.com/webcodingcat/clowder
 Wants=network-online.target docker.service
 After=network-online.target docker.service
+# Restart without limit and never give up: a broken agent shows up as a failed
+# host and the cluster's fencing takes over.
+StartLimitIntervalSec=0
 
 [Service]
 Type=notify
+# clowderd run (the agent loop) is not built yet; until then the package
+# installs this unit without enabling it.
 ExecStart=/usr/bin/clowderd run
 # The agent reports to systemd every few seconds; a hung agent is restarted
 # well within the 45 s after which the cluster counts a host as failed.
 WatchdogSec=15
 Restart=always
 RestartSec=2
-# No reboot after repeated failures: a broken agent shows up as a failed host
-# and the cluster's fencing takes over.
-StartLimitIntervalSec=0
-# Only the agent itself is stopped; containers keep running (live-restore).
+# Only the agent itself is stopped. Its helpers (docker compose, drbdadm, a
+# volume copy) finish their step instead of being killed halfway; one that
+# hangs in state D could not be killed anyway. Containers belong to dockerd
+# and are not affected either way.
 KillMode=process
 
 [Install]

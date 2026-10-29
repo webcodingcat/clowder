@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prepare a spike host: packages (DRBD 9 from LINBIT's proxmox-9 dist), the
-# operator base from the plan, and the two LVM thin pools.
+# operator base, and the two LVM thin pools.
 # Usage: base.sh <bulk volume id> <fast volume id> <floating ip>
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -76,6 +76,7 @@ create_pool() {
   lvcreate -q -l 90%VG -T "${vg}/thin"
 }
 
+# main: Do what the header of this script describes.
 main() {
   local bulk_id="$1" fast_id="$2" floating_ip="$3"
   install_packages

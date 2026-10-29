@@ -25,14 +25,16 @@ DOCKER_ROOT="$(cd "${ROOT}" && (pwd -W 2>/dev/null || pwd) )"
 readonly DOCKER_ROOT
 
 readonly GO_IMAGE=golang:1.27.3
-# Alpine packages sops, so the cross-tests install it in seconds.
+# Alpine packages sops, so the cross-tests install it in seconds; this image
+# (Alpine 3.24) brings sops 3.12.2, the version of the fixtures.
 readonly GO_SOPS_IMAGE=golang:1.27.3-alpine
 readonly LINT_IMAGE=golangci/golangci-lint:v2.15.0
 readonly NFPM_IMAGE=goreleaser/nfpm:v2.48.0
 readonly SHELLCHECK_IMAGE=koalaman/shellcheck:v0.11.0
 readonly SHFMT_IMAGE=mvdan/shfmt:v3.14.1
-readonly YAMLLINT_IMAGE=cytopia/yamllint:1
-readonly TOFU_IMAGE=ghcr.io/opentofu/opentofu:1
+# The yamllint image has only a major tag; the digest pins yamllint 1.32.0.
+readonly YAMLLINT_IMAGE=cytopia/yamllint:1@sha256:596fb19eb71e55ba5b2fa56d8c18a615ec82adc8d3bf2d73918cb78c8f3240fb
+readonly TOFU_IMAGE=ghcr.io/opentofu/opentofu:1.13.2
 # Go's module and build cache survive between runs.
 readonly CACHE_VOLUME=clowder-gocache
 
@@ -46,12 +48,14 @@ in_image() {
 }
 
 # version: Print the version for the build without a leading v: a tag
-# (v1.2.3 -> 1.2.3), otherwise 0.0.0~dev+<commit>, which sorts before any
-# release in Debian's version order.
+# (v1.2.3 -> 1.2.3, v1.2.3-rc1 -> 1.2.3~rc1, which sorts before 1.2.3 in
+# Debian's version order), otherwise 0.0.0~dev+<commit>, which sorts before
+# any release.
 version() {
   local tag commit
   if tag="$(cd "${ROOT}" && git describe --tags --exact-match 2>/dev/null)"; then
-    echo "${tag#v}"
+    tag="${tag#v}"
+    echo "${tag//-/\~}"
     return
   fi
   commit="$(cd "${ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -63,6 +67,7 @@ shell_files() {
   (cd "${ROOT}" && git ls-files --cached --others --exclude-standard bin/dev '*.sh')
 }
 
+# cmd_lint: Run every style check; any finding fails.
 cmd_lint() {
   local scripts
   in_image "${LINT_IMAGE}" golangci-lint run ./...
@@ -70,11 +75,10 @@ cmd_lint() {
   in_image "${SHELLCHECK_IMAGE}" "${scripts[@]}"
   in_image "${SHFMT_IMAGE}" -i 2 -ci -bn -d "${scripts[@]}"
   in_image "${YAMLLINT_IMAGE}" .
-  if [[ -d "${ROOT}/deploy/opentofu" ]]; then
-    in_image "${TOFU_IMAGE}" fmt -check -recursive deploy/opentofu
-  fi
+  in_image "${TOFU_IMAGE}" fmt -check -recursive .
 }
 
+# cmd_format: Rewrite Go and shell files as the formatters want them.
 cmd_format() {
   local scripts
   in_image "${LINT_IMAGE}" golangci-lint fmt ./...
@@ -82,19 +86,27 @@ cmd_format() {
   in_image "${SHFMT_IMAGE}" -i 2 -ci -bn -w "${scripts[@]}"
 }
 
+# cmd_test: Run the unit tests; arguments go to go test, e.g.
+# bin/dev test ./internal/compose -update
 cmd_test() {
-  # extra arguments go to go test, e.g. bin/dev test ./internal/compose -update
   if (($# == 0)); then
     set -- ./...
   fi
-  in_image "${GO_IMAGE}" go test "$@"
+  local status=0
+  in_image "${GO_IMAGE}" go test "$@" || status=$?
+  if [[ " $* " == *" -update "* ]]; then
+    give_back internal
+  fi
+  return "${status}"
 }
 
+# cmd_test_sops: Run the cross-tests of internal/sopsage against Alpine's sops.
 cmd_test_sops() {
   in_image "${GO_SOPS_IMAGE}" sh -c \
     'apk add --no-cache sops >/dev/null && go test -tags sops ./internal/sopsage'
 }
 
+# cmd_build: Build clowderd for Linux and clowder for each platform into dist/.
 cmd_build() {
   local ldflags target goos goarch
   ldflags="-s -w -X github.com/webcodingcat/clowder/internal/buildinfo.Version=$(version)"
@@ -109,29 +121,32 @@ cmd_build() {
       -o "dist/${goos}-${goarch}/clowder$([[ "${goos}" == windows ]] && echo .exe)" \
       ./cmd/clowder
   done
-  give_back_dist
+  give_back dist
 }
 
-# give_back_dist: The containers write dist/ as root; on Linux (CI as well)
-# hand it to the caller so later steps can write next to the binaries.
-give_back_dist() {
-  in_image "${GO_IMAGE}" chown -R "$(id -u):$(id -g)" dist
+# give_back <path>: The containers run as root, so on Linux (CI as well) what
+# they write belongs to root; hand it to the caller (dist/ after a build, the
+# golden files after test -update).
+give_back() {
+  in_image "${GO_IMAGE}" chown -R "$(id -u):$(id -g)" "$1"
 }
 
+# cmd_package: Build, then make the Debian packages of both binaries.
 cmd_package() {
-  local package version
+  local package package_version
   cmd_build
-  version="$(version)"
+  package_version="$(version)"
   for package in clowder clowderd; do
     # the image's entrypoint is nfpm itself
-    docker run --rm -v "${DOCKER_ROOT}:/src" -w /src -e VERSION="${version}" \
+    docker run --rm -v "${DOCKER_ROOT}:/src" -w /src -e VERSION="${package_version}" \
       "${NFPM_IMAGE}" package --config "packaging/${package}.yaml" --packager deb \
       --target dist/
   done
-  give_back_dist
+  give_back dist
   ls -1 "${ROOT}/dist"/*.deb
 }
 
+# cmd_all: Everything CI runs.
 cmd_all() {
   cmd_lint
   cmd_test
@@ -139,6 +154,7 @@ cmd_all() {
   cmd_package
 }
 
+# main: Dispatch to the command named in the first argument.
 main() {
   case "${1:-}" in
     lint | format | build | package | all) "cmd_$1" ;;

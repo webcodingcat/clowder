@@ -1,5 +1,5 @@
 // Package agent is the clowderd process: the daemon and the commands that run
-// on a host (check, init, join). Only clowderd imports it.
+// on a host (now check; later init, join, recover). Only clowderd imports it.
 package agent
 
 import (

@@ -3,7 +3,7 @@
 // the format of SOPS 3: values sealed with AES-256-GCM under a data key, the
 // data key sealed with age for each recipient, and a MAC over all values.
 // Files written here open with the sops tool and the other way round
-// (bin/dev test checks both directions against the real sops).
+// (bin/dev test-sops checks both directions against the real sops).
 package sopsage
 
 import (
@@ -28,7 +28,9 @@ const metadataKey = "sops"
 // defaultUnencryptedSuffix marks keys whose values SOPS leaves in plaintext.
 const defaultUnencryptedSuffix = "_unencrypted"
 
-// formatVersion is the SOPS version whose format this package writes.
+// formatVersion goes into the files this package writes: the newest SOPS
+// release whose format it follows. Older releases read such files too (the
+// fixtures and test-sops use 3.12.2).
 const formatVersion = "3.13.3"
 
 // macOnlyEncryptedPrefix starts the MAC when mac_only_encrypted is set, as in
@@ -112,7 +114,9 @@ func Decrypt(file []byte, identities []age.Identity) ([]byte, error) {
 			return nil
 		}
 		if leaf.Value == "" || leaf.Tag == "!!null" {
-			return nil // SOPS leaves empty strings and nulls as they are
+			// SOPS leaves empty strings and nulls as they are; an empty
+			// string adds nothing to the hash, and SOPS never hashes a null
+			return nil
 		}
 		plaintext, valueType, err := decryptValue(leaf.Value, dataKey, strings.Join(path, ":")+":")
 		if err != nil {
@@ -127,6 +131,7 @@ func Decrypt(file []byte, identities []age.Identity) ([]byte, error) {
 	if err := checkMAC(meta, dataKey, hash.Sum(nil)); err != nil {
 		return nil, err
 	}
+	// the plaintext is only decoded, never shown: YAML's usual indent
 	return encodeYAML(&document, 2)
 }
 
@@ -173,7 +178,7 @@ func Encrypt(plaintext []byte, recipients []string, now time.Time) ([]byte, erro
 			return err
 		}
 		hash.Write(value)
-		if !settings.shouldBeEncrypted(path) || len(value) == 0 && valueType == "str" {
+		if !settings.shouldBeEncrypted(path) || (len(value) == 0 && valueType == "str") {
 			return nil // SOPS leaves empty strings as they are
 		}
 		sealed, err := encryptValue(value, valueType, dataKey, strings.Join(path, ":")+":")
@@ -196,6 +201,7 @@ func Encrypt(plaintext []byte, recipients []string, now time.Time) ([]byte, erro
 		return nil, err
 	}
 	root.Content = append(root.Content, metadataNode(stanzas, lastModified, mac)...)
+	// the indent sops itself writes, so a re-encrypted file diffs cleanly
 	return encodeYAML(&document, 4)
 }
 
@@ -242,8 +248,12 @@ func openDataKey(meta metadata, identities []age.Identity) ([]byte, error) {
 	}
 	for _, stanza := range meta.Age {
 		reader, err := age.Decrypt(armor.NewReader(strings.NewReader(stanza.Encrypted)), identities...)
-		if err != nil {
-			continue
+		var noMatch *age.NoIdentityMatchError
+		switch {
+		case errors.As(err, &noMatch):
+			continue // sealed for someone else
+		case err != nil:
+			return nil, fmt.Errorf("open the data key sealed for %s: %w", stanza.Recipient, err)
 		}
 		dataKey, err := io.ReadAll(reader)
 		if err != nil {
@@ -278,24 +288,33 @@ func sealDataKey(dataKey []byte, recipients []string) ([]ageStanza, error) {
 		if err != nil {
 			return nil, err
 		}
-		var sealed bytes.Buffer
-		armored := armor.NewWriter(&sealed)
-		writer, err := age.Encrypt(armored, recipient)
+		sealed, err := sealFor(dataKey, recipient)
 		if err != nil {
 			return nil, fmt.Errorf("seal the data key for %s: %w", text, err)
 		}
-		if _, err := writer.Write(dataKey); err != nil {
-			return nil, fmt.Errorf("seal the data key for %s: %w", text, err)
-		}
-		if err := writer.Close(); err != nil {
-			return nil, fmt.Errorf("seal the data key for %s: %w", text, err)
-		}
-		if err := armored.Close(); err != nil {
-			return nil, fmt.Errorf("seal the data key for %s: %w", text, err)
-		}
-		stanzas = append(stanzas, ageStanza{Recipient: text, Encrypted: sealed.String()})
+		stanzas = append(stanzas, ageStanza{Recipient: text, Encrypted: sealed})
 	}
 	return stanzas, nil
+}
+
+// sealFor encrypts the data key for one recipient as an armored age file.
+func sealFor(dataKey []byte, recipient age.Recipient) (string, error) {
+	var sealed bytes.Buffer
+	armored := armor.NewWriter(&sealed)
+	writer, err := age.Encrypt(armored, recipient)
+	if err != nil {
+		return "", err
+	}
+	if _, err := writer.Write(dataKey); err != nil {
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+	if err := armored.Close(); err != nil {
+		return "", err
+	}
+	return sealed.String(), nil
 }
 
 // parseRecipient reads an age recipient or an SSH public key.

@@ -38,6 +38,7 @@ SignWith: ${fingerprint}
 EOF
 }
 
+# main: Do what the header of this script describes.
 main() {
   local repository="$1" fingerprint deb
   shift

@@ -17,8 +17,18 @@ var clowderRanges = []netip.Prefix{
 	netip.MustParsePrefix("10.78.0.0/16"),
 }
 
-// minimumDRBDUtils is the oldest drbd-utils that LINBIT's drbd-dkms accepts.
-var minimumDRBDUtils = []int{9, 28}
+// The oldest drbd-utils that LINBIT's drbd-dkms accepts: 9.28.
+const (
+	minimumDRBDUtilsMajor = 9
+	minimumDRBDUtilsMinor = 28
+)
+
+var (
+	drbdUtilsVersion = regexp.MustCompile(`DRBDADM_VERSION=(\d+)\.(\d+)`)
+	usageCountOff    = regexp.MustCompile(`(?m)^\s*usage-count\s+no\s*;`)
+	// a reject pattern ("r|...|") that names drbd; an accept pattern does not count
+	rejectsDRBD = regexp.MustCompile(`"r\|[^|"]*drbd`)
+)
 
 // checks in the order they are printed.
 var checks = []check{
@@ -119,20 +129,23 @@ func checkDRBDUtils(ctx context.Context, host Host, _ Options) (Status, string) 
 	if err != nil {
 		return Fail, "drbdadm is missing (install drbd-utils from LINBIT)"
 	}
-	match := regexp.MustCompile(`DRBDADM_VERSION=(\d+)\.(\d+)`).FindStringSubmatch(output)
+	match := drbdUtilsVersion.FindStringSubmatch(output)
 	if match == nil {
 		return Fail, "cannot read the version of drbd-utils"
 	}
 	major, _ := strconv.Atoi(match[1])
 	minor, _ := strconv.Atoi(match[2])
-	if major < minimumDRBDUtils[0] || major == minimumDRBDUtils[0] && minor < minimumDRBDUtils[1] {
-		return Fail, fmt.Sprintf("drbd-utils %d.%d is older than 9.28 (Debian's own; use LINBIT's)", major, minor)
+	if major < minimumDRBDUtilsMajor || major == minimumDRBDUtilsMajor && minor < minimumDRBDUtilsMinor {
+		return Fail, fmt.Sprintf("drbd-utils %d.%d is older than %d.%d (Debian's own; use LINBIT's)",
+			major, minor, minimumDRBDUtilsMajor, minimumDRBDUtilsMinor)
 	}
 	return OK, fmt.Sprintf("drbd-utils %d.%d", major, minor)
 }
 
 // checkDRBDService: only the agent brings resources up.
 func checkDRBDService(ctx context.Context, host Host, _ Options) (Status, string) {
+	// is-enabled exits non-zero for a disabled or missing unit; only its
+	// output matters
 	state, _ := host.Run(ctx, "systemctl", "is-enabled", "drbd.service")
 	if strings.TrimSpace(state) == "enabled" {
 		return Fail, "drbd.service is enabled; only clowderd may bring resources up"
@@ -146,7 +159,7 @@ func checkUsageCount(_ context.Context, host Host, _ Options) (Status, string) {
 	if err != nil {
 		return Fail, err.Error()
 	}
-	if !regexp.MustCompile(`(?m)^\s*usage-count\s+no\s*;`).Match(content) {
+	if !usageCountOff.Match(content) {
 		return Fail, "set usage-count no; in /etc/drbd.d/global_common.conf"
 	}
 	return OK, ""
@@ -156,7 +169,7 @@ func checkUsageCount(_ context.Context, host Host, _ Options) (Status, string) {
 // groups inside volumes twice).
 func checkLVMFilter(ctx context.Context, host Host, _ Options) (Status, string) {
 	filter, err := host.Run(ctx, "lvmconfig", "devices/global_filter")
-	if err != nil || !strings.Contains(filter, "/dev/drbd") {
+	if err != nil || !rejectsDRBD.MatchString(filter) {
 		return Fail, `global_filter in /etc/lvm/lvm.conf must reject /dev/drbd* ("r|^/dev/drbd.*|")`
 	}
 	return OK, ""
@@ -241,7 +254,10 @@ func checkCompose(ctx context.Context, host Host, _ Options) (Status, string) {
 // checkUnattendedUpgrades: the kernel, Docker, DRBD and clowder are only
 // updated after a drain.
 func checkUnattendedUpgrades(ctx context.Context, host Host, _ Options) (Status, string) {
-	if _, err := host.Run(ctx, "dpkg-query", "--show", "unattended-upgrades"); err != nil {
+	// a removed package whose configuration is left is listed too, so look at
+	// its status, not only whether dpkg knows it
+	status, err := host.Run(ctx, "dpkg-query", "--show", "--showformat=${db:Status-Status}", "unattended-upgrades")
+	if err != nil || strings.TrimSpace(status) != "installed" {
 		return OK, "not installed"
 	}
 	dump, err := host.Run(ctx, "apt-config", "dump", "Unattended-Upgrade::Package-Blacklist")
@@ -274,5 +290,5 @@ func checkFloatingIP(_ context.Context, host Host, options Options) (Status, str
 			return OK, ""
 		}
 	}
-	return Fail, fmt.Sprintf("%s is on no interface (every host needs it)", options.FloatingIP)
+	return Fail, fmt.Sprintf("%s is on no interface (every host needs it: Docker publishes the stacks' ports on it, and Docker binds only to local addresses)", options.FloatingIP)
 }

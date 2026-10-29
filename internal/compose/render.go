@@ -30,7 +30,7 @@ type Target struct {
 // MountedVolume is a volume as it is mounted on the host.
 type MountedVolume struct {
 	Dir        string
-	Generation int
+	Generation int64
 }
 
 // Labels that the agent puts on every container.
@@ -44,6 +44,14 @@ const (
 // nothing may start before the agent has looked at the cluster; the agent
 // applies the stack's restart rules instead.
 func Render(stack *Stack, target Target) ([]byte, error) {
+	for _, required := range []struct {
+		what    string
+		address netip.Addr
+	}{{"floating IP", target.FloatingIP}, {"node address", target.NodeAddress}, {"resolver", target.Resolver}} {
+		if !required.address.IsValid() {
+			return nil, fmt.Errorf("render stack %s: the target has no %s", stack.Name, required.what)
+		}
+	}
 	project := *stack.Project
 	project.Services = types.Services{}
 	for name, service := range stack.Project.Services {
@@ -60,7 +68,7 @@ func Render(stack *Stack, target Target) ([]byte, error) {
 	for name, volume := range stack.Project.Volumes {
 		mounted, ok := target.Volumes[name]
 		if !ok {
-			return nil, fmt.Errorf("volume %s of stack %s is not mounted", name, stack.Name)
+			return nil, fmt.Errorf("render stack %s: volume %s is not mounted", stack.Name, name)
 		}
 		project.Volumes[name] = renderVolume(stack.Name, name, volume, mounted)
 	}

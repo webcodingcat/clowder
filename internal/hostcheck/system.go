@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"time"
 )
 
 // System is the real host.
@@ -17,13 +18,34 @@ func (System) ReadFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-// Run runs a command and returns its standard output.
+// commandTimeout bounds each command. lvs or drbdadm can hang in the kernel
+// while DRBD suspends I/O, and a check must never hang with them.
+const commandTimeout = 10 * time.Second
+
+// Run runs a command and returns its standard output. A command that does not
+// finish in time is left behind: a process in state D ignores even SIGKILL,
+// so waiting for it would hang the check.
 func (System) Run(ctx context.Context, name string, args ...string) (string, error) {
-	output, err := exec.CommandContext(ctx, name, args...).Output()
-	if err != nil {
-		return string(output), fmt.Errorf("%s: %w", name, err)
+	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+	type result struct {
+		output []byte
+		err    error
 	}
-	return string(output), nil
+	done := make(chan result, 1)
+	go func() {
+		output, err := exec.CommandContext(ctx, name, args...).Output()
+		done <- result{output, err}
+	}()
+	select {
+	case finished := <-done:
+		if finished.err != nil {
+			return string(finished.output), fmt.Errorf("%s: %w", name, finished.err)
+		}
+		return string(finished.output), nil
+	case <-ctx.Done():
+		return "", fmt.Errorf("%s: no answer within %s: %w", name, commandTimeout, ctx.Err())
+	}
 }
 
 // Addresses returns the IPv4 addresses on the host's interfaces.

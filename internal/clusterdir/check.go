@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/webcodingcat/clowder/internal/units"
 )
@@ -40,7 +41,7 @@ func Check(config Config) Problems {
 	if config.Hoster == "" {
 		report("hoster is required")
 	}
-	if config.HosterToken.Secret == "" {
+	if missingSecret(&config.HosterToken) {
 		report("hoster_token: {secret: <name>} is required")
 	}
 	if config.Network != "" && config.Network != "private" && config.Network != "public" {
@@ -58,13 +59,34 @@ func Check(config Config) Problems {
 	problems = append(problems, checkPriorities(config.Priorities)...)
 	problems = append(problems, checkResources("defaults.reservations", config.Defaults.Reservations)...)
 	problems = append(problems, checkResources("system_reserve", config.SystemReserve)...)
-	if config.Backup != nil && config.Backup.Target.Type != "restic" {
-		report("backup.target.type %q is not supported (restic)", config.Backup.Target.Type)
+	if backup := config.Backup; backup != nil {
+		if backup.Target.Type != "restic" {
+			report("backup.target.type %q is not supported (restic)", backup.Target.Type)
+		}
+		if backup.Target.URL == "" {
+			report("backup.target.url is required")
+		}
+		if missingSecret(&backup.Password) {
+			report("backup.password: {secret: <name>} is required")
+		}
 	}
 	if config.Alerts != nil {
 		for index, channel := range config.Alerts.Channels {
 			problems = append(problems, checkChannel(index, channel)...)
 		}
+		if heartbeat := config.Alerts.Heartbeat; heartbeat != nil {
+			if missingSecret(&heartbeat.URL) {
+				report("alerts.heartbeat.url: {secret: <name>} is required")
+			}
+			if heartbeat.Interval != "" {
+				if interval, err := time.ParseDuration(heartbeat.Interval); err != nil || interval <= 0 {
+					report("alerts.heartbeat.interval %q is not a duration like 5m", heartbeat.Interval)
+				}
+			}
+		}
+	}
+	if listen := config.Metrics.Listen; listen != "" && listen != "node" && listen != "node+underlay" {
+		report("metrics.listen %q is neither node nor node+underlay", listen)
 	}
 	return problems
 }
@@ -122,7 +144,9 @@ func validPercent(text string) bool {
 	return strings.HasSuffix(text, "%") && err == nil && number >= 0 && number <= 90
 }
 
-// checkPriorities: numbers from 0 to 1000, and the default is a category.
+// checkPriorities: numbers from 0 to 1000, and the default is one of the
+// categories. Without categories the default ones apply (withDefaults), so
+// the default must be one of those; with own categories it must be named.
 func checkPriorities(priorities Priorities) Problems {
 	var problems Problems
 	for _, name := range slices.Sorted(maps.Keys(priorities.Categories)) {
@@ -130,10 +154,13 @@ func checkPriorities(priorities Priorities) Problems {
 			problems = append(problems, fmt.Sprintf("priority category %s: %d is not from 0 to 1000", name, value))
 		}
 	}
-	if priorities.Default != "" && len(priorities.Categories) > 0 {
-		if _, ok := priorities.Categories[priorities.Default]; !ok {
-			problems = append(problems, fmt.Sprintf("priorities.default %q is not a category", priorities.Default))
-		}
+	if len(priorities.Categories) > 0 && priorities.Default == "" {
+		problems = append(problems, "priorities.default is required with own categories")
+	}
+	effective := priorities.withDefaults()
+	if _, ok := effective.Categories[effective.Default]; !ok {
+		problems = append(problems, fmt.Sprintf("priorities.default %q is not one of the categories %s",
+			effective.Default, strings.Join(slices.Sorted(maps.Keys(effective.Categories)), ", ")))
 	}
 	return problems
 }
@@ -156,24 +183,34 @@ func checkResources(where string, resources Resources) Problems {
 
 // checkChannel: each type needs its own fields.
 func checkChannel(index int, channel AlertChannel) Problems {
-	where := fmt.Sprintf("alerts.channels[%d] (%s)", index, channel.Type)
+	var problems Problems
+	report := func(problem string) {
+		problems = append(problems, fmt.Sprintf("alerts.channels[%d] (%s): %s", index, channel.Type, problem))
+	}
+	switch channel.MinSeverity {
+	case "", "info", "warning", "critical":
+	default:
+		report(fmt.Sprintf("min_severity %q is not info, warning or critical", channel.MinSeverity))
+	}
 	switch channel.Type {
 	case "discord":
-		if channel.Webhook == nil {
-			return Problems{where + ": webhook: {secret: <name>} is required"}
+		if missingSecret(channel.Webhook) {
+			report("webhook: {secret: <name>} is required")
 		}
 	case "webhook":
-		if channel.URL == nil {
-			return Problems{where + ": url: {secret: <name>} is required"}
+		if missingSecret(channel.URL) {
+			report("url: {secret: <name>} is required")
 		}
 	case "email":
 		if channel.SMTP == nil || channel.From == "" || len(channel.To) == 0 {
-			return Problems{where + ": smtp, from and to are required"}
+			report("smtp, from and to are required")
+		} else if channel.SMTP.Host == "" || channel.SMTP.Port == 0 {
+			report("smtp needs host and port")
 		}
 	default:
-		return Problems{where + ": type is not discord, email or webhook"}
+		report("type is not discord, email or webhook")
 	}
-	return nil
+	return problems
 }
 
 // SecretNames lists every secret cluster.yaml refers to, sorted.
@@ -201,4 +238,9 @@ func SecretNames(config Config) []string {
 		}
 	}
 	return slices.Sorted(maps.Keys(names))
+}
+
+// missingSecret tells whether a reference to a secret is absent or names none.
+func missingSecret(reference *SecretRef) bool {
+	return reference == nil || reference.Secret == ""
 }

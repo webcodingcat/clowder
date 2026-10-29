@@ -44,6 +44,7 @@ up_peer() {
     || ip rule add fwmark $((0x100 + peer))/0xfff lookup $((100 + peer)) priority 1000
 }
 
+# main: Do what the header of this script describes.
 main() {
   case "$1" in
     key) print_public_key ;;

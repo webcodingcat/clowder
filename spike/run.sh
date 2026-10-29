@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 0 spike: try the risky paths of the plan on three HLab hosts.
+# Phase 0 spike: try the risky paths of the design on three HLab hosts.
 # Usage: HLAB=/path/to/hlab/bin/hlab spike/run.sh <step>...
 #   up        start the lab, create the hosts (OpenTofu), install them, mesh
 #   net       DNAT without SNAT, client IP, Floating IP move, conntrack, invariant
@@ -17,7 +17,7 @@ DOCKER_HERE="$(cd "${HERE}" && (pwd -W 2>/dev/null || pwd) )"
 readonly DOCKER_HERE
 readonly LAB_CONFIG="${HERE}/lab.yaml"
 readonly CONTAINER=hlab-clowder
-readonly TOFU_IMAGE=ghcr.io/opentofu/opentofu:1
+readonly TOFU_IMAGE=ghcr.io/opentofu/opentofu:1.13.2
 readonly ECHO_IMAGE=alpine/socat
 readonly RESULTS="${HERE}/results"
 readonly NODES=(node0 node1 node2)
@@ -547,6 +547,7 @@ step_down() {
   lab down
 }
 
+# main: Do what the header of this script describes.
 main() {
   local step
   (($# > 0)) || set -- up net drbd boot watchdog

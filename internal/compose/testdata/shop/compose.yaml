@@ -1,4 +1,4 @@
-# The example stack of the plan: an app behind Traefik, a database that is
+# The example stack: an app behind Traefik, a database that is
 # replicated and backed up, a cache that is thrown away.
 x-clowder:
   priority: high

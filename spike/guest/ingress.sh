@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The nft table inet clowder and the DOCKER-USER rules for published ports,
-# as the plan describes them (3.2, 3.4, 3.5). The same rules go on every host.
+# as clowder sets them up: DNAT without SNAT, hairpin, isolation. The same
+# rules go on every host.
 # Usage: ingress.sh <self id> <floating ip> <proto>:<port>:<target host id>...
 set -euo pipefail
 
@@ -69,6 +70,7 @@ docker_user_rules() {
     || iptables -I DOCKER-USER 2 -m conntrack --ctstate DNAT -m connmark --mark 0x200/0xfff -j ACCEPT
 }
 
+# main: Do what the header of this script describes.
 main() {
   local ruleset
   ruleset="$(print_ruleset "$@")"

@@ -21,23 +21,36 @@ Go is not needed on the host: `bin/dev` runs everything in pinned images (`golan
 ### Live tests with HLab
 
 The live tests run against HLab, a local stand-in for Hetzner Cloud with real VMs (it needs
-`/dev/kvm`). clowder only uses its interface: `hlab env` prints the API endpoint, the token,
-the Storage Box access and the Docker network of a running lab. Point `HLAB` at its wrapper:
+`/dev/kvm`). The live tests use only its interface: `hlab env` prints the API endpoint, the
+token, the Storage Box access and the Docker network of a running lab. (The spike also reaches
+into the lab's container; it goes away with it.) Point `HLAB` at its wrapper:
 
 ```bash
 export HLAB=/path/to/hlab/bin/hlab
-spike/run.sh up      # phase 0: a lab "clowder" with three hosts
+spike/run.sh up      # the spike of phase 0: a lab "clowder" with three hosts
 ```
 
-The live tests of phase 1a replace `spike/`; they live in `test/live` behind the build tag
-`live`.
+The live tests replace `spike/`; they live in `test/live` behind the build tag `live`.
+
+## Roadmap
+
+clowder is built in phases; each ends with live tests on HLab.
+
+| Phase | Builds | State |
+|---|---|---|
+| 0 | the spike: DRBD quorum and fencing, WireGuard, the real client IP, on three hosts | done |
+| 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | in progress |
+| 1b | ingress (Traefik, ACME), priorities, alerts, still on one host | |
+| 2 | three hosts: replication, failover with fencing | |
+| 3 | backup and restore, GitOps | |
+| 4 | comfort and operations | |
 
 ## The two binaries
 
 | Binary | Package | Runs on | Does |
 |---|---|---|---|
 | `clowder` | `cmd/clowder`, `internal/cli` | Linux, macOS, Windows | the user's CLI: reads the cluster directory, talks to an agent over mTLS |
-| `clowderd` | `cmd/clowderd`, `internal/agent` | Linux | the agent (systemd service `clowderd`) and the host commands `check`, `init`, `join`, `recover` |
+| `clowderd` | `cmd/clowderd`, `internal/agent` | Linux | the agent (systemd service `clowderd`) and the host commands: `check` now; `run`, `init`, `join`, `recover` to come |
 
 `cmd/clowderd` has the build constraint `linux`. Both get their version from
 `internal/buildinfo.Version`, which `bin/dev build` stamps from the Git tag (or
@@ -46,25 +59,32 @@ The live tests of phase 1a replace `spike/`; they live in `test/live` behind the
 ## Layers
 
 The package layout is planned for the whole of v1; packages appear as the phases add them.
+Packages in *italics* do not exist yet.
 
-- **Portable**: `cli`, `api`, `clusterdir`, `pki`, `compose`, `buildinfo`, `logging`. The CLI may
-  import only these. `.golangci.yml` (depguard, rule `cli-portable`) refuses direct imports
-  of the Linux-only packages in `cmd/clowder` and `internal/cli`; the cross build for Windows
-  and macOS in `bin/dev build` catches indirect ones.
-- **Pure logic, no I/O**: `scheduler`, `state`. They are tested with table tests only.
-- **Decides**: `controller` (the leader's loops) writes Raft commands. It talks to external
+- **Portable**: `cli`, *`api`*, `clusterdir`, `sopsage`, *`pki`*, `compose`, `units`,
+  `buildinfo`, `logging`. The CLI may import only these. `.golangci.yml` (depguard, rule
+  `cli-portable`) refuses direct imports of the Linux-only packages in `cmd/clowder` and
+  `internal/cli`; the cross build for Windows and macOS in `bin/dev build` catches indirect
+  ones.
+- **Pure logic, no I/O**: *`scheduler`*, *`state`*. They are tested with table tests only.
+- **Decides**: *`controller`* (the leader's loops) writes Raft commands. It talks to external
   services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
   changes the host.
-- **Changes the host**: `agent`, `supervisor` and the drivers `network`, `storage`, `docker`,
-  `ingress`.
+- **Changes the host**: `agent`, *`supervisor`*, *`raftnode`* (Raft over mTLS) and the drivers
+  *`network`*, *`storage`*, *`docker`*, *`ingress`*.
+- **Reads the host**: `hostcheck` (for `clowderd check`). It compiles anywhere, but only the
+  agent uses it, so depguard keeps it out of the CLI like the packages above.
 
 ## Stacks (`internal/compose`)
 
-- `Load` reads Compose files with compose-go and checks what clowder cannot run: `build`,
-  host or container network modes, `pid`/`ipc: host`, `container_name`, devices, more than one
-  replica, bind mounts (except `/etc/localtime` read-only), anonymous and external volumes,
-  port ranges, host addresses and reserved ports. It reports every problem at once
-  (`Problems`).
+- `Load` reads Compose files with compose-go and refuses what breaks clowder's model: what ties
+  a container to one host (bind mounts except `/etc/localtime` read-only, `secrets` and
+  `configs` from files, devices, anonymous and external volumes, external networks), what
+  shares the host's namespaces (`network_mode: host`, `pid`/`ipc: host`), and what clowder
+  sets itself (`build`, `container_name`, replicas, network drivers and subnets, port ranges,
+  host addresses, reserved ports). It does not restrict what a container may do on its host
+  (`privileged`, capabilities): stacks run the operator's own code. Every problem is reported
+  at once (`Problems`); only an unknown key ends the checks of its `x-clowder` block.
 - The `x-clowder` blocks are decoded strictly: an unknown key is an error, not ignored.
 - `Render` writes the file docker compose gets on a host: `restart: "no"` (the agent restarts),
   the agent's resolver, each port on the Floating IP and the node address, labels, a fixed
@@ -124,13 +144,16 @@ reports never depend on a volume.
 
 ## Packages and units
 
-`packaging/` holds the nfpm configurations, the systemd units and the post-install script.
+`packaging/` holds the nfpm configurations, the systemd units and the
+maintainer scripts (reload systemd after install and removal, stop the agent before removal).
 
 - `clowderd` depends on Debian packages and on `drbd-dkms` and `drbd-utils` from LINBIT's
   public repository (dist `proxmox-9`); the host's APT sources must list it. `coccinelle`
   lets the DKMS build run offline.
-- `clowderd.service`: `Type=notify`, `WatchdogSec=15`, `Restart=always`, no reboot on repeated
-  failures, `KillMode=process` (containers keep running).
+- `clowderd.service`: `Type=notify`, `WatchdogSec=15`, `Restart=always` without a start
+  limit, `KillMode=process` (helpers finish their step; containers belong to dockerd). It
+  starts `clowderd run`, which does not exist yet; the package installs the unit without
+  enabling it.
 - `clowder-tasks.slice`: memory limit for the agent's short-lived tasks.
 
 ## CI
@@ -149,7 +172,9 @@ A tag `v<major>.<minor>.<patch>` starts `.github/workflows/release.yml`:
    `webcodingcat/clowder-apt` with reprepro and signs it; GitHub Pages serves it at
    `https://webcodingcat.github.io/clowder-apt` (distribution `trixie`, component `main`,
    public key `clowder.asc`). Its `README.md` shows how a host adds it.
-4. A GitHub release with the packages and the archives.
+4. A GitHub release with the packages and the archives. It comes last: a version is out once
+   it is in the APT repository. If only this step fails, create the release by hand
+   (`gh release create`); re-running the workflow would publish the version again.
 
 The workflow needs two secrets in this repository:
 

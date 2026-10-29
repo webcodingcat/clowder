@@ -9,7 +9,7 @@ func TestSizesUseBinaryUnits(t *testing.T) {
 			t.Errorf("%s: %d, %v", text, got, err)
 		}
 	}
-	for _, text := range []string{"", "20", "G", "-1G", "1.5G", "20GB"} {
+	for _, text := range []string{"", "20", "G", "-1G", "1.5G", "20GB", "9999999999T"} {
 		if _, err := ParseSize(text); err == nil {
 			t.Errorf("%q: no error", text)
 		}

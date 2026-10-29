@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One DRBD 9 resource as the plan configures it: quorum majority with
+# One DRBD 9 resource as clowder configures it: quorum majority with
 # suspend-io, auto-promote off, max-peers 4, port 10000 + minor, node-id =
 # host ID. The resource file is the same on every host.
 # Usage: drbd.sh res <name> <minor> <host>:<id>:<disk or none>...
@@ -30,6 +30,7 @@ write_res() {
   drbdadm sh-nop
 }
 
+# main: Do what the header of this script describes.
 main() {
   case "$1" in
     res) write_res "${@:2}" ;;

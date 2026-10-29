@@ -30,13 +30,13 @@ DEVELOPING.md explains each one.
 
 - The CLI must build on Windows: `cmd/clowder` and `internal/cli` never import a package that
   only works on Linux (Layers).
-- `scheduler` and `state` do no I/O; only `agent`, `supervisor` and the drivers change the
-  host (Layers).
+- `scheduler` and `state` do no I/O; only `agent`, `supervisor`, `raftnode` and the drivers
+  change the host (Layers).
 - The agent never waits on a write to a volume: without quorum DRBD suspends I/O, and such a
   write hangs in the kernel where no timeout ends it (Volumes).
 - Errors are wrapped with `%w` and context; logs go through `log/slog` (Logging and errors).
 
 ## State of the work
 
-Phase 1a (the foundation on one host). `spike/` is the throw-away spike of phase 0; it goes
-away once the live tests of phase 1a replace it.
+Phase 1a, the foundation on one host (DEVELOPING.md, Roadmap). `spike/` is the throw-away
+spike of phase 0; it goes away once the live tests in `test/live` replace it.

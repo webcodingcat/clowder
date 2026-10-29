@@ -48,6 +48,10 @@ jobs:
           git add -A
           git commit -m "Add clowder ${GITHUB_REF_NAME}"
           git push
+      # The release comes after the APT repository on purpose: hosts install
+      # from APT, so a version is out once it is there. If only this step
+      # fails, create the release by hand (gh release create) instead of
+      # re-running the workflow, which would publish the version again.
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

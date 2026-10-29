@@ -33,17 +33,19 @@ func LoadIdentities() ([]age.Identity, error) {
 		}
 		identities = append(identities, parsed...)
 	}
-	keyFile, named := os.LookupEnv("SOPS_AGE_KEY_FILE")
-	if !named || keyFile == "" {
+	// a key file named in the variable must exist; the default one may not
+	keyFile := os.Getenv("SOPS_AGE_KEY_FILE")
+	mustExist := keyFile != ""
+	if !mustExist {
 		configDir, err := userConfigDir()
 		if err != nil {
 			return identities, nil //nolint:nilerr // no config directory, so no default key file
 		}
-		keyFile, named = filepath.Join(configDir, "sops", "age", "keys.txt"), false
+		keyFile = filepath.Join(configDir, "sops", "age", "keys.txt")
 	}
 	content, err := os.ReadFile(keyFile)
 	switch {
-	case errors.Is(err, os.ErrNotExist) && !named:
+	case errors.Is(err, os.ErrNotExist) && !mustExist:
 		return identities, nil
 	case err != nil:
 		return nil, fmt.Errorf("read the age key file: %w", err)

@@ -50,7 +50,7 @@ type Service struct {
 // HTTPRoute sends requests for Host (and Path) to Port of the service.
 type HTTPRoute struct {
 	Host string
-	Port uint32
+	Port uint16
 	Path string
 }
 
@@ -64,8 +64,8 @@ type PublishedPort struct {
 // Volume holds the clowder fields of a named volume.
 type Volume struct {
 	Name string
-	// Class is a storage class from cluster.yaml; empty means the cluster's
-	// default.
+	// Class is a storage class from cluster.yaml; whether the cluster has it is
+	// checked when the stack is applied.
 	Class    string
 	Size     int64
 	Replicas int

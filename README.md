@@ -4,7 +4,8 @@ A small cluster orchestrator for Docker Compose stacks on hosts with about 4 GB 
 replicated volumes (DRBD 9), the real client IP behind a Floating IP, priorities, fencing
 through the hoster's API. First hoster: Hetzner Cloud.
 
-Status: under construction (phase 1a). Nothing to run yet beyond `clowder version`.
+Status: under construction (phase 1a, see the roadmap in [DEVELOPING.md](DEVELOPING.md)).
+Nothing to run yet beyond `clowder version` and `clowderd check`.
 
 | Binary | For | Platforms |
 |---|---|---|

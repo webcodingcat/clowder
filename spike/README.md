@@ -1,8 +1,8 @@
 # Spike (phase 0)
 
-Throw-away scripts that try the risky paths of the plan on three HLab hosts before any
-clowder code exists. They are removed at the end of phase 0; what they show goes into the
-plan and the first golden files.
+Throw-away scripts that tried the risky paths of the design on three HLab hosts before any
+clowder code existed. What they showed went into the code and the first golden files; they
+are removed once the live tests in `test/live` replace them.
 
 ## Run
 

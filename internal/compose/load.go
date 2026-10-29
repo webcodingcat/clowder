@@ -83,8 +83,26 @@ func check(project *types.Project) (*Stack, error) {
 		stack.Volumes[name] = volume
 	}
 	for _, name := range slices.Sorted(maps.Keys(project.Networks)) {
-		if project.Networks[name].External {
+		network := project.Networks[name]
+		if network.External {
 			report("network %s: external networks are not supported", name)
+		}
+		if network.Driver != "" && network.Driver != "bridge" {
+			report("network %s: driver %q is not supported (clowder uses bridges)", name, network.Driver)
+		}
+		if len(network.Ipam.Config) > 0 {
+			report("network %s: ipam subnets are not supported (Docker's address pools assign them)", name)
+		}
+	}
+	// a file named here lives on this machine, not on the host that runs the stack
+	for _, name := range slices.Sorted(maps.Keys(project.Secrets)) {
+		if project.Secrets[name].File != "" {
+			report("secret %s: file is not supported; use environment", name)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(project.Configs)) {
+		if project.Configs[name].File != "" {
+			report("config %s: file is not supported; use content or environment", name)
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(project.Services)) {
@@ -102,7 +120,8 @@ func check(project *types.Project) (*Stack, error) {
 			report("stack: import %q is not of the form stack/service", imported)
 		}
 	}
-	for _, volume := range stack.Volumes {
+	for _, name := range slices.Sorted(maps.Keys(stack.Volumes)) {
+		volume := stack.Volumes[name]
 		if volume.Backup != nil && volume.Backup.Pre != nil {
 			if _, ok := stack.Services[volume.Backup.Pre.Service]; !ok {
 				report("volume %s: the backup hook runs in %q, which is not a service of this stack",
@@ -135,6 +154,9 @@ func checkVolume(name string, config types.VolumeConfig) (Volume, Problems) {
 		report("%v", err)
 		return volume, problems
 	}
+	if raw.Class == "" {
+		report("x-clowder.class is required (a storage class of the cluster, for example fast)")
+	}
 	volume.Class = raw.Class
 	if raw.Size == "" {
 		report("x-clowder.size is required (for example 10G)")
@@ -157,6 +179,12 @@ func checkVolume(name string, config types.VolumeConfig) (Volume, Problems) {
 		}
 		if raw.Replicas != nil && *raw.Replicas == 0 {
 			report("a volume with replicas 0 is never backed up; remove x-clowder.backup")
+		}
+		if raw.Backup.Keep < 0 {
+			report("x-clowder.backup.keep %d is negative", raw.Backup.Keep)
+		}
+		if hook := raw.Backup.Pre; hook != nil && (hook.Service == "" || len(hook.Command) == 0) {
+			report("x-clowder.backup.pre needs service and command")
 		}
 		volume.Backup = &Backup{Schedule: raw.Backup.Schedule, Keep: raw.Backup.Keep}
 		if raw.Backup.Pre != nil {
@@ -194,8 +222,8 @@ func checkService(config types.ServiceConfig, volumes types.Volumes) (Service, P
 	if len(config.Devices) > 0 {
 		report("devices are not supported")
 	}
-	if config.Scale != nil && *config.Scale > 1 ||
-		config.Deploy != nil && config.Deploy.Replicas != nil && *config.Deploy.Replicas > 1 {
+	if (config.Scale != nil && *config.Scale > 1) ||
+		(config.Deploy != nil && config.Deploy.Replicas != nil && *config.Deploy.Replicas > 1) {
 		report("more than one replica per service is not supported")
 	}
 	if !validRestart(config.Restart) {
@@ -217,6 +245,7 @@ func checkService(config types.ServiceConfig, volumes types.Volumes) (Service, P
 	service.DependsOn = slices.Sorted(maps.Keys(config.DependsOn))
 	if config.Deploy != nil && config.Deploy.Resources.Reservations != nil {
 		service.MemoryReservation = int64(config.Deploy.Resources.Reservations.MemoryBytes)
+		// compose-go names the field NanoCPUs but keeps whole CPUs in it (0.5)
 		service.CPUReservation = float64(config.Deploy.Resources.Reservations.NanoCPUs)
 	}
 
@@ -308,10 +337,15 @@ func checkPort(port types.ServicePortConfig) (PublishedPort, string) {
 // and may not be published by a stack.
 func ReservedPort(port uint16) bool {
 	switch {
-	case port == 22, port == 53, port == 80, port == 443:
+	case port == 22, port == 53, port == 80, port == 443: // SSH, DNS, Traefik
 		return true
-	case port >= 7400 && port <= 7499, port >= 10000 && port <= 10999,
-		port >= 20000 && port <= 29999, port >= 51800 && port <= 51831:
+	case port >= 7400 && port <= 7499: // Raft, agent API, metrics, ACME, Traefik inside
+		return true
+	case port >= 10000 && port <= 10999: // DRBD: 10000 + minor
+		return true
+	case port >= 20000 && port <= 29999: // exported services
+		return true
+	case port >= 51800 && port <= 51831: // WireGuard: 51800 + host ID
 		return true
 	default:
 		return false

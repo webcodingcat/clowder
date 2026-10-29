@@ -1,7 +1,7 @@
 // Package hostcheck checks the operator base of a host: what the operator
 // sets up (cloud-init, Ansible, by hand) and clowderd relies on. It only
-// reads; it never changes the host. clowderd check runs it before init and
-// join, and the agent reports it with every health message.
+// reads; it never changes the host. clowderd check runs it; init and join will
+// run it first, and the agent will report it with every health message.
 package hostcheck
 
 import (
@@ -25,7 +25,16 @@ const (
 )
 
 func (s Status) String() string {
-	return [...]string{"OK", "WARN", "FAIL"}[s]
+	switch s {
+	case OK:
+		return "OK"
+	case Warn:
+		return "WARN"
+	case Fail:
+		return "FAIL"
+	default:
+		return fmt.Sprintf("Status(%d)", int(s))
+	}
 }
 
 // Result is the outcome of one check with what was found.
