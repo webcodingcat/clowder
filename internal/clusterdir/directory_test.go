@@ -253,3 +253,21 @@ func TestProblemsAreAnError(t *testing.T) {
 		t.Error("Problems is not usable with errors.As")
 	}
 }
+
+func TestUserComesFromTheFlagTheEnvironmentOrTheOnlyCredentials(t *testing.T) {
+	directory, err := Load(filepath.Join("testdata", "prod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(UserEnvVar, "")
+	if user, err := directory.User(""); err != nil || user != "alice" {
+		t.Errorf("only credentials: %q, %v", user, err)
+	}
+	t.Setenv(UserEnvVar, "bob")
+	if user, _ := directory.User(""); user != "bob" {
+		t.Errorf("environment: %q", user)
+	}
+	if user, _ := directory.User("carol"); user != "carol" {
+		t.Errorf("flag: %q", user)
+	}
+}

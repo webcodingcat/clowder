@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -51,6 +52,11 @@ const LeaderActor = "leader"
 
 // hostActorPrefix starts the actor of every host.
 const hostActorPrefix = "host/"
+
+// IsHostActor tells whether an actor is a host (and not the leader or a user).
+func IsHostActor(actor string) bool {
+	return strings.HasPrefix(actor, hostActorPrefix)
+}
 
 // HostActor is the agent of a host, as its certificate names it.
 func HostActor(id HostID) string {
@@ -170,3 +176,14 @@ func (s *State) makeMaps() {
 		s.Locks = map[string]string{}
 	}
 }
+
+// Refused carries why Apply refused a command, so the one who proposed it can
+// tell a refusal (the command is wrong) from a command that did not commit
+// (no leader, no quorum).
+type Refused struct {
+	Err error
+}
+
+func (r *Refused) Error() string { return r.Err.Error() }
+
+func (r *Refused) Unwrap() error { return r.Err }

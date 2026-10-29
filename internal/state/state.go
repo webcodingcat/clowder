@@ -6,15 +6,13 @@
 package state
 
 import (
-	"cmp"
 	"encoding/json"
 	"maps"
 	"net/netip"
-	"regexp"
 	"slices"
-	"strconv"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 )
 
@@ -211,50 +209,9 @@ func (s *State) MinVersion() string {
 		if host.Phase == Removed || host.Version == "" {
 			continue
 		}
-		if oldest == "" || compareVersions(host.Version, oldest) < 0 {
+		if oldest == "" || buildinfo.Compare(host.Version, oldest) < 0 {
 			oldest = host.Version
 		}
 	}
 	return oldest
-}
-
-// version is "major.minor.patch" with an optional suffix: 1.2.3~rc1 (a
-// release candidate) or 0.0.0~dev+abc (a development build).
-var version = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)(.*)$`)
-
-// compareVersions orders versions as Debian does: a suffix sorts before the
-// plain release (1.2.3~rc1 < 1.2.3). A version that does not parse sorts
-// before every other, so it holds new commands back.
-func compareVersions(a, b string) int {
-	parse := func(text string) (numbers [3]int, suffix string, ok bool) {
-		match := version.FindStringSubmatch(text)
-		if match == nil {
-			return numbers, "", false
-		}
-		for index := range numbers {
-			numbers[index], _ = strconv.Atoi(match[index+1])
-		}
-		return numbers, match[4], true
-	}
-	first, firstSuffix, firstOK := parse(a)
-	second, secondSuffix, secondOK := parse(b)
-	switch {
-	case !firstOK || !secondOK:
-		return cmp.Compare(boolRank(firstOK), boolRank(secondOK))
-	case first != second:
-		return slices.Compare(first[:], second[:])
-	case firstSuffix == "" || secondSuffix == "":
-		// the one with a suffix is the earlier build
-		return cmp.Compare(len(secondSuffix), len(firstSuffix))
-	default:
-		return cmp.Compare(firstSuffix, secondSuffix)
-	}
-}
-
-// boolRank orders false before true.
-func boolRank(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
 }

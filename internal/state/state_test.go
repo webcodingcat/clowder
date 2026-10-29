@@ -211,25 +211,6 @@ func TestOnlyAHostReportsItsVersion(t *testing.T) {
 	}
 }
 
-func TestVersionsCompareByNumber(t *testing.T) {
-	tests := []struct {
-		a, b string
-		want int
-	}{
-		{"1.10.0", "1.9.0", 1},
-		{"1.2.3", "1.2.3", 0},
-		{"0.0.0~dev+abc", "0.1.0", -1},
-		{"dev", "0.0.1", -1},
-		{"1.2.3~rc1", "1.2.3", -1},
-		{"1.2.3~rc2", "1.2.3~rc1", 1},
-	}
-	for _, test := range tests {
-		if got := compareVersions(test.a, test.b); got != test.want {
-			t.Errorf("%s vs %s: %d", test.a, test.b, got)
-		}
-	}
-}
-
 func TestRemovingAUserRevokesTheirCertificates(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"})

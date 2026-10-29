@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"go.yaml.in/yaml/v3"
 
@@ -112,6 +113,31 @@ func (d *Directory) Secrets() (*Secrets, error) {
 		return nil, missing
 	}
 	return &secrets, nil
+}
+
+// UserEnvVar names the user when --user is not given.
+const UserEnvVar = "CLOWDER_USER"
+
+// User returns who uses the CLI: the flag if set, else $CLOWDER_USER, else
+// the only user with credentials in the directory.
+func (d *Directory) User(flag string) (string, error) {
+	for _, candidate := range []string{flag, os.Getenv(UserEnvVar)} {
+		if candidate != "" {
+			return candidate, nil
+		}
+	}
+	files, err := filepath.Glob(filepath.Join(d.Path, CredentialsDir, "*"+credentialsTail))
+	if err != nil {
+		return "", fmt.Errorf("list the credentials: %w", err)
+	}
+	switch len(files) {
+	case 0:
+		return "", fmt.Errorf("no credentials in %s", filepath.Join(d.Path, CredentialsDir))
+	case 1:
+		return strings.TrimSuffix(filepath.Base(files[0]), credentialsTail), nil
+	default:
+		return "", fmt.Errorf("%d users have credentials here: use --user or set %s", len(files), UserEnvVar)
+	}
 }
 
 // Credentials decrypts the credentials of one user.

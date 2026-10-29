@@ -62,7 +62,7 @@ clowder is built in phases; each ends with live tests on HLab.
 The package layout is planned for the whole of v1; packages appear as the phases add them.
 Packages in *italics* do not exist yet.
 
-- **Portable**: `cli`, *`api`*, `clusterdir`, `sopsage`, `pki`, `compose`, `units`,
+- **Portable**: `cli`, `api`, `clusterdir`, `sopsage`, `pki`, `compose`, `units`,
   `buildinfo`, `logging`. The CLI may import only these. `.golangci.yml` (depguard, rule
   `cli-portable`) refuses direct imports of the Linux-only packages in `cmd/clowder` and
   `internal/cli`; the cross build for Windows and macOS in `bin/dev build` catches indirect
@@ -181,6 +181,29 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   their join answer.
 - The tests run real members on 127.0.0.1 (a restart from disk, three hosts over mTLS,
   strangers refused); `go test -race` passes on them.
+
+## API (`internal/api`) and the CLI (`internal/cli`)
+
+- Every agent serves `/v1` on port 7443 with mutual TLS. Each call is checked against the CA
+  and the state's revocation list, so a revoked certificate is refused at once on every agent.
+  User routes take user certificates, `/v1/internal/*` only host certificates.
+- Any agent answers. Reads come from its own copy of the state; writes it commits as the
+  leader or forwards to the leader's `/v1/internal/propose`. A write answers with its Raft
+  index (`X-Clowder-Index`); the client sends it on with later reads (`X-Clowder-Min-Index`),
+  and the agent waits until it has applied it.
+- The actor of a command is the caller of the first agent. Hosts are trusted with the users
+  they forward for, but a host speaks only for itself.
+- A refusal of the state is HTTP 409 with its reason; a write that did not commit is 503.
+- CLI and agent refuse each other more than one minor version apart (`X-Clowder-Version`,
+  `buildinfo.Compatible`); development builds talk to everything.
+- The client tries the seeds of `cluster.yaml` in turn and trusts any host certificate of the
+  cluster's CA, whatever name the seed has.
+- The CLI finds the cluster directory (`--cluster`, `$CLOWDER_CLUSTER`, the working directory)
+  and the user (`--user`, `$CLOWDER_USER`, the only credentials file), then talks to the
+  cluster with the user's certificate. So far: `cluster status`, `host list`,
+  `host drain|undrain|remove|enable`.
+- The tests run real HTTPS servers: a follower forwarding to the leader, refused callers, the
+  CLI against an agent with a cluster directory and SOPS-encrypted credentials.
 
 ## Host check (`internal/hostcheck`, `clowderd check`)
 

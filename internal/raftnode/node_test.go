@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -138,8 +139,10 @@ func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	// a refused command comes back as the state's error
-	if _, err := node.Propose(ctx, command(t, state.KindAddUser, state.AddUser{Name: "bob", Serial: "a1"})); err == nil {
-		t.Error("a used serial was accepted")
+	_, err := node.Propose(ctx, command(t, state.KindAddUser, state.AddUser{Name: "bob", Serial: "a1"}))
+	var refused *state.Refused
+	if !errors.As(err, &refused) {
+		t.Errorf("want a refusal for a used serial, got %v", err)
 	}
 	// the snapshot plus the entry after it must give the same state
 	if err := node.raft.Snapshot().Error(); err != nil {

@@ -3,7 +3,6 @@ package state
 import (
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // Bootstrap starts the cluster: the keys init made and the first host.
@@ -123,7 +122,7 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) error {
 	if !allowed {
 		return fmt.Errorf("host %s cannot go from %s to %s", host.Name, host.Phase, payload.Phase)
 	}
-	fromHost := strings.HasPrefix(cmd.Actor, hostActorPrefix)
+	fromHost := IsHostActor(cmd.Actor)
 	switch {
 	case who == byTheHost && cmd.Actor != HostActor(host.ID):
 		return fmt.Errorf("only host %s itself reports %s", host.Name, payload.Phase)

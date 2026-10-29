@@ -151,7 +151,7 @@ func (n *Node) Propose(ctx context.Context, cmd state.Command) (uint64, error) {
 		return 0, fmt.Errorf("commit %s: %w", cmd.Kind, err)
 	}
 	if refused, ok := future.Response().(error); ok && refused != nil {
-		return future.Index(), refused
+		return future.Index(), &state.Refused{Err: refused}
 	}
 	return future.Index(), nil
 }
