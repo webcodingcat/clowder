@@ -1,0 +1,20 @@
+[Unit]
+Description=Prepare this host for clowder and make it the first host of a cluster
+# cloud-init writes the network configuration before the network is online.
+# Not After=cloud-final.service: cloud-final orders itself after
+# multi-user.target, which wants this unit, and systemd drops a job of the
+# cycle at boot (seen after the setup's reboot).
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=!/var/lib/clowder-setup/done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/clowder-setup
+# a mirror or the time sync may come back: try again
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

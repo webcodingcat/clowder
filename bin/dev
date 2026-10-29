@@ -3,7 +3,7 @@
 # needs only Bash and Docker (Linux, macOS; Git Bash or WSL on Windows).
 # Usage: bin/dev <command>
 #   lint      golangci-lint (with gofumpt, goimports, the import rule), shellcheck,
-#             shfmt, yamllint, tofu fmt
+#             shfmt, yamllint, tofu fmt, tofu validate
 #   format    apply what the formatters can fix
 #   test      the unit tests (no VMs); arguments go to go test, e.g.
 #             bin/dev test ./internal/compose -update (rewrite golden files)
@@ -15,6 +15,11 @@
 #             into dist/
 #   package   build, then the Debian packages of clowder and clowderd into dist/
 #   all       lint, test, test-sops, test-tools, package (what CI runs)
+#   live      package, then the live tests in an HLab lab of their own:
+#             examples/hetzner makes a host, test/live drives it (about 15
+#             minutes; needs HLAB=<path to HLab's bin/hlab> and /dev/kvm).
+#             What a failed run leaves stays for a look.
+#   live down destroy what the live tests left and stop their lab
 set -euo pipefail
 # Docker gets Windows paths from pwd -W; Git Bash must not rewrite them. Native
 # tools that take a path (git) are called after a cd instead.
@@ -42,6 +47,15 @@ readonly TOFU_IMAGE=ghcr.io/opentofu/opentofu:1.13.2
 readonly DEBIAN_IMAGE=debian:trixie-slim
 # Go's module and build cache survive between runs.
 readonly CACHE_VOLUME=clowder-gocache
+readonly BUSYBOX_IMAGE=busybox:1.37.0
+# What the live tests keep between runs, so bin/dev live down finds it after
+# a failure: the OpenTofu state, the SSH key, the cluster directory.
+readonly LIVE_VOLUME=clowder-live
+# The container that serves the clowderd package to the host.
+readonly LIVE_PACKAGES=clowder-live-packages
+# HLab gives tools in the lab's network this address, and the hosts reach it.
+readonly LAB_ADDRESS=192.0.2.2
+readonly PACKAGE_PORT=8099
 
 # in_image <image> <command...>: Run a command in an image with the repository
 # mounted at /src as the working directory.
@@ -81,6 +95,16 @@ cmd_lint() {
   in_image "${SHFMT_IMAGE}" -i 2 -ci -bn -d "${scripts[@]}"
   in_image "${YAMLLINT_IMAGE}" .
   in_image "${TOFU_IMAGE}" fmt -check -recursive .
+  tofu_validate examples/hetzner
+}
+
+# tofu_validate <module>: Check an OpenTofu module against its providers,
+# with the committed lock file only; the providers are cached in Go's cache
+# volume, and OpenTofu's data stays out of the repository.
+tofu_validate() {
+  docker run --rm -v "${DOCKER_ROOT}:/src" -w "/src/$1" -v "${CACHE_VOLUME}:/go" \
+    -e TF_PLUGIN_CACHE_DIR=/go/tofu-plugins -e TF_DATA_DIR=/tmp/tofu --entrypoint sh "${TOFU_IMAGE}" \
+    -c 'mkdir -p "${TF_PLUGIN_CACHE_DIR}" && tofu init -backend=false -input=false -lockfile=readonly >/dev/null && tofu validate -no-color'
 }
 
 # cmd_format: Rewrite Go and shell files as the formatters want them.
@@ -160,6 +184,107 @@ cmd_package() {
   ls -1 "${ROOT}/dist"/*.deb
 }
 
+# lab <arguments>: HLab's wrapper with the live tests' lab.
+# Globals:
+#   HLAB (read)
+lab() {
+  "${HLAB:?set HLAB to the path of bin/hlab in HLab}" -c "${ROOT}/test/live/lab.yaml" "$@"
+}
+
+# in_lab <image> <command...>: Run a command in the lab's network with the
+# repository at /src as the working directory, Go's caches at /go and the
+# live tests' files at /work.
+# Globals:
+#   HLAB_NETWORK, HCLOUD_ENDPOINT, HCLOUD_TOKEN (read)
+in_lab() {
+  local image="$1"
+  shift
+  docker run --rm -i --network "${HLAB_NETWORK}" -v "${DOCKER_ROOT}:/src" -w /src \
+    -v "${CACHE_VOLUME}:/go" -v "${LIVE_VOLUME}:/work" -e HCLOUD_ENDPOINT -e HCLOUD_TOKEN \
+    -e GOFLAGS=-buildvcs=false "${image}" "$@"
+}
+
+# live_tofu <command>: A shell command with OpenTofu on examples/hetzner in
+# the lab's network; the state and OpenTofu's data stay in /work.
+# Globals:
+#   HLAB_NETWORK, HCLOUD_ENDPOINT, HCLOUD_TOKEN (read)
+live_tofu() {
+  docker run --rm --network "${HLAB_NETWORK}" -v "${DOCKER_ROOT}:/src" -w /src/examples/hetzner \
+    -v "${CACHE_VOLUME}:/go" -v "${LIVE_VOLUME}:/work" -e HCLOUD_ENDPOINT -e HCLOUD_TOKEN \
+    -e TF_DATA_DIR=/work/tofu -e TF_PLUGIN_CACHE_DIR=/go/tofu-plugins -e TF_IN_AUTOMATION=1 \
+    --entrypoint sh "${TOFU_IMAGE}" -c "mkdir -p \"\${TF_PLUGIN_CACHE_DIR}\" \
+      && tofu init -input=false -lockfile=readonly >/dev/null && $1"
+}
+
+# live_host_left: Tell whether an earlier run left OpenTofu state, that is a
+# host. A failure to look is an error, not a "no": the state is the only way
+# to destroy the host.
+live_host_left() {
+  local answer
+  answer="$(in_lab "${GO_IMAGE}" sh -c 'if test -e /work/terraform.tfstate; then echo yes; else echo no; fi')"
+  case "${answer}" in
+    yes) return 0 ;;
+    no) return 1 ;;
+    *)
+      echo "bin/dev live: cannot tell whether a host is left" >&2
+      exit 1
+      ;;
+  esac
+}
+
+# cmd_live: Run the live tests on a new host; tear it down if they pass.
+cmd_live() {
+  local sha256 public_key status=0
+  cmd_package
+  lab up
+  eval "$(lab env)"
+  if live_host_left; then
+    echo "bin/dev live: an earlier run left its host; bin/dev live down removes it" >&2
+    return 1
+  fi
+  in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/* && mkdir /work/www \
+    && ssh-keygen -q -t ed25519 -N "" -C clowder-live -f /work/id_ed25519'
+  sha256="$(in_lab "${GO_IMAGE}" sh -c 'cp dist/clowderd_*_amd64.deb /work/www/clowderd.deb \
+    && sha256sum /work/www/clowderd.deb' | cut -d ' ' -f 1)"
+  public_key="$(in_lab "${GO_IMAGE}" cat /work/id_ed25519.pub)"
+  in_lab "${GO_IMAGE}" sh -c 'cat >/work/live.tfvars' <<EOF
+ssh_public_key          = "${public_key}"
+admin_cidrs             = ["${LAB_ADDRESS}/32"]
+clowderd_package_url    = "http://${LAB_ADDRESS}:${PACKAGE_PORT}/clowderd.deb"
+clowderd_package_sha256 = "${sha256}"
+EOF
+  docker rm -f "${LIVE_PACKAGES}" >/dev/null 2>&1 || true
+  docker run -d --rm --name "${LIVE_PACKAGES}" --network "${HLAB_NETWORK}" \
+    -v "${LIVE_VOLUME}:/work:ro" "${BUSYBOX_IMAGE}" \
+    httpd -f -p "${LAB_ADDRESS}:${PACKAGE_PORT}" -h /work/www >/dev/null
+  live_tofu 'tofu apply -input=false -auto-approve -state=/work/terraform.tfstate \
+    -var-file=/work/live.tfvars && tofu output -json -state=/work/terraform.tfstate >/work/outputs.json' \
+    && in_lab "${GO_IMAGE}" env LIVE_DIR=/work CLOWDER=/src/dist/linux-amd64/clowder \
+      go test -tags live -count=1 -timeout 60m -v ./test/live \
+    || status=$?
+  docker rm -f "${LIVE_PACKAGES}" >/dev/null
+  if ((status != 0)); then
+    echo "bin/dev live: failed; the host stays for a look (ssh from the lab's network with" \
+      "/work/id_ed25519 in the volume ${LIVE_VOLUME}); bin/dev live down removes it" >&2
+    return "${status}"
+  fi
+  cmd_live_down
+}
+
+# cmd_live_down: Destroy what the live tests left and stop their lab.
+cmd_live_down() {
+  lab up
+  eval "$(lab env)"
+  docker rm -f "${LIVE_PACKAGES}" >/dev/null 2>&1 || true
+  if live_host_left; then
+    live_tofu 'tofu destroy -input=false -auto-approve -state=/work/terraform.tfstate \
+      -var-file=/work/live.tfvars'
+  fi
+  # only after a destroy that worked (set -e): the state goes with the rest
+  in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/*'
+  lab down
+}
+
 # cmd_all: Everything CI runs.
 cmd_all() {
   cmd_lint
@@ -176,6 +301,13 @@ main() {
     test) cmd_test "${@:2}" ;;
     test-sops) cmd_test_sops ;;
     test-tools) cmd_test_tools ;;
+    live)
+      if [[ "${2:-}" == down ]]; then
+        cmd_live_down
+      else
+        cmd_live
+      fi
+      ;;
     *)
       sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' >&2
       exit 2

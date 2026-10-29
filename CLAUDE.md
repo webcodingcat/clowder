@@ -16,7 +16,7 @@ are not needed on the host.
 
 | Command | What it does |
 |---|---|
-| `bin/dev lint` | golangci-lint (gofumpt, goimports, the import rule), shellcheck, shfmt, yamllint, `tofu fmt` |
+| `bin/dev lint` | golangci-lint (gofumpt, goimports, the import rule), shellcheck, shfmt, yamllint, `tofu fmt`, `tofu validate` |
 | `bin/dev format` | apply what the formatters can fix |
 | `bin/dev test` | the unit tests with the race detector (seconds, no VMs) |
 | `bin/dev test-sops` | the tests of `internal/sopsage` against the real sops |
@@ -24,6 +24,10 @@ are not needed on the host.
 | `bin/dev build` | `clowderd` for Linux, `clowder` for Linux, macOS and Windows into `dist/` |
 | `bin/dev package` | build, then the Debian packages into `dist/` |
 | `bin/dev all` | lint, test, test-sops, test-tools, package – what CI runs |
+| `bin/dev live` | the live tests: a host from `examples/hetzner` in an HLab lab of their own, driven by `test/live` (about 15 minutes; `HLAB` points at HLab's `bin/hlab`, needs `/dev/kvm`); `bin/dev live down` removes what a failed run left |
+
+Run the live tests only at the end of a piece of work, on its finished state, and only while
+no one else uses the lab `clowder-live`.
 
 ## Rules that are easy to break
 
@@ -40,5 +44,5 @@ DEVELOPING.md explains each one.
 
 ## State of the work
 
-Phase 1a, the foundation on one host (DEVELOPING.md, Roadmap). `spike/` is the throw-away
-spike of phase 0; it goes away once the live tests in `test/live` replace it.
+Phase 1a, the foundation on one host (DEVELOPING.md, Roadmap), ends with the live tests in
+`test/live`.

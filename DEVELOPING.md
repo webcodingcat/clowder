@@ -22,17 +22,41 @@ caches in a Docker volume. With Go installed, `go test ./...` works the same.
 ### Live tests with HLab
 
 The live tests run against HLab, a local stand-in for Hetzner Cloud with real VMs (it needs
-`/dev/kvm`). They use only its interface: `hlab env` prints the API endpoint, the token, the
-Storage Box access and the Docker network of a running lab. (The spike also reaches into the
-lab's container; it goes away with it.) Point `HLAB` at its wrapper:
+`/dev/kvm`). They use only its interface: `hlab env` prints the API endpoint, the token and
+the Docker network of a running lab. That network is one namespace shared by every tool
+started in it; it holds `192.0.2.2`, where the hosts reach those tools and from where the
+tools reach the hosts. Point `HLAB` at its wrapper:
 
 ```bash
 export HLAB=/path/to/hlab/bin/hlab
-spike/run.sh up      # the spike of phase 0: a lab "clowder" with three hosts
+bin/dev live         # about 15 minutes; tears everything down if it passes
+bin/dev live down    # after a failure: destroy the host, stop the lab
 ```
 
-The live tests will replace `spike/`; they will live in `test/live` behind the build tag
-`live` (not written yet).
+`bin/dev live` builds the packages and starts the lab `clowder-live` (`test/live/lab.yaml`,
+ports apart from other labs). In the lab's network it serves the `clowderd` package over
+HTTP, applies `examples/hetzner` with the test hook (the package's URL and SHA-256,
+`admin_cidrs` = `192.0.2.2/32`) and runs `go test -tags live ./test/live`. Everything a run
+keeps is in the Docker volume `clowder-live`: the OpenTofu state, a throw-away SSH key and
+`known_hosts`, the cluster and stack directories. A failed run leaves the host for a look;
+the next `bin/dev live` refuses to start until `bin/dev live down` removed it.
+
+`TestOneHost` drives the host with the real CLI and SSH, in steps that build on each other,
+each with a deadline (`steps` in `live_test.go`); on a failure it prints cloud-init's status
+and the journals of `clowder-setup` and `clowderd`. The steps:
+
+1. The setup makes the first host and deletes its key file.
+2. The user bootstraps, fills in `cluster.yaml` from the module's outputs and applies it;
+   the join keys stay in `secrets.sops.yaml`.
+3. A stack runs with a replicated and a plain volume, a secret file and a secret variable.
+4. After a reboot it comes back with its data, and `clowderd check` passes.
+5. A changed secret recreates the container.
+6. With the agent stopped, `docker compose up` fails on a missing secret file; started
+   again, the agent brings the stack back.
+7. The stack goes with its volumes.
+8. The agent's memory is logged; a measurement, never a failure.
+
+It parses the tables of `clowder stack ps`, as long as the CLI prints no JSON.
 
 ## Roadmap
 
@@ -62,6 +86,33 @@ Known gaps to close in phase 2. They do no harm on a single host:
   That is right for a new volume on one host; after a failover it would force an outdated
   copy. Whether a volume was ever initialised must come from the state, not a local file.
 - A volume a stack no longer names stays: nothing sends `delete-volume` yet.
+- `cluster.yaml` has no field for the hoster API's endpoint; fencing against HLab (phase 2)
+  needs one.
+- `examples/hetzner` ignores later changes to the server's user data, so a storage class
+  added later gets a volume but no thin pool on an existing host.
+
+What the spike of phase 0 showed on three HLab hosts, before any clowder code existed, and
+what the design rests on:
+
+- Published ports reach a container on another host through WireGuard with DNAT and no
+  SNAT: the container sees the client's own address, over UDP and TCP, and no packet with the
+  Floating IP as source leaves that host. After the Floating IP moves it works through the
+  new ingress host; a running UDP flow follows a moved target only after `conntrack -D`.
+- DRBD 9 with quorum majority and `suspend-io`: a host cut off from its peers suspends its
+  writes; after it is powered off through the API, a peer promotes with a diskless
+  tiebreaker and the data is intact. The fenced host boots with no resource up and resyncs as
+  secondary. A copy moves to another pool while its host stays primary (detach, attach), a
+  snapshot on the secondary with `fsfreeze` on the primary mounts with intact data, and a
+  host whose peers are gone for good goes on alone after `del-peer`, `forget-peer` and
+  `quorum=off`.
+- Measured: the first sync of 4 GiB took 87 s at the resync limit, with a round-trip time
+  over WireGuard of at most 112 ms meanwhile; 1 GiB of writes with protocol C raised it to
+  11 ms at most.
+- After a reboot Docker starts neither a `restart: "no"` container nor, in this setup, an
+  `unless-stopped` one; a container whose volume is not mounted cannot start (the mount
+  guard).
+- The watchdog: a host whose systemd stops feeding it reboots after about 140 s. In HLab's
+  VMs systemd fed the `iTCO_wdt` device, not softdog.
 
 ## The big picture
 
@@ -96,9 +147,10 @@ clowder stack apply ──mTLS──▶  API: check, seal  ──▶  Raft log �
 4. That host's agent makes the volumes (LV, DRBD, ext4, mount), renders the Compose file,
    writes the secrets to tmpfs, runs `docker compose up` and reports `running`.
 5. `clowder stack ps|logs shop` asks the stack's host, through any agent.
-6. A later `stack apply` raises the stack's generation. The stack keeps its host, the
-   placement adds only volumes it newly names, and the host's agent brings the new
-   generation up; Compose recreates the containers whose configuration changed.
+6. A later `stack apply` raises the stack's generation; a running stack is `starting` again.
+   The stack keeps its host, the placement adds only volumes it newly names, and the host's
+   agent brings the new generation up, Compose recreating the containers whose configuration
+   changed, and reports `running`.
 
 ## Words
 
@@ -250,7 +302,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   first) are there for the next steps; they are tested, but nothing sends them yet.
 - **Stacks.** `create-stack` registers a stack as `created` (no Source, `CreatedBy` from the
   actor, `Owner` the channel: cli or gitops); only `put-stack` moves it on, to `pending`, and
-  nothing places a `created` stack. `put-stack` changes registered stacks only.
+  nothing places a `created` stack. `put-stack` changes registered stacks only, and makes a
+  `running` stack `starting` until its host reports the new generation up.
   `delete-stack` with `WithVolumes` takes the volumes along in the same command, so the
   placement cannot put one back in between.
 - **Host phases** (`phaseChanges`; L = the leader, on its own or for a user; H = the host

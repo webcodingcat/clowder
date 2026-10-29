@@ -1,0 +1,6 @@
+# HLab configuration for clowder's live tests: a lab of their own, so they do
+# not disturb other labs. Every key not set here takes HLab's default. The
+# ports on the host's localhost differ from HLab's defaults (8480, 1080).
+name: clowder-live
+ui_port: 8482
+socks_port: 1082

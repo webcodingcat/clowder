@@ -1,5 +1,0 @@
-# HLab configuration for the spike: its own lab, so it does not disturb others.
-# Every key not set here takes HLab's default.
-name: clowder
-ui_port: 8481
-socks_port: 1081
