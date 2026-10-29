@@ -59,10 +59,12 @@ Known gaps to close in phase 2, harmless on a single host:
 
 ## A stack's way
 
-1. `clowder stack create shop` registers the name (`create-stack`): the stack is `created`,
-   and nothing places or runs it yet.
-2. `clowder stack apply shop -f compose.yaml` loads and checks the files on the user's
-   machine and sends one self-contained Compose file (`PUT /v1/stacks/shop`). The agent that
+1. `clowder stack create shop --age <key>` registers the name (`create-stack`): the stack is
+   `created`, and nothing places or runs it yet. It writes what is missing of `shop/`:
+   `clowder.yaml` (the stack's Compose file, `name: shop`), an empty `secrets.sops.yaml` and
+   the `.sops.yaml` that encrypts it for the key.
+2. `clowder stack apply shop` loads and checks `shop/clowder.yaml` on the user's machine and
+   sends one self-contained Compose file (`PUT /v1/stacks/shop`). The agent that
    takes the call checks it against the cluster and commits `put-stack` through the leader:
    the stack is `pending`.
 3. The leader's placement picks a host and a pool for each volume, commits the volumes
@@ -124,6 +126,10 @@ Packages in *italics* do not exist yet.
 
 ## Stacks (`internal/compose`)
 
+- A stack's files are bound to it by name: the first file says `name: <stack>` as written
+  (`CheckNames` reads it before compose-go fills in or normalizes anything) and no later file
+  sets one. `Load` and `Parse` compare the project's name with the stack, so a file for one
+  stack is refused for another, by the CLI and again by the API.
 - `Load` reads Compose files with compose-go and refuses what breaks clowder's model: what ties
   a container to one host (bind mounts except `/etc/localtime` read-only, `secrets` and
   `configs` from files, devices, anonymous and external volumes, external networks), what
@@ -293,8 +299,16 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   and the user (`--user`, `$CLOWDER_USER`, the only credentials file), then talks to the
   cluster with the user's certificate: `cluster status|apply|diff|schema`, `host list`,
   `host drain|undrain|remove|enable`, `stack create|apply|delete|ps|logs`.
-- `stack apply` loads the Compose files on the user's machine (`compose.Load`, all problems
-  at once) and sends the merged, self-contained file (`compose.Stack.Source`); the agent
+- `stack create <name>` registers the stack (`POST /v1/stacks/<name>`; again for a stack
+  still `created` it does nothing, so a failed run can be repeated) and writes the missing
+  files of its directory (`--dir`, default `./<name>`), never overwriting one: an existing
+  `clowder.yaml` must be the stack's, and `--age` is needed only for a SOPS file to write
+  (`clusterdir.WriteSOPS`, `WriteSOPSConfig`, shared with `cluster bootstrap`). Stack
+  directories belong outside the cluster directory, whose `.sops.yaml` rule would match
+  their files; working there, users point the CLI at the cluster with `$CLOWDER_CLUSTER`.
+- `stack apply` loads the stack's files on the user's machine (`compose.Load`, all problems
+  at once; by default `<name>/clowder.yaml`) and sends the merged, self-contained file
+  (`compose.Stack.Source`); the agent
   parses it again and checks it against the cluster (storage classes). `stack delete` refuses
   a stack with volumes unless `--delete-volumes` says so. `stack ps <name>` and `stack logs`
   ask the stack's host through `/v1/internal/stacks/<name>/ps|logs`, wherever the CLI came

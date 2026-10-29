@@ -82,7 +82,7 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 	cluster.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Name: "shop", Owner: state.OwnerCLI})
 	cluster.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
 		Name: "shop", Owner: state.OwnerCLI,
-		Source: "services: {app: {image: nginx, volumes: [db:/data]}}\n" +
+		Source: "name: shop\nservices: {app: {image: nginx, volumes: [db:/data]}}\n" +
 			"volumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n",
 	})
 	putVolume(cluster, 1)

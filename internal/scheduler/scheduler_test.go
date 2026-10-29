@@ -52,8 +52,9 @@ func cluster() *state.State {
 	}
 }
 
-func source(volumes string) string {
-	return "services:\n  app:\n    image: example/app\nvolumes:\n" + volumes
+// source is a stack's Compose file with one service and these volumes.
+func source(stack, volumes string) string {
+	return "name: " + stack + "\nservices:\n  app:\n    image: example/app\nvolumes:\n" + volumes
 }
 
 func TestAStackNeverAppliedIsNotPlaced(t *testing.T) {
@@ -66,8 +67,8 @@ func TestAStackNeverAppliedIsNotPlaced(t *testing.T) {
 
 func TestAStackGoesWhereItsVolumesFit(t *testing.T) {
 	current := cluster()
-	current.Stacks["shop"] = &state.Stack{Name: "shop", Source: source(
-		"  db:\n    x-clowder: {class: fast, size: 20G, replicas: 1}\n" +
+	current.Stacks["shop"] = &state.Stack{Name: "shop", Source: source("shop",
+		"  db:\n    x-clowder: {class: fast, size: 20G, replicas: 1}\n"+
 			"  cache:\n    x-clowder: {class: any, size: 12G, replicas: 0}\n")}
 	placements, waiting := Plan(context.Background(), current)
 	if len(waiting) > 0 || len(placements) != 1 || !placements[0].Place || placements[0].Host != 0 {
@@ -89,10 +90,10 @@ func TestAStackGoesWhereItsVolumesFit(t *testing.T) {
 
 func TestStacksThatDoNotFitWaitAndTakeNothing(t *testing.T) {
 	current := cluster()
-	current.Stacks["big"] = &state.Stack{Name: "big", Source: source(
-		"  small:\n    x-clowder: {class: fast, size: 10G, replicas: 1}\n" +
+	current.Stacks["big"] = &state.Stack{Name: "big", Source: source("big",
+		"  small:\n    x-clowder: {class: fast, size: 10G, replicas: 1}\n"+
 			"  huge:\n    x-clowder: {class: fast, size: 75G, replicas: 1}\n")}
-	current.Stacks["next"] = &state.Stack{Name: "next", Source: source(
+	current.Stacks["next"] = &state.Stack{Name: "next", Source: source("next",
 		"  data:\n    x-clowder: {class: fast, size: 80G, replicas: 1}\n")}
 	placements, waiting := Plan(context.Background(), current)
 	// huge (first by name) fits, small after it does not
@@ -109,8 +110,8 @@ func TestAPlacedStackGetsOnlyItsNewVolumes(t *testing.T) {
 	current := cluster()
 	host := state.HostID(0)
 	minor := 0
-	current.Stacks["shop"] = &state.Stack{Name: "shop", Host: &host, Source: source(
-		"  db:\n    x-clowder: {class: fast, size: 20G, replicas: 1}\n" +
+	current.Stacks["shop"] = &state.Stack{Name: "shop", Host: &host, Source: source("shop",
+		"  db:\n    x-clowder: {class: fast, size: 20G, replicas: 1}\n"+
 			"  files:\n    x-clowder: {class: fast, size: 50G, replicas: 1}\n")}
 	current.Volumes["shop/db"] = &state.Volume{
 		ID: "shop/db", SizeBytes: 20 * gib, Replicas: 1, Minor: &minor,
@@ -124,7 +125,7 @@ func TestAPlacedStackGetsOnlyItsNewVolumes(t *testing.T) {
 	if len(files) != 1 || files[0].ID != "shop/files" || *files[0].Minor != 1 {
 		t.Errorf("new volumes %+v", files)
 	}
-	current.Stacks["shop"].Source = source("  db:\n    x-clowder: {class: fast, size: 20G, replicas: 1}\n")
+	current.Stacks["shop"].Source = source("shop", "  db:\n    x-clowder: {class: fast, size: 20G, replicas: 1}\n")
 	if placements, _ := Plan(context.Background(), current); len(placements) != 0 {
 		t.Errorf("a placed stack without new volumes: %+v", placements)
 	}
@@ -133,7 +134,7 @@ func TestAPlacedStackGetsOnlyItsNewVolumes(t *testing.T) {
 func TestWithoutAnActiveHostEveryStackWaits(t *testing.T) {
 	current := cluster()
 	current.Hosts[0].Phase = state.Draining
-	current.Stacks["shop"] = &state.Stack{Name: "shop", Source: source("  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n")}
+	current.Stacks["shop"] = &state.Stack{Name: "shop", Source: source("shop", "  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n")}
 	if _, waiting := Plan(context.Background(), current); len(waiting) != 1 || waiting[0].Reason != "no active host" {
 		t.Errorf("waiting %+v", waiting)
 	}

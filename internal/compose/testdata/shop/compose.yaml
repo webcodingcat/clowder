@@ -1,5 +1,6 @@
 # The example stack: an app behind Traefik, a database that is
 # replicated and backed up, a cache that is thrown away.
+name: shop
 x-clowder:
   priority: high
   exports: [db]

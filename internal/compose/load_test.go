@@ -9,12 +9,13 @@ import (
 	"testing"
 )
 
-// loadText loads a stack from Compose text written to a temporary file.
+// loadText loads the stack "test" from Compose text written to a temporary
+// file, with the name: the stack's file needs.
 func loadText(t *testing.T, text string) (*Stack, error) {
 	t.Helper()
 	dir := t.TempDir()
 	file := filepath.Join(dir, "compose.yaml")
-	if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
+	if err := os.WriteFile(file, []byte("name: test\n"+text), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return Load(context.Background(), LoadOptions{Name: "test", WorkingDir: dir, Files: []string{file}})
@@ -28,7 +29,7 @@ func TestTheSourceReadsBackWithoutTheUsersFiles(t *testing.T) {
 		}
 	}
 	write("app.env", "TOKEN=from-the-env-file\n")
-	write("compose.yaml", "services:\n  app:\n    image: example/app:${TAG}\n    env_file: [app.env]\n"+
+	write("compose.yaml", "name: shop\nservices:\n  app:\n    image: example/app:${TAG}\n    env_file: [app.env]\n"+
 		"    environment: {PRICE: \"$$5\"}\n    x-clowder: {priority: 300}\n"+
 		"volumes:\n  data:\n    x-clowder: {class: fast, size: 1G, replicas: 1}\n")
 	stack, err := Load(context.Background(), LoadOptions{
@@ -134,6 +135,37 @@ func TestPrioritiesAreNumbersOrCategories(t *testing.T) {
 		case c.category == "" && !c.fails && (priority.Value == nil || *priority.Value != c.value):
 			t.Errorf("%v: value %v, want %d", c.raw, priority.Value, c.value)
 		}
+	}
+}
+
+func TestTheFilesAreBoundToTheirStack(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, text string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	shop := write("shop.yaml", "name: shop\nservices: {app: {image: x}}\n")
+	nameless := write("nameless.yaml", "services: {app: {image: x}}\n")
+	override := write("override.yaml", "name: backend\nservices: {app: {image: y}}\n")
+	for want, files := range map[string][]string{
+		`the file of stack "shop", not of "backend"`: {shop},
+		"has no name:":                {nameless},
+		"only the stack's first file": {shop, override},
+	} {
+		stack := "backend"
+		if len(files) > 1 {
+			stack = "shop"
+		}
+		_, err := Load(context.Background(), LoadOptions{Name: stack, WorkingDir: dir, Files: files})
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("want an error with %q, got %v", want, err)
+		}
+	}
+	if _, err := Parse(context.Background(), "backend", []byte("name: shop\nservices: {app: {image: x}}\n")); err == nil {
+		t.Error("the source of shop was read as backend")
 	}
 }
 

@@ -52,9 +52,21 @@ type Containers interface {
 	Logs(ctx context.Context, stack string, follow bool, out io.Writer) error
 }
 
-// createStack registers a stack for clowder stack apply.
+// createStack registers a stack for clowder stack apply. Creating a stack
+// that is registered and was never applied again does nothing, so a create
+// whose files could not be written can be repeated.
 func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
-	s.write(w, r, state.KindCreateStack, state.CreateStack{Name: r.PathValue("name"), Owner: state.OwnerCLI})
+	name := r.PathValue("name")
+	var registered bool
+	s.config.Cluster.Read(func(current *state.State) {
+		stack, ok := current.Stacks[name]
+		registered = ok && stack.Status == state.StackCreated && stack.Owner == state.OwnerCLI
+	})
+	if registered {
+		writeJSON(w, http.StatusOK, Written{})
+		return
+	}
+	s.write(w, r, state.KindCreateStack, state.CreateStack{Name: name, Owner: state.OwnerCLI})
 }
 
 // applyStack checks a stack against the cluster and commits it.

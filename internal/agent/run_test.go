@@ -296,17 +296,30 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 		t.Errorf("diff after apply: %q, %v", out, err)
 	}
 
-	// a stack with a volume: placed, its volume made, compose up, running
-	composeFile := filepath.Join(t.TempDir(), "compose.yaml")
-	if err := os.WriteFile(composeFile, []byte("services:\n  app: {image: nginx, volumes: [db:/data]}\n"+
-		"volumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n"), 0o600); err != nil {
+	// a stack: created with its directory, then with a volume placed, its
+	// volume made, compose up, running
+	stackDir := filepath.Join(t.TempDir(), "shop")
+	composeFile := filepath.Join(stackDir, "clowder.yaml")
+	if _, err := clowder(t, "--cluster", dir, "stack", "apply", "shop", "-f", composeFile); err == nil {
+		t.Error("an apply without the stack's file")
+	}
+	create := []string{"--cluster", dir, "stack", "create", "shop", "--dir", stackDir}
+	if _, err := clowder(t, create...); err == nil || !strings.Contains(err.Error(), "--age is required") {
+		t.Errorf("a create without --age: %v", err)
+	}
+	if _, err := clowder(t, append(create, "--age", identity.Recipient().String())...); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := clowder(t, "--cluster", dir, "stack", "apply", "shop", "-f", composeFile); err == nil ||
-		!strings.Contains(err.Error(), "register it first") {
-		t.Errorf("an apply before create: %v", err)
+	for _, file := range []string{"clowder.yaml", "secrets.sops.yaml", ".sops.yaml"} {
+		if _, err := os.Stat(filepath.Join(stackDir, file)); err != nil {
+			t.Errorf("stack create wrote no %s: %v", file, err)
+		}
 	}
-	if _, err := clowder(t, "--cluster", dir, "stack", "create", "shop"); err != nil {
+	if _, err := clowder(t, create...); err != nil { // all files there: registered again, nothing written
+		t.Errorf("a second create of a stack never applied: %v", err)
+	}
+	if err := os.WriteFile(composeFile, []byte("name: shop\nservices:\n  app: {image: nginx, volumes: [db:/data]}\n"+
+		"volumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := clowder(t, "--cluster", dir, "stack", "apply", "shop", "-f", composeFile); err != nil {

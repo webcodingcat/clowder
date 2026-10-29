@@ -12,9 +12,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/sopsage"
 )
 
-// sopsConfigFile tells the sops tool which age key encrypts the files here,
-// so users can edit them with sops.
-const sopsConfigFile = ".sops.yaml"
+// SOPSConfigFile tells the sops tool which age keys encrypt the files of a
+// directory, so users can edit them with sops.
+const SOPSConfigFile = ".sops.yaml"
 
 // NewDirectory is what clowder cluster bootstrap writes into an empty
 // cluster directory.
@@ -40,7 +40,7 @@ func Create(directory NewDirectory) error {
 		return fmt.Errorf("create the cluster directory: %w", err)
 	}
 	user := directory.Credentials.User
-	if err := writeSOPS(filepath.Join(directory.Path, CredentialsDir, user+credentialsTail),
+	if err := WriteSOPS(filepath.Join(directory.Path, CredentialsDir, user+credentialsTail),
 		directory.Credentials, directory.Recipient); err != nil {
 		return err
 	}
@@ -49,19 +49,31 @@ func Create(directory NewDirectory) error {
 		JoinKeys:   []string{directory.BootstrapKey},
 		Registries: map[string]RegistryLogin{},
 	}
-	if err := writeSOPS(filepath.Join(directory.Path, SecretsFile), secrets, directory.Recipient); err != nil {
+	if err := WriteSOPS(filepath.Join(directory.Path, SecretsFile), secrets, directory.Recipient); err != nil {
 		return err
 	}
-	sopsConfig := fmt.Sprintf("# The sops tool encrypts the files here for these keys.\n"+
-		"creation_rules:\n  - path_regex: \\.sops\\.yaml$\n    age: %s\n", directory.Recipient)
-	if err := os.WriteFile(filepath.Join(directory.Path, sopsConfigFile), []byte(sopsConfig), 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", sopsConfigFile, err)
+	if err := WriteSOPSConfig(directory.Path, `\.sops\.yaml$`, directory.Recipient); err != nil {
+		return err
 	}
 	return os.WriteFile(filepath.Join(directory.Path, ConfigFile), []byte(configTemplate(directory)), 0o644)
 }
 
-// writeSOPS encrypts a value as YAML for the recipient.
-func writeSOPS(path string, value any, recipient string) error {
+// WriteSOPSConfig writes the .sops.yaml of a directory: the files matching
+// pathRegex are encrypted for the recipient. Users add their colleagues'
+// keys there and run sops updatekeys.
+func WriteSOPSConfig(dir, pathRegex, recipient string) error {
+	config := fmt.Sprintf("# The sops tool encrypts the files here for these keys; add a colleague's\n"+
+		"# key and run sops updatekeys <file> in this directory.\n"+
+		"creation_rules:\n  - path_regex: %s\n    age: %s\n", pathRegex, recipient)
+	path := filepath.Join(dir, SOPSConfigFile)
+	if err := os.WriteFile(path, []byte(config), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// WriteSOPS encrypts a value as YAML for the recipient, as sops would.
+func WriteSOPS(path string, value any, recipient string) error {
 	plain, err := yaml.Marshal(value)
 	if err != nil {
 		return err

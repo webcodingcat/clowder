@@ -47,6 +47,20 @@ func TestTheRealSopsDecryptsWhatEncryptWrites(t *testing.T) {
 	assertSameYAML(t, plaintext, readTestdata(t, "plain.yaml"))
 }
 
+// clowder stack create writes an empty file for the user to fill with sops.
+func TestTheRealSopsOpensAnEmptyMap(t *testing.T) {
+	sealed, err := Encrypt([]byte("{}\n"), []string{testRecipient}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "secrets.sops.yaml")
+	if err := os.WriteFile(file, sealed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plaintext := runSops(t, "decrypt", "--input-type", "yaml", "--output-type", "yaml", file)
+	assertSameYAML(t, plaintext, []byte("{}\n"))
+}
+
 func TestDecryptReadsWhatTheRealSopsWritesNow(t *testing.T) {
 	plain, err := filepath.Abs(filepath.Join("testdata", "plain.yaml"))
 	if err != nil {

@@ -1,17 +1,20 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
 	"github.com/webcodingcat/clowder/internal/api"
+	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
 )
 
@@ -21,13 +24,31 @@ func newStack(g *globals) *cobra.Command {
 	return stack
 }
 
+// The files of a stack's directory.
+const (
+	stackFile        = "clowder.yaml"
+	stackSecretsFile = "secrets.sops.yaml"
+)
+
 func newStackCreate(g *globals) *cobra.Command {
-	return &cobra.Command{
+	var dir, recipient string
+	command := &cobra.Command{
 		Use:   "create <name>",
-		Short: "Register a stack in the cluster before its first apply",
-		Args:  cobra.ExactArgs(1),
+		Short: "Register a stack and write the files of its directory",
+		Long: "Registers the stack in the cluster and writes what is missing of its directory:\n" +
+			stackFile + " (a Compose file), an empty " + stackSecretsFile + " and the .sops.yaml\n" +
+			"that encrypts it for --age. Existing files are kept, so a stack directory from Git\n" +
+			"is registered in a new cluster the same way, and a failed run can be repeated.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
+			if dir == "" {
+				dir = name
+			}
+			missing, err := missingStackFiles(name, dir, recipient)
+			if err != nil {
+				return err
+			}
 			client, _, err := g.connect()
 			if err != nil {
 				return err
@@ -35,10 +56,68 @@ func newStackCreate(g *globals) *cobra.Command {
 			if _, err := client.Post(cmd.Context(), "/v1/stacks/"+url.PathEscape(name), nil); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s created; clowder stack apply %s runs it\n", name, name)
+			if err := writeStackFiles(name, dir, recipient, missing); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s created in %s; clowder stack apply %s runs it\n",
+				name, dir, name)
 			return err
 		},
 	}
+	command.Flags().StringVar(&dir, "dir", "", "the stack's directory (default: ./<name>)")
+	command.Flags().StringVar(&recipient, "age", "",
+		"your age key (age1... or an SSH public key) for "+stackSecretsFile)
+	return command
+}
+
+// missingStackFiles checks a stack's directory before anything is
+// registered: which files are missing, that an existing clowder.yaml is the
+// stack's, and that --age is there if a SOPS file must be written.
+func missingStackFiles(name, dir, recipient string) ([]string, error) {
+	var missing []string
+	for _, file := range []string{stackFile, stackSecretsFile, clusterdir.SOPSConfigFile} {
+		if _, err := os.Stat(filepath.Join(dir, file)); errors.Is(err, os.ErrNotExist) {
+			missing = append(missing, file)
+		} else if err != nil {
+			return nil, err
+		}
+	}
+	if !slices.Contains(missing, stackFile) {
+		if err := compose.CheckNames(name, []string{filepath.Join(dir, stackFile)}); err != nil {
+			return nil, err
+		}
+	}
+	if recipient == "" && (slices.Contains(missing, stackSecretsFile) ||
+		slices.Contains(missing, clusterdir.SOPSConfigFile)) {
+		return nil, fmt.Errorf("--age is required to write %s and %s", stackSecretsFile, clusterdir.SOPSConfigFile)
+	}
+	return missing, nil
+}
+
+// writeStackFiles writes the missing files of a stack's directory.
+func writeStackFiles(name, dir, recipient string, missing []string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	for _, file := range missing {
+		path := filepath.Join(dir, file)
+		var err error
+		switch file {
+		case stackFile:
+			template := fmt.Sprintf("# The stack %s: a Compose file with clowder's rules (x-clowder blocks).\n"+
+				"# clowder stack apply %s sends it to the cluster.\n"+
+				"name: %s\nservices:\n  app:\n    image: nginx:stable\n", name, name, name)
+			err = os.WriteFile(path, []byte(template), 0o644)
+		case stackSecretsFile:
+			err = clusterdir.WriteSOPS(path, map[string]string{}, recipient)
+		case clusterdir.SOPSConfigFile:
+			err = clusterdir.WriteSOPSConfig(dir, `(^|/)secrets\.sops\.yaml$`, recipient)
+		}
+		if err != nil {
+			return fmt.Errorf("write %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 func newStackApply(g *globals) *cobra.Command {
@@ -51,6 +130,9 @@ func newStackApply(g *globals) *cobra.Command {
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
+			if len(files) == 0 {
+				files = []string{filepath.Join(name, stackFile)}
+			}
 			stack, err := compose.Load(cmd.Context(), compose.LoadOptions{
 				Name: name, WorkingDir: filepath.Dir(files[0]), Files: files, Environment: environment(),
 			})
@@ -73,7 +155,8 @@ func newStackApply(g *globals) *cobra.Command {
 			return err
 		},
 	}
-	command.Flags().StringSliceVarP(&files, "file", "f", []string{"compose.yaml"}, "Compose file, repeatable")
+	command.Flags().StringSliceVarP(&files, "file", "f", nil,
+		"the stack's files, repeatable; the first names the stack (default: <name>/"+stackFile+")")
 	return command
 }
 

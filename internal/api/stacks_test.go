@@ -10,7 +10,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-const privilegedSource = "services: {exporter: {image: x, privileged: true}}\n"
+const privilegedSource = "name: monitoring\nservices: {exporter: {image: x, privileged: true}}\n"
 
 func TestOnlyStacksTheClusterNamesMayBePrivileged(t *testing.T) {
 	stack, err := compose.Parse(context.Background(), "monitoring", []byte(privilegedSource))

@@ -4,19 +4,22 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/compose-spec/compose-go/v2/loader"
 	"github.com/compose-spec/compose-go/v2/types"
+	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
 // LoadOptions says where a stack's Compose files are.
 type LoadOptions struct {
-	// Name is the stack's name (the Compose project name).
+	// Name is the stack the files are for: the first file must say so in
+	// its name: (the Compose project name), and no other file may set one.
 	Name string
 	// WorkingDir is where relative paths (env_file, extends) start.
 	WorkingDir string
@@ -37,6 +40,9 @@ func (p Problems) Error() string {
 // Load reads the Compose files, checks them and returns the stack. A stack
 // that clowder cannot run gives Problems.
 func Load(ctx context.Context, options LoadOptions) (*Stack, error) {
+	if err := CheckNames(options.Name, options.Files); err != nil {
+		return nil, err
+	}
 	details := types.ConfigDetails{
 		WorkingDir:  options.WorkingDir,
 		Environment: options.Environment,
@@ -44,13 +50,41 @@ func Load(ctx context.Context, options LoadOptions) (*Stack, error) {
 	for _, file := range options.Files {
 		details.ConfigFiles = append(details.ConfigFiles, types.ConfigFile{Filename: file})
 	}
-	project, err := loader.LoadWithContext(ctx, details, func(o *loader.Options) {
-		o.SetProjectName(options.Name, true)
-	})
+	project, err := loader.LoadWithContext(ctx, details)
 	if err != nil {
 		return nil, fmt.Errorf("read the compose files: %w", err)
 	}
+	if project.Name != options.Name {
+		return nil, fmt.Errorf("the compose files are for stack %q, not %q", project.Name, options.Name)
+	}
 	return check(project)
+}
+
+// CheckNames binds the files to their stack: the first says its name as
+// written (before compose-go fills in or normalizes anything), so a file
+// for one stack is never applied to another; a later file may not change it.
+func CheckNames(stack string, files []string) error {
+	for index, file := range files {
+		content, err := os.ReadFile(file)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", file, err)
+		}
+		var header struct {
+			Name string `yaml:"name"`
+		}
+		if err := yaml.Unmarshal(content, &header); err != nil {
+			return fmt.Errorf("read %s: %w", file, err)
+		}
+		switch {
+		case index == 0 && header.Name == "":
+			return fmt.Errorf("%s has no name:; the stack's first file says which stack it is (name: %s)", file, stack)
+		case index == 0 && header.Name != stack:
+			return fmt.Errorf("%s is the file of stack %q, not of %q", file, header.Name, stack)
+		case index > 0 && header.Name != "":
+			return fmt.Errorf("%s sets name:; only the stack's first file does", file)
+		}
+	}
+	return nil
 }
 
 // check turns a loaded project into a Stack, or lists its problems.
@@ -168,11 +202,13 @@ func Parse(ctx context.Context, name string, source []byte) (*Stack, error) {
 		ConfigFiles: []types.ConfigFile{{Filename: "compose.yaml", Content: source}},
 	}
 	project, err := loader.LoadWithContext(ctx, details, func(o *loader.Options) {
-		o.SetProjectName(name, true)
 		o.SkipInterpolation = true
 	})
 	if err != nil {
 		return nil, fmt.Errorf("read the stack %s: %w", name, err)
+	}
+	if project.Name != name {
+		return nil, fmt.Errorf("the Compose file is for stack %q, not %q", project.Name, name)
 	}
 	return check(project)
 }

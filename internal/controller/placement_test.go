@@ -85,7 +85,7 @@ func TestAPendingStackIsPlacedWithItsVolumes(t *testing.T) {
 	l.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Name: "shop", Owner: state.OwnerCLI})
 	l.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
 		Name: "shop", Owner: state.OwnerCLI,
-		Source: "services: {app: {image: x}}\nvolumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 1}\n",
+		Source: "name: shop\nservices: {app: {image: x}}\nvolumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 1}\n",
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
