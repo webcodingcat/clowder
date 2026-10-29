@@ -183,12 +183,12 @@ type Identity struct {
 	Serial string
 }
 
-// Verify checks a certificate a peer presented as a client (a CLI, or an
-// agent calling another): issued by this CA, in its lifetime and not
-// revoked. It tells whose it is.
-func (ca *CA) Verify(certificate *x509.Certificate, revoked func(serial string) bool, now time.Time) (Identity, error) {
+// Verify checks a certificate a peer presented (a CLI, or an agent calling
+// another): issued by the CA, in its lifetime and not revoked. It tells
+// whose it is. It needs only the CA certificate, not its key.
+func Verify(caCertificate, certificate *x509.Certificate, revoked func(serial string) bool, now time.Time) (Identity, error) {
 	roots := x509.NewCertPool()
-	roots.AddCert(ca.Certificate)
+	roots.AddCert(caCertificate)
 	_, err := certificate.Verify(x509.VerifyOptions{
 		Roots:       roots,
 		CurrentTime: now,

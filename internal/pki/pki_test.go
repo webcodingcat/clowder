@@ -50,11 +50,11 @@ func TestVerifyTellsUsersAndHostsApart(t *testing.T) {
 		return ca.IssueHost(public, 2, []netip.Addr{netip.MustParseAddr("10.77.0.3")}, testTime)
 	})
 
-	identity, err := ca.Verify(user, notRevoked, testTime)
+	identity, err := Verify(ca.Certificate, user, notRevoked, testTime)
 	if err != nil || identity.Role != RoleUser || identity.Name != "alice" || identity.Serial != Serial(user) {
 		t.Errorf("user: %+v, %v", identity, err)
 	}
-	identity, err = ca.Verify(host, notRevoked, testTime)
+	identity, err = Verify(ca.Certificate, host, notRevoked, testTime)
 	if err != nil || identity.Role != RoleHost || identity.HostID != 2 || identity.Name != "host-2" {
 		t.Errorf("host: %+v, %v", identity, err)
 	}
@@ -83,7 +83,7 @@ func TestVerifyRefuses(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := ca.Verify(test.certificate, test.revoked, test.at)
+			_, err := Verify(ca.Certificate, test.certificate, test.revoked, test.at)
 			switch {
 			case test.want == "" && err != nil:
 				t.Errorf("want no error, got %v", err)
@@ -120,7 +120,7 @@ func TestTheCASurvivesPEM(t *testing.T) {
 	_, user := issued(t, func(public ed25519.PublicKey) ([]byte, error) {
 		return loaded.IssueUser(public, "alice", testTime)
 	})
-	if _, err := ca.Verify(user, notRevoked, testTime); err != nil {
+	if _, err := Verify(ca.Certificate, user, notRevoked, testTime); err != nil {
 		t.Errorf("a certificate of the loaded CA does not verify with the original: %v", err)
 	}
 
@@ -192,7 +192,7 @@ func TestHostsTalkMutualTLS(t *testing.T) {
 			peer <- Identity{}
 			return
 		}
-		identity, _ := ca.Verify(tlsConnection.ConnectionState().PeerCertificates[0], notRevoked, time.Now())
+		identity, _ := Verify(ca.Certificate, tlsConnection.ConnectionState().PeerCertificates[0], notRevoked, time.Now())
 		peer <- identity
 	}()
 

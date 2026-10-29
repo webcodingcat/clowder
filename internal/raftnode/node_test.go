@@ -1,0 +1,242 @@
+package raftnode
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/tls"
+	"io"
+	"log/slog"
+	"net"
+	"net/netip"
+	"testing"
+	"time"
+
+	"github.com/webcodingcat/clowder/internal/pki"
+	"github.com/webcodingcat/clowder/internal/state"
+)
+
+// testCluster is a CA and the hosts' Raft members on the loopback address.
+type testCluster struct {
+	t  *testing.T
+	ca *pki.CA
+}
+
+func newTestCluster(t *testing.T) *testCluster {
+	t.Helper()
+	ca, err := pki.NewCA("test", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &testCluster{t: t, ca: ca}
+}
+
+// certificate issues a host or user certificate for 127.0.0.1.
+func (c *testCluster) certificate(issue func(public ed25519.PublicKey) ([]byte, error)) tls.Certificate {
+	c.t.Helper()
+	key, err := pki.NewKey()
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	certificatePEM, err := issue(key.Public().(ed25519.PublicKey))
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	leaf, err := pki.ParseCertificate(certificatePEM)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{leaf.Raw}, PrivateKey: key, Leaf: leaf}
+}
+
+func (c *testCluster) hostCertificate(id state.HostID) tls.Certificate {
+	return c.certificate(func(public ed25519.PublicKey) ([]byte, error) {
+		return c.ca.IssueHost(public, int(id), []netip.Addr{netip.MustParseAddr("127.0.0.1")}, time.Now())
+	})
+}
+
+// freeAddress returns a loopback address with a port nobody uses right now.
+func freeAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return address
+}
+
+// open starts a member for host id in dir at address.
+func (c *testCluster) open(id state.HostID, dir, address string) *Node {
+	c.t.Helper()
+	node, err := Open(Config{
+		Dir: dir, ID: id, Bind: address, Advertise: address,
+		Certificate: c.hostCertificate(id), CA: c.ca.Certificate,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return node
+}
+
+func waitForLeader(t *testing.T, node *Node) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for !node.IsLeader() {
+		if time.Now().After(deadline) {
+			t.Fatal("no leader after 15 s")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func command(t *testing.T, kind string, payload any) state.Command {
+	t.Helper()
+	cmd, err := state.NewCommand(kind, time.Now(), state.LeaderActor, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cmd
+}
+
+func bootstrapCommand(t *testing.T) state.Command {
+	return command(t, state.KindBootstrap, state.Bootstrap{
+		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
+		JoinKey: state.Sealed("join"),
+		Host: state.Host{
+			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg",
+		},
+	})
+}
+
+func users(node *Node) []string {
+	var names []string
+	node.Read(func(current *state.State) {
+		for name := range current.Users {
+			names = append(names, name)
+		}
+	})
+	return names
+}
+
+func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
+	cluster := newTestCluster(t)
+	dir, address := t.TempDir(), freeAddress(t)
+	node := cluster.open(0, dir, address)
+	if err := node.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	waitForLeader(t, node)
+	ctx := context.Background()
+	if _, err := node.Propose(ctx, bootstrapCommand(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := node.Propose(ctx, command(t, state.KindAddUser, state.AddUser{Name: "alice", Serial: "a1"})); err != nil {
+		t.Fatal(err)
+	}
+	// a refused command comes back as the state's error
+	if _, err := node.Propose(ctx, command(t, state.KindAddUser, state.AddUser{Name: "bob", Serial: "a1"})); err == nil {
+		t.Error("a used serial was accepted")
+	}
+	// the snapshot plus the entry after it must give the same state
+	if err := node.raft.Snapshot().Error(); err != nil {
+		t.Fatal(err)
+	}
+	index, err := node.Propose(ctx, command(t, state.KindAddUser, state.AddUser{Name: "carol", Serial: "c1"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := node.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := cluster.open(0, dir, address)
+	defer func() { _ = reopened.Close() }()
+	if err := reopened.Bootstrap(); err != nil {
+		t.Fatalf("bootstrapping a member with a log must do nothing: %v", err)
+	}
+	waitForLeader(t, reopened)
+	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := reopened.WaitIndex(waitCtx, index); err != nil {
+		t.Fatal(err)
+	}
+	if got := users(reopened); len(got) != 2 {
+		t.Errorf("users after the restart: %v", got)
+	}
+}
+
+func TestThreeHostsReplicateOverMutualTLS(t *testing.T) {
+	cluster := newTestCluster(t)
+	var nodes []*Node
+	var addresses []string
+	for id := range state.HostID(3) {
+		address := freeAddress(t)
+		node := cluster.open(id, t.TempDir(), address)
+		defer func() { _ = node.Close() }()
+		nodes, addresses = append(nodes, node), append(addresses, address)
+	}
+	if err := nodes[0].Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	waitForLeader(t, nodes[0])
+	for id := 1; id < 3; id++ {
+		if err := nodes[0].AddMember(state.HostID(id), addresses[id], true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := context.Background()
+	if _, err := nodes[0].Propose(ctx, bootstrapCommand(t)); err != nil {
+		t.Fatal(err)
+	}
+	index, err := nodes[0].Propose(ctx, command(t, state.KindAddUser, state.AddUser{Name: "alice", Serial: "a1"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	for id, node := range nodes {
+		if err := node.WaitIndex(waitCtx, index); err != nil {
+			t.Fatalf("host %d: %v", id, err)
+		}
+		if got := users(node); len(got) != 1 || got[0] != "alice" {
+			t.Errorf("host %d has users %v", id, got)
+		}
+	}
+	if _, id := nodes[2].Leader(); id != "0" {
+		t.Errorf("host 2 sees leader %q", id)
+	}
+	if _, err := nodes[1].Propose(ctx, command(t, state.KindAddUser, state.AddUser{Name: "bob", Serial: "b1"})); err == nil {
+		t.Error("a follower committed a command")
+	}
+}
+
+func TestOnlyHostsOfTheClusterGetIn(t *testing.T) {
+	cluster := newTestCluster(t)
+	address := freeAddress(t)
+	node := cluster.open(0, t.TempDir(), address)
+	defer func() { _ = node.Close() }()
+
+	user := cluster.certificate(func(public ed25519.PublicKey) ([]byte, error) {
+		return cluster.ca.IssueUser(public, "alice", time.Now())
+	})
+	stranger := newTestCluster(t).hostCertificate(1)
+	for name, certificate := range map[string]tls.Certificate{"a user": user, "another cluster's host": stranger} {
+		connection, err := tls.Dial("tcp", address, &tls.Config{
+			Certificates: []tls.Certificate{certificate}, InsecureSkipVerify: true, //nolint:gosec // only the server's check is tested
+			MinVersion: tls.VersionTLS13,
+		})
+		if err == nil {
+			// TLS 1.3 reports the server's refusal on the first read
+			_ = connection.SetReadDeadline(time.Now().Add(5 * time.Second))
+			_, err = connection.Read(make([]byte, 1))
+			_ = connection.Close()
+		}
+		if err == nil {
+			t.Errorf("%s got in", name)
+		}
+	}
+}

@@ -72,8 +72,8 @@ Packages in *italics* do not exist yet.
 - **Decides**: *`controller`* (the leader's loops) writes Raft commands. It talks to external
   services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
   changes the host.
-- **Changes the host**: `agent`, *`supervisor`*, *`raftnode`* (Raft over mTLS) and the drivers
-  *`network`*, *`storage`*, *`docker`*, *`ingress`*.
+- **Changes the host**: `agent`, *`supervisor`*, `raftnode` (Raft over mTLS), `datakey` (the
+  key file) and the drivers *`network`*, *`storage`*, *`docker`*, *`ingress`*.
 - **Reads the host**: `hostcheck` (for `clowderd check`). It compiles anywhere, but only the
   agent uses it, so depguard keeps it out of the CLI like the packages above.
 
@@ -162,6 +162,25 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   for months. `Verify` takes the revoked serials from the state.
 - `TrustProof` (HMAC-SHA256 with the bootstrap key over the CA certificate) is how a CLI or
   a joining host trusts the CA on first contact.
+
+## Raft (`internal/raftnode`) and the data key (`internal/datakey`)
+
+- `raftnode` runs hashicorp/raft: log and stable store in BoltDB (`raft.db`), a snapshot every
+  8192 entries (2 kept), the state of `internal/state` as the replicated machine. Raft's own
+  log lines go through `log/slog` (hclog's bridge).
+- The network is mutual TLS on port 7400 of the node address: both sides show a host
+  certificate of the cluster CA that is not revoked (the state's list). Users' certificates and
+  other clusters' hosts fail the handshake.
+- `Propose` commits a command through the leader and returns its index, or the state's
+  refusal. `Read` gives the current state under a lock; nothing may keep it, as `Apply` changes
+  it in place. `WaitIndex` lets a read follow a write made through another member.
+- `Bootstrap` makes the first host a cluster of its own; on a member with a log it does
+  nothing. `AddMember` is for joins.
+- The data key is an age identity in a file only root reads (`/var/lib/clowder/keys`).
+  `Seal` and `Open` turn secrets into `state.Sealed` and back; joining hosts get the key with
+  their join answer.
+- The tests run real members on 127.0.0.1 (a restart from disk, three hosts over mTLS,
+  strangers refused); `go test -race` passes on them.
 
 ## Host check (`internal/hostcheck`, `clowderd check`)
 
