@@ -61,12 +61,12 @@ clowder is built in phases; each ends with live tests on HLab.
 The package layout is planned for the whole of v1; packages appear as the phases add them.
 Packages in *italics* do not exist yet.
 
-- **Portable**: `cli`, *`api`*, `clusterdir`, `sopsage`, *`pki`*, `compose`, `units`,
+- **Portable**: `cli`, *`api`*, `clusterdir`, `sopsage`, `pki`, `compose`, `units`,
   `buildinfo`, `logging`. The CLI may import only these. `.golangci.yml` (depguard, rule
   `cli-portable`) refuses direct imports of the Linux-only packages in `cmd/clowder` and
   `internal/cli`; the cross build for Windows and macOS in `bin/dev build` catches indirect
   ones.
-- **Pure logic, no I/O**: *`scheduler`*, *`state`*. They are tested with table tests only.
+- **Pure logic, no I/O**: *`scheduler`*, `state`. They are tested with table tests only.
 - **Decides**: *`controller`* (the leader's loops) writes Raft commands. It talks to external
   services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
   changes the host.
@@ -118,6 +118,36 @@ read and written.
 - `testdata/plain*.sops.yaml` were written by the real sops from `testdata/plain.yaml`.
   `bin/dev test-sops` (part of `all` and CI) runs `cross_test.go` (build tag `sops`)
   against Alpine's sops in both directions.
+
+## Cluster state (`internal/state`)
+
+Every agent holds the same `State` and applies the same `Command`s in Raft's order.
+
+- `Apply` is deterministic: no clock (a command carries the leader's time in `At`), no
+  randomness, no I/O. A handler checks everything before it changes anything, so a refused
+  command leaves no trace; the state's `Index` follows the log either way.
+- A command has a kind, a payload of the type with the same name (`AddHost`, `PutStack`, ...)
+  and an actor (`leader`, `host/<id>`, `user/<name>`) that the API takes from the caller's
+  certificate. Phase changes check who asks: some only the host itself reports
+  (`phaseChanges`).
+- Versions: `CommandVersion` and `SnapshotVersion`; this release reads its own and the one
+  before. Payload fields are added, not changed; unknown fields are ignored.
+- Operations hold locks (`stack/<name>`, `volume/<id>`); a change to a locked stack or volume
+  is refused with a `LockedError`. Only failover takes locks over (`TakeOver`).
+- Secrets arrive sealed (`Sealed`, age for the data key); `state` never sees them in clear.
+- Snapshots are gzip-compressed JSON (`WriteSnapshot`, `ReadSnapshot`). The audit keeps the
+  last 10 000 commands, finished operations the last 100.
+
+## Certificates (`internal/pki`)
+
+- The cluster CA issues host certificates (server and client, valid for the host's addresses)
+  and user certificates (client). The role is the certificate's organizational unit, the
+  name its common name (`host-<id>` or the user's name).
+- Keys are Ed25519 and never leave the machine that made them: the CA signs public keys.
+- Certificates end by revocation, not expiry (CA 20 years, others 10): hosts may stay off
+  for months. `Verify` takes the revoked serials from the state.
+- `TrustProof` (HMAC-SHA256 with the bootstrap key over the CA certificate) is how a CLI or
+  a joining host trusts the CA on first contact.
 
 ## Host check (`internal/hostcheck`, `clowderd check`)
 

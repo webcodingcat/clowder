@@ -1,0 +1,157 @@
+package state
+
+import (
+	"errors"
+	"fmt"
+)
+
+// Bootstrap starts the cluster: the keys init made and the first host.
+type Bootstrap struct {
+	Keys    ClusterKeys `json:"keys"`
+	JoinKey Sealed      `json:"join_key"`
+	Host    Host        `json:"host"`
+}
+
+func applyBootstrap(s *State, _ Command, payload Bootstrap) error {
+	switch {
+	case s.Keys != nil:
+		return errors.New("the cluster is bootstrapped already")
+	case len(payload.Keys.CACertificate) == 0 || len(payload.Keys.CAKey) == 0 || len(payload.Keys.AgeIdentity) == 0:
+		return errors.New("the keys are incomplete")
+	case len(payload.JoinKey) == 0:
+		return errors.New("the bootstrap key is missing")
+	case payload.Host.ID != 0:
+		return fmt.Errorf("the first host has ID 0, not %d", payload.Host.ID)
+	}
+	if err := checkNewHost(payload.Host); err != nil {
+		return err
+	}
+	host := payload.Host
+	host.Voter, host.Phase = true, Active
+	keys := payload.Keys
+	s.Keys = &keys
+	s.JoinKeys = []Sealed{payload.JoinKey}
+	s.Hosts[host.ID] = &host
+	return nil
+}
+
+// AddHost adds a host that joins; the leader has picked its free ID.
+type AddHost struct {
+	Host Host `json:"host"`
+}
+
+func applyAddHost(s *State, _ Command, payload AddHost) error {
+	host := payload.Host
+	if host.ID < 0 || host.ID >= MaxHosts {
+		return fmt.Errorf("host ID %d is not from 0 to %d", host.ID, MaxHosts-1)
+	}
+	// IDs of removed hosts stay taken until every DRBD peer has forgotten them
+	if _, taken := s.Hosts[host.ID]; taken {
+		return fmt.Errorf("host ID %d is taken", host.ID)
+	}
+	if err := checkNewHost(host); err != nil {
+		return err
+	}
+	for _, other := range s.Hosts {
+		if other.Name == host.Name && other.Phase != Removed {
+			return fmt.Errorf("a host named %s is a member already", host.Name)
+		}
+	}
+	host.Voter, host.Phase = false, Joining
+	s.Hosts[host.ID] = &host
+	return nil
+}
+
+// checkNewHost checks what a host must bring.
+func checkNewHost(host Host) error {
+	switch {
+	case host.Name == "":
+		return errors.New("the host has no name")
+	case !host.Underlay.IsValid():
+		return fmt.Errorf("host %s has no underlay address", host.Name)
+	case host.WGPublicKey == "":
+		return fmt.Errorf("host %s has no WireGuard key", host.Name)
+	}
+	return nil
+}
+
+// SetHostPhase moves a host to another phase.
+type SetHostPhase struct {
+	Host  HostID    `json:"host"`
+	Phase HostPhase `json:"phase"`
+	Voter *bool     `json:"voter,omitempty"` // changes the Raft role along with the phase
+}
+
+// mover is who may make a phase change: the leader (on its own or for a
+// user) or the agent of the host itself, reporting what it sees.
+type mover int
+
+const (
+	byLeader mover = iota
+	byAgent
+)
+
+// phaseChanges are the allowed moves; any phase may also go to Removed, by
+// the leader.
+var phaseChanges = map[HostPhase]map[HostPhase]mover{
+	Joining:    {Passive: byLeader, Active: byLeader},
+	Passive:    {Active: byLeader},
+	Active:     {Draining: byLeader, Failed: byLeader},
+	Draining:   {Active: byLeader, Failed: byLeader},
+	Failed:     {Active: byAgent, Fenced: byLeader},
+	Fenced:     {Recovering: byAgent, Disabled: byLeader},
+	Recovering: {Active: byAgent},
+	Disabled:   {Fenced: byLeader},
+}
+
+func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) error {
+	host, ok := s.Hosts[payload.Host]
+	if !ok {
+		return fmt.Errorf("no host %d", payload.Host)
+	}
+	if host.Phase == Removed {
+		return fmt.Errorf("host %s is removed", host.Name)
+	}
+	who, allowed := phaseChanges[host.Phase][payload.Phase]
+	if payload.Phase == Removed {
+		who, allowed = byLeader, true
+	}
+	if !allowed {
+		return fmt.Errorf("host %s cannot go from %s to %s", host.Name, host.Phase, payload.Phase)
+	}
+	fromAgent := cmd.Actor == HostActor(host.ID)
+	switch {
+	case who == byAgent && !fromAgent:
+		return fmt.Errorf("only host %s itself reports %s", host.Name, payload.Phase)
+	case who == byLeader && fromAgent:
+		return fmt.Errorf("host %s cannot move itself to %s", host.Name, payload.Phase)
+	}
+	host.Phase = payload.Phase
+	if payload.Voter != nil {
+		host.Voter = *payload.Voter
+	}
+	if host.Phase == Removed {
+		host.Voter = false
+	}
+	return nil
+}
+
+// ReportVersion is an agent telling which version it runs.
+type ReportVersion struct {
+	Host    HostID `json:"host"`
+	Version string `json:"version"`
+}
+
+func applyReportVersion(s *State, cmd Command, payload ReportVersion) error {
+	host, ok := s.Hosts[payload.Host]
+	switch {
+	case !ok:
+		return fmt.Errorf("no host %d", payload.Host)
+	case cmd.Actor != HostActor(host.ID):
+		return fmt.Errorf("only host %s itself reports its version", host.Name)
+	case payload.Version == "":
+		return errors.New("the version is empty")
+	}
+	host.Version = payload.Version
+	return nil
+}
