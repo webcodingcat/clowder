@@ -372,6 +372,27 @@ func TestStacksBelongToTheirOwner(t *testing.T) {
 	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Status: "dancing"}, "unknown status")
 }
 
+func TestAWaitReasonChangesNothingElse(t *testing.T) {
+	c := newCluster(t)
+	c.createShop()
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
+	host := HostID(0)
+	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Status: StackStarting, Host: &host})
+	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host})
+
+	// a running stack whose new volume fits nowhere keeps running where it is
+	c.mustApply(KindSetStackWaitReason, LeaderActor, SetStackWaitReason{Name: "shop", Reason: "volume data fits no pool"})
+	stack := c.state.Stacks["shop"]
+	if stack.WaitReason != "volume data fits no pool" || stack.Status != StackRunning || *stack.Host != host {
+		t.Errorf("stack %+v", stack)
+	}
+	c.mustApply(KindSetStackWaitReason, LeaderActor, SetStackWaitReason{Name: "shop"})
+	if stack.WaitReason != "" {
+		t.Errorf("an empty reason left %q", stack.WaitReason)
+	}
+	c.refuse(KindSetStackWaitReason, LeaderActor, SetStackWaitReason{Name: "gone", Reason: "x"}, "no stack gone")
+}
+
 func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 	c := newCluster(t)
 	c.createShop()

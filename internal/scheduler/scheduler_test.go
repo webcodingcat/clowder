@@ -97,7 +97,10 @@ func TestStacksThatDoNotFitWaitAndTakeNothing(t *testing.T) {
 		"  data:\n    x-clowder: {class: fast, size: 80G, replicas: 1}\n")}
 	placements, waiting := Plan(context.Background(), current)
 	// huge (first by name) fits, small after it does not
-	if len(waiting) != 1 || waiting[0].Stack != "big" || !strings.Contains(waiting[0].Reason, "volume small") {
+	// the reason is shown to users: sizes in units, the hosts' reasons joined
+	if len(waiting) != 1 || waiting[0].Stack != "big" ||
+		!strings.Contains(waiting[0].Reason, ": volume small (10G, class fast) fits no pool") ||
+		strings.Contains(waiting[0].Reason, "[") {
 		t.Errorf("waiting %+v", waiting)
 	}
 	// big took nothing, so next has the whole usable 80 GiB, and minor 0

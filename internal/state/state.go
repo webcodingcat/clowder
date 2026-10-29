@@ -149,6 +149,9 @@ type Stack struct {
 	// Stopped lists services pushed out by higher priorities.
 	Stopped  []string  `json:"stopped,omitempty"`
 	LastMove time.Time `json:"last_move,omitzero"`
+	// WaitReason is why the placement cannot place the stack or a volume it
+	// newly names; empty while nothing waits. Display only.
+	WaitReason string `json:"wait_reason,omitempty"`
 }
 
 // OwnerCLI owns the stacks applied with clowder stack apply.

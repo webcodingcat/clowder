@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/state"
+	"github.com/webcodingcat/clowder/internal/units"
 )
 
 // Placement is a decision for one stack: the host and the volumes that are
@@ -116,7 +118,7 @@ func (p *planner) place(stack *state.Stack, parsed *compose.Stack) (Placement, s
 	if len(reasons) == 0 {
 		return Placement{}, "no active host"
 	}
-	return Placement{}, fmt.Sprint(reasons)
+	return Placement{}, strings.Join(reasons, "; ")
 }
 
 // allocation is space a volume takes in a pool.
@@ -146,7 +148,7 @@ func (p *planner) newVolumes(stackName string, host state.HostID, parsed *compos
 		class, pool, ok := p.fit(host, wanted.Class, wanted.Size, tentative)
 		if !ok {
 			giveBack()
-			return nil, fmt.Sprintf("volume %s (%d bytes, class %s) fits no pool", name, wanted.Size, wanted.Class)
+			return nil, fmt.Sprintf("volume %s (%s, class %s) fits no pool", name, units.FormatSize(wanted.Size), wanted.Class)
 		}
 		volume := state.Volume{
 			ID: id, Generation: 1, Class: wanted.Class, SizeBytes: wanted.Size, Replicas: wanted.Replicas,

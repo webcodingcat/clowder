@@ -30,3 +30,21 @@ func ParseSize(text string) (int64, error) {
 	}
 	return number * unit, nil
 }
+
+// FormatSize writes a size in bytes for people, in the largest unit that
+// fits: "20G", "1.5G" (one decimal, rounded), "512M"; under 1K in bytes
+// ("100B"). Whole sizes read back with ParseSize, the others do not.
+func FormatSize(size int64) string {
+	for _, unit := range []struct {
+		letter string
+		bytes  int64
+	}{{"T", 1 << 40}, {"G", 1 << 30}, {"M", 1 << 20}, {"K", 1 << 10}} {
+		if size >= unit.bytes {
+			if size%unit.bytes == 0 {
+				return strconv.FormatInt(size/unit.bytes, 10) + unit.letter
+			}
+			return strconv.FormatFloat(float64(size)/float64(unit.bytes), 'f', 1, 64) + unit.letter
+		}
+	}
+	return strconv.FormatInt(size, 10) + "B"
+}

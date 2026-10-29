@@ -59,7 +59,9 @@ func (l *leader) apply(kind, actor string, payload any) {
 	}
 }
 
-func TestAPendingStackIsPlacedWithItsVolumes(t *testing.T) {
+// newLeader is a bootstrapped cluster with one host whose pool vg-fast/thin
+// has the given size, and a stack shop applied with a 1G volume db.
+func newLeader(t *testing.T, poolSize int64) *leader {
 	l := &leader{t: t, state: &state.State{}, changed: make(chan struct{})}
 	l.apply(state.KindBootstrap, state.LeaderActor, state.Bootstrap{
 		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
@@ -80,29 +82,78 @@ func TestAPendingStackIsPlacedWithItsVolumes(t *testing.T) {
 	})
 	l.apply(state.KindReportHost, state.HostActor(0), state.ReportHost{
 		Host: 0, Version: "1.0.0",
-		Pools: map[string]state.Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: 100 << 30}},
+		Pools: map[string]state.Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: poolSize}},
 	})
 	l.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Name: "shop", Owner: state.OwnerCLI})
 	l.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
 		Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
 		Source: "name: shop\nservices: {app: {image: x}}\nvolumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 1}\n",
 	})
+	return l
+}
 
+// runPlacement runs the placement until the test ends.
+func runPlacement(t *testing.T, l *leader) {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 	go RunPlacement(ctx, l, l.propose, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
 
+// waitFor fails the test unless the state comes to hold what check says.
+func waitFor(t *testing.T, l *leader, what string, check func(current *state.State) bool) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		var placed bool
-		l.Read(func(current *state.State) {
-			stack := current.Stacks["shop"]
-			placed = stack.Host != nil && stack.Status == state.StackStarting && current.Volumes["shop/db"] != nil
-		})
-		if placed {
+		var done bool
+		l.Read(func(current *state.State) { done = check(current) })
+		if done {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Error("the stack was not placed")
+	t.Error(what)
+}
+
+func TestAPendingStackIsPlacedWithItsVolumes(t *testing.T) {
+	l := newLeader(t, 100<<30)
+	runPlacement(t, l)
+	waitFor(t, l, "the stack was not placed", func(current *state.State) bool {
+		stack := current.Stacks["shop"]
+		return stack.Host != nil && stack.Status == state.StackStarting && current.Volumes["shop/db"] != nil &&
+			stack.WaitReason == ""
+	})
+}
+
+func TestAStackThatFitsNowhereShowsWhyUntilItFits(t *testing.T) {
+	l := newLeader(t, 512<<20)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// passes one by one, so the test knows how many ran
+	for range 3 {
+		place(context.Background(), l, l.propose, logger)
+	}
+	l.Read(func(current *state.State) {
+		if reason := current.Stacks["shop"].WaitReason; reason != "node0: volume db (1G, class fast) fits no pool" {
+			t.Errorf("reason %q", reason)
+		}
+		written := 0
+		for _, entry := range current.Audit {
+			if entry.Kind == state.KindSetStackWaitReason {
+				written++
+			}
+		}
+		if written != 1 {
+			t.Errorf("three passes wrote the reason %d times, want once", written)
+		}
+	})
+
+	l.apply(state.KindReportHost, state.HostActor(0), state.ReportHost{
+		Host: 0, Version: "1.0.1",
+		Pools: map[string]state.Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: 100 << 30}},
+	})
+	place(context.Background(), l, l.propose, logger)
+	l.Read(func(current *state.State) {
+		if stack := current.Stacks["shop"]; stack.Host == nil || stack.WaitReason != "" {
+			t.Errorf("after the pool grew: host %v, reason %q", stack.Host, stack.WaitReason)
+		}
+	})
 }

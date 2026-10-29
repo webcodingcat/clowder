@@ -220,6 +220,23 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) error {
 	return nil
 }
 
+// SetStackWaitReason records why the placement cannot place a stack or a
+// volume it newly names; an empty reason clears it. It changes nothing else,
+// so it never moves or stops a stack that runs.
+type SetStackWaitReason struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason,omitempty"`
+}
+
+func applySetStackWaitReason(s *State, _ Command, payload SetStackWaitReason) error {
+	stack, ok := s.Stacks[payload.Name]
+	if !ok {
+		return fmt.Errorf("no stack %s", payload.Name)
+	}
+	stack.WaitReason = payload.Reason
+	return nil
+}
+
 func samePlace(a, b *HostID) bool {
 	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
 }

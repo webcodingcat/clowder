@@ -15,3 +15,12 @@ func TestSizesUseBinaryUnits(t *testing.T) {
 		}
 	}
 }
+
+func TestSizesAreWrittenInTheLargestUnit(t *testing.T) {
+	cases := map[int64]string{20 << 30: "20G", 1 << 40: "1T", 3 << 29: "1.5G", 512 << 20: "512M", 100: "100B"}
+	for size, want := range cases {
+		if got := FormatSize(size); got != want {
+			t.Errorf("%d: %q, want %q", size, got, want)
+		}
+	}
+}

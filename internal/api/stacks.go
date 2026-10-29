@@ -37,6 +37,8 @@ type StackInfo struct {
 	Status     string   `json:"status"`
 	Host       string   `json:"host,omitempty"` // empty: not placed yet
 	Stopped    []string `json:"stopped,omitempty"`
+	// WaitReason is why the stack or a volume it newly names finds no place.
+	WaitReason string `json:"wait_reason,omitempty"`
 }
 
 // ContainerInfo is one container of a stack on its host.
@@ -208,6 +210,7 @@ func stackInfo(current *state.State, stack *state.Stack) StackInfo {
 	info := StackInfo{
 		Name: stack.Name, Owner: stack.Owner, CreatedBy: stack.CreatedBy, Generation: stack.Generation,
 		Priority: stack.Priority, Status: string(stack.Status), Stopped: stack.Stopped,
+		WaitReason: stack.WaitReason,
 	}
 	if stack.Host != nil {
 		if host, ok := current.Hosts[*stack.Host]; ok {

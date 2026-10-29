@@ -6,6 +6,8 @@ package controller
 import (
 	"context"
 	"log/slog"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/scheduler"
@@ -28,11 +30,10 @@ const interval = 30 * time.Second
 // RunPlacement places stacks and their new volumes while this agent leads,
 // until ctx ends: at every change of the state and every interval.
 func RunPlacement(ctx context.Context, cluster Cluster, propose Propose, logger *slog.Logger) {
-	reported := map[string]string{} // the reason each stack last waited for
 	for {
 		changed := cluster.Changed()
 		if cluster.IsLeader() {
-			place(ctx, cluster, propose, logger, reported)
+			place(ctx, cluster, propose, logger)
 		}
 		select {
 		case <-ctx.Done():
@@ -43,8 +44,8 @@ func RunPlacement(ctx context.Context, cluster Cluster, propose Propose, logger 
 	}
 }
 
-// place plans once and writes the decisions.
-func place(ctx context.Context, cluster Cluster, propose Propose, logger *slog.Logger, reported map[string]string) {
+// place plans once and writes the decisions and why stacks wait.
+func place(ctx context.Context, cluster Cluster, propose Propose, logger *slog.Logger) {
 	// Plan parses every stack: too slow for the state's lock, which Raft's
 	// Apply waits for
 	var copied *state.State
@@ -55,15 +56,29 @@ func place(ctx context.Context, cluster Cluster, propose Propose, logger *slog.L
 		return
 	}
 	placements, waiting := scheduler.Plan(ctx, copied)
+	reasons := map[string]string{}
 	for _, wait := range waiting {
-		// say it once per reason, not every 30 s
-		if reported[wait.Stack] != wait.Reason {
-			logger.Warn("stack waits for a place", "stack", wait.Stack, "reason", wait.Reason)
-			reported[wait.Stack] = wait.Reason
+		reasons[wait.Stack] = wait.Reason
+	}
+	// the state remembers the last reason, so each change is written and
+	// logged once, not every 30 s, and a new leader knows it too; an empty
+	// reason clears it once the stack no longer waits. Every change is a Raft
+	// write and an audit entry, so a reason holds only what stays the same
+	// from pass to pass (no free space, no times).
+	for _, name := range slices.Sorted(maps.Keys(copied.Stacks)) {
+		reason := reasons[name]
+		if copied.Stacks[name].WaitReason == reason {
+			continue
+		}
+		if reason != "" {
+			logger.Warn("stack waits for a place", "stack", name, "reason", reason)
+		}
+		err := commit(ctx, propose, state.KindSetStackWaitReason, state.SetStackWaitReason{Name: name, Reason: reason})
+		if err != nil {
+			logger.Error("record why a stack waits", "stack", name, "error", err)
 		}
 	}
 	for _, placement := range placements {
-		delete(reported, placement.Stack)
 		if err := write(ctx, propose, placement); err != nil {
 			logger.Error("place a stack", "stack", placement.Stack, "error", err)
 		}

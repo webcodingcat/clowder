@@ -29,23 +29,24 @@ type Command struct {
 
 // The kinds of commands. Each has a payload type of the same name.
 const (
-	KindBootstrap        = "bootstrap"
-	KindApplyConfig      = "apply-config"
-	KindAddHost          = "add-host"
-	KindSetHostPhase     = "set-host-phase"
-	KindReportHost       = "report-host"
-	KindAddUser          = "add-user"
-	KindRemoveUser       = "remove-user"
-	KindRevoke           = "revoke"
-	KindCreateStack      = "create-stack"
-	KindPutStack         = "put-stack"
-	KindDeleteStack      = "delete-stack"
-	KindSetStackStatus   = "set-stack-status"
-	KindPutVolume        = "put-volume"
-	KindDeleteVolume     = "delete-volume"
-	KindStartOperation   = "start-operation"
-	KindAdvanceOperation = "advance-operation"
-	KindFinishOperation  = "finish-operation"
+	KindBootstrap          = "bootstrap"
+	KindApplyConfig        = "apply-config"
+	KindAddHost            = "add-host"
+	KindSetHostPhase       = "set-host-phase"
+	KindReportHost         = "report-host"
+	KindAddUser            = "add-user"
+	KindRemoveUser         = "remove-user"
+	KindRevoke             = "revoke"
+	KindCreateStack        = "create-stack"
+	KindPutStack           = "put-stack"
+	KindDeleteStack        = "delete-stack"
+	KindSetStackStatus     = "set-stack-status"
+	KindSetStackWaitReason = "set-stack-wait-reason"
+	KindPutVolume          = "put-volume"
+	KindDeleteVolume       = "delete-volume"
+	KindStartOperation     = "start-operation"
+	KindAdvanceOperation   = "advance-operation"
+	KindFinishOperation    = "finish-operation"
 )
 
 // LeaderActor is the leader acting on its own (its control loops).
@@ -92,23 +93,24 @@ func NewCommand(kind string, at time.Time, actor string, payload any) (Command, 
 type handler func(s *State, cmd Command) error
 
 var handlers = map[string]handler{
-	KindBootstrap:        decoded(applyBootstrap),
-	KindApplyConfig:      decoded(applyConfig),
-	KindAddHost:          decoded(applyAddHost),
-	KindSetHostPhase:     decoded(applySetHostPhase),
-	KindReportHost:       decoded(applyReportHost),
-	KindAddUser:          decoded(applyAddUser),
-	KindRemoveUser:       decoded(applyRemoveUser),
-	KindRevoke:           decoded(applyRevoke),
-	KindCreateStack:      decoded(applyCreateStack),
-	KindPutStack:         decoded(applyPutStack),
-	KindDeleteStack:      decoded(applyDeleteStack),
-	KindSetStackStatus:   decoded(applySetStackStatus),
-	KindPutVolume:        decoded(applyPutVolume),
-	KindDeleteVolume:     decoded(applyDeleteVolume),
-	KindStartOperation:   decoded(applyStartOperation),
-	KindAdvanceOperation: decoded(applyAdvanceOperation),
-	KindFinishOperation:  decoded(applyFinishOperation),
+	KindBootstrap:          decoded(applyBootstrap),
+	KindApplyConfig:        decoded(applyConfig),
+	KindAddHost:            decoded(applyAddHost),
+	KindSetHostPhase:       decoded(applySetHostPhase),
+	KindReportHost:         decoded(applyReportHost),
+	KindAddUser:            decoded(applyAddUser),
+	KindRemoveUser:         decoded(applyRemoveUser),
+	KindRevoke:             decoded(applyRevoke),
+	KindCreateStack:        decoded(applyCreateStack),
+	KindPutStack:           decoded(applyPutStack),
+	KindDeleteStack:        decoded(applyDeleteStack),
+	KindSetStackStatus:     decoded(applySetStackStatus),
+	KindSetStackWaitReason: decoded(applySetStackWaitReason),
+	KindPutVolume:          decoded(applyPutVolume),
+	KindDeleteVolume:       decoded(applyDeleteVolume),
+	KindStartOperation:     decoded(applyStartOperation),
+	KindAdvanceOperation:   decoded(applyAdvanceOperation),
+	KindFinishOperation:    decoded(applyFinishOperation),
 }
 
 // decoded turns a function of a typed payload into a handler. Unknown fields
