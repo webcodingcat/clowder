@@ -6,6 +6,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -54,7 +55,11 @@ type Supervisor struct {
 	docker  Docker
 	rules   Rules
 	backoff Backoff
-	logger  *slog.Logger
+	// missed is called when the events broke off and are followed again:
+	// what died in between went unseen (a restart of Docker kills every
+	// container), so the agent starts its stacks as after a boot
+	missed func()
+	logger *slog.Logger
 
 	mu sync.Mutex
 	// held are the stacks the agent is stopping or recreating itself: the
@@ -67,10 +72,10 @@ type Supervisor struct {
 	started map[string]time.Time
 }
 
-// New makes a supervisor.
-func New(dockerAPI Docker, rules Rules, backoff Backoff, logger *slog.Logger) *Supervisor {
+// New makes a supervisor; missed is called after a break in Docker's events.
+func New(dockerAPI Docker, rules Rules, backoff Backoff, missed func(), logger *slog.Logger) *Supervisor {
 	return &Supervisor{
-		docker: dockerAPI, rules: rules, backoff: backoff, logger: logger,
+		docker: dockerAPI, rules: rules, backoff: backoff, missed: missed, logger: logger,
 		held: map[string]int{}, stopped: map[string]bool{},
 		crashes: map[string]int{}, started: map[string]time.Time{},
 	}
@@ -98,8 +103,11 @@ func (s *Supervisor) Hold(stack string) (release func()) {
 // Run follows Docker's events of clowder's containers until ctx ends. When
 // the stream breaks (Docker restarted), it follows again after a pause.
 func (s *Supervisor) Run(ctx context.Context, label string) {
-	for ctx.Err() == nil {
+	for following := false; ctx.Err() == nil; following = true {
 		events, failed := s.docker.Events(ctx, label)
+		if following {
+			s.missed()
+		}
 		for event := range events {
 			s.handle(ctx, event)
 		}
@@ -134,6 +142,13 @@ func (s *Supervisor) handle(ctx context.Context, event docker.Event) {
 		s.mu.Unlock()
 	case event.Action == "die":
 		s.crashed(ctx, stack, service, id, event.ExitCode)
+	case event.Action == "destroy":
+		// a new generation makes new containers; forget the old ones
+		s.mu.Lock()
+		delete(s.started, id)
+		delete(s.stopped, id)
+		delete(s.crashes, id)
+		s.mu.Unlock()
 	case strings.HasPrefix(event.Action, "health_status: unhealthy"):
 		s.unhealthy(ctx, stack, service, id)
 	}
@@ -166,8 +181,14 @@ func (s *Supervisor) crashed(ctx context.Context, stack, service, id string, exi
 		if held || ctx.Err() != nil {
 			return
 		}
-		if err := s.docker.Start(ctx, id); err != nil {
+		err := s.docker.Start(ctx, id)
+		switch {
+		case err == nil, errors.Is(err, docker.ErrNoContainer):
+			// a removed container is not ours to start
+		default:
+			// a start that fails counts as another crash: tried again later
 			s.logger.Error("restart a crashed container", "stack", stack, "service", service, "error", err)
+			s.crashed(ctx, stack, service, id, exitCode)
 		}
 	})
 }

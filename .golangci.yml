@@ -59,10 +59,14 @@ linters:
         # Every agent must apply the same commands to the same state: the
         # state reads no files, network, clock or randomness (the time comes
         # with the command).
+        # The scheduler is pure as well, so its decisions are tested without a
+        # host.
         state-pure:
           files:
             - "**/internal/state/*.go"
             - "!**/internal/state/*_test.go"
+            - "**/internal/scheduler/*.go"
+            - "!**/internal/scheduler/*_test.go"
           deny:
             - pkg: os
               desc: the state does no I/O

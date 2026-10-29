@@ -78,10 +78,12 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 	return nil
 }
 
-// DeleteStack removes a stack. Its volumes go first, each with its own
-// command, so no volume is left without its stack.
+// DeleteStack removes a stack. A stack with volumes goes only together with
+// them (WithVolumes), in this one command: deleted one by one, the
+// placement would put a volume back between two commands.
 type DeleteStack struct {
-	Name string `json:"name"`
+	Name        string `json:"name"`
+	WithVolumes bool   `json:"with_volumes,omitempty"`
 	// Operation is set when the operation holding the lock makes the change.
 	Operation string `json:"operation,omitempty"`
 }
@@ -90,13 +92,24 @@ func applyDeleteStack(s *State, _ Command, payload DeleteStack) error {
 	if _, ok := s.Stacks[payload.Name]; !ok {
 		return fmt.Errorf("no stack %s", payload.Name)
 	}
-	for _, id := range slices.Sorted(maps.Keys(s.Volumes)) {
-		if strings.HasPrefix(id, payload.Name+"/") {
-			return fmt.Errorf("stack %s still has volume %s", payload.Name, id)
-		}
-	}
 	if err := s.checkUnlocked(stackLock(payload.Name), payload.Operation); err != nil {
 		return err
+	}
+	var volumes []string
+	for _, id := range slices.Sorted(maps.Keys(s.Volumes)) {
+		if !strings.HasPrefix(id, payload.Name+"/") {
+			continue
+		}
+		if !payload.WithVolumes {
+			return fmt.Errorf("stack %s still has volume %s", payload.Name, id)
+		}
+		if err := s.checkUnlocked(volumeLock(id), payload.Operation); err != nil {
+			return err
+		}
+		volumes = append(volumes, id)
+	}
+	for _, id := range volumes {
+		delete(s.Volumes, id)
 	}
 	delete(s.Stacks, payload.Name)
 	return nil
@@ -123,6 +136,12 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) error {
 	if err := s.checkLiveHost(payload.Host); err != nil {
 		return err
 	}
+	// a host reports only about a stack it runs, and never moves it: the
+	// leader may have moved it since the host read the state
+	if IsHostActor(cmd.Actor) && (stack.Host == nil || cmd.Actor != HostActor(*stack.Host) ||
+		!samePlace(stack.Host, payload.Host)) {
+		return fmt.Errorf("stack %s: only its host reports about it, and only where it is", payload.Name)
+	}
 	if !samePlace(stack.Host, payload.Host) {
 		stack.LastMove = cmd.At
 	}
@@ -145,10 +164,10 @@ func (s *State) checkLiveHost(id *HostID) error {
 	return nil
 }
 
-// maxMinor is the highest DRBD minor: its port 10000 + minor stays in the
+// MaxMinor is the highest DRBD minor: its port 10000 + minor stays in the
 // range compose.ReservedPort keeps for DRBD (10000-10999); both change
 // together.
-const maxMinor = 999
+const MaxMinor = 999
 
 // PutVolume creates a volume or replaces its record.
 type PutVolume struct {
@@ -176,8 +195,8 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) error {
 		return fmt.Errorf("volume %s: generation %d is older than %d", volume.ID, volume.Generation, old.Generation)
 	}
 	if volume.Minor != nil {
-		if *volume.Minor < 0 || *volume.Minor > maxMinor {
-			return fmt.Errorf("volume %s: minor %d is not from 0 to %d", volume.ID, *volume.Minor, maxMinor)
+		if *volume.Minor < 0 || *volume.Minor > MaxMinor {
+			return fmt.Errorf("volume %s: minor %d is not from 0 to %d", volume.ID, *volume.Minor, MaxMinor)
 		}
 		for _, other := range s.Volumes {
 			if other.ID != volume.ID && other.Minor != nil && *other.Minor == *volume.Minor {

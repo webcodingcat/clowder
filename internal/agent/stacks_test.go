@@ -1,0 +1,188 @@
+package agent
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"net/netip"
+	"os"
+	"slices"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/compose"
+	"github.com/webcodingcat/clowder/internal/state"
+	"github.com/webcodingcat/clowder/internal/supervisor"
+)
+
+// testCluster is a state that applies what is proposed, as the leader
+// would; the runner's host is host 0.
+type testCluster struct {
+	t     *testing.T
+	mu    sync.Mutex
+	state *state.State
+}
+
+func (c *testCluster) Read(use func(current *state.State)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	use(c.state)
+}
+
+func (c *testCluster) Changed() <-chan struct{} { return make(chan struct{}) }
+
+func (c *testCluster) propose(_ context.Context, cmd state.Command) (uint64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cmd.At = time.Now()
+	return c.state.Index + 1, c.state.Apply(c.state.Index+1, cmd)
+}
+
+// apply commits a command and fails the test if the state refuses it.
+func (c *testCluster) apply(kind, actor string, payload any) {
+	c.t.Helper()
+	cmd, err := state.NewCommand(kind, time.Now(), actor, payload)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	if _, err := c.propose(context.Background(), cmd); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+func (c *testCluster) stack(name string) state.Stack {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return *c.state.Stacks[name]
+}
+
+// newTestRunner is a runner on host 0 of a cluster with the stack "shop":
+// one service and the volume "db" (generation 1), placed on host 0.
+func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fakeStorage) {
+	t.Helper()
+	cluster := &testCluster{t: t, state: &state.State{}}
+	cluster.apply(state.KindBootstrap, state.LeaderActor, state.Bootstrap{
+		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
+		JoinKey: state.Sealed("j"),
+		Host: state.Host{
+			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
+		},
+	})
+	cluster.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
+		Spec: clusterdir.Config{
+			Name: "prod", Seeds: []string{"10.0.0.2"}, Hoster: "hetzner",
+			HosterToken:    clusterdir.SecretRef{Secret: "token"},
+			Ingress:        clusterdir.Ingress{FloatingIP: "203.0.113.10"},
+			StorageClasses: map[string]clusterdir.StorageClass{"fast": {Pool: "vg-fast/thin"}},
+		},
+		Secrets: map[string]state.Sealed{"token": state.Sealed("t")},
+	})
+	cluster.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
+		Name: "shop", Owner: state.OwnerCLI,
+		Source: "services: {app: {image: nginx, volumes: [db:/data]}}\n" +
+			"volumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n",
+	})
+	putVolume(cluster, 1)
+	host := state.HostID(0)
+	cluster.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{
+		Name: "shop", Status: state.StackStarting, Host: &host,
+	})
+
+	docker, storage := &fakeDocker{}, &fakeStorage{dir: t.TempDir()}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	runner := &stackRunner{
+		files: Files{Dir: t.TempDir()}, host: Host{ID: 0, Name: "node0", NodeAddress: netip.MustParseAddr("10.77.0.1")},
+		version: "1.0.0", cluster: cluster, docker: docker, storage: storage, logger: logger,
+		propose: cluster.propose, applied: map[string][32]byte{}, logins: map[string][32]byte{},
+	}
+	runner.supervisor = supervisor.New(docker, runner.rules, supervisor.DefaultBackoff, nil, logger)
+	return runner, cluster, docker, storage
+}
+
+func putVolume(cluster *testCluster, generation int64) {
+	cluster.apply(state.KindPutVolume, state.LeaderActor, state.PutVolume{Volume: state.Volume{
+		ID: "shop/db", Generation: generation, Class: "fast", SizeBytes: 1 << 30,
+		Placements: []state.Placement{{Host: 0, Class: "fast"}}, Status: state.VolumeOK,
+	}})
+}
+
+func (c *calls) count(line string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(slices.DeleteFunc(slices.Clone(c.lines), func(l string) bool { return l != line }))
+}
+
+func TestAFailedComposeUpIsTriedAgain(t *testing.T) {
+	runner, cluster, docker, _ := newTestRunner(t)
+	docker.failedUps = 1
+	runner.pass(context.Background())
+	if status := cluster.stack("shop").Status; status != state.StackStarting {
+		t.Errorf("after a failed compose up the stack is %s", status)
+	}
+	runner.pass(context.Background())
+	if ups := docker.count("up shop"); ups != 2 {
+		t.Errorf("%d compose ups, want 2", ups)
+	}
+	if status := cluster.stack("shop").Status; status != state.StackRunning {
+		t.Errorf("after compose up the stack is %s", status)
+	}
+	runner.pass(context.Background()) // nothing changed: no compose up
+	if ups := docker.count("up shop"); ups != 2 {
+		t.Errorf("%d compose ups without a change, want 2", ups)
+	}
+	runner.forgetApplied() // Docker restarted
+	runner.pass(context.Background())
+	if ups := docker.count("up shop"); ups != 3 {
+		t.Errorf("%d compose ups after Docker restarted, want 3", ups)
+	}
+}
+
+func TestANewGenerationReplacesTheLV(t *testing.T) {
+	runner, cluster, docker, storage := newTestRunner(t)
+	runner.pass(context.Background())
+	putVolume(cluster, 2) // a restore
+	runner.pass(context.Background())
+	old, current := compose.VolumeName("shop", "db", 1), compose.VolumeName("shop", "db", 2)
+	if storage.count("ensure "+current) != 1 || storage.count("remove "+old) != 1 || storage.count("remove "+current) != 0 {
+		t.Errorf("storage calls %q", storage.lines)
+	}
+	if ups := docker.count("up shop"); ups != 2 {
+		t.Errorf("%d compose ups, want 2 (the new volume)", ups)
+	}
+}
+
+func TestAStackThatLeftIsStoppedAndForgotten(t *testing.T) {
+	runner, cluster, docker, storage := newTestRunner(t)
+	runner.pass(context.Background())
+
+	// moved off this host, but its volume copy stays here for now
+	cluster.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{Name: "shop", Status: state.StackPending})
+	runner.pass(context.Background())
+	runner.pass(context.Background())
+	lv := compose.VolumeName("shop", "db", 1)
+	if docker.count("down shop") != 1 || storage.count("remove "+lv) != 0 {
+		t.Errorf("docker %q, storage %q", docker.lines, storage.lines)
+	}
+
+	cluster.apply(state.KindDeleteStack, state.UserActor("alice"), state.DeleteStack{Name: "shop", WithVolumes: true})
+	runner.pass(context.Background())
+	if storage.count("remove "+lv) != 1 {
+		t.Errorf("storage %q", storage.lines)
+	}
+	if _, err := os.Stat(runner.files.stackDir("shop")); !os.IsNotExist(err) {
+		t.Errorf("the stack's directory is left: %v", err)
+	}
+}
+
+func TestComposePsOutputIsRead(t *testing.T) {
+	containers, err := parsePs(`{"Service":"app","State":"running","Health":"healthy","Status":"Up 1 minute"}` + "\n" +
+		`{"Service":"db","State":"exited","Health":"","Status":"Exited (1)"}` + "\n")
+	if err != nil || len(containers) != 2 || containers[0].Health != "healthy" || containers[1].State != "exited" {
+		t.Errorf("%+v, %v", containers, err)
+	}
+	if _, err := parsePs("not json\n"); err == nil {
+		t.Error("garbage was read")
+	}
+}

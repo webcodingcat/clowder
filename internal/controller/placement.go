@@ -45,11 +45,16 @@ func RunPlacement(ctx context.Context, cluster Cluster, propose Propose, logger 
 
 // place plans once and writes the decisions.
 func place(ctx context.Context, cluster Cluster, propose Propose, logger *slog.Logger, reported map[string]string) {
-	var placements []scheduler.Placement
-	var waiting []scheduler.Waiting
-	cluster.Read(func(current *state.State) {
-		placements, waiting = scheduler.Plan(ctx, current)
-	})
+	// Plan parses every stack: too slow for the state's lock, which Raft's
+	// Apply waits for
+	var copied *state.State
+	var err error
+	cluster.Read(func(current *state.State) { copied, err = current.Copy() })
+	if err != nil {
+		logger.Error("place the stacks", "error", err)
+		return
+	}
+	placements, waiting := scheduler.Plan(ctx, copied)
 	for _, wait := range waiting {
 		// say it once per reason, not every 30 s
 		if reported[wait.Stack] != wait.Reason {

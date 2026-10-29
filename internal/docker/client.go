@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -93,6 +94,9 @@ func (c *Client) Events(ctx context.Context, label string) (<-chan Event, <-chan
 	return events, failed
 }
 
+// ErrNoContainer is Docker's answer for a container that is gone.
+var ErrNoContainer = errors.New("no such container")
+
 // Start starts a stopped container.
 func (c *Client) Start(ctx context.Context, id string) error {
 	return c.post(ctx, "/containers/"+url.PathEscape(id)+"/start")
@@ -147,6 +151,9 @@ func (c *Client) post(ctx context.Context, path string) error {
 		return fmt.Errorf("docker %s: %w", path, err)
 	}
 	defer func() { _ = response.Body.Close() }() // read to the end below
+	if response.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("docker %s: %w", path, ErrNoContainer)
+	}
 	// 304: already in that state
 	if response.StatusCode >= 300 && response.StatusCode != http.StatusNotModified {
 		return answerError("docker "+path, response)

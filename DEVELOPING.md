@@ -46,8 +46,28 @@ clowder is built in phases; each ends with live tests on HLab.
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
-Known gap until phase 2: Raft and the forwarding of writes run on the node address, which
-other hosts reach only through the WireGuard mesh. A single host needs neither.
+Known gaps to close in phase 2, harmless on a single host:
+
+- Raft and the forwarding of writes run on the node address, which other hosts reach only
+  through the WireGuard mesh.
+- `CatchUp` makes sure only on the leader that the state holds the whole log; a follower
+  returns once it knows a leader. Before a host that was away starts its stacks, it must
+  have applied the leader's commit index.
+- The agent runs its stacks one after another in one loop: a long image pull or `mkfs`
+  holds up the others, and a command left behind on a suspended DRBD volume leaves a
+  goroutine behind at every pass.
+
+## A stack's way
+
+1. `clowder stack apply shop -f compose.yaml` loads and checks the files on the user's
+   machine and sends one self-contained Compose file (`PUT /v1/stacks/shop`).
+2. The agent that takes the call checks it against the cluster and commits `put-stack`
+   through the leader: the stack is `pending`.
+3. The leader's placement picks a host and a pool for each volume, commits the volumes
+   (`put-volume`) and the stack's host (`set-stack-status starting`).
+4. That host's agent makes the volumes (LV, DRBD, ext4, mount), renders the Compose file,
+   runs `docker compose up` and reports `running`. Its supervisor restarts what crashes.
+5. `clowder stack ps|logs shop` asks the stack's host, through any agent.
 
 ## Words
 
@@ -87,7 +107,8 @@ Packages in *italics* do not exist yet.
   `cli-portable`) refuses direct imports of the Linux-only packages in `cmd/clowder` and
   `internal/cli`; the cross build for Windows and macOS in `bin/dev build` catches indirect
   ones.
-- **Pure logic, no I/O**: `scheduler`, `state`. Their tests need no host, files or network.
+- **Pure logic, no I/O**: `scheduler`, `state`. Their tests need no host, files or network;
+  depguard (rule `state-pure`) keeps `os`, `net/http` and randomness out of both.
   `state` uses the types and `Check` of `clusterdir`, never its file access.
 - **Decides**: `controller` (the leader's loops) writes Raft commands. It talks to external
   services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
@@ -108,6 +129,9 @@ Packages in *italics* do not exist yet.
   host addresses, reserved ports). It does not restrict what a container may do on its host
   (`privileged`, capabilities): stacks run the operator's own code. Every problem is reported
   at once (`Problems`); only an unknown key ends the checks of its `x-clowder` block.
+- `Source` fills in the variables and env files of the user's machine; the result is stored
+  in the cluster state and on the stack's host as it is, not sealed. Passwords in a Compose
+  file are readable to whoever reads the state; stacks have no sealed secrets yet.
 - The `x-clowder` blocks are decoded strictly: an unknown key is an error, not ignored.
 - `Render` writes the file docker compose gets on a host: `restart: "no"` (the agent restarts),
   the agent's resolver, each port on the Floating IP and the node address, labels, a fixed
@@ -152,13 +176,15 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - A command has a kind, a payload of the type with the same name (`AddHost`, `PutStack`, ...)
   and an actor (`leader`, `host/<id>`, `user/<name>`) that the API takes from the caller's
   certificate. Which actor may send which kind is the API's check; the state checks only
-  what it alone can tell: a host reports only about itself and never moves another host.
+  what it alone can tell: a host reports only about itself and never moves another host,
+  and about a stack only while it runs on that host, without moving it.
 - In use so far: `bootstrap` (init), `apply-config`, `add-user` (the first user),
-  `set-host-phase` (host actions), `put-stack` and `delete-stack` (the user),
-  `put-volume`, `delete-volume` and `set-stack-status` (placement, the stack's host),
-  `report-host` (each agent). The other kinds (hosts joining, operations, users beyond the
-  first) and the fields they fill are there for the next steps; they are tested, but nothing
-  sends them yet.
+  `set-host-phase` (host actions), `put-stack` and `delete-stack` (the user; with
+  `WithVolumes` the volumes go in the same command, so the placement cannot put one back
+  in between), `put-volume` and `set-stack-status` (placement, the stack's host),
+  `report-host` (each agent). The other kinds (`delete-volume`, hosts joining, operations,
+  users beyond the first) and the fields they fill are there for the next steps; they are
+  tested, but nothing sends them yet.
 - Host phases (`phaseChanges`; L = the leader, on its own or for a user; H = the host itself):
 
   ```
@@ -178,8 +204,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   Only failover takes locks over (`TakeOver`).
 - Invariants the state holds itself, as the last place to catch a wrong command: one first
   user, valid names, volumes with 0 to 3 replicas and a DRBD minor exactly when replicated,
-  one copy per host, a stack deleted only without volumes, a removed host's certificate
+  one copy per host, a stack deleted only with its volumes, a removed host's certificate
   revoked. `time.Now` is banned from the package by lint (forbidigo).
+- `Copy` gives a deep copy without the audit, for work too slow for the state's lock (the
+  placement parses every stack) or that keeps parts of the state (the agent's stacks).
 - Secrets arrive sealed (`Sealed`, age for the data key); `state` never sees them in clear.
 - Snapshots are gzip-compressed JSON (`WriteSnapshot`, `ReadSnapshot`). The audit keeps the
   last 10 000 commands, finished operations the last 100.
@@ -288,15 +316,18 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   (`reconcileNetwork`): after a change of the state when the rules differ, and every 30 s to
   repair what someone changed by hand. `HostNetwork` is what the agent changes in the
   network; the test uses a fake.
-- The stacks of the host (`stacks.reconcile`, after a change of the state and every 30 s):
-  for each stack the state places here, `Ensure` its volume copies, render its Compose file
-  to `/var/lib/clowder/stacks/<name>/compose.yaml` and run `compose up` when the file
-  changed, then report `running`. Stacks that left the host get `compose down`; volume copies
-  the state no longer places here (or in an older generation) are removed. Each stack's
+- The stacks of the host (`stackRunner`, a pass after a change of the state and every 30 s):
+  for each stack the state places here, render its Compose file, `Ensure` its volume copies,
+  write the file to `/var/lib/clowder/stacks/<name>/compose.yaml` and run `compose up`
+  unless that file came up before, then report `running`. A failed `compose up` is tried
+  again at the next pass. Stacks that left the host get `compose down`; volume copies the
+  state no longer places here (or in an older generation) are removed. Each stack's
   `volumes.json` records its copies before they are made, so a crash leaves nothing unknown.
-- After a boot no container runs (`restart: "no"`); the first pass runs `compose up` for
-  every stack, but only once the state has caught up with the Raft log, so a host that was
-  away does not start a stack that has moved on.
+- After a boot no container runs (`restart: "no"`): the runner remembers which files came
+  up only in memory, so its first pass runs `compose up` for every stack, and so does the
+  pass after Docker restarted (the supervisor's events broke off). The first pass waits until
+  the state has caught up with the Raft log, so a host that was away does not start a stack
+  that has moved on.
 - The agent also reports its version, memory, CPUs and pools (`report-host`, only when
   they changed; the pools' use rounded to GiB), logs Docker in to the registries of
   `secrets.sops.yaml`, runs the supervisor and, while it leads, the placement
@@ -304,6 +335,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - The test of the package goes the whole way on 127.0.0.1: init, the agent with a notify
   socket, the user's bootstrap (and a wrong key, a second user refused), apply and diff, the
   Floating IP reaching the nft rules, and a stack with a volume applied, listed and deleted.
+  `stacks_test.go` runs single passes of the runner against a state in memory: a failed
+  `compose up`, a new volume generation, a stack that leaves the host.
 
 ## Network (`internal/network`)
 
@@ -352,7 +385,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   (`Fits`: without overcommit, the pool's volumes and the new one stay within the pool less
   its reserve; a class's fallbacks included). Volumes and DRBD
   minors are only taken for a stack that fits whole.
-- `controller.RunPlacement` runs on every agent but acts only on the leader: it writes the
+- `controller.RunPlacement` runs on every agent but acts only on the leader: it plans on a
+  copy of the state (`State.Copy`), outside the lock Raft's `Apply` waits for, then writes the
   volumes (`put-volume`), then the stack's host and `starting` (`set-stack-status`). The
   stack's host does the rest.
 
@@ -367,6 +401,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   10 minutes up). A container stopped by hand (kill, stop) stays stopped; `unhealthy` means
   a restart unless the service says otherwise. While the agent runs `compose up` or `down`
   for a stack, it `Hold`s the stack, so the supervisor does not fight it.
+- A start that fails counts as another crash and is tried again after the backoff; a
+  container that is gone (`docker.ErrNoContainer`) is let be. `destroy` events drop what the
+  supervisor knew about a container. When the events break off, what died in between went
+  unseen (a restart of Docker kills every container): the supervisor tells the agent, which
+  then runs `compose up` for every stack as after a boot.
+- `compose down` removes the stack's Docker volumes too; they only bind a directory of
+  clowder's volume, whose data stays until clowder removes the copy.
 
 ## Host tools (`internal/command`)
 

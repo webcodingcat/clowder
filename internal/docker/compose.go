@@ -23,11 +23,12 @@ func (c *Client) ComposeUp(ctx context.Context, stack, file string) error {
 	return err
 }
 
-// ComposeDown stops and removes a stack's containers and networks; its
-// volumes stay (they are clowder's to remove).
+// ComposeDown stops and removes a stack's containers, networks and Docker
+// volumes. The data stays: a Docker volume only binds a directory of
+// clowder's volume (compose.Render), and that is clowder's to remove.
 func (c *Client) ComposeDown(ctx context.Context, stack, file string) error {
 	_, err := command.Run(ctx, downTimeout, "docker", "compose", "--project-name", stack, "--file", file,
-		"down", "--remove-orphans")
+		"down", "--remove-orphans", "--volumes")
 	return err
 }
 

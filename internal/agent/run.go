@@ -26,6 +26,9 @@ const (
 	// catchUpTimeout is how long the agent waits at start for its state to
 	// catch up with the Raft log; well within systemd's start timeout.
 	catchUpTimeout = 15 * time.Second
+	// reconcileInterval is how often the reconcilers (network, stacks) run
+	// without a change of the state, to repair what someone changed by hand.
+	reconcileInterval = 30 * time.Second
 )
 
 // HostParts are what the agent changes on its host; tests use fakes.
@@ -78,10 +81,10 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	defer stopReconcilers()
 	go reconcileNetwork(reconcilers, node, parts.Network, logger)
 
-	hostStacks := &stacks{
-		files: files, host: host, version: buildinfo.Version, node: node,
-		docker: parts.Docker, storage: parts.Storage, open: credentials.dataKey.Open,
-		logger: logger, logins: map[string][32]byte{},
+	runner := &stackRunner{
+		files: files, host: host, version: buildinfo.Version, cluster: node,
+		docker: parts.Docker, storage: parts.Storage, open: credentials.dataKey.Open, logger: logger,
+		applied: map[string][32]byte{}, logins: map[string][32]byte{},
 	}
 	server := api.NewServer(api.ServerConfig{
 		Cluster: node, CA: credentials.ca, Certificate: credentials.certificate,
@@ -90,20 +93,20 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 			return net.JoinHostPort(network.NodeAddress(id).String(), strconv.Itoa(host.APIPort))
 		},
 		Keys: credentials.dataKey, Version: buildinfo.Version, Logger: logger,
-		HostID: host.ID, Containers: hostStacks,
+		HostID: host.ID, Containers: runner,
 	})
-	hostStacks.propose = server.Propose
-	hostStacks.supervisor = supervisor.New(parts.Docker, hostStacks.rules, supervisor.DefaultBackoff, logger)
-	go hostStacks.supervisor.Run(reconcilers, compose.LabelStack)
+	runner.propose = server.Propose
+	runner.supervisor = supervisor.New(parts.Docker, runner.rules, supervisor.DefaultBackoff, runner.forgetApplied, logger)
+	go runner.supervisor.Run(reconcilers, compose.LabelStack)
 	go controller.RunPlacement(reconcilers, node, server.Propose, logger)
-	go hostStacks.trim(reconcilers)
+	go runner.trim(reconcilers)
 	go func() {
 		// a state that lags may still place a stack here that has moved on,
 		// so containers start only once the state caught up
 		if caughtUp != nil && !waitForState(reconcilers, node, logger) {
 			return
 		}
-		hostStacks.reconcile(reconcilers)
+		runner.reconcile(reconcilers)
 	}()
 	servers, serveErrors, err := serveAPI(server, host.apiAddresses(), logger)
 	if err != nil {

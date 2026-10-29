@@ -287,10 +287,16 @@ func TestStacksBelongToTheirOwner(t *testing.T) {
 	c.refuse(KindPutStack, LeaderActor, PutStack{Name: "shop", Owner: GitOpsOwner("main"), Source: spec}, "belongs to cli")
 
 	host := HostID(0)
-	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host})
+	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host},
+		"only its host")
+	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Status: StackStarting, Host: &host})
 	if !stack.LastMove.Equal(testTime) {
 		t.Errorf("placing a stack is a move: %v", stack.LastMove)
 	}
+	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host})
+	c.refuse(KindSetStackStatus, HostActor(1), SetStackStatus{Name: "shop", Status: StackStopped, Host: &host},
+		"only its host")
+	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackPending}, "only where it is")
 	gone := HostID(7)
 	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Status: StackRunning, Host: &gone}, "not a member")
 	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Status: "dancing"}, "unknown status")
@@ -336,8 +342,10 @@ func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: strange}, "unknown status")
 
 	c.refuse(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop"}, "still has volume shop/pgdata")
-	c.mustApply(KindDeleteVolume, UserActor("alice"), DeleteVolume{ID: "shop/pgdata"})
-	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop"})
+	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop", WithVolumes: true})
+	if len(c.state.Volumes) != 0 || len(c.state.Stacks) != 0 {
+		t.Errorf("left behind: %v, %v", c.state.Volumes, c.state.Stacks)
+	}
 }
 
 func TestOperationsHoldTheirLocks(t *testing.T) {

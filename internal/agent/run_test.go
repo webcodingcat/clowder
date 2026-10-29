@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -135,6 +136,8 @@ func (f *fakeStorage) MountPoint(volume storage.Volume) string {
 // container per stack.
 type fakeDocker struct {
 	calls
+	// failedUps is how many compose ups fail before one works
+	failedUps int
 }
 
 func (f *fakeDocker) Events(ctx context.Context, _ string) (<-chan docker.Event, <-chan error) {
@@ -151,6 +154,12 @@ func (f *fakeDocker) Restart(context.Context, string) error { return nil }
 
 func (f *fakeDocker) ComposeUp(_ context.Context, stack, _ string) error {
 	f.add("up %s", stack)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failedUps > 0 {
+		f.failedUps--
+		return errors.New("pull access denied")
+	}
 	return nil
 }
 

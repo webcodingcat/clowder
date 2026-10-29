@@ -8,10 +8,10 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
@@ -165,18 +165,7 @@ func (s *Server) deleteStack(w http.ResponseWriter, r *http.Request) {
 			name, volumes))
 		return
 	}
-	for _, id := range volumes {
-		cmd, err := state.NewCommand(state.KindDeleteVolume, time.Time{}, actorOf(identityOf(r)),
-			state.DeleteVolume{ID: id})
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if _, ok := s.commit(w, r, cmd, s.Propose); !ok {
-			return
-		}
-	}
-	s.write(w, r, state.KindDeleteStack, state.DeleteStack{Name: name})
+	s.write(w, r, state.KindDeleteStack, state.DeleteStack{Name: name, WithVolumes: len(volumes) > 0})
 }
 
 func stackOf(volumeID string) string {
@@ -213,7 +202,7 @@ func (s *Server) stackPs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if host != s.config.HostID {
-		s.relay(w, r, host, "/v1/internal/stacks/"+name+"/ps")
+		s.relay(w, r, host, "/v1/internal/stacks/"+url.PathEscape(name)+"/ps")
 		return
 	}
 	s.localPs(w, r)
@@ -227,7 +216,7 @@ func (s *Server) stackLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if host != s.config.HostID {
-		s.relay(w, r, host, "/v1/internal/stacks/"+name+"/logs?"+r.URL.RawQuery)
+		s.relay(w, r, host, "/v1/internal/stacks/"+url.PathEscape(name)+"/logs?"+r.URL.RawQuery)
 		return
 	}
 	s.localLogs(w, r)

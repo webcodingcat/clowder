@@ -18,9 +18,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// maxMinor is the highest DRBD minor (state checks the same bound).
-const maxMinor = 999
-
 // Placement is a decision for one stack: the host and the volumes that are
 // new there (all of them for a new stack, the added ones for an update).
 type Placement struct {
@@ -198,7 +195,7 @@ func (p *planner) fit(host state.HostID, className string, size int64, tentative
 
 // freeMinor takes the lowest DRBD minor no volume has.
 func (p *planner) freeMinor() (int, bool) {
-	for minor := range maxMinor + 1 {
+	for minor := range state.MaxMinor + 1 {
 		if !p.minors[minor] {
 			p.minors[minor] = true
 			return minor, true

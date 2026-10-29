@@ -20,10 +20,6 @@ type HostNetwork interface {
 	StartResolver() (io.Closer, error)
 }
 
-// reconcileInterval is how often the reconcilers run without a change of the
-// state, to repair what someone changed by hand.
-const reconcileInterval = 30 * time.Second
-
 // reconcileNetwork keeps the nft rules as the state says until ctx ends:
 // after a change of the state when the rules differ, and every
 // reconcileInterval anyway, to repair what someone changed by hand.

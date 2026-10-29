@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -17,6 +18,9 @@ type fakeDocker struct {
 	mu        sync.Mutex
 	started   []string
 	restarted []string
+	// failedStarts is how many starts fail before one works
+	failedStarts int
+	missed       int
 }
 
 func (f *fakeDocker) Events(context.Context, string) (<-chan docker.Event, <-chan error) {
@@ -26,8 +30,18 @@ func (f *fakeDocker) Events(context.Context, string) (<-chan docker.Event, <-cha
 func (f *fakeDocker) Start(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failedStarts > 0 {
+		f.failedStarts--
+		return errors.New("the image is gone")
+	}
 	f.started = append(f.started, id)
 	return nil
+}
+
+func (f *fakeDocker) miss() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.missed++
 }
 
 func (f *fakeDocker) Restart(_ context.Context, id string) error {
@@ -67,7 +81,7 @@ func running(t *testing.T) (*Supervisor, *fakeDocker) {
 	t.Helper()
 	fake := &fakeDocker{events: make(chan docker.Event)}
 	supervisor := New(fake, rules, Backoff{Base: time.Millisecond, Max: 4 * time.Millisecond, Stable: time.Hour},
-		slog.New(slog.NewTextHandler(io.Discard, nil)))
+		fake.miss, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go supervisor.Run(ctx, "clowder.stack")
@@ -135,6 +149,29 @@ func TestRestartRulesOfCompose(t *testing.T) {
 	}
 }
 
+func TestAFailedStartIsTriedAgain(t *testing.T) {
+	_, fake := running(t)
+	fake.mu.Lock()
+	fake.failedStarts = 2
+	fake.mu.Unlock()
+	fake.events <- event("die", "app", 1)
+	settle()
+	if started, _ := fake.counts(); started != 1 {
+		t.Errorf("%d starts after two failed ones, want 1", started)
+	}
+}
+
+func TestABreakInTheEventsIsReported(t *testing.T) {
+	_, fake := running(t)
+	close(fake.events) // Docker restarted
+	settle()
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.missed == 0 {
+		t.Error("the break went unreported")
+	}
+}
+
 func TestUnhealthyContainersRestartUnlessTheyMayNot(t *testing.T) {
 	_, fake := running(t)
 	fake.events <- event("health_status: unhealthy", "app", 0)
@@ -146,7 +183,7 @@ func TestUnhealthyContainersRestartUnlessTheyMayNot(t *testing.T) {
 }
 
 func TestBackoffDoublesUpToItsMaximum(t *testing.T) {
-	supervisor := New(nil, rules, DefaultBackoff, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	supervisor := New(nil, rules, DefaultBackoff, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	want := []time.Duration{
 		time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second,
 		16 * time.Second, 32 * time.Second, time.Minute, time.Minute,

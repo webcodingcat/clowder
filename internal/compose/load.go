@@ -100,12 +100,12 @@ func check(project *types.Project) (*Stack, error) {
 	// a file named here lives on this machine, not on the host that runs the stack
 	for _, name := range slices.Sorted(maps.Keys(project.Secrets)) {
 		if project.Secrets[name].File != "" {
-			report("secret %s: file is not supported; use environment", name)
+			report("secret %s: file is not supported", name)
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(project.Configs)) {
 		if project.Configs[name].File != "" {
-			report("config %s: file is not supported; use content or environment", name)
+			report("config %s: file is not supported; use content", name)
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(project.Services)) {
@@ -387,7 +387,7 @@ func ReservedPort(port uint16) bool {
 		return true
 	case port >= 7400 && port <= 7499: // Raft, agent API, metrics, ACME, Traefik inside
 		return true
-	case port >= 10000 && port <= 10999: // DRBD: 10000 + minor (state's maxMinor)
+	case port >= 10000 && port <= 10999: // DRBD: 10000 + minor (state.MaxMinor)
 		return true
 	case port >= 20000 && port <= 29999: // exported services
 		return true
