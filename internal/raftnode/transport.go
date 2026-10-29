@@ -3,7 +3,6 @@ package raftnode
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -26,42 +25,11 @@ type tlsStream struct {
 func newTLSStream(bind string, advertise net.Addr, certificate tls.Certificate, ca *x509.Certificate,
 	revoked func(serial string) bool,
 ) (*tlsStream, error) {
-	roots := x509.NewCertPool()
-	roots.AddCert(ca)
-	verifyHost := func(rawCertificates [][]byte, _ [][]*x509.Certificate) error {
-		if len(rawCertificates) == 0 {
-			return errors.New("no certificate")
-		}
-		peer, err := x509.ParseCertificate(rawCertificates[0])
-		if err != nil {
-			return err
-		}
-		identity, err := pki.Verify(ca, peer, revoked, time.Now())
-		if err != nil {
-			return err
-		}
-		if identity.Role != pki.RoleHost {
-			return fmt.Errorf("%s is no host", identity.Name)
-		}
-		return nil
-	}
-	server := &tls.Config{
-		Certificates:          []tls.Certificate{certificate},
-		ClientCAs:             roots,
-		ClientAuth:            tls.RequireAndVerifyClientCert,
-		VerifyPeerCertificate: verifyHost,
-		MinVersion:            tls.VersionTLS13,
-	}
-	listener, err := tls.Listen("tcp", bind, server)
+	listener, err := tls.Listen("tcp", bind, pki.HostServerTLS(certificate, ca, revoked))
 	if err != nil {
 		return nil, fmt.Errorf("listen for Raft on %s: %w", bind, err)
 	}
-	client := &tls.Config{
-		Certificates:          []tls.Certificate{certificate},
-		RootCAs:               roots,
-		VerifyPeerCertificate: verifyHost,
-		MinVersion:            tls.VersionTLS13,
-	}
+	client := pki.HostClientTLS(certificate, ca, revoked)
 	return &tlsStream{Listener: listener, advertise: advertise, client: client}, nil
 }
 
@@ -71,7 +39,7 @@ func (s *tlsStream) Addr() net.Addr {
 	return s.advertise
 }
 
-// Dial connects to a peer; its certificate must carry the dialed address.
+// Dial connects to a peer, which must show a host certificate of the cluster.
 func (s *tlsStream) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: timeout}
 	connection, err := tls.DialWithDialer(dialer, "tcp", string(address), s.client)

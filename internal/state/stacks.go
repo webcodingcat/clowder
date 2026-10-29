@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -44,16 +45,24 @@ type PutStack struct {
 	Owner    string          `json:"owner"`
 	Spec     json.RawMessage `json:"spec"`
 	Priority int             `json:"priority"`
+	// Operation is set when the operation holding the lock makes the change.
+	Operation string `json:"operation,omitempty"`
 }
+
+// stackName is what Compose allows as a project name; it has no "/", which
+// separates the stack from the volume in a volume ID.
+var stackName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 func applyPutStack(s *State, _ Command, payload PutStack) error {
 	switch {
-	case payload.Name == "" || payload.Owner == "":
-		return errors.New("the stack needs a name and an owner")
+	case !stackName.MatchString(payload.Name):
+		return fmt.Errorf("stack name %q: use lowercase letters, digits, - and _", payload.Name)
+	case payload.Owner == "":
+		return errors.New("the stack needs an owner")
 	case len(payload.Spec) == 0:
 		return fmt.Errorf("stack %s has no spec", payload.Name)
 	}
-	if err := s.checkUnlocked(stackLock(payload.Name)); err != nil {
+	if err := s.checkUnlocked(stackLock(payload.Name), payload.Operation); err != nil {
 		return err
 	}
 	stack, exists := s.Stacks[payload.Name]
@@ -73,6 +82,8 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 // command, so no volume is left without its stack.
 type DeleteStack struct {
 	Name string `json:"name"`
+	// Operation is set when the operation holding the lock makes the change.
+	Operation string `json:"operation,omitempty"`
 }
 
 func applyDeleteStack(s *State, _ Command, payload DeleteStack) error {
@@ -84,7 +95,7 @@ func applyDeleteStack(s *State, _ Command, payload DeleteStack) error {
 			return fmt.Errorf("stack %s still has volume %s", payload.Name, id)
 		}
 	}
-	if err := s.checkUnlocked(stackLock(payload.Name)); err != nil {
+	if err := s.checkUnlocked(stackLock(payload.Name), payload.Operation); err != nil {
 		return err
 	}
 	delete(s.Stacks, payload.Name)
@@ -135,12 +146,15 @@ func (s *State) checkLiveHost(id *HostID) error {
 }
 
 // maxMinor is the highest DRBD minor: its port 10000 + minor stays in the
-// range clowder reserves for DRBD.
+// range compose.ReservedPort keeps for DRBD (10000-10999); both change
+// together.
 const maxMinor = 999
 
 // PutVolume creates a volume or replaces its record.
 type PutVolume struct {
 	Volume Volume `json:"volume"`
+	// Operation is set when the operation holding the lock makes the change.
+	Operation string `json:"operation,omitempty"`
 }
 
 func applyPutVolume(s *State, _ Command, payload PutVolume) error {
@@ -152,7 +166,7 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) error {
 	if _, ok := s.Stacks[stackName]; !ok {
 		return fmt.Errorf("volume %s: no stack %s", volume.ID, stackName)
 	}
-	if err := s.checkUnlocked(volumeLock(volume.ID)); err != nil {
+	if err := s.checkUnlocked(volumeLock(volume.ID), payload.Operation); err != nil {
 		return err
 	}
 	if old, ok := s.Volumes[volume.ID]; ok && volume.Generation < old.Generation {
@@ -187,13 +201,15 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) error {
 // DeleteVolume removes a volume's record.
 type DeleteVolume struct {
 	ID string `json:"id"`
+	// Operation is set when the operation holding the lock makes the change.
+	Operation string `json:"operation,omitempty"`
 }
 
 func applyDeleteVolume(s *State, _ Command, payload DeleteVolume) error {
 	if _, ok := s.Volumes[payload.ID]; !ok {
 		return fmt.Errorf("no volume %s", payload.ID)
 	}
-	if err := s.checkUnlocked(volumeLock(payload.ID)); err != nil {
+	if err := s.checkUnlocked(volumeLock(payload.ID), payload.Operation); err != nil {
 		return err
 	}
 	delete(s.Volumes, payload.ID)

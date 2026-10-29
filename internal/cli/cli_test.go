@@ -52,7 +52,7 @@ func (h *oneHost) Read(use func(current *state.State)) {
 
 func (h *oneHost) WaitIndex(context.Context, uint64) error { return nil }
 func (h *oneHost) IsLeader() bool                          { return true }
-func (h *oneHost) Leader() (string, string)                { return "", "0" }
+func (h *oneHost) Leader() (state.HostID, bool)            { return 0, true }
 
 // startCluster runs an agent's API with one host and writes a cluster
 // directory for alice that points at it.
@@ -82,7 +82,7 @@ func startCluster(t *testing.T) string {
 	cmd, err := state.NewCommand(state.KindBootstrap, time.Now(), state.LeaderActor, state.Bootstrap{
 		Keys:    state.ClusterKeys{CACertificate: ca.CertificatePEM(), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
 		JoinKey: state.Sealed("join"),
-		Host:    state.Host{ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg"},
+		Host:    state.Host{ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +195,7 @@ func TestHostCommandsTalkToTheCluster(t *testing.T) {
 	}
 
 	if _, err := run(t, "--cluster", dir, "host", "enable", "node0"); err == nil ||
-		!strings.Contains(err.Error(), "cannot go from draining to fenced") {
+		!strings.Contains(err.Error(), "enable works on a host that is disabled") {
 		t.Errorf("want the state's refusal, got %v", err)
 	}
 	if _, err := run(t, "--cluster", dir, "host", "drain", "node9"); err == nil || !strings.Contains(err.Error(), `no host "node9"`) {

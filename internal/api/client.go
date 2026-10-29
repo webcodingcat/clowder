@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
 	"strings"
 	"time"
@@ -35,32 +36,8 @@ func NewClient(seeds []string, certificate tls.Certificate, ca *x509.Certificate
 		version: version,
 		http: &http.Client{
 			Timeout:   30 * time.Second,
-			Transport: &http.Transport{TLSClientConfig: clientTLS(certificate, ca)},
+			Transport: &http.Transport{TLSClientConfig: pki.HostClientTLS(certificate, ca, nil)},
 		},
-	}
-}
-
-// clientTLS trusts any host of the cluster's CA, whatever name or address it
-// was reached by: seeds may be names, and a host certificate lists only the
-// host's addresses.
-func clientTLS(certificate tls.Certificate, ca *x509.Certificate) *tls.Config {
-	return &tls.Config{
-		Certificates:       []tls.Certificate{certificate},
-		InsecureSkipVerify: true, //nolint:gosec // VerifyConnection checks the chain instead of the name
-		VerifyConnection: func(connection tls.ConnectionState) error {
-			if len(connection.PeerCertificates) == 0 {
-				return errors.New("the agent showed no certificate")
-			}
-			identity, err := pki.Verify(ca, connection.PeerCertificates[0], func(string) bool { return false }, time.Now())
-			if err != nil {
-				return fmt.Errorf("the agent's certificate: %w", err)
-			}
-			if identity.Role != pki.RoleHost {
-				return fmt.Errorf("%s is no host of the cluster", identity.Name)
-			}
-			return nil
-		},
-		MinVersion: tls.VersionTLS13,
 	}
 }
 
@@ -87,8 +64,8 @@ func (c *Client) Post(ctx context.Context, path string, in any) (Written, error)
 	return written, nil
 }
 
-// do sends a request to the first seed that answers. Only a seed that cannot
-// be reached is skipped; an answer, even an error, ends the search.
+// do sends a request to the first seed that answers. A seed that cannot be
+// reached is skipped; an answer, even an error, ends the search.
 func (c *Client) do(ctx context.Context, method, path string, body []byte, out any) error {
 	var unreachable []string
 	for _, seed := range c.seeds {
@@ -100,13 +77,21 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 		if method == http.MethodGet && c.written > 0 {
 			request.Header.Set(MinIndexHeader, strconv.FormatUint(c.written, 10))
 		}
+		// a write goes to the next seed only if it never left: one that was
+		// sent may have committed even though no answer came back
+		var sent bool
+		request = request.WithContext(httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+			WroteRequest: func(httptrace.WroteRequestInfo) { sent = true },
+		}))
 		err = send(c.http, request, out)
 		var statusError *StatusError
-		if err != nil && !errors.As(err, &statusError) {
-			unreachable = append(unreachable, fmt.Sprintf("%s: %v", seed, err))
-			continue
+		switch {
+		case err == nil || errors.As(err, &statusError):
+			return err
+		case sent && method != http.MethodGet:
+			return fmt.Errorf("%s: %w (the write may have gone through: look before you repeat it)", seed, err)
 		}
-		return err
+		unreachable = append(unreachable, fmt.Sprintf("%s: %v", seed, err))
 	}
 	return fmt.Errorf("no agent answered:\n  %s", strings.Join(unreachable, "\n  "))
 }

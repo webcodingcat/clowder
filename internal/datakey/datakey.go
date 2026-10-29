@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"filippo.io/age"
@@ -56,21 +57,57 @@ func Load(path string) (*Key, error) {
 	return Parse(string(content))
 }
 
-// Save writes the key to path, readable by root only. It writes a new file
-// and renames it, so a crash leaves the old key or the new one, never half
-// of one.
+// Save writes the key to path, readable by root only. It writes a new file,
+// syncs it and renames it, then syncs the directory: a crash or power loss
+// leaves the old key or the new one, never half of one.
 func (k *Key) Save(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("save the data key: %w", err)
 	}
 	temporary := path + ".new"
-	if err := os.WriteFile(temporary, []byte(k.Text()+"\n"), 0o600); err != nil {
+	if err := writeSynced(temporary, []byte(k.Text()+"\n")); err != nil {
 		return fmt.Errorf("save the data key: %w", err)
 	}
 	if err := os.Rename(temporary, path); err != nil {
 		return fmt.Errorf("save the data key: %w", err)
 	}
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("save the data key: %w", err)
+	}
 	return nil
+}
+
+// writeSynced writes a file readable by its owner only and waits until it
+// is on disk.
+func writeSynced(path string, content []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(content); err != nil {
+		_ = file.Close() // the write error is the one to report
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+// syncDir makes a rename in dir durable. Windows cannot sync a directory
+// (the agent runs on Linux; the tests run anywhere).
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	syncErr := directory.Sync()
+	return errors.Join(syncErr, directory.Close())
 }
 
 // Seal encrypts a secret for the cluster state.

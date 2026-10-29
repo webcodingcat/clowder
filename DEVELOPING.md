@@ -165,12 +165,17 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 
 ## Raft (`internal/raftnode`) and the data key (`internal/datakey`)
 
+`raftnode`, `datakey` and the server of `api` are built and tested, but no binary runs them
+yet: `clowderd run` and `clowderd init` put them together.
+
 - `raftnode` runs hashicorp/raft: log and stable store in BoltDB (`raft.db`), a snapshot every
   8192 entries (2 kept), the state of `internal/state` as the replicated machine. Raft's own
   log lines go through `log/slog` (hclog's bridge).
 - The network is mutual TLS on port 7400 of the node address: both sides show a host
   certificate of the cluster CA that is not revoked (the state's list). Users' certificates and
-  other clusters' hosts fail the handshake.
+  other clusters' hosts fail the handshake. Removing a host revokes its certificate, so it
+  leaves Raft and the API at once. `pki.HostClientTLS` and `pki.HostServerTLS` are the one way
+  hosts are checked, by Raft and by the API alike: the chain and the role, not the name.
 - `Propose` commits a command through the leader and returns its index, or the state's
   refusal. `Read` gives the current state under a lock; nothing may keep it, as `Apply` changes
   it in place. `WaitIndex` lets a read follow a write made through another member.
@@ -194,10 +199,17 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - The actor of a command is the caller of the first agent. Hosts are trusted with the users
   they forward for, but a host speaks only for itself.
 - A refusal of the state is HTTP 409 with its reason; a write that did not commit is 503.
+- `api.HostActions` lists the user's host actions with the phases they start from; the server
+  checks them and the CLI makes its subcommands from them.
 - CLI and agent refuse each other more than one minor version apart (`X-Clowder-Version`,
-  `buildinfo.Compatible`); development builds talk to everything.
+  `buildinfo.Compatible`); development builds and callers without a version talk to
+  everything.
 - The client tries the seeds of `cluster.yaml` in turn and trusts any host certificate of the
-  cluster's CA, whatever name the seed has.
+  cluster's CA, whatever name the seed has. A read goes on to the next seed after any network
+  error; a write only if it never left (`httptrace`), since one that was sent may have
+  committed without an answer.
+- An operation that holds a lock names itself in the change (`Operation` in `PutStack`,
+  `PutVolume`, ...); everyone else is refused while the lock is held.
 - The CLI finds the cluster directory (`--cluster`, `$CLOWDER_CLUSTER`, the working directory)
   and the user (`--user`, `$CLOWDER_USER`, the only credentials file), then talks to the
   cluster with the user's certificate. So far: `cluster status`, `host list`,

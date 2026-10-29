@@ -28,11 +28,11 @@ func (g *globals) register(root *cobra.Command) {
 // connect reads the cluster directory and the user's credentials and returns
 // a client for the cluster's agents.
 func (g *globals) connect() (*api.Client, error) {
-	dir, err := clusterdir.Find(g.cluster)
+	path, err := clusterdir.Find(g.cluster)
 	if err != nil {
 		return nil, err
 	}
-	directory, err := clusterdir.Load(dir)
+	directory, err := clusterdir.Load(path)
 	if err != nil {
 		return nil, err
 	}

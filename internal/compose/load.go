@@ -350,11 +350,11 @@ func ReservedPort(port uint16) bool {
 		return true
 	case port >= 7400 && port <= 7499: // Raft, agent API, metrics, ACME, Traefik inside
 		return true
-	case port >= 10000 && port <= 10999: // DRBD: 10000 + minor
+	case port >= 10000 && port <= 10999: // DRBD: 10000 + minor (state's maxMinor)
 		return true
 	case port >= 20000 && port <= 29999: // exported services
 		return true
-	case port >= 51800 && port <= 51831: // WireGuard: 51800 + host ID
+	case port >= 51800 && port <= 51831: // WireGuard: 51800 + host ID (state.MaxHosts)
 		return true
 	default:
 		return false

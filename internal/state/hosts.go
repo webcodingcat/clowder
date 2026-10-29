@@ -71,6 +71,8 @@ func checkNewHost(host Host) error {
 		return fmt.Errorf("host %s has no underlay address", host.Name)
 	case host.WGPublicKey == "":
 		return fmt.Errorf("host %s has no WireGuard key", host.Name)
+	case host.CertificateSerial == "":
+		return fmt.Errorf("host %s has no certificate serial", host.Name)
 	}
 	return nil
 }
@@ -90,21 +92,21 @@ type SetHostPhase struct {
 type mover int
 
 const (
-	byLeader mover = iota
+	byLeaderOrUser mover = iota
 	byTheHost
 )
 
 // phaseChanges are the allowed moves; any phase may also go to Removed, by
 // the leader.
 var phaseChanges = map[HostPhase]map[HostPhase]mover{
-	Joining:    {Passive: byLeader, Active: byLeader},
-	Passive:    {Active: byLeader},
-	Active:     {Draining: byLeader, Failed: byLeader},
-	Draining:   {Active: byLeader, Failed: byLeader},
-	Failed:     {Active: byTheHost, Fenced: byLeader},
-	Fenced:     {Recovering: byTheHost, Disabled: byLeader},
+	Joining:    {Passive: byLeaderOrUser, Active: byLeaderOrUser},
+	Passive:    {Active: byLeaderOrUser},
+	Active:     {Draining: byLeaderOrUser, Failed: byLeaderOrUser},
+	Draining:   {Active: byLeaderOrUser, Failed: byLeaderOrUser},
+	Failed:     {Active: byTheHost, Fenced: byLeaderOrUser},
+	Fenced:     {Recovering: byTheHost, Disabled: byLeaderOrUser},
 	Recovering: {Active: byTheHost},
-	Disabled:   {Fenced: byLeader},
+	Disabled:   {Fenced: byLeaderOrUser},
 }
 
 func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) error {
@@ -117,7 +119,7 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) error {
 	}
 	who, allowed := phaseChanges[host.Phase][payload.Phase]
 	if payload.Phase == Removed {
-		who, allowed = byLeader, true
+		who, allowed = byLeaderOrUser, true
 	}
 	if !allowed {
 		return fmt.Errorf("host %s cannot go from %s to %s", host.Name, host.Phase, payload.Phase)
@@ -126,7 +128,7 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) error {
 	switch {
 	case who == byTheHost && cmd.Actor != HostActor(host.ID):
 		return fmt.Errorf("only host %s itself reports %s", host.Name, payload.Phase)
-	case who == byLeader && fromHost:
+	case who == byLeaderOrUser && fromHost:
 		return fmt.Errorf("%s cannot move host %s to %s; only the leader does", cmd.Actor, host.Name, payload.Phase)
 	}
 	host.Phase = payload.Phase
@@ -135,6 +137,7 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) error {
 	}
 	if host.Phase == Removed {
 		host.Voter = false
+		s.Revoked[host.CertificateSerial] = cmd.At
 	}
 	return nil
 }

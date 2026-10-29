@@ -108,7 +108,7 @@ func bootstrapCommand(t *testing.T) state.Command {
 		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
 		JoinKey: state.Sealed("join"),
 		Host: state.Host{
-			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg",
+			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
 		},
 	})
 }
@@ -209,8 +209,8 @@ func TestThreeHostsReplicateOverMutualTLS(t *testing.T) {
 			t.Errorf("host %d has users %v", id, got)
 		}
 	}
-	if _, id := nodes[2].Leader(); id != "0" {
-		t.Errorf("host 2 sees leader %q", id)
+	if id, ok := nodes[2].Leader(); !ok || id != 0 {
+		t.Errorf("host 2 sees leader %d (%v)", id, ok)
 	}
 	if _, err := nodes[1].Propose(ctx, command(t, state.KindAddUser, state.AddUser{Name: "bob", Serial: "b1"})); err == nil {
 		t.Error("a follower committed a command")

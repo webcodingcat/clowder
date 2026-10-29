@@ -37,10 +37,11 @@ func newCluster(t *testing.T) *cluster {
 
 func testHost(id HostID) Host {
 	return Host{
-		ID:          id,
-		Name:        "node" + string(rune('0'+id)),
-		Underlay:    netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
-		WGPublicKey: "wg-key",
+		ID:                id,
+		Name:              "node" + string(rune('0'+id)),
+		Underlay:          netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
+		WGPublicKey:       "wg-key",
+		CertificateSerial: "serial-" + string(rune('0'+id)),
 	}
 }
 
@@ -320,6 +321,8 @@ func TestOperationsHoldTheirLocks(t *testing.T) {
 
 	c.refuse(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Spec: json.RawMessage(`{}`)},
 		"locked by operation 01A")
+	// the operation itself may change what it holds
+	c.mustApply(KindPutStack, LeaderActor, PutStack{Name: "shop", Owner: OwnerCLI, Spec: json.RawMessage(`{}`), Operation: "01A"})
 	backup := Operation{ID: "01B", Kind: "backup", Locks: []string{"volume/shop/pgdata"}}
 	before := c.encoded()
 	err := c.apply(KindStartOperation, LeaderActor, StartOperation{Operation: backup})
@@ -463,4 +466,13 @@ func gzipped(t *testing.T, plain []byte) []byte {
 		t.Fatal(err)
 	}
 	return buffer.Bytes()
+}
+
+func TestRemovingAHostRevokesItsCertificate(t *testing.T) {
+	c := newCluster(t)
+	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
+	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 1, Phase: Removed})
+	if at, revoked := c.state.Revoked[testHost(1).CertificateSerial]; !revoked || !at.Equal(testTime) {
+		t.Errorf("the removed host's certificate is not revoked: %v", c.state.Revoked)
+	}
 }

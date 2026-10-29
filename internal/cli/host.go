@@ -25,14 +25,6 @@ func printHosts(out io.Writer, hosts []api.HostInfo) error {
 	return table.Flush()
 }
 
-// hostActions are the subcommands that move a host to another phase.
-var hostActions = []struct{ name, short string }{
-	{"drain", "Move the stacks off a host, for maintenance"},
-	{"undrain", "Let a drained host take stacks again"},
-	{"remove", "Remove a host from the cluster for good"},
-	{"enable", "Let a host the flapping brake disabled be powered on again"},
-}
-
 func newHost(g *globals) *cobra.Command {
 	host := &cobra.Command{Use: "host", Short: "The hosts of the cluster"}
 	host.AddCommand(&cobra.Command{
@@ -51,10 +43,10 @@ func newHost(g *globals) *cobra.Command {
 			return printHosts(cmd.OutOrStdout(), hosts)
 		},
 	})
-	for _, action := range hostActions {
+	for _, action := range api.HostActions {
 		host.AddCommand(&cobra.Command{
-			Use:   action.name + " <host>",
-			Short: action.short,
+			Use:   action.Name + " <host>",
+			Short: action.Description,
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				client, err := g.connect()
@@ -69,10 +61,10 @@ func newHost(g *globals) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if _, err := client.Post(cmd.Context(), "/v1/hosts/"+strconv.Itoa(id)+"/"+action.name, nil); err != nil {
+				if _, err := client.Post(cmd.Context(), "/v1/hosts/"+strconv.Itoa(id)+"/"+action.Name, nil); err != nil {
 					return err
 				}
-				_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s: %s done\n", args[0], action.name)
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s: %s done\n", args[0], action.Name)
 				return err
 			},
 		})

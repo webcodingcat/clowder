@@ -46,8 +46,30 @@ func Compare(a, b string) int {
 		// the one with a suffix is the earlier build
 		return cmp.Compare(len(second.suffix), len(first.suffix))
 	default:
-		return cmp.Compare(first.suffix, second.suffix)
+		return compareSuffixes(first.suffix, second.suffix)
 	}
+}
+
+// suffixRun is a run of digits or of other characters in a suffix.
+var suffixRun = regexp.MustCompile(`\d+|\D+`)
+
+// compareSuffixes compares runs of digits by their number and the rest as
+// text, as Debian does: ~rc2 < ~rc10.
+func compareSuffixes(a, b string) int {
+	first, second := suffixRun.FindAllString(a, -1), suffixRun.FindAllString(b, -1)
+	for index := range min(len(first), len(second)) {
+		left, right := first[index], second[index]
+		leftNumber, leftErr := strconv.Atoi(left)
+		rightNumber, rightErr := strconv.Atoi(right)
+		order := cmp.Compare(left, right)
+		if leftErr == nil && rightErr == nil {
+			order = cmp.Compare(leftNumber, rightNumber)
+		}
+		if order != 0 {
+			return order
+		}
+	}
+	return cmp.Compare(len(first), len(second))
 }
 
 // rank orders false before true.
@@ -60,7 +82,9 @@ func rank(value bool) int {
 
 // Compatible tells whether a CLI and an agent may talk: releases of the same
 // major version at most one minor version apart (N and N-1 run side by side
-// during an upgrade). Development builds talk to everything.
+// during an upgrade). Development builds talk to everything, and so does a
+// caller without a version it can read (curl, a script): the check is there
+// to explain a mismatch, not to keep anyone out.
 func Compatible(a, b string) bool {
 	first, firstOK := parse(a)
 	second, secondOK := parse(b)

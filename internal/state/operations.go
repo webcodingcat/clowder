@@ -57,9 +57,10 @@ func (e *LockedError) Error() string {
 	return fmt.Sprintf("%s is locked by operation %s", e.Lock, e.Operation)
 }
 
-// checkUnlocked refuses a change to something an operation holds.
-func (s *State) checkUnlocked(lock string) error {
-	if holder, held := s.Locks[lock]; held {
+// checkUnlocked refuses a change to something an operation holds, unless
+// that operation makes it.
+func (s *State) checkUnlocked(lock, operation string) error {
+	if holder, held := s.Locks[lock]; held && holder != operation {
 		return &LockedError{Lock: lock, Operation: holder}
 	}
 	return nil

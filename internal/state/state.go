@@ -17,7 +17,8 @@ import (
 )
 
 // MaxHosts is the size of a cluster: a host ID is also the DRBD node-id and
-// the last part of the node address and the WireGuard port.
+// the last part of the node address and the WireGuard port (51800 + ID;
+// compose.ReservedPort keeps 51800-51831 free, so both change together).
 const MaxHosts = 32
 
 // HostID is a host's number, 0 to MaxHosts-1.
@@ -89,9 +90,12 @@ type Host struct {
 	ServerRef   string     `json:"server_ref,omitempty"` // the hoster's ID of the server
 	Underlay    netip.Addr `json:"underlay"`
 	WGPublicKey string     `json:"wg_public_key"`
-	Voter       bool       `json:"voter"`
-	Phase       HostPhase  `json:"phase"`
-	Capacity    Resources  `json:"capacity"`
+	// CertificateSerial is the host certificate; removing the host revokes it,
+	// so a removed host leaves Raft and the API at once.
+	CertificateSerial string    `json:"certificate_serial"`
+	Voter             bool      `json:"voter"`
+	Phase             HostPhase `json:"phase"`
+	Capacity          Resources `json:"capacity"`
 	// Pools are the thin pools by storage class.
 	Pools map[string]Pool `json:"pools,omitempty"`
 	// Version of the agent, as it last reported it.

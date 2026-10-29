@@ -43,10 +43,28 @@ linters:
               desc: Linux only (clowderd)
             - pkg: github.com/webcodingcat/clowder/internal/hostcheck
               desc: "agent only (clowderd); compiles anywhere but the CLI has no use for it"
+            - pkg: github.com/webcodingcat/clowder/internal/datakey
+              desc: "agent only (clowderd): the data key never leaves the hosts"
             - pkg: github.com/vishvananda/netlink
               desc: Linux only
             - pkg: golang.zx2c4.com/wireguard/wgctrl
               desc: Linux only
+        # Every agent must apply the same commands to the same state: the
+        # state reads no files, network, clock or randomness (the time comes
+        # with the command).
+        state-pure:
+          files:
+            - "**/internal/state/*.go"
+            - "!**/internal/state/*_test.go"
+          deny:
+            - pkg: os
+              desc: the state does no I/O
+            - pkg: net/http
+              desc: the state does no I/O
+            - pkg: math/rand
+              desc: Apply must be deterministic
+            - pkg: crypto/rand
+              desc: Apply must be deterministic
     misspell:
       locale: US
     revive:

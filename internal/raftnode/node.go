@@ -5,6 +5,7 @@
 package raftnode
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -146,6 +147,10 @@ func (n *Node) Propose(ctx context.Context, cmd state.Command) (uint64, error) {
 	if deadline, ok := ctx.Deadline(); ok {
 		timeout = min(timeout, time.Until(deadline))
 	}
+	// Raft takes a timeout of 0 or less as none at all
+	if err := ctx.Err(); err != nil || timeout <= 0 {
+		return 0, fmt.Errorf("commit %s: %w", cmd.Kind, cmp.Or(err, context.DeadlineExceeded))
+	}
 	future := n.raft.Apply(encoded, timeout)
 	if err := future.Error(); err != nil {
 		return 0, fmt.Errorf("commit %s: %w", cmd.Kind, err)
@@ -173,10 +178,14 @@ func (n *Node) IsLeader() bool {
 	return n.raft.State() == raft.Leader
 }
 
-// Leader returns the leader's address and ID, empty while there is none.
-func (n *Node) Leader() (string, string) {
-	address, id := n.raft.LeaderWithID()
-	return string(address), string(id)
+// Leader returns the leading host; ok is false while there is none.
+func (n *Node) Leader() (id state.HostID, ok bool) {
+	_, raftID := n.raft.LeaderWithID()
+	number, err := strconv.Atoi(string(raftID))
+	if err != nil {
+		return 0, false
+	}
+	return state.HostID(number), true
 }
 
 // Close stops the member; the log and snapshots stay on disk.

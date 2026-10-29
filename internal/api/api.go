@@ -10,6 +10,8 @@ import (
 	"net"
 	"strconv"
 	"time"
+
+	"github.com/webcodingcat/clowder/internal/state"
 )
 
 // Port is where every agent serves the API (underlay and node address).
@@ -87,4 +89,24 @@ type AuditEntry struct {
 // Written is the answer to a write.
 type Written struct {
 	Index uint64 `json:"index"`
+}
+
+// HostAction is something a user does to a host: POST
+// /v1/hosts/{id}/{name} moves the host from one of From (any phase if
+// empty) to To. The CLI makes its host subcommands from this list.
+type HostAction struct {
+	Name        string
+	Description string
+	From        []state.HostPhase
+	To          state.HostPhase
+}
+
+// HostActions are the actions on hosts.
+var HostActions = []HostAction{
+	{"drain", "Move the stacks off a host, for maintenance", []state.HostPhase{state.Active}, state.Draining},
+	{"undrain", "Let a drained host take stacks again", []state.HostPhase{state.Draining}, state.Active},
+	{"remove", "Remove a host from the cluster for good", nil, state.Removed},
+	// a disabled host becomes fenced again: the leader may then power it
+	// on, and it recovers as any fenced host does
+	{"enable", "Let a host the flapping brake disabled be powered on again", []state.HostPhase{state.Disabled}, state.Fenced},
 }

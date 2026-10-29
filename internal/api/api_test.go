@@ -30,7 +30,7 @@ type fakeCluster struct {
 	mu       sync.Mutex
 	state    *state.State
 	leader   bool
-	leaderID string
+	leaderID state.HostID
 }
 
 func (f *fakeCluster) Propose(_ context.Context, cmd state.Command) (uint64, error) {
@@ -70,7 +70,7 @@ func (f *fakeCluster) WaitIndex(ctx context.Context, index uint64) error {
 
 func (f *fakeCluster) IsLeader() bool { return f.leader }
 
-func (f *fakeCluster) Leader() (string, string) { return "", f.leaderID }
+func (f *fakeCluster) Leader() (state.HostID, bool) { return f.leaderID, true }
 
 // setIndex moves the applied index, as replication would.
 func (f *fakeCluster) setIndex(index uint64) {
@@ -97,7 +97,7 @@ func newTestCluster(t *testing.T) *testCluster {
 	c := &testCluster{t: t, ca: ca}
 	addresses := map[state.HostID]string{}
 	for id := range state.HostID(2) {
-		cluster := &fakeCluster{state: bootstrappedState(t), leader: id == 0, leaderID: "0"}
+		cluster := &fakeCluster{state: bootstrappedState(t), leader: id == 0, leaderID: 0}
 		server := httptest.NewUnstartedServer(nil)
 		api := NewServer(ServerConfig{
 			Cluster: cluster, CA: ca.Certificate, Certificate: c.hostCertificate(id),
@@ -131,10 +131,10 @@ func bootstrappedState(t *testing.T) *state.State {
 	apply(1, state.KindBootstrap, state.Bootstrap{
 		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
 		JoinKey: state.Sealed("join"),
-		Host:    state.Host{ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg"},
+		Host:    state.Host{ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0"},
 	})
 	apply(2, state.KindAddHost, state.AddHost{Host: state.Host{
-		ID: 1, Name: "node1", Underlay: netip.MustParseAddr("10.0.0.3"), WGPublicKey: "wg",
+		ID: 1, Name: "node1", Underlay: netip.MustParseAddr("10.0.0.3"), WGPublicKey: "wg", CertificateSerial: "s1",
 	}})
 	apply(3, state.KindAddUser, state.AddUser{Name: "alice", Serial: "a1"})
 	return current
@@ -234,8 +234,17 @@ func TestAFollowerForwardsWritesToTheLeader(t *testing.T) {
 	})
 
 	// a refusal of the state comes back as such
+	// the API checks the phase a user action starts from
 	_, err = client.Post(ctx, "/v1/hosts/1/enable", nil)
-	if statusOf(err) != http.StatusConflict || !strings.Contains(err.Error(), "cannot go from joining to fenced") {
+	if statusOf(err) != http.StatusConflict || !strings.Contains(err.Error(), "enable works on a host that is disabled") {
+		t.Errorf("want 409 for enabling a joining host, got %v", err)
+	}
+	// the leader's state refuses what the API lets through: removing twice
+	if _, err := client.Post(ctx, "/v1/hosts/1/remove", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Post(ctx, "/v1/hosts/1/remove", nil)
+	if statusOf(err) != http.StatusConflict || !strings.Contains(err.Error(), "node1 is removed") {
 		t.Errorf("want 409 with the state's reason, got %v", err)
 	}
 	if _, err := client.Post(ctx, "/v1/hosts/1/explode", nil); statusOf(err) != http.StatusNotFound {
@@ -326,6 +335,37 @@ func TestTheClientTriesTheNextSeed(t *testing.T) {
 	if len(users) != 1 || users[0].Name != "alice" {
 		t.Errorf("users %+v", users)
 	}
+	// a write that could not leave goes on to the next seed
+	if _, err := client.Post(context.Background(), "/v1/hosts/0/drain", nil); err != nil {
+		t.Errorf("a write after an unreachable seed: %v", err)
+	}
+}
+
+func TestAWriteThatLeftIsNotSentAgain(t *testing.T) {
+	cluster := newTestCluster(t)
+	// this agent takes the request and hangs up without an answer
+	hangsUp := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		connection, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = connection.Close()
+		}
+	}))
+	hangsUp.TLS = &tls.Config{Certificates: []tls.Certificate{cluster.hostCertificate(1)}, MinVersion: tls.VersionTLS13}
+	hangsUp.Config.ErrorLog = log.New(io.Discard, "", 0)
+	hangsUp.StartTLS()
+	defer hangsUp.Close()
+
+	seeds := []string{hangsUp.Listener.Addr().String(), cluster.servers[0].Listener.Addr().String()}
+	client := NewClient(seeds, cluster.userCertificate("alice"), cluster.ca.Certificate, testVersion)
+	_, err := client.Post(context.Background(), "/v1/hosts/0/drain", nil)
+	if err == nil || !strings.Contains(err.Error(), "may have gone through") {
+		t.Errorf("want a warning that the write may have gone through, got %v", err)
+	}
+	cluster.clusters[0].Read(func(current *state.State) {
+		if current.Hosts[0].Phase != state.Active {
+			t.Error("the write went to the second seed as well")
+		}
+	})
 }
 
 func TestAddressAddsTheAPIPort(t *testing.T) {

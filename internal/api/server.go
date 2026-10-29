@@ -30,8 +30,8 @@ type Cluster interface {
 	Read(use func(current *state.State))
 	WaitIndex(ctx context.Context, index uint64) error
 	IsLeader() bool
-	// Leader returns the leader's Raft address and ID (its host ID).
-	Leader() (address, id string)
+	// Leader returns the leading host; ok is false while there is none.
+	Leader() (id state.HostID, ok bool)
 }
 
 // ServerConfig is what an agent's API server needs.
@@ -53,23 +53,12 @@ type Server struct {
 	forwarder *http.Client
 }
 
-// hostActions are the phase each POST /v1/hosts/{id}/{action} moves to.
-var hostActions = map[string]state.HostPhase{
-	"drain":   state.Draining,
-	"undrain": state.Active,
-	"remove":  state.Removed,
-	"enable":  state.Fenced,
-}
-
 // NewServer sets up the routes.
 func NewServer(config ServerConfig) *Server {
-	server := &Server{
-		config: config,
-		mux:    http.NewServeMux(),
-		forwarder: &http.Client{
-			Timeout:   waitTimeout,
-			Transport: &http.Transport{TLSClientConfig: clientTLS(config.Certificate, config.CA)},
-		},
+	server := &Server{config: config, mux: http.NewServeMux()}
+	server.forwarder = &http.Client{
+		Timeout:   waitTimeout,
+		Transport: &http.Transport{TLSClientConfig: pki.HostClientTLS(config.Certificate, config.CA, server.revoked)},
 	}
 	server.handle("GET /v1/status", pki.RoleUser, server.status)
 	server.handle("GET /v1/hosts", pki.RoleUser, server.hosts)
@@ -172,16 +161,14 @@ func actorOf(identity pki.Identity) string {
 
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	var status Status
-	_, leaderID := s.config.Cluster.Leader()
+	leaderID, hasLeader := s.config.Cluster.Leader()
 	s.config.Cluster.Read(func(current *state.State) {
 		status = Status{
 			Name: current.Config.Spec.Name, Revision: current.Config.Revision,
 			Index: current.Index, Hosts: hostInfos(current),
 		}
-		if id, err := strconv.Atoi(leaderID); err == nil {
-			if leader, ok := current.Hosts[state.HostID(id)]; ok {
-				status.Leader = leader.Name
-			}
+		if leader, ok := current.Hosts[leaderID]; hasLeader && ok {
+			status.Leader = leader.Name
 		}
 	})
 	writeJSON(w, http.StatusOK, status)
@@ -207,18 +194,33 @@ func hostInfos(current *state.State) []HostInfo {
 	return hosts
 }
 
+// hostAction checks the phase a user action starts from; the state allows
+// more moves (the leader's), so this is the user's narrower rule.
 func (s *Server) hostAction(w http.ResponseWriter, r *http.Request) {
-	phase, ok := hostActions[r.PathValue("action")]
-	if !ok {
+	index := slices.IndexFunc(HostActions, func(action HostAction) bool { return action.Name == r.PathValue("action") })
+	if index < 0 {
 		writeError(w, http.StatusNotFound, fmt.Errorf("no host action %q", r.PathValue("action")))
 		return
 	}
-	id, err := strconv.Atoi(r.PathValue("id"))
+	action := HostActions[index]
+	number, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("host ID %q is not a number", r.PathValue("id")))
 		return
 	}
-	s.write(w, r, state.KindSetHostPhase, state.SetHostPhase{Host: state.HostID(id), Phase: phase})
+	id := state.HostID(number)
+	var phase state.HostPhase
+	s.config.Cluster.Read(func(current *state.State) {
+		if host, ok := current.Hosts[id]; ok {
+			phase = host.Phase
+		}
+	})
+	if len(action.From) > 0 && phase != "" && !slices.Contains(action.From, phase) {
+		writeError(w, http.StatusConflict, fmt.Errorf("host %d is %s; %s works on a host that is %s",
+			id, phase, action.Name, action.From[0]))
+		return
+	}
+	s.write(w, r, state.KindSetHostPhase, state.SetHostPhase{Host: id, Phase: action.To})
 }
 
 func (s *Server) users(w http.ResponseWriter, _ *http.Request) {
@@ -310,16 +312,15 @@ func (s *Server) propose(ctx context.Context, cmd state.Command) (uint64, error)
 	if s.config.Cluster.IsLeader() {
 		return s.config.Cluster.Propose(ctx, cmd)
 	}
-	_, leaderID := s.config.Cluster.Leader()
-	id, err := strconv.Atoi(leaderID)
-	if err != nil {
+	id, ok := s.config.Cluster.Leader()
+	if !ok {
 		return 0, errors.New("the cluster has no leader right now")
 	}
 	body, err := json.Marshal(cmd)
 	if err != nil {
 		return 0, err
 	}
-	url := "https://" + s.config.APIAddress(state.HostID(id)) + "/v1/internal/propose"
+	url := "https://" + s.config.APIAddress(id) + "/v1/internal/propose"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return 0, err
@@ -327,11 +328,16 @@ func (s *Server) propose(ctx context.Context, cmd state.Command) (uint64, error)
 	request.Header.Set(VersionHeader, s.config.Version)
 	var written Written
 	if err := send(s.forwarder, request, &written); err != nil {
+		// the leader's answer goes back as it is, a refusal as a refusal
 		var statusError *StatusError
-		if errors.As(err, &statusError) && statusError.Status == http.StatusConflict {
+		switch {
+		case errors.As(err, &statusError) && statusError.Status == http.StatusConflict:
 			return 0, &state.Refused{Err: errors.New(statusError.Message)}
+		case errors.As(err, &statusError):
+			return 0, statusError
+		default:
+			return 0, fmt.Errorf("forward to the leader (host %d): %w", id, err)
 		}
-		return 0, fmt.Errorf("forward to the leader (host %d): %w", id, err)
 	}
 	return written.Index, nil
 }

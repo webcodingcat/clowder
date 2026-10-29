@@ -13,6 +13,7 @@ func TestVersionsCompareLikeDebian(t *testing.T) {
 		{"dev", "0.0.1", -1},
 		{"1.2.3~rc1", "1.2.3", -1},
 		{"1.2.3~rc2", "1.2.3~rc1", 1},
+		{"1.2.3~rc10", "1.2.3~rc2", 1},
 	}
 	for _, test := range tests {
 		if got := Compare(test.a, test.b); got != test.want {

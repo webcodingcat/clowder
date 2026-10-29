@@ -34,6 +34,8 @@ func (f *fsm) Apply(entry *raft.Log) any {
 	var cmd state.Command
 	decodeErr := json.Unmarshal(entry.Data, &cmd)
 	f.mu.Lock()
+	// defers run backwards: unlock first, then wake, which takes the lock
+	// again to swap the channel
 	defer f.wake()
 	defer f.mu.Unlock()
 	if decodeErr != nil {
