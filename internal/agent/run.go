@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/api"
@@ -149,12 +150,25 @@ func waitForState(ctx context.Context, node *raftnode.Node, logger *slog.Logger)
 	return false
 }
 
+// freeBind lets a socket bind an address the host does not have yet: at
+// boot the public address can come up after the agent (DHCP, netplan), and
+// the agent must neither fail nor leave users locked out then.
+var freeBind = net.ListenConfig{
+	Control: func(_, _ string, raw syscall.RawConn) error {
+		var optErr error
+		err := raw.Control(func(fd uintptr) {
+			optErr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_FREEBIND, 1)
+		})
+		return errors.Join(err, optErr)
+	},
+}
+
 // serveAPI listens on every address and serves the API there.
 func serveAPI(server *api.Server, addresses []string, logger *slog.Logger) ([]*http.Server, <-chan error, error) {
 	var servers []*http.Server
 	serveErrors := make(chan error, len(addresses))
 	for _, address := range addresses {
-		listener, err := net.Listen("tcp", address)
+		listener, err := freeBind.Listen(context.Background(), "tcp", address)
 		if err != nil {
 			for _, started := range servers {
 				_ = started.Close() // the listen error is the one to report

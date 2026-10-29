@@ -55,7 +55,7 @@ func printStatus(out io.Writer, status api.Status) error {
 }
 
 func newBootstrap(g *globals) *cobra.Command {
-	var recipient, seed, bootstrapKey string
+	var recipient, seed, keyFile string
 	command := &cobra.Command{
 		Use:   "bootstrap <user>",
 		Short: "Become the first user of a new cluster and set up its directory",
@@ -69,6 +69,10 @@ func newBootstrap(g *globals) *cobra.Command {
 				return err
 			}
 			path, err := clusterdir.Target(g.cluster)
+			if err != nil {
+				return err
+			}
+			bootstrapKey, err := pki.ReadBootstrapKey(keyFile)
 			if err != nil {
 				return err
 			}
@@ -101,8 +105,9 @@ func newBootstrap(g *globals) *cobra.Command {
 	}
 	command.Flags().StringVar(&recipient, "age", "", "your age public key (age1...) or SSH public key")
 	command.Flags().StringVar(&seed, "seed", "", "address of the first host")
-	command.Flags().StringVar(&bootstrapKey, "key", "", "the cluster's bootstrap key (from OpenTofu)")
-	for _, name := range []string{"age", "seed", "key"} {
+	command.Flags().StringVar(&keyFile, "key-file", "",
+		"a file with the cluster's bootstrap key (from OpenTofu); not the key itself, which shell histories would keep")
+	for _, name := range []string{"age", "seed", "key-file"} {
 		_ = command.MarkFlagRequired(name) // the flags exist; this cannot fail
 	}
 	return command

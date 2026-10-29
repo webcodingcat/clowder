@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"net"
 	"net/netip"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -280,6 +281,22 @@ func TrustProof(bootstrapKey, caCertificatePEM []byte) []byte {
 	mac := hmac.New(sha256.New, bootstrapKey)
 	mac.Write(caCertificatePEM)
 	return mac.Sum(nil)
+}
+
+// ReadBootstrapKey reads the bootstrap key from a file, without the line end
+// an editor or echo adds. clowderd init and clowder cluster bootstrap take
+// it from a file, never from the command line, where /proc and shell
+// histories would keep it.
+func ReadBootstrapKey(path string) (string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read the bootstrap key: %w", err)
+	}
+	key := strings.TrimSpace(string(content))
+	if key == "" {
+		return "", fmt.Errorf("read the bootstrap key: %s is empty", path)
+	}
+	return key, nil
 }
 
 // CheckTrustProof tells whether a proof matches the CA certificate.

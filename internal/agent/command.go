@@ -19,6 +19,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/command"
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/network"
+	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/storage"
 )
 
@@ -36,18 +37,25 @@ func NewRoot() *cobra.Command {
 
 func newInit() *cobra.Command {
 	var options InitOptions
-	var underlay string
+	var underlay, publicAddress, keyFile string
 	var start bool
 	initCommand := &cobra.Command{
 		Use:   "init",
 		Short: "Make this host the first of a new cluster (from cloud-init)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			address, err := netip.ParseAddr(underlay)
-			if err != nil {
+			var err error
+			if options.Underlay, err = netip.ParseAddr(underlay); err != nil {
 				return fmt.Errorf("--underlay: %w", err)
 			}
-			options.Underlay = address
+			if publicAddress != "" {
+				if options.PublicAddress, err = netip.ParseAddr(publicAddress); err != nil {
+					return fmt.Errorf("--public-address: %w", err)
+				}
+			}
+			if options.BootstrapKey, err = pki.ReadBootstrapKey(keyFile); err != nil {
+				return err
+			}
 			files := Files{Dir: DefaultDir}
 			if err := Init(cmd.Context(), files, options, hostNetwork(), slog.Default()); err != nil {
 				return err
@@ -64,11 +72,15 @@ func newInit() *cobra.Command {
 		},
 	}
 	hostname, _ := os.Hostname() // without one, --name is needed
-	initCommand.Flags().StringVar(&options.BootstrapKey, "bootstrap-key", "", "the cluster's bootstrap key (from OpenTofu)")
+	initCommand.Flags().StringVar(&keyFile, "bootstrap-key-file", "",
+		"a file with the cluster's bootstrap key (from OpenTofu); not a flag of its own, which /proc would show")
 	initCommand.Flags().StringVar(&options.Name, "name", hostname, "the host's name in the cluster")
 	initCommand.Flags().StringVar(&underlay, "underlay", "", "the host's address in the network between the hosts")
+	initCommand.Flags().StringVar(&publicAddress, "public-address", "",
+		"where users reach the API, if the underlay is a private network")
+	initCommand.Flags().StringVar(&options.ServerRef, "server-ref", "", "the hoster's ID of this server")
 	initCommand.Flags().BoolVar(&start, "start", true, "enable and start clowderd.service afterwards")
-	_ = initCommand.MarkFlagRequired("bootstrap-key") // the flags exist; this cannot fail
+	_ = initCommand.MarkFlagRequired("bootstrap-key-file") // the flags exist; this cannot fail
 	_ = initCommand.MarkFlagRequired("underlay")
 	return initCommand
 }

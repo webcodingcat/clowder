@@ -400,10 +400,16 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **`clowderd init`** (from cloud-init) makes the first host: the CA, the data key, the
   cluster's age key, the host's certificate and WireGuard key, a Raft group with this host as
   its only voter and the bootstrap command. Then it enables and starts `clowderd.service`.
-  It refuses a host that has a `raft/` directory.
+  It refuses a host that has a `raft/` directory. The bootstrap key comes from a file
+  (`--bootstrap-key-file`; `clowder cluster bootstrap --key-file` alike), never from the
+  command line, where `/proc` and shell histories keep it. `--public-address` is where users
+  reach the API when the underlay is a private network; it goes into `host.json` and the
+  state, like `--server-ref`, the hoster's ID of the server (for fencing).
 - **`clowderd run`** (the service) sets up `clowder0` with the node address (a dummy
   interface, so the address exists on a host without peers), the Raft member, and the API on
-  the underlay and the node address. It waits up to `catchUpTimeout` for its state to catch
+  the underlay, the node address and the public address, each once. The API binds them with
+  `IP_FREEBIND` (`freeBind`): at boot the public address may come up after the agent, which
+  must neither fail nor lock users out then. It waits up to `catchUpTimeout` for its state to catch
   up with the Raft log, then tells systemd `READY=1`, and feeds the watchdog while the
   state's lock answers.
 - `HostParts` are what the agent changes on its host: the network, the storage driver and

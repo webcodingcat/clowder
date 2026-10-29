@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 
 	"github.com/webcodingcat/clowder/internal/atomicfile"
@@ -51,8 +52,11 @@ type Host struct {
 	Name        string       `json:"name"`
 	NodeAddress netip.Addr   `json:"node_address"`
 	Underlay    netip.Addr   `json:"underlay"`
-	RaftPort    int          `json:"raft_port"`
-	APIPort     int          `json:"api_port"`
+	// PublicAddress is where users reach the API when the underlay is private.
+	PublicAddress netip.Addr `json:"public_address,omitzero"`
+	ServerRef     string     `json:"server_ref,omitempty"`
+	RaftPort      int        `json:"raft_port"`
+	APIPort       int        `json:"api_port"`
 }
 
 // raftAddress is where the host's Raft member listens and is reached.
@@ -60,11 +64,15 @@ func (h Host) raftAddress() string {
 	return net.JoinHostPort(h.NodeAddress.String(), strconv.Itoa(h.RaftPort))
 }
 
-// apiAddresses are where the host serves the API: underlay and node address.
+// apiAddresses are where the host serves the API: the underlay, the node
+// address and the public address, each once.
 func (h Host) apiAddresses() []string {
-	addresses := []string{net.JoinHostPort(h.Underlay.String(), strconv.Itoa(h.APIPort))}
-	if h.NodeAddress != h.Underlay {
-		addresses = append(addresses, net.JoinHostPort(h.NodeAddress.String(), strconv.Itoa(h.APIPort)))
+	var addresses []string
+	for _, address := range []netip.Addr{h.Underlay, h.NodeAddress, h.PublicAddress} {
+		hostPort := net.JoinHostPort(address.String(), strconv.Itoa(h.APIPort))
+		if address.IsValid() && !slices.Contains(addresses, hostPort) {
+			addresses = append(addresses, hostPort)
+		}
 	}
 	return addresses
 }

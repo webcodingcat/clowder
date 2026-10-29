@@ -184,6 +184,16 @@ func (f *fakeDocker) ComposeLogs(_ context.Context, _, _ string, _ bool, out io.
 
 func (f *fakeDocker) Login(context.Context, string, string, string) error { return nil }
 
+// keyFile writes a bootstrap key into a file of its own, as the user keeps it.
+func keyFile(t *testing.T, key string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "bootstrap-key")
+	if err := os.WriteFile(path, []byte(key), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // waitForOutput runs the CLI up to 10 s until its output contains want.
 func waitForOutput(t *testing.T, want string, args ...string) {
 	t.Helper()
@@ -218,8 +228,11 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	files := Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}
 	apiPort := freePort(t)
 	hostNetwork := &fakeNetwork{}
+	// the public address is another loopback address, as a host's public
+	// address is another than its underlay; users reach the API there
 	err := Init(context.Background(), files, InitOptions{
 		BootstrapKey: "the-bootstrap-key", Name: "node0", Underlay: loopback,
+		PublicAddress: netip.MustParseAddr("127.0.0.2"), ServerRef: "1000001",
 		NodeAddress: loopback, RaftPort: freePort(t), APIPort: apiPort,
 	}, hostNetwork, logger)
 	if err != nil {
@@ -270,21 +283,22 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	t.Setenv(clusterdir.EnvVar, "")
 	t.Setenv(clusterdir.UserEnvVar, "")
 	dir := t.TempDir()
-	seed := net.JoinHostPort("127.0.0.1", strconv.Itoa(apiPort))
+	seed := net.JoinHostPort("127.0.0.2", strconv.Itoa(apiPort))
 	bootstrap := []string{
 		"--cluster", dir, "cluster", "bootstrap", "alice", "--age", identity.Recipient().String(),
 		"--seed", seed,
 	}
 
-	if _, err := clowder(t, append(bootstrap, "--key", "a-guess")...); err == nil ||
+	if _, err := clowder(t, append(bootstrap, "--key-file", keyFile(t, "a-guess"))...); err == nil ||
 		!strings.Contains(err.Error(), "cannot prove it knows the bootstrap key") {
 		t.Errorf("a wrong bootstrap key: %v", err)
 	}
-	if _, err := clowder(t, append(bootstrap, "--key", "the-bootstrap-key")...); err != nil {
+	theKey := keyFile(t, "the-bootstrap-key\n")
+	if _, err := clowder(t, append(bootstrap, "--key-file", theKey)...); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := clowder(t, "--cluster", t.TempDir(), "cluster", "bootstrap", "bob",
-		"--age", identity.Recipient().String(), "--seed", seed, "--key", "the-bootstrap-key"); err == nil ||
+		"--age", identity.Recipient().String(), "--seed", seed, "--key-file", theKey); err == nil ||
 		!strings.Contains(err.Error(), "first user already") {
 		t.Errorf("a second bootstrap: %v", err)
 	}

@@ -87,11 +87,14 @@ const (
 
 // Host is one member of the cluster.
 type Host struct {
-	ID          HostID     `json:"id"`
-	Name        string     `json:"name"`
-	ServerRef   string     `json:"server_ref,omitempty"` // the hoster's ID of the server
-	Underlay    netip.Addr `json:"underlay"`
-	WGPublicKey string     `json:"wg_public_key"`
+	ID        HostID     `json:"id"`
+	Name      string     `json:"name"`
+	ServerRef string     `json:"server_ref,omitempty"` // the hoster's ID of the server
+	Underlay  netip.Addr `json:"underlay"`
+	// PublicAddress is where users reach the host's API when the underlay is
+	// a private network; the CLI learns it from the cluster.
+	PublicAddress netip.Addr `json:"public_address,omitzero"`
+	WGPublicKey   string     `json:"wg_public_key"`
 	// CertificateSerial is the host certificate; removing the host revokes it,
 	// so a removed host leaves Raft and the API at once.
 	CertificateSerial string    `json:"certificate_serial"`
