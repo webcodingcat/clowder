@@ -84,6 +84,19 @@ func TestTraefikComesUpWithRoutesToTheContainersThatMayTakeRequests(t *testing.T
 	if ups := fake.count(up); ups != 1 {
 		t.Errorf("Traefik came up %d times, want once while nothing changed", ups)
 	}
+	// a file removed by hand comes back, without a restart of Traefik
+	if err := os.Remove(filepath.Join(traefik.files.traefikDynamicDir(), "routes.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := traefik.pass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(traefik.files.traefikDynamicDir(), "routes.yaml")); err != nil {
+		t.Errorf("the routes did not come back: %v", err)
+	}
+	if ups := fake.count(up); ups != 1 {
+		t.Errorf("Traefik came up %d times, want once", ups)
+	}
 	traefik.forget() // Docker restarted
 	if err := traefik.pass(context.Background()); err != nil {
 		t.Fatal(err)

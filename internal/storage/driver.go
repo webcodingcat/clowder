@@ -44,9 +44,10 @@ type Driver struct {
 
 // Volume is one copy of a volume on this host.
 type Volume struct {
-	// ID is "<stack>/<volume>"; the mount point is VolumesDir/<ID>.
+	// ID is "<stack>/<volume>".
 	ID string
-	// LV is the logical volume's name, Pool the thin pool ("vg/thin").
+	// LV is the logical volume's name, Pool the thin pool ("vg/thin"). The
+	// name holds the generation, and so does the mount point VolumesDir/<LV>.
 	LV        string
 	Pool      string
 	SizeBytes int64
@@ -56,9 +57,11 @@ type Volume struct {
 }
 
 // MountPoint is where the volume's file system is mounted; containers get
-// its data/ directory.
+// its data/ directory. Each generation has a mount point of its own: one
+// shared by two generations would let the new one find the old one mounted
+// there, and the removal of the old one unmount the new one.
 func (d Driver) MountPoint(volume Volume) string {
-	return filepath.Join(d.VolumesDir, filepath.FromSlash(volume.ID))
+	return filepath.Join(d.VolumesDir, volume.LV)
 }
 
 // Ensure brings the copy to what volume says and mounts it: the thin LV, the

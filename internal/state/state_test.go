@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -490,6 +491,55 @@ func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop", WithVolumes: true})
 	if len(c.state.Volumes) != 0 || len(c.state.Stacks) != 0 {
 		t.Errorf("left behind: %v, %v", c.state.Volumes, c.state.Stacks)
+	}
+}
+
+func TestOnlyRetiredCopiesMayGo(t *testing.T) {
+	c := newCluster(t)
+	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
+	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
+	c.createShop()
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
+	minor := 5
+	volume := Volume{
+		ID: "shop/pgdata", Generation: 1, Class: "fast", SizeBytes: 1 << 30, Replicas: 2, Minor: &minor,
+		Placements: []Placement{{Host: 0, Class: "fast"}, {Host: 1, Class: "fast"}}, Status: VolumeOK,
+	}
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: volume})
+	if len(c.state.Retired) != 0 {
+		t.Fatalf("a new volume retired %v", c.state.Retired)
+	}
+
+	// the copy on host 1 leaves; the one on host 0 stays
+	moved := volume
+	moved.Placements = []Placement{{Host: 0, Class: "fast"}}
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: moved})
+	// a new generation retires the copies of the old one
+	restored := moved
+	restored.Generation = 2
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: restored})
+	want := []RetiredCopy{{Volume: "shop/pgdata", Generation: 1, Host: 1}, {Volume: "shop/pgdata", Generation: 1, Host: 0}}
+	if !slices.Equal(c.state.Retired, want) {
+		t.Errorf("retired %v, want %v", c.state.Retired, want)
+	}
+
+	// each host forgets its own, once
+	c.refuse(KindForgetCopy, HostActor(0), ForgetCopy{Copy: want[0]}, "only host 1 itself")
+	c.mustApply(KindForgetCopy, HostActor(1), ForgetCopy{Copy: want[0]})
+	c.refuse(KindForgetCopy, HostActor(1), ForgetCopy{Copy: want[0]}, "no retired copy")
+
+	// a deleted stack retires its copies, and its name waits for them
+	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop", WithVolumes: true})
+	c.refuse(KindCreateStack, UserActor("alice"), CreateStack{Name: "shop", Owner: OwnerCLI}, "still being removed")
+	c.mustApply(KindForgetCopy, HostActor(0), ForgetCopy{Copy: want[1]})
+	c.mustApply(KindForgetCopy, HostActor(0), ForgetCopy{Copy: RetiredCopy{Volume: "shop/pgdata", Generation: 2, Host: 0}})
+	c.createShop()
+
+	// a removed host forgets nothing any more: its copies leave the list
+	c.state.Retired = append(c.state.Retired, RetiredCopy{Volume: "blog/data", Generation: 1, Host: 1})
+	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Removed})
+	if len(c.state.Retired) != 0 {
+		t.Errorf("retired %v after the host was removed", c.state.Retired)
 	}
 }
 

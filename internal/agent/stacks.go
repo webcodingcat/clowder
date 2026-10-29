@@ -81,6 +81,9 @@ type stackRunner struct {
 	// wake starts a pass at once (buffered, 1): after Docker restarted,
 	// nothing runs until the next pass
 	wake chan struct{}
+	// unexplained are the LVs of copies kept without a reason, warned
+	// about once
+	unexplained map[string]bool
 }
 
 // desiredState is what this host should run, from a copy of the state.
@@ -91,10 +94,13 @@ type desiredState struct {
 	hostNames  map[state.HostID]string
 	registries map[string]state.Sealed
 	self       state.Host
+	// retired are the copies the cluster gave up, on any host
+	retired []state.RetiredCopy
 }
 
-// readDesired reads what the host self should run, from a copy of the
-// state, outside the lock Raft's Apply waits for.
+// readDesired reads what the host self should run: a copy of the state,
+// made under the lock Raft's Apply waits for, which a pass then works on
+// outside it.
 func readDesired(cluster stateReader, self state.HostID) (desiredState, error) {
 	var copied *state.State
 	var err error
@@ -104,7 +110,7 @@ func readDesired(cluster stateReader, self state.HostID) (desiredState, error) {
 	}
 	desired := desiredState{
 		config: copied.Config.Spec, stacks: map[string]*state.Stack{}, volumes: copied.Volumes,
-		hostNames: map[state.HostID]string{}, registries: copied.Registries,
+		hostNames: map[state.HostID]string{}, registries: copied.Registries, retired: copied.Retired,
 	}
 	for name, stack := range copied.Stacks {
 		if stack.Host != nil && *stack.Host == self {
@@ -192,10 +198,10 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 			Dir: r.storage.MountPoint(volume), Generation: desired.volumes[volume.ID].Generation,
 		}
 	}
-	// rendered before any volume is made: a stack that cannot run (no
-	// Floating IP before the first cluster apply) leaves nothing behind
-	// cluster.yaml's check made sure it parses; before the first apply it is
-	// empty, the zero address, which Render refuses
+	// Rendered before any volume is made, so a stack that cannot run leaves
+	// nothing behind. The parse error is not needed: cluster.yaml's check
+	// refuses a Floating IP that does not parse, and before the first apply
+	// it is empty, the zero address, which Render refuses.
 	floatingIP, _ := netip.ParseAddr(desired.config.Ingress.FloatingIP)
 	rendered, err := compose.Render(parsed, compose.Target{
 		FloatingIP: floatingIP, NodeAddress: r.host.NodeAddress, Resolver: network.Resolver,
@@ -291,7 +297,10 @@ func (r *stackRunner) describe(desired desiredState, id string) (storage.Volume,
 	}
 	stackName, name, _ := strings.Cut(id, "/")
 	lv := compose.VolumeName(stackName, name, volume.Generation)
-	pool := desired.config.StorageClasses[volume.Placements[index].Class].Pool
+	pool, err := poolOf(desired.config, id, volume.Placements[index].Class)
+	if err != nil {
+		return storage.Volume{}, err
+	}
 	described := storage.Volume{ID: id, LV: lv, Pool: pool, SizeBytes: volume.SizeBytes}
 	if volume.Minor == nil {
 		return described, nil // replicas 0: a plain LV
@@ -300,13 +309,28 @@ func (r *stackRunner) describe(desired desiredState, id string) (storage.Volume,
 	for _, placement := range volume.Placements {
 		node := storage.Node{Host: desired.hostNames[placement.Host], ID: placement.Host}
 		if !placement.Tiebreaker {
-			group, _, _ := strings.Cut(desired.config.StorageClasses[placement.Class].Pool, "/")
+			peerPool, err := poolOf(desired.config, id, placement.Class)
+			if err != nil {
+				return storage.Volume{}, err
+			}
+			group, _, _ := strings.Cut(peerPool, "/")
 			node.Disk = "/dev/" + group + "/" + lv
 		}
 		resource.Nodes = append(resource.Nodes, node)
 	}
 	described.Resource = resource
 	return described, nil
+}
+
+// poolOf is the thin pool of a copy's storage class. cluster apply refuses
+// a cluster.yaml without a class a volume uses, so a missing one is a bug
+// to say clearly, not an empty pool for lvcreate.
+func poolOf(config clusterdir.Config, volumeID, class string) (string, error) {
+	storageClass, ok := config.StorageClasses[class]
+	if !ok || storageClass.Pool == "" {
+		return "", fmt.Errorf("volume %s: cluster.yaml has no storage class %s with a pool", volumeID, class)
+	}
+	return storageClass.Pool, nil
 }
 
 // removeOthers stops the stacks that left this host and removes the volume
@@ -381,7 +405,22 @@ func (r *stackRunner) removeVolumes(ctx context.Context, desired desiredState, s
 			kept = append(kept, volume)
 			continue
 		}
+		retired, ok := r.retiredHere(desired, volume)
+		if !ok {
+			// neither placed nor retired: a state that lost it by mistake
+			// must not cost the data
+			r.warnUnexplained(volume)
+			kept = append(kept, volume)
+			continue
+		}
 		if err := r.storage.Remove(ctx, volume); err != nil {
+			errs = append(errs, err)
+			kept = append(kept, volume)
+			continue
+		}
+		// Remove picks up where it left, so a copy whose forgetting failed
+		// stays recorded and is tried again at the next pass
+		if err := r.report(ctx, state.KindForgetCopy, state.ForgetCopy{Copy: retired}); err != nil {
 			errs = append(errs, err)
 			kept = append(kept, volume)
 		}
@@ -390,6 +429,31 @@ func (r *stackRunner) removeVolumes(ctx context.Context, desired desiredState, s
 		errs = append(errs, err)
 	}
 	return len(kept), errors.Join(errs...)
+}
+
+// retiredHere finds the retired copy that the recorded one on this host is.
+func (r *stackRunner) retiredHere(desired desiredState, volume storage.Volume) (state.RetiredCopy, bool) {
+	stackName, name, _ := strings.Cut(volume.ID, "/")
+	for _, retired := range desired.retired {
+		if retired.Host == r.host.ID && retired.Volume == volume.ID &&
+			compose.VolumeName(stackName, name, retired.Generation) == volume.LV {
+			return retired, true
+		}
+	}
+	return state.RetiredCopy{}, false
+}
+
+// warnUnexplained says once per agent run that a copy is kept which the
+// state neither places nor retires here.
+func (r *stackRunner) warnUnexplained(volume storage.Volume) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.unexplained[volume.LV] {
+		return
+	}
+	r.unexplained[volume.LV] = true
+	r.logger.Warn("keeping a volume copy the cluster neither places nor retires here; remove it by hand if it is not needed",
+		"volume", volume.ID, "lv", volume.LV)
 }
 
 // placedHere tells whether the state has a copy of the volume on this host

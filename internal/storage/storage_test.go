@@ -262,6 +262,15 @@ func TestAPlainVolumeHasNoDRBD(t *testing.T) {
 	}
 }
 
+func TestEachGenerationHasAMountPointOfItsOwn(t *testing.T) {
+	driver := newDriver(t, &fakeHost{existing: map[string]bool{}})
+	first, second := replicated(), replicated()
+	second.LV = "clw-shop-pgdata-g2"
+	if driver.MountPoint(first) == driver.MountPoint(second) {
+		t.Errorf("two generations share %s", driver.MountPoint(first))
+	}
+}
+
 func TestAForeignPlainLVIsNotFormatted(t *testing.T) {
 	// the LV is there without a file system, but this driver never made it
 	host := &fakeHost{existing: map[string]bool{"lv": true}}

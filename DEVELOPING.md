@@ -104,6 +104,8 @@ Known gaps to close in phase 2. They do no harm on a single host:
   That is right for a new volume on one host; after a failover it would force an outdated
   copy. Whether a volume was ever initialised must come from the state, not a local file.
 - A volume a stack no longer names stays: nothing sends `delete-volume` yet.
+- A stack whose `compose up` fails after a reboot or a restart of Docker stays `running` in
+  the state; only the agent's log says so. The host should report it.
 - The placement does not bind a stack to the host its volumes are on. When `put-volume`
   committed but the stack's `set-stack-status` did not (an error, a change of leader), a
   later pass may pick another host for the stack.
@@ -339,9 +341,16 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **In use so far:** `bootstrap` (init), `apply-config`, `add-user` (the first user),
   `set-host-phase` (host actions), `create-stack`, `put-stack` and `delete-stack` (the user),
   `put-volume`, `set-stack-status` and `set-stack-wait-reason` (placement, the stack's
-  host), `set-ingress` (the ingress loop), `report-host` (each agent). The other kinds (`delete-volume`, hosts joining,
-  operations, users beyond the first) are there for the next steps; they are tested, but
-  nothing sends them yet.
+  host), `set-ingress` (the ingress loop), `report-host` and `forget-copy` (each agent). The
+  other kinds (`delete-volume`, hosts joining, operations, users beyond the first) are there
+  for the next steps; they are tested, but nothing sends them yet.
+- **Retired copies.** A volume copy's data goes only when the state says so: `delete-stack`
+  with its volumes, `delete-volume`, and a `put-volume` that changes the generation or takes
+  a copy off a host each add the copies they give up to `Retired` (volume, generation,
+  host). The host removes those and forgets each with `forget-copy`; a removed host's go
+  with it. A copy that is merely missing from the state stays: a bug in the placement must
+  not cost data. A stack whose deleted volumes are still being removed cannot be created
+  again under the same name, as its new volumes would have the LVs of the old ones.
 - **Stacks.** `create-stack` registers a stack as `created` (no Source, `CreatedBy` from the
   actor, `Owner` the channel: cli or gitops); only `put-stack` moves it on, to `pending`, and
   nothing places a `created` stack. `put-stack` changes registered stacks only, and makes a
@@ -523,19 +532,22 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   interface, so the address exists on a host without peers), the Raft member, and the API on
   the underlay, the node address and the public address, each once. The API binds them with
   `IP_FREEBIND` (`freeBind`): at boot the public address may come up after the agent, which
-  must neither fail nor lock users out then. It waits up to `catchUpTimeout` for its state to catch
-  up with the Raft log, then tells systemd `READY=1`, and feeds the watchdog while the
-  state's lock answers.
-- `HostParts` are what the agent changes on its host: the network, the storage driver and
-  Docker. `clowderd run` passes the real ones, the tests fakes.
+  must neither fail nor lock users out then. It waits up to `catchUpTimeout` for its state
+  to catch up with the Raft log, then tells systemd `READY=1`, and feeds the watchdog while
+  the state's lock answers. When it stops, it ends its loops and waits for them, at most
+  `loopsTimeout` (a host tool left behind on a suspended volume must not hold up the stop),
+  before the resolver and the Raft member close (`stopLoops`).
+- `HostParts` are what the agent changes on its host (the network, the storage driver and
+  Docker) and the hoster's API. `clowderd run` passes the real ones, the tests fakes.
 - **Reconcilers** run after a change of the state and every `reconcileInterval`, to repair
   what someone changed by hand: `reconcileNetwork` keeps the nft rules as the state says,
   and the stack runner keeps the stacks.
 - **The stack runner** (`stackRunner`), for each stack the state places here: render its
   Compose file, `Ensure` its volume copies, write its secrets, run `compose up` unless all of
   it came up before, then report `running`. A failed `compose up` is tried again at the next
-  pass. Stacks that left the host get `compose down`; volume copies the state no longer
-  places here, or places in a newer generation, are removed.
+  pass. Stacks that left the host get `compose down`; volume copies the state retired here
+  are removed and forgotten (State, Retired copies). A copy the state neither places nor
+  retires here stays, with a warning once per run.
 - **Crashes leave nothing unknown.** The files tell how far a stack got: `volumes.json`
   records its copies before they are made, its `compose.yaml` exists until `compose down`
   worked, its directory goes with the last copy, and its secrets go once `compose.yaml` is
@@ -597,7 +609,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   test-tools` checks with `drbdadm`): quorum majority with `suspend-io`, `auto-promote no`,
   node-id = host ID, port `drbdBasePort` + minor on the node address. With replicas 0 it is a
   plain LV. A copy's LV is `compose.VolumeName(stack, volume, generation)` and its resource
-  has the same name, so a restored volume (a new generation) is a new LV next to the old one.
+  and mount point (`volumes/<LV>`) have the same name, so a restored volume (a new
+  generation) is a new LV next to the old one, mounted apart from it.
 - **`Ensure` does only what is missing:** the LV, the resource, the primary role, ext4, the
   mount and `data/` in it. Markers in the driver's `StateDir` let it pick up after a crash at
   any point (`created`: clowder made the LV; `metadata`: DRBD metadata written; `primary`:
@@ -646,7 +659,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   stack never holds up the ingress. It runs compose up as the stack runner does
   (`composeUpHeld`, under the supervisor's hold) when the hash of the Compose file and
   `traefik.yml` differs from the one Traefik came up with: at the first pass after the agent
-  started, after Docker restarted (`forget`), and after a new image pin or Floating IP.
+  started, after Docker restarted (`forget`), and after a new image pin or Floating IP. Each
+  of its files is compared with what is on disk, so one removed or changed by hand comes
+  back at the next pass. It reads only the Floating IP and the stacks' sources from the
+  state, no copy of all of it: it passes at every event of Docker's.
 - **Routes.** `ingress.RenderDynamic` writes the file provider's `routes.yaml`: per
   `x-clowder.http` a router `<stack>.<service>` on `web` and a service whose servers are the
   containers of that service on this host that run and, if they have a health check, are

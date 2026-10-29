@@ -101,6 +101,7 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 		files: Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}, host: Host{ID: 0, Name: "node0", NodeAddress: netip.MustParseAddr("10.77.0.1")},
 		version: "1.0.0", cluster: cluster, docker: docker, storage: storage, logger: logger,
 		propose: cluster.propose, applied: map[string][32]byte{}, logins: map[string][32]byte{},
+		unexplained: map[string]bool{},
 		// the tests' sealed values are their clear text
 		open:      func(sealed state.Sealed) ([]byte, error) { return []byte(sealed), nil },
 		digestKey: []byte("the test's digest key"),
@@ -161,6 +162,26 @@ func TestANewGenerationReplacesTheLV(t *testing.T) {
 	if ups := docker.count("up shop"); ups != 2 {
 		t.Errorf("%d compose ups, want 2 (the new volume)", ups)
 	}
+	if retired := cluster.state.Retired; len(retired) != 0 {
+		t.Errorf("the removed copy is not forgotten: %v", retired)
+	}
+}
+
+func TestACopyTheStateLostIsKept(t *testing.T) {
+	runner, cluster, _, storage := newTestRunner(t)
+	runner.pass(context.Background())
+	// a bug, not a command, takes the volume out of the state
+	cluster.mu.Lock()
+	delete(cluster.state.Volumes, "shop/db")
+	cluster.mu.Unlock()
+	runner.pass(context.Background())
+	runner.pass(context.Background())
+	if storage.count("remove "+compose.VolumeName("shop", "db", 1)) != 0 {
+		t.Errorf("a copy that is neither placed nor retired was removed: %q", storage.lines)
+	}
+	if !runner.unexplained[compose.VolumeName("shop", "db", 1)] {
+		t.Error("no warning about the kept copy")
+	}
 }
 
 func TestAStackThatLeftIsStoppedAndForgotten(t *testing.T) {
@@ -180,6 +201,9 @@ func TestAStackThatLeftIsStoppedAndForgotten(t *testing.T) {
 	runner.pass(context.Background())
 	if storage.count("remove "+lv) != 1 {
 		t.Errorf("storage %q", storage.lines)
+	}
+	if retired := cluster.state.Retired; len(retired) != 0 {
+		t.Errorf("the removed copy is not forgotten: %v", retired)
 	}
 	if _, err := os.Stat(runner.files.stackDir("shop")); !os.IsNotExist(err) {
 		t.Errorf("the stack's directory is left: %v", err)

@@ -45,6 +45,7 @@ const (
 	KindSetStackWaitReason = "set-stack-wait-reason"
 	KindPutVolume          = "put-volume"
 	KindDeleteVolume       = "delete-volume"
+	KindForgetCopy         = "forget-copy"
 	KindStartOperation     = "start-operation"
 	KindAdvanceOperation   = "advance-operation"
 	KindFinishOperation    = "finish-operation"
@@ -110,6 +111,7 @@ var handlers = map[string]handler{
 	KindSetStackWaitReason: decoded(applySetStackWaitReason),
 	KindPutVolume:          decoded(applyPutVolume),
 	KindDeleteVolume:       decoded(applyDeleteVolume),
+	KindForgetCopy:         decoded(applyForgetCopy),
 	KindStartOperation:     decoded(applyStartOperation),
 	KindAdvanceOperation:   decoded(applyAdvanceOperation),
 	KindFinishOperation:    decoded(applyFinishOperation),

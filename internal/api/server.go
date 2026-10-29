@@ -329,7 +329,7 @@ var userKinds = map[string]bool{
 // hostKinds are what a host reports about itself.
 var hostKinds = map[string]bool{
 	state.KindReportHost: true, state.KindSetHostPhase: true, state.KindAdvanceOperation: true,
-	state.KindSetStackStatus: true,
+	state.KindSetStackStatus: true, state.KindForgetCopy: true,
 }
 
 // internalPropose is where a follower forwards a user's write and where an

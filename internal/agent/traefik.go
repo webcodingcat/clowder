@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/ingress"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
+	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/supervisor"
 )
 
@@ -53,9 +55,6 @@ type traefikRunner struct {
 	// so it comes up again (restart: "no")
 	cameUp [32]byte
 
-	// writtenRoutes are the routes as the last pass wrote them; only the
-	// loop's goroutine uses them
-	writtenRoutes []byte
 	// wake starts a pass at once (buffered, 1)
 	wake chan struct{}
 }
@@ -104,13 +103,13 @@ func (t *traefikRunner) forget() {
 // Traefik has not come up since the agent started. The routes change
 // without a restart: Traefik watches their directory.
 func (t *traefikRunner) pass(ctx context.Context) error {
-	desired, err := readDesired(t.cluster, t.host.ID)
+	input := t.read()
+	floatingIP, err := netip.ParseAddr(input.floatingIP)
 	if err != nil {
-		return err
-	}
-	floatingIP, err := netip.ParseAddr(desired.config.Ingress.FloatingIP)
-	if err != nil {
-		return nil // before the first cluster apply there is nothing to bind
+		// empty before the first cluster apply, when there is nothing to
+		// bind; cluster.yaml's check refuses any other value that does not
+		// parse
+		return nil
 	}
 	static, err := ingress.RenderStatic(ingress.Static{
 		FloatingIP: floatingIP, NodeAddress: t.host.NodeAddress, Overlay: network.Overlay,
@@ -123,7 +122,23 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 		return err
 	}
 	// the routes first, so Traefik finds them when it starts
-	if err := t.writeRoutes(ctx, desired); err != nil {
+	routes, err := t.routes(ctx, input.sources)
+	if err != nil {
+		return err
+	}
+	rendered, err := ingress.RenderDynamic(routes)
+	if err != nil {
+		return err
+	}
+	// each file is compared with what is on disk, so one removed or changed
+	// by hand comes back at the next pass
+	if err := writeChanged(filepath.Join(t.files.traefikDynamicDir(), "routes.yaml"), rendered, 0o644); err != nil {
+		return err
+	}
+	if err := writeChanged(filepath.Join(t.files.traefikStaticDir(), "traefik.yml"), static, 0o644); err != nil {
+		return err
+	}
+	if err := writeChanged(t.files.traefikCompose(), file, 0o600); err != nil {
 		return err
 	}
 	digest := sha256.New()
@@ -135,12 +150,6 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	if upToDate {
 		return nil
 	}
-	if err := atomicfile.Write(filepath.Join(t.files.traefikStaticDir(), "traefik.yml"), static, 0o644); err != nil {
-		return err
-	}
-	if err := atomicfile.Write(t.files.traefikCompose(), file, 0o600); err != nil {
-		return err
-	}
 	if err := composeUpHeld(ctx, t.docker, t.supervisor, ingress.Project, []string{t.files.traefikCompose()}); err != nil {
 		return err
 	}
@@ -150,35 +159,45 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	return nil
 }
 
-// writeRoutes renders the routes of the stacks on this host and writes them
-// for Traefik's file provider when they changed.
-func (t *traefikRunner) writeRoutes(ctx context.Context, desired desiredState) error {
-	routes, err := t.routes(ctx, desired)
-	if err != nil {
-		return err
-	}
-	rendered, err := ingress.RenderDynamic(routes)
-	if err != nil {
-		return err
-	}
-	if bytes.Equal(rendered, t.writtenRoutes) {
+// traefikInput is what Traefik's files depend on: the Floating IP and the
+// sources of the stacks on this host.
+type traefikInput struct {
+	floatingIP string
+	sources    map[string]string // stack -> its Compose file
+}
+
+// read takes what Traefik's files depend on from the state, and nothing
+// else: the runner passes at every event of Docker's, too often for a copy
+// of the whole state under the lock that Raft's Apply waits for.
+func (t *traefikRunner) read() traefikInput {
+	input := traefikInput{sources: map[string]string{}}
+	t.cluster.Read(func(current *state.State) {
+		input.floatingIP = current.Config.Spec.Ingress.FloatingIP
+		for name, stack := range current.Stacks {
+			if stack.Host != nil && *stack.Host == t.host.ID {
+				input.sources[name] = stack.Source
+			}
+		}
+	})
+	return input
+}
+
+// writeChanged writes a file unless it holds content already.
+func writeChanged(path string, content []byte, mode os.FileMode) error {
+	if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, content) {
 		return nil
 	}
-	if err := atomicfile.Write(filepath.Join(t.files.traefikDynamicDir(), "routes.yaml"), rendered, 0o644); err != nil {
-		return err
-	}
-	t.writtenRoutes = rendered
-	return nil
+	return atomicfile.Write(path, content, mode)
 }
 
 // routes are the HTTP routes of the stacks on this host, each with the
 // containers that may take its requests: running, and healthy if they have
 // a health check.
-func (t *traefikRunner) routes(ctx context.Context, desired desiredState) ([]ingress.Route, error) {
+func (t *traefikRunner) routes(ctx context.Context, sources map[string]string) ([]ingress.Route, error) {
 	var routes []ingress.Route
 	ports := map[string]uint16{} // "<stack>.<service>" -> the port requests go to
-	for _, name := range slices.Sorted(maps.Keys(desired.stacks)) {
-		parsed, err := compose.Parse(ctx, name, []byte(desired.stacks[name].Source))
+	for _, name := range slices.Sorted(maps.Keys(sources)) {
+		parsed, err := compose.Parse(ctx, name, []byte(sources[name]))
 		if err != nil {
 			t.logger.Warn("read the routes of a stack", "stack", name, "error", err)
 			continue

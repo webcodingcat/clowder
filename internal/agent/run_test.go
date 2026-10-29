@@ -179,7 +179,7 @@ func (f *fakeStorage) PoolUsage(context.Context, string) (int64, float64, float6
 }
 
 func (f *fakeStorage) MountPoint(volume storage.Volume) string {
-	return filepath.Join(f.dir, filepath.FromSlash(volume.ID))
+	return filepath.Join(f.dir, volume.LV)
 }
 
 // fakeDocker stands in for Docker: it sends no events and has one
@@ -287,6 +287,30 @@ func clowder(t *testing.T, args ...string) (string, error) {
 	root.SetArgs(args)
 	err := root.ExecuteContext(context.Background())
 	return out.String(), err
+}
+
+func TestStoppingWaitsForTheLoopsButNotForever(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, stop := context.WithCancel(context.Background())
+	var loops sync.WaitGroup
+	ended := false
+	loops.Go(func() {
+		<-ctx.Done()
+		time.Sleep(20 * time.Millisecond) // a pass finishing its last step
+		ended = true
+	})
+	if !stopLoops(stop, &loops, time.Second, logger) || !ended {
+		t.Error("stopped before the loop ended")
+	}
+
+	// a loop that hangs (a host tool left behind) does not hold up the stop
+	hung := make(chan struct{})
+	defer close(hung)
+	var stuck sync.WaitGroup
+	stuck.Go(func() { <-hung })
+	if stopLoops(func() {}, &stuck, 20*time.Millisecond, logger) {
+		t.Error("a hung loop counted as ended")
+	}
 }
 
 // TestAFirstHostAndItsFirstUser goes the way of a new cluster: init on the

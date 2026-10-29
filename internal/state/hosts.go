@@ -3,6 +3,7 @@ package state
 import (
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // Bootstrap starts the cluster: the keys init made and the first host.
@@ -144,6 +145,8 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) error {
 	if host.Phase == Removed {
 		host.Voter = false
 		s.Revoked[host.CertificateSerial] = cmd.At
+		// a removed host forgets nothing any more
+		s.Retired = slices.DeleteFunc(s.Retired, func(c RetiredCopy) bool { return c.Host == host.ID })
 	}
 	return nil
 }

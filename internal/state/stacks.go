@@ -26,6 +26,11 @@ func applyCreateStack(s *State, cmd Command, payload CreateStack) error {
 	if _, exists := s.Stacks[payload.Name]; exists {
 		return fmt.Errorf("stack %s exists already", payload.Name)
 	}
+	// a new volume of the same name would have the same LV as a retired one
+	// of the deleted stack, and its host would take the old data for it
+	if slices.ContainsFunc(s.Retired, func(c RetiredCopy) bool { return strings.HasPrefix(c.Volume, payload.Name+"/") }) {
+		return fmt.Errorf("the volumes of the deleted stack %s are still being removed; try again in a minute", payload.Name)
+	}
 	createdBy := cmd.Actor
 	if IsUserActor(cmd.Actor) {
 		createdBy = strings.TrimPrefix(cmd.Actor, userActorPrefix)
@@ -173,6 +178,7 @@ func applyDeleteStack(s *State, _ Command, payload DeleteStack) error {
 		volumes = append(volumes, id)
 	}
 	for _, id := range volumes {
+		s.retire(s.Volumes[id], nil)
 		delete(s.Volumes, id)
 	}
 	delete(s.Stacks, payload.Name)
@@ -308,7 +314,43 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) error {
 		}
 		placed[placement.Host] = true
 	}
+	if old, ok := s.Volumes[volume.ID]; ok {
+		s.retire(old, &volume)
+	}
 	s.Volumes[volume.ID] = &volume
+	return nil
+}
+
+// retire records the copies of old as retired, except those that kept,
+// the volume's new record, still has: same host, same generation.
+func (s *State) retire(old *Volume, kept *Volume) {
+	for _, placement := range old.Placements {
+		if kept != nil && kept.Generation == old.Generation &&
+			slices.ContainsFunc(kept.Placements, func(p Placement) bool { return p.Host == placement.Host }) {
+			continue
+		}
+		retired := RetiredCopy{Volume: old.ID, Generation: old.Generation, Host: placement.Host}
+		if !slices.Contains(s.Retired, retired) {
+			s.Retired = append(s.Retired, retired)
+		}
+	}
+}
+
+// ForgetCopy is a host telling that a retired copy of its is gone.
+type ForgetCopy struct {
+	Copy RetiredCopy `json:"copy"`
+}
+
+func applyForgetCopy(s *State, cmd Command, payload ForgetCopy) error {
+	if cmd.Actor != HostActor(payload.Copy.Host) {
+		return fmt.Errorf("only host %d itself forgets its copies", payload.Copy.Host)
+	}
+	index := slices.Index(s.Retired, payload.Copy)
+	if index < 0 {
+		return fmt.Errorf("no retired copy of %s (generation %d) on host %d",
+			payload.Copy.Volume, payload.Copy.Generation, payload.Copy.Host)
+	}
+	s.Retired = slices.Delete(s.Retired, index, index+1)
 	return nil
 }
 
@@ -354,6 +396,7 @@ func applyDeleteVolume(s *State, _ Command, payload DeleteVolume) error {
 	if err := s.checkUnlocked(volumeLock(payload.ID), payload.Operation); err != nil {
 		return err
 	}
+	s.retire(s.Volumes[payload.ID], nil)
 	delete(s.Volumes, payload.ID)
 	return nil
 }

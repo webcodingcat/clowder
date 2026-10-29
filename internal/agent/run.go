@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -24,6 +25,9 @@ import (
 const (
 	// shutdownTimeout is how long open API calls get when the agent stops.
 	shutdownTimeout = 5 * time.Second
+	// loopsTimeout is how long the agent waits for its loops when it stops;
+	// well within systemd's stop timeout.
+	loopsTimeout = 30 * time.Second
 	// catchUpTimeout is how long the agent waits at start for its state to
 	// catch up with the Raft log; well within systemd's start timeout.
 	catchUpTimeout = 15 * time.Second
@@ -85,8 +89,11 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	}
 	defer func() { _ = resolver.Close() }() // stopping: nothing to keep
 	reconcilers, stopReconcilers := context.WithCancel(ctx)
-	defer stopReconcilers()
-	go reconcileNetwork(reconcilers, node, parts.Network, logger)
+	// deferred after the resolver and the Raft node, so it runs before they
+	// close: no loop uses them any more then
+	var loops sync.WaitGroup
+	defer stopLoops(stopReconcilers, &loops, loopsTimeout, logger)
+	loops.Go(func() { reconcileNetwork(reconcilers, node, parts.Network, logger) })
 
 	digestKey, err := credentials.dataKey.Derive(secretDigestPurpose)
 	if err != nil {
@@ -96,6 +103,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		files: files, host: host, version: buildinfo.Version, cluster: node,
 		docker: parts.Docker, storage: parts.Storage, open: credentials.dataKey.Open, digestKey: digestKey,
 		logger: logger, applied: map[string][32]byte{}, logins: map[string][32]byte{}, wake: make(chan struct{}, 1),
+		unexplained: map[string]bool{},
 	}
 	traefik := &traefikRunner{
 		files: files, host: host, cluster: node, docker: parts.Docker, logger: logger, wake: make(chan struct{}, 1),
@@ -119,19 +127,22 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	runner.supervisor = supervisor.New(parts.Docker, runner.rules, supervisor.DefaultBackoff,
 		dockerRestarted, traefik.look, logger)
 	traefik.supervisor = runner.supervisor
-	go runner.supervisor.Run(reconcilers, compose.LabelStack)
-	go controller.RunPlacement(reconcilers, node, server.Propose, logger)
-	go controller.RunIngress(reconcilers, node, server.Propose, credentials.dataKey.Open, parts.Hoster, logger)
-	go runner.trim(reconcilers)
-	go func() {
+	loops.Go(func() { runner.supervisor.Run(reconcilers, compose.LabelStack) })
+	loops.Go(func() { controller.RunPlacement(reconcilers, node, server.Propose, logger) })
+	loops.Go(func() {
+		controller.RunIngress(reconcilers, node, server.Propose, credentials.dataKey.Open, parts.Hoster, logger)
+	})
+	loops.Go(func() { runner.trim(reconcilers) })
+	loops.Go(func() {
 		// a state that lags may still place a stack here that has moved on,
-		// so containers start only once the state caught up
+		// so containers start only once the state caught up: the stacks and
+		// Traefik (a loop of its own, started from here, so it waits too)
 		if caughtUp != nil && !waitForState(reconcilers, node, logger) {
 			return
 		}
-		go traefik.run(reconcilers)
+		loops.Go(func() { traefik.run(reconcilers) })
 		runner.reconcile(reconcilers)
-	}()
+	})
 	servers, serveErrors, err := serveAPI(server, host.apiAddresses(), logger)
 	if err != nil {
 		return err
@@ -148,6 +159,26 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		_ = server.Shutdown(shutdown) // stopping: open calls are cut after the timeout
 	}
 	return err
+}
+
+// stopLoops ends the agent's loops and waits for them, at most timeout: a
+// pass ends its host tools by their timeouts, and one left behind on a
+// suspended DRBD volume does not hold up the stop. It tells whether all
+// ended.
+func stopLoops(stop context.CancelFunc, loops *sync.WaitGroup, timeout time.Duration, logger *slog.Logger) bool {
+	stop()
+	ended := make(chan struct{})
+	go func() {
+		loops.Wait()
+		close(ended)
+	}()
+	select {
+	case <-ended:
+		return true
+	case <-time.After(timeout):
+		logger.Warn("stopping before every loop ended", "after", timeout)
+		return false
+	}
 }
 
 // waitForState tries until ctx ends to catch the state up with the Raft
@@ -199,7 +230,9 @@ func serveAPI(server *api.Server, addresses []string, logger *slog.Logger) ([]*h
 			Handler:           server,
 			TLSConfig:         server.TLSConfig(),
 			ReadHeaderTimeout: 10 * time.Second,
-			ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelDebug),
+			// idle keep-alive connections of CLIs and agents go after a while
+			IdleTimeout: 2 * time.Minute,
+			ErrorLog:    slog.NewLogLogger(logger.Handler(), slog.LevelDebug),
 		}
 		servers = append(servers, httpServer)
 		go func() {

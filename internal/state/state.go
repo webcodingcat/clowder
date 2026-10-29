@@ -46,11 +46,15 @@ type State struct {
 	Stacks  map[string]*Stack    `json:"stacks,omitempty"`
 	// StacksRevision counts the stacks' applies: a cluster apply checked
 	// against the stacks commits only if none came in between.
-	StacksRevision int64                 `json:"stacks_revision,omitempty"`
-	Volumes        map[string]*Volume    `json:"volumes,omitempty"` // "<stack>/<volume>"
-	Operations     map[string]*Operation `json:"operations,omitempty"`
-	Locks          map[string]string     `json:"locks,omitempty"` // "stack/<name>" or "volume/<id>" -> operation
-	Audit          []AuditEntry          `json:"audit,omitempty"`
+	StacksRevision int64              `json:"stacks_revision,omitempty"`
+	Volumes        map[string]*Volume `json:"volumes,omitempty"` // "<stack>/<volume>"
+	// Retired are the volume copies the cluster gave up: the only ones an
+	// agent removes, so a copy that is merely missing from the state (a bug)
+	// keeps its data.
+	Retired    []RetiredCopy         `json:"retired,omitempty"`
+	Operations map[string]*Operation `json:"operations,omitempty"`
+	Locks      map[string]string     `json:"locks,omitempty"` // "stack/<name>" or "volume/<id>" -> operation
+	Audit      []AuditEntry          `json:"audit,omitempty"`
 }
 
 // ClusterKeys are the keys init creates. The CA certificate is public; its
@@ -205,6 +209,15 @@ type Placement struct {
 	// Class is the pool's class the copy is in (any falls back to another).
 	Class      string `json:"class"`
 	Tiebreaker bool   `json:"tiebreaker,omitempty"` // diskless
+}
+
+// RetiredCopy is a copy of a volume that its host may remove: of a deleted
+// stack or volume, of an older generation, or one the volume no longer
+// places there. The host forgets it once the copy is gone (forget-copy).
+type RetiredCopy struct {
+	Volume     string `json:"volume"` // "<stack>/<volume>"
+	Generation int64  `json:"generation"`
+	Host       HostID `json:"host"`
 }
 
 // VolumeStatus says how healthy a volume's copies are.
