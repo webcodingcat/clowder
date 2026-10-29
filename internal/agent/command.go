@@ -8,13 +8,14 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
-	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/webcodingcat/clowder/internal/buildinfo"
+	"github.com/webcodingcat/clowder/internal/command"
 	"github.com/webcodingcat/clowder/internal/network"
 )
 
@@ -34,7 +35,7 @@ func newInit() *cobra.Command {
 	var options InitOptions
 	var underlay string
 	var start bool
-	command := &cobra.Command{
+	initCommand := &cobra.Command{
 		Use:   "init",
 		Short: "Make this host the first of a new cluster (from cloud-init)",
 		Args:  cobra.NoArgs,
@@ -52,22 +53,21 @@ func newInit() *cobra.Command {
 				return nil
 			}
 			// the agent runs as a service from now on, across reboots
-			output, err := exec.CommandContext(cmd.Context(), "systemctl", "enable", "--now", "clowderd.service").
-				CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("start clowderd.service: %w: %s", err, output)
+			if _, err := command.Run(cmd.Context(), time.Minute, "systemctl", "enable", "--now",
+				"clowderd.service"); err != nil {
+				return fmt.Errorf("start clowderd.service: %w", err)
 			}
 			return nil
 		},
 	}
 	hostname, _ := os.Hostname() // without one, --name is needed
-	command.Flags().StringVar(&options.BootstrapKey, "bootstrap-key", "", "the cluster's bootstrap key (from OpenTofu)")
-	command.Flags().StringVar(&options.Name, "name", hostname, "the host's name in the cluster")
-	command.Flags().StringVar(&underlay, "underlay", "", "the host's address in the network between the hosts")
-	command.Flags().BoolVar(&start, "start", true, "enable and start clowderd.service afterwards")
-	_ = command.MarkFlagRequired("bootstrap-key") // the flags exist; this cannot fail
-	_ = command.MarkFlagRequired("underlay")
-	return command
+	initCommand.Flags().StringVar(&options.BootstrapKey, "bootstrap-key", "", "the cluster's bootstrap key (from OpenTofu)")
+	initCommand.Flags().StringVar(&options.Name, "name", hostname, "the host's name in the cluster")
+	initCommand.Flags().StringVar(&underlay, "underlay", "", "the host's address in the network between the hosts")
+	initCommand.Flags().BoolVar(&start, "start", true, "enable and start clowderd.service afterwards")
+	_ = initCommand.MarkFlagRequired("bootstrap-key") // the flags exist; this cannot fail
+	_ = initCommand.MarkFlagRequired("underlay")
+	return initCommand
 }
 
 func newRun() *cobra.Command {

@@ -67,7 +67,7 @@ func NewServer(config ServerConfig) *Server {
 	server := &Server{config: config, mux: http.NewServeMux()}
 	server.forwarder = &http.Client{
 		Timeout:   waitTimeout,
-		Transport: &http.Transport{TLSClientConfig: pki.HostClientTLS(config.Certificate, config.CA, server.revoked)},
+		Transport: &http.Transport{TLSClientConfig: pki.ClientTLSToHosts(config.Certificate, config.CA, server.revoked)},
 	}
 	server.handle("GET /v1/status", pki.RoleUser, server.status)
 	server.handle("GET /v1/hosts", pki.RoleUser, server.hosts)
@@ -338,7 +338,8 @@ func (s *Server) internalPropose(w http.ResponseWriter, r *http.Request) {
 
 // write turns a request into a command and commits it.
 func (s *Server) write(w http.ResponseWriter, r *http.Request, kind string, payload any) {
-	cmd, err := state.NewCommand(kind, time.Now(), actorOf(identityOf(r)), payload)
+	// no time here: the leader stamps its own (proposeHere)
+	cmd, err := state.NewCommand(kind, time.Time{}, actorOf(identityOf(r)), payload)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

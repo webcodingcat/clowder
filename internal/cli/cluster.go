@@ -186,13 +186,12 @@ func newDiff(g *globals) *cobra.Command {
 			// differs too, the secrets changed
 			secretsOnly := local
 			secretsOnly.Spec = applied.Spec
-			if appliedSpecHash, err := secretsOnly.Hash(); err != nil {
-				return err
-			} else if appliedSpecHash != applied.Hash {
-				_, err = fmt.Fprintln(out, "the secrets differ (secrets.sops.yaml)")
+			secretsHash, err := secretsOnly.Hash()
+			if err != nil || secretsHash == applied.Hash {
 				return err
 			}
-			return nil
+			_, err = fmt.Fprintln(out, "the secrets differ (secrets.sops.yaml)")
+			return err
 		},
 	}
 }

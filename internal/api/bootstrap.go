@@ -101,7 +101,7 @@ func Bootstrap(ctx context.Context, seed string, bootstrapKey []byte, user strin
 
 	// from now on only a host of this CA is believed
 	checked := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
-		TLSClientConfig: pki.HostClientTLS(tls.Certificate{}, ca, nil),
+		TLSClientConfig: pki.ClientTLSToHosts(tls.Certificate{}, ca, nil),
 	}}
 	signed := BootstrapRequest{User: user, PublicKey: public, Time: time.Now().UTC()}
 	signed.Sign(bootstrapKey)

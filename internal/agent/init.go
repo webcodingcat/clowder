@@ -77,10 +77,12 @@ func Init(ctx context.Context, files Files, options InitOptions, hostNetwork Hos
 }
 
 // createKeys makes the cluster's keys and this host's, writes the host's to
-// disk and returns what goes into the state.
+// disk and returns what goes into the state. The functions it calls say in
+// their errors what failed.
 func createKeys(files Files, host Host) (state.ClusterKeys, state.Host, error) {
 	var keys state.ClusterKeys
-	ca, err := pki.NewCA(host.Name, time.Now())
+	now := time.Now()
+	ca, err := pki.NewCA(host.Name, now)
 	if err != nil {
 		return keys, state.Host{}, err
 	}
@@ -97,7 +99,7 @@ func createKeys(files Files, host Host) (state.ClusterKeys, state.Host, error) {
 		return keys, state.Host{}, err
 	}
 	certificatePEM, err := ca.IssueHost(hostKey.Public().(ed25519.PublicKey), int(host.ID),
-		[]netip.Addr{host.Underlay, host.NodeAddress}, time.Now())
+		[]netip.Addr{host.Underlay, host.NodeAddress}, now)
 	if err != nil {
 		return keys, state.Host{}, err
 	}

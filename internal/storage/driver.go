@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/atomicfile"
+	"github.com/webcodingcat/clowder/internal/command"
 )
 
 // Timeouts of the commands; a command past its timeout is left behind.
@@ -62,13 +63,13 @@ func (d Driver) MountPoint(volume Volume) string {
 // container whose volume is not mounted fails to start instead of writing
 // to the host's root file system.
 func (d Driver) Ensure(ctx context.Context, volume Volume) error {
-	created, err := d.ensureLV(ctx, volume)
-	if err != nil {
+	if err := d.ensureLV(ctx, volume); err != nil {
 		return err
 	}
 	device := "/dev/" + volumeGroup(volume.Pool) + "/" + volume.LV
 	if volume.Resource != nil {
-		if device, err = d.ensureResource(ctx, volume, created); err != nil {
+		var err error
+		if device, err = d.ensureResource(ctx, volume); err != nil {
 			return err
 		}
 	}
@@ -83,74 +84,134 @@ func volumeGroup(pool string) string {
 	return group
 }
 
-// ensureLV creates the thin LV unless it is there; created says it is new.
-func (d Driver) ensureLV(ctx context.Context, volume Volume) (bool, error) {
-	path := volumeGroup(volume.Pool) + "/" + volume.LV
-	if _, err := d.Run(ctx, shortTimeout, "lvs", path); err == nil {
+// The exit codes the driver reads. Any other failure of these tools (a
+// timeout, a missing binary, a device not ready) stops Ensure: guessing
+// "missing" there could create over or format real data.
+const (
+	lvsNotFound   = 5 // lvs: no such LV
+	blkidNotFound = 2 // blkid: no file system on the device
+)
+
+// Markers in StateDir. They let Ensure pick up after a crash at any point:
+//   - <LV>.created: clowder made this LV, so it is empty or clowder's own;
+//   - <resource>.metadata: the DRBD metadata is written;
+//   - <resource>.primary: the first promotion worked (a new resource is made
+//     primary with --force, as it has no UpToDate copy yet).
+func (d Driver) marker(name, kind string) string {
+	return filepath.Join(d.StateDir, name+"."+kind)
+}
+
+func (d Driver) hasMarker(name, kind string) (bool, error) {
+	_, err := os.Stat(d.marker(name, kind))
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, os.ErrNotExist):
 		return false, nil
+	default:
+		return false, fmt.Errorf("read the marker %s: %w", d.marker(name, kind), err)
 	}
-	_, err := d.Run(ctx, shortTimeout, "lvcreate", "--quiet", "--thin", volume.Pool,
-		"--virtualsize", strconv.FormatInt(volume.SizeBytes, 10)+"b", "--name", volume.LV)
-	if err != nil {
-		return false, fmt.Errorf("create the LV of %s: %w", volume.ID, err)
+}
+
+func (d Driver) setMarker(name, kind, volumeID string) error {
+	return atomicfile.Write(d.marker(name, kind), []byte(volumeID+"\n"), 0o600)
+}
+
+// ensureLV creates the thin LV unless it is there, and marks it as clowder's.
+func (d Driver) ensureLV(ctx context.Context, volume Volume) error {
+	path := volumeGroup(volume.Pool) + "/" + volume.LV
+	_, err := d.Run(ctx, shortTimeout, "lvs", path)
+	if code, ok := command.ExitCode(err); err != nil && (!ok || code != lvsNotFound) {
+		return fmt.Errorf("look for the LV of %s: %w", volume.ID, err)
 	}
-	return true, nil
+	if err == nil {
+		return nil
+	}
+	if _, err := d.Run(ctx, shortTimeout, "lvcreate", "--quiet", "--thin", volume.Pool,
+		"--virtualsize", strconv.FormatInt(volume.SizeBytes, 10)+"b", "--name", volume.LV); err != nil {
+		return fmt.Errorf("create the LV of %s: %w", volume.ID, err)
+	}
+	// a crash right here leaves an LV without the marker; Ensure then
+	// refuses it and a human looks (it is empty)
+	return d.setMarker(volume.LV, "created", volume.ID)
 }
 
 // ensureResource writes the resource file and brings the resource up as
-// primary. New metadata is written only once, for a resource that has none
-// yet; a marker remembers it, as an error of drbdadm up does not tell
-// "no metadata" from other trouble.
-func (d Driver) ensureResource(ctx context.Context, volume Volume, created bool) (string, error) {
+// primary. New metadata goes only on an LV clowder made itself, and only
+// once.
+func (d Driver) ensureResource(ctx context.Context, volume Volume) (string, error) {
 	resource := volume.Resource
 	file := filepath.Join(d.ResourceDir, resource.Name+".res")
 	if err := atomicfile.Write(file, []byte(RenderResource(*resource)), 0o644); err != nil {
 		return "", err
 	}
-	marker := filepath.Join(d.StateDir, resource.Name+".metadata")
-	_, markerErr := os.Stat(marker)
-	fresh := errors.Is(markerErr, os.ErrNotExist)
-	if fresh && !created {
-		return "", fmt.Errorf("volume %s: the LV exists but clowder never wrote its DRBD metadata; "+
-			"look at it by hand before anything overwrites it", volume.ID)
+	hasMetadata, err := d.hasMarker(resource.Name, "metadata")
+	if err != nil {
+		return "", err
 	}
-	if fresh {
+	if !hasMetadata {
+		ours, err := d.hasMarker(volume.LV, "created")
+		if err != nil {
+			return "", err
+		}
+		if !ours {
+			return "", fmt.Errorf("volume %s: clowder did not create LV %s and never wrote its DRBD metadata; "+
+				"look at it by hand before anything overwrites it", volume.ID, volume.LV)
+		}
 		if _, err := d.Run(ctx, shortTimeout, "drbdadm", "create-md", "--force",
 			"--max-peers="+strconv.Itoa(maxPeers), resource.Name); err != nil {
 			return "", fmt.Errorf("write the DRBD metadata of %s: %w", volume.ID, err)
 		}
-		if err := atomicfile.Write(marker, []byte(volume.ID+"\n"), 0o600); err != nil {
+		if err := d.setMarker(resource.Name, "metadata", volume.ID); err != nil {
 			return "", err
 		}
 	}
 	if _, err := d.Run(ctx, shortTimeout, "drbdadm", "adjust", resource.Name); err != nil {
 		return "", fmt.Errorf("bring up the DRBD resource of %s: %w", volume.ID, err)
 	}
-	role, err := d.Run(ctx, shortTimeout, "drbdadm", "role", resource.Name)
-	if err != nil {
-		return "", fmt.Errorf("read the DRBD role of %s: %w", volume.ID, err)
-	}
-	if strings.TrimSpace(role) != "Primary" {
-		primary := []string{"primary", resource.Name}
-		if fresh {
-			// a new resource has no UpToDate copy yet: this one is it
-			primary = []string{"primary", "--force", resource.Name}
-		}
-		if _, err := d.Run(ctx, shortTimeout, "drbdadm", primary...); err != nil {
-			return "", fmt.Errorf("make %s primary here: %w", volume.ID, err)
-		}
+	if err := d.ensurePrimary(ctx, volume); err != nil {
+		return "", err
 	}
 	return "/dev/drbd" + strconv.Itoa(resource.Minor), nil
 }
 
-// ensureFilesystem makes ext4 on a device that has no file system.
-func (d Driver) ensureFilesystem(ctx context.Context, device string) error {
-	// blkid exits with 2 when it finds no file system
-	if kind, err := d.Run(ctx, shortTimeout, "blkid", "--output", "value", "--match-tag", "TYPE", device); err == nil {
-		if strings.TrimSpace(kind) != "ext4" {
-			return fmt.Errorf("%s holds %s, not ext4; clowder does not touch it", device, strings.TrimSpace(kind))
-		}
+// ensurePrimary makes the resource primary here unless it is.
+func (d Driver) ensurePrimary(ctx context.Context, volume Volume) error {
+	name := volume.Resource.Name
+	role, err := d.Run(ctx, shortTimeout, "drbdadm", "role", name)
+	if err != nil {
+		return fmt.Errorf("read the DRBD role of %s: %w", volume.ID, err)
+	}
+	if strings.TrimSpace(role) == "Primary" {
 		return nil
+	}
+	promoted, err := d.hasMarker(name, "primary")
+	if err != nil {
+		return err
+	}
+	args := []string{"primary", name}
+	if !promoted {
+		// a new resource has no UpToDate copy yet: this one becomes it
+		args = []string{"primary", "--force", name}
+	}
+	if _, err := d.Run(ctx, shortTimeout, "drbdadm", args...); err != nil {
+		return fmt.Errorf("make %s primary here: %w", volume.ID, err)
+	}
+	return d.setMarker(name, "primary", volume.ID)
+}
+
+// ensureFilesystem makes ext4 on a device that has no file system, and only
+// then: blkid must say so with its exit code.
+func (d Driver) ensureFilesystem(ctx context.Context, device string) error {
+	kind, err := d.Run(ctx, shortTimeout, "blkid", "--output", "value", "--match-tag", "TYPE", device)
+	code, exited := command.ExitCode(err)
+	switch {
+	case err == nil && strings.TrimSpace(kind) == "ext4":
+		return nil
+	case err == nil:
+		return fmt.Errorf("%s holds %s, not ext4; clowder does not touch it", device, strings.TrimSpace(kind))
+	case !exited || code != blkidNotFound:
+		return fmt.Errorf("look for a file system on %s: %w", device, err)
 	}
 	if _, err := d.Run(ctx, mkfsTimeout, "mkfs.ext4", "-q", device); err != nil {
 		return fmt.Errorf("make ext4 on %s: %w", device, err)
@@ -164,7 +225,11 @@ func (d Driver) ensureMounted(ctx context.Context, volume Volume, device string)
 	if err := os.MkdirAll(mountPoint, 0o700); err != nil {
 		return fmt.Errorf("create the mount point of %s: %w", volume.ID, err)
 	}
-	if _, err := d.Run(ctx, shortTimeout, "findmnt", "--noheadings", "--mountpoint", mountPoint); err != nil {
+	isMounted, err := d.mounted(ctx, mountPoint)
+	if err != nil {
+		return err
+	}
+	if !isMounted {
 		if _, err := d.Run(ctx, shortTimeout, "mount", "-t", "ext4", device, mountPoint); err != nil {
 			return fmt.Errorf("mount %s: %w", volume.ID, err)
 		}
@@ -176,31 +241,51 @@ func (d Driver) ensureMounted(ctx context.Context, volume Volume, device string)
 	return nil
 }
 
+// mounted tells whether a file system is mounted at mountPoint; findmnt
+// exits with 1 when none is.
+func (d Driver) mounted(ctx context.Context, mountPoint string) (bool, error) {
+	_, err := d.Run(ctx, shortTimeout, "findmnt", "--noheadings", "--mountpoint", mountPoint)
+	if code, exited := command.ExitCode(err); exited && code == 1 {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("look whether %s is mounted: %w", mountPoint, err)
+	}
+	return true, nil
+}
+
 // Remove unmounts the copy, takes the DRBD resource down and removes it and
 // the LV with the data.
 func (d Driver) Remove(ctx context.Context, volume Volume) error {
 	mountPoint := d.MountPoint(volume)
-	if _, err := d.Run(ctx, shortTimeout, "findmnt", "--noheadings", "--mountpoint", mountPoint); err == nil {
+	isMounted, err := d.mounted(ctx, mountPoint)
+	if err != nil {
+		return err
+	}
+	if isMounted {
 		if _, err := d.Run(ctx, shortTimeout, "umount", mountPoint); err != nil {
 			return fmt.Errorf("unmount %s: %w", volume.ID, err)
 		}
 	}
+	leftovers := []string{d.marker(volume.LV, "created")}
 	if volume.Resource != nil {
 		name := volume.Resource.Name
 		if _, err := d.Run(ctx, shortTimeout, "drbdadm", "down", name); err != nil {
 			return fmt.Errorf("take down the DRBD resource of %s: %w", volume.ID, err)
 		}
-		for _, file := range []string{filepath.Join(d.ResourceDir, name+".res"), filepath.Join(d.StateDir, name+".metadata")} {
-			if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-		}
+		leftovers = append(leftovers, filepath.Join(d.ResourceDir, name+".res"),
+			d.marker(name, "metadata"), d.marker(name, "primary"))
 	}
 	path := volumeGroup(volume.Pool) + "/" + volume.LV
 	if _, err := d.Run(ctx, shortTimeout, "lvremove", "--yes", path); err != nil {
 		return fmt.Errorf("remove the LV of %s: %w", volume.ID, err)
 	}
-	return os.Remove(mountPoint)
+	for _, file := range append(leftovers, mountPoint) {
+		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove %s of %s: %w", file, volume.ID, err)
+		}
+	}
+	return nil
 }
 
 // Trim gives the free blocks of the mounted volumes back to their thin

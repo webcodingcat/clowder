@@ -154,7 +154,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   certificate. Which actor may send which kind is the API's check; the state checks only
   what it alone can tell: a host reports only about itself and never moves another host.
 - In use so far: `bootstrap` (init), `apply-config`, `add-user` (the first user),
-  `set-host-phase` (host actions), `report-version`. The other kinds (hosts joining, stacks,
+  `set-host-phase` (host actions). The other kinds (versions reported, hosts joining, stacks,
   volumes, operations, users beyond the first) and the fields they fill are there for the
   next steps; they are tested, but nothing sends them yet.
 - Host phases (`phaseChanges`; L = the leader, on its own or for a user; H = the host itself):
@@ -201,7 +201,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - The network is mutual TLS on port 7400 of the node address: both sides show a host
   certificate of the cluster CA that is not revoked (the state's list). Users' certificates and
   other clusters' hosts fail the handshake. Removing a host revokes its certificate, so it
-  leaves Raft and the API at once. `pki.HostClientTLS` and `pki.HostServerTLS` are the one way
+  leaves Raft and the API at once. `pki.ClientTLSToHosts` and `pki.ServerTLSForHosts` are the one way
   hosts are checked, by Raft and by the API alike: the chain and the role, not the name.
 - `Propose` commits a command through the leader and returns its index, or the state's
   refusal. `Read` gives the current state under a lock; nothing may keep it, as `Apply` changes
@@ -279,6 +279,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   (`reconcileNetwork`): after a change of the state when the rules differ, and every 30 s to
   repair what someone changed by hand. `HostNetwork` is what the agent changes in the
   network; the test uses a fake.
+- The test of the package goes the whole way on 127.0.0.1: init, the agent with a notify
+  socket, the user's bootstrap (and a wrong key, a second user refused), apply and diff, and
+  the Floating IP reaching the nft rules.
 
 ## Network (`internal/network`)
 
@@ -298,25 +301,35 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 ## Storage (`internal/storage`)
 
 - A copy of a volume is a thin LV in a pool of its storage class. With replicas, a DRBD 9
-  resource sits on it (`RenderResource`, golden files in `testdata/`, checked with the real
-  `drbdadm`): quorum majority with `suspend-io`, `auto-promote no`, node-id = host ID, port
-  10000 + minor on the node address, `max-peers 4`. With replicas 0 it is a plain LV.
-- `Driver.Ensure` does only what is missing: the LV, the resource (new metadata only for a
-  resource it created itself; a marker in `/var/lib/clowder/storage` remembers that), the
-  primary role (`--force` only the first time), ext4, the mount under
-  `/var/lib/clowder/volumes/<stack>/<volume>` and `data/` in it. It refuses an LV it never
-  wrote metadata on, and a device with another file system: those it leaves to a human.
+  resource sits on it (`RenderResource`, golden files in `testdata/` that `bin/dev test-tools`
+  checks with `drbdadm`): quorum majority with
+  `suspend-io`, `auto-promote no`, node-id = host ID, port 10000 + minor on the node address,
+  `max-peers 4`. With replicas 0 it is a plain LV.
+- `Driver.Ensure` does only what is missing: the LV, the resource, the primary role, ext4,
+  the mount under `/var/lib/clowder/volumes/<stack>/<volume>` and `data/` in it. Markers in
+  `/var/lib/clowder/storage` let it pick up after a crash at any point: `<LV>.created` (clowder
+  made the LV), `<resource>.metadata` (DRBD metadata written), `<resource>.primary` (the
+  first promotion, made with `--force`, worked). It refuses an LV it did not create and never
+  wrote metadata on, and a device with another file system: those it leaves to a human. (A
+  crash between `lvcreate` and its marker leaves an empty LV that a human must look at.)
+- It reads the tools' own exit codes: only `lvs` exiting with 5 means "no LV", only `blkid`
+  with 2 "no file system", only `findmnt` with 1 "not mounted". Any other failure (a timeout,
+  a device not ready) stops `Ensure`, so a guess never creates over or formats real data.
 - The mount guard: containers get `data/`, which exists only in the mounted file system, so a
   container whose volume is not mounted fails to start instead of writing to the root file
   system.
-- Every command runs through `internal/command`: with a timeout, and left behind if it hangs
-  (also `mkdir` of `data/`, a write to the volume). `hostcheck` uses the same.
 - `Fits` is the accounting without overcommit: the volumes of a pool and a new one stay
   within the pool less its reserve. `PoolUsage` reads how full data and metadata are.
-- `Trim` (fstrim) gives deleted blocks back to the pool; the agent runs it weekly once it
-  places volumes (1a.8), as it calls `Ensure` and `Remove` from then on.
-- The test of the package goes the whole way on 127.0.0.1: init, the agent with a notify
-  socket, the user's bootstrap (and a wrong key, a second user refused), apply and diff.
+- `Trim` (fstrim) gives deleted blocks back to the pool. The agent does not call the driver
+  yet: it will with the containers (placing volumes, `Ensure`, `Remove`, a weekly `Trim`).
+
+## Host tools (`internal/command`)
+
+Every host tool runs through `command.Run` or `command.RunWithInput`, with no exception (lvs,
+drbdadm, mkfs, mount, nft, ip, systemctl, ...): with a timeout, and left behind if it does not
+finish. A process that touches a volume can hang in state D while DRBD suspends I/O, and
+then not even SIGKILL ends it; any other tool that hangs must not stop a reconciler either.
+`command.ExitCode` tells a tool's own exit code from a timeout or a missing binary.
 
 ## Host check (`internal/hostcheck`, `clowderd check`)
 
@@ -360,15 +373,17 @@ maintainer scripts (reload systemd after install and removal, stop the agent bef
 
 ## CI
 
-`.github/workflows/ci.yml` runs `bin/dev lint`, `bin/dev test`, `bin/dev test-sops` and
-`bin/dev package` on every push and pull request and keeps `dist/` as an artifact. The live
-tests need `/dev/kvm` and stay manual.
+`.github/workflows/ci.yml` runs `bin/dev lint`, `bin/dev test`, `bin/dev test-sops`,
+`bin/dev test-tools` and `bin/dev package` on every push and pull request and keeps `dist/` as
+an artifact. `test-tools` checks the renderers' golden files with Debian's `nft -c` and
+`drbdadm` (`test/tools/check-golden-files.sh`). The live tests need `/dev/kvm` and stay
+manual.
 
 ## Releases
 
 A tag `v<major>.<minor>.<patch>` starts `.github/workflows/release.yml`:
 
-1. `bin/dev all` (lint, test, test-sops, package); the version comes from the tag.
+1. `bin/dev all` (lint, test, test-sops, test-tools, package); the version comes from the tag.
 2. CLI archives for Linux, macOS (`.tar.gz`) and Windows (`.zip`).
 3. `packaging/apt/publish.sh` adds the Debian packages to the public APT repository
    `webcodingcat/clowder-apt` with reprepro and signs it; GitHub Pages serves it at

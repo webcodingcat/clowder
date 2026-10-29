@@ -1,22 +1,55 @@
-// Package command runs the host's tools (lvs, drbdadm, mkfs, ...) so that
-// none can hang the agent. Without quorum, DRBD suspends I/O, and a process
-// touching a volume then hangs in the kernel in state D, where even SIGKILL
-// does not reach it. Run gives up on such a process after its timeout and
-// leaves it behind, instead of waiting with it.
+// Package command runs the host's tools (lvs, drbdadm, mkfs, nft, ip,
+// systemctl, ...) so that none can hang the agent. Every host tool goes
+// through it, with no exception: without quorum, DRBD suspends I/O, and a
+// process touching a volume then hangs in the kernel in state D, where even
+// SIGKILL does not reach it; and a tool that hangs for any other reason must
+// not stop a reconciler either. Run gives up on such a process after its
+// timeout and leaves it behind, instead of waiting with it.
 package command
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 	"time"
 )
 
+// ExitError is a command that ran and exited with a code other than 0, as
+// opposed to one that did not start or did not finish. Callers that read a
+// tool's exit code (blkid's 2: no file system) check for it.
+type ExitError struct {
+	Code   int
+	Stderr string
+}
+
+func (e *ExitError) Error() string {
+	if e.Stderr == "" {
+		return fmt.Sprintf("exit status %d", e.Code)
+	}
+	return fmt.Sprintf("exit status %d: %s", e.Code, e.Stderr)
+}
+
+// ExitCode tells the exit code of a command that ran and failed; ok is false
+// for any other error (a timeout, a missing tool).
+func ExitCode(err error) (code int, ok bool) {
+	var exitErr *ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.Code, true
+	}
+	return 0, false
+}
+
 // Run runs a command and returns its standard output. If it does not finish
 // within timeout, Run returns an error and leaves the process (and the
 // goroutine waiting for it) behind.
 func Run(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+	return RunWithInput(ctx, timeout, "", name, args...)
+}
+
+// RunWithInput is Run with input on the command's standard input.
+func RunWithInput(ctx context.Context, timeout time.Duration, input, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	type result struct {
@@ -27,10 +60,12 @@ func Run(ctx context.Context, timeout time.Duration, name string, args ...string
 	go func() {
 		var stderr strings.Builder
 		process := exec.CommandContext(ctx, name, args...)
+		process.Stdin = strings.NewReader(input)
 		process.Stderr = &stderr
 		output, err := process.Output()
-		if err != nil && stderr.Len() > 0 {
-			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			err = &ExitError{Code: exitErr.ExitCode(), Stderr: strings.TrimSpace(stderr.String())}
 		}
 		done <- result{output, err}
 	}()

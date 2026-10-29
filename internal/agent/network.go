@@ -28,26 +28,27 @@ const reconcileInterval = 30 * time.Second
 // after a change of the state when the rules differ, and every
 // reconcileInterval anyway, to repair what someone changed by hand.
 func reconcileNetwork(ctx context.Context, node *raftnode.Node, hostNetwork HostNetwork, logger *slog.Logger) {
-	var applied network.Ruleset
-	upToDate, repair := false, true
+	// applied is the ruleset that is loaded; nil means "load it again"
+	// (at the start, after a failure, at each repair)
+	var applied *network.Ruleset
 	for {
+		// take the channel before reading, so no change between goes unseen
 		changed := node.Changed()
 		wanted := wantedRuleset(node)
-		if repair || !upToDate || wanted != applied {
+		if applied == nil || *applied != wanted {
+			applied = nil
 			if err := hostNetwork.ApplyRules(ctx, wanted); err != nil {
 				logger.Error("apply the nft rules", "error", err)
-				upToDate = false
 			} else {
-				applied, upToDate = wanted, true
+				applied = &wanted
 			}
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-changed:
-			repair = false
 		case <-time.After(reconcileInterval):
-			repair = true
+			applied = nil
 		}
 	}
 }
@@ -56,6 +57,8 @@ func reconcileNetwork(ctx context.Context, node *raftnode.Node, hostNetwork Host
 func wantedRuleset(node *raftnode.Node) network.Ruleset {
 	var ruleset network.Ruleset
 	node.Read(func(current *state.State) {
+		// empty before the first cluster apply; clusterdir.Check lets no
+		// other invalid address into the state
 		if address, err := netip.ParseAddr(current.Config.Spec.Ingress.FloatingIP); err == nil {
 			ruleset.FloatingIP = address
 		}

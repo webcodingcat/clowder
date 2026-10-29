@@ -24,6 +24,8 @@ jobs:
         run: bin/dev test
       - name: SOPS format against the real sops
         run: bin/dev test-sops
+      - name: Golden files against the real nft and drbdadm
+        run: bin/dev test-tools
       - name: Build and package
         run: bin/dev package
       - uses: actions/upload-artifact@v7

@@ -25,11 +25,11 @@ type tlsStream struct {
 func newTLSStream(bind string, advertise net.Addr, certificate tls.Certificate, ca *x509.Certificate,
 	revoked func(serial string) bool,
 ) (*tlsStream, error) {
-	listener, err := tls.Listen("tcp", bind, pki.HostServerTLS(certificate, ca, revoked))
+	listener, err := tls.Listen("tcp", bind, pki.ServerTLSForHosts(certificate, ca, revoked))
 	if err != nil {
 		return nil, fmt.Errorf("listen for Raft on %s: %w", bind, err)
 	}
-	client := pki.HostClientTLS(certificate, ca, revoked)
+	client := pki.ClientTLSToHosts(certificate, ca, revoked)
 	return &tlsStream{Listener: listener, advertise: advertise, client: client}, nil
 }
 

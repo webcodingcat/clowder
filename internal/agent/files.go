@@ -82,7 +82,7 @@ func (f Files) readHost() (Host, error) {
 func (f Files) writeHost(host Host) error {
 	content, err := json.MarshalIndent(host, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("write %s: %w", f.hostFile(), err)
 	}
 	return atomicfile.Write(f.hostFile(), append(content, '\n'), 0o600)
 }

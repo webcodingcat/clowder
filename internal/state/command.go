@@ -126,6 +126,17 @@ func decoded[Payload any](apply func(s *State, cmd Command, payload Payload) err
 // the cluster has one.
 var ErrNotBootstrapped = errors.New("the cluster is not bootstrapped yet")
 
+// ApplyEntry applies a Raft log entry: a command as JSON. An entry that does
+// not read as one is refused like any other wrong command.
+func (s *State) ApplyEntry(index uint64, data []byte) error {
+	var cmd Command
+	if err := json.Unmarshal(data, &cmd); err != nil {
+		s.Index = index
+		return fmt.Errorf("read the command at index %d: %w", index, err)
+	}
+	return s.Apply(index, cmd)
+}
+
 // Apply applies the command at the given Raft index. A refused command
 // returns an error and leaves the state as it was, apart from the index:
 // the log entry is applied either way.

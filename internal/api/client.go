@@ -37,7 +37,7 @@ func NewClient(seeds []string, certificate tls.Certificate, ca *x509.Certificate
 		version: version,
 		http: &http.Client{
 			Timeout:   30 * time.Second,
-			Transport: &http.Transport{TLSClientConfig: pki.HostClientTLS(certificate, ca, nil)},
+			Transport: &http.Transport{TLSClientConfig: pki.ClientTLSToHosts(certificate, ca, nil)},
 		},
 	}
 }

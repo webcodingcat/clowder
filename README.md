@@ -5,9 +5,10 @@ replicated volumes (DRBD 9), the real client IP behind a Floating IP, priorities
 through the hoster's API. First hoster: Hetzner Cloud.
 
 Status: under construction (phase 1a, see the roadmap in [DEVELOPING.md](DEVELOPING.md)).
-What runs: on a host `clowderd check` and `clowderd init`, which starts the agent; from the
-CLI `clowder cluster bootstrap|apply|diff|status|schema` and `clowder host ...`. Stacks,
-networking and volumes come next.
+What runs: on a host `clowderd check` and `clowderd init`, which starts the agent (with the
+containers' isolation and DNS resolver); from the CLI `clowder cluster
+bootstrap|apply|diff|status|schema` and `clowder host ...`. Stacks with their volumes come
+next.
 
 | Binary | For | Platforms |
 |---|---|---|

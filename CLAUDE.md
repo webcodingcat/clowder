@@ -20,9 +20,10 @@ are not needed on the host.
 | `bin/dev format` | apply what the formatters can fix |
 | `bin/dev test` | the unit tests (seconds, no VMs) |
 | `bin/dev test-sops` | the tests of `internal/sopsage` against the real sops |
+| `bin/dev test-tools` | the golden files of the renderers against the real `nft` and `drbdadm` |
 | `bin/dev build` | `clowderd` for Linux, `clowder` for Linux, macOS and Windows into `dist/` |
 | `bin/dev package` | build, then the Debian packages into `dist/` |
-| `bin/dev all` | lint, test, test-sops, package – what CI runs |
+| `bin/dev all` | lint, test, test-sops, test-tools, package – what CI runs |
 
 ## Rules that are easy to break
 
@@ -30,10 +31,11 @@ DEVELOPING.md explains each one.
 
 - The CLI must build on Windows: `cmd/clowder` and `internal/cli` never import a package that
   only works on Linux (Layers).
-- `scheduler` and `state` do no I/O; only `agent`, `supervisor`, `raftnode` and the drivers
-  change the host (Layers).
+- `scheduler` and `state` do no I/O; only `agent`, `raftnode`, the drivers (`network`,
+  `storage`) and later `supervisor` change the host (Layers).
 - The agent never waits on a write to a volume: without quorum DRBD suspends I/O, and such a
-  write hangs in the kernel where no timeout ends it (Volumes).
+  write hangs in the kernel where no timeout ends it (Volumes). Every host tool runs through
+  `internal/command`, with a timeout (Host tools).
 - Errors are wrapped with `%w` and context; logs go through `log/slog` (Logging and errors).
 
 ## State of the work

@@ -3,7 +3,6 @@ package raftnode
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
@@ -31,18 +30,12 @@ func newFSM() *fsm {
 // Apply applies one command. Its error goes back to the proposer as the
 // response; for Raft the entry is applied either way.
 func (f *fsm) Apply(entry *raft.Log) any {
-	var cmd state.Command
-	decodeErr := json.Unmarshal(entry.Data, &cmd)
 	f.mu.Lock()
 	// defers run backwards: unlock first, then wake, which takes the lock
 	// again to swap the channel
 	defer f.wake()
 	defer f.mu.Unlock()
-	if decodeErr != nil {
-		f.state.Index = entry.Index
-		return fmt.Errorf("read the command at index %d: %w", entry.Index, decodeErr)
-	}
-	return f.state.Apply(entry.Index, cmd)
+	return f.state.ApplyEntry(entry.Index, entry.Data)
 }
 
 // wake tells the waiters that the state changed.

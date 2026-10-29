@@ -8,13 +8,13 @@ import (
 	"time"
 )
 
-// HostClientTLS is the TLS of a caller (a CLI, or an agent calling another)
+// ClientTLSToHosts is the TLS of a caller (a CLI, or an agent calling another)
 // that talks to a host. It trusts any host of the CA that is not revoked,
 // whatever name or address it was reached by: a seed may be a name, and a
 // host certificate lists only the host's addresses. revoked may be nil (the
 // CLI does not know the list; the agent it reaches checks the CLI). Without a
 // certificate (an empty one) the caller shows none: a user's first contact.
-func HostClientTLS(certificate tls.Certificate, ca *x509.Certificate, revoked func(serial string) bool) *tls.Config {
+func ClientTLSToHosts(certificate tls.Certificate, ca *x509.Certificate, revoked func(serial string) bool) *tls.Config {
 	var certificates []tls.Certificate
 	if len(certificate.Certificate) > 0 {
 		certificates = []tls.Certificate{certificate}
@@ -27,8 +27,8 @@ func HostClientTLS(certificate tls.Certificate, ca *x509.Certificate, revoked fu
 	}
 }
 
-// HostServerTLS is the TLS of a server only hosts may reach (Raft).
-func HostServerTLS(certificate tls.Certificate, ca *x509.Certificate, revoked func(serial string) bool) *tls.Config {
+// ServerTLSForHosts is the TLS of a server only hosts may reach (Raft).
+func ServerTLSForHosts(certificate tls.Certificate, ca *x509.Certificate, revoked func(serial string) bool) *tls.Config {
 	return &tls.Config{
 		Certificates:     []tls.Certificate{certificate},
 		ClientAuth:       tls.RequireAnyClientCert,

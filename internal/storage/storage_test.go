@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/webcodingcat/clowder/internal/command"
 )
 
 var update = flag.Bool("update", false, "write the golden files anew")
@@ -79,20 +81,20 @@ type fakeHost struct {
 func (f *fakeHost) run(_ context.Context, _ time.Duration, name string, args ...string) (string, error) {
 	line := name + " " + strings.Join(args, " ")
 	f.commands = append(f.commands, line)
-	missing := errors.New("missing")
+	// the exit codes the tools use for "not there"
 	switch {
 	case name == "lvs" && !f.existing["lv"]:
-		return "", missing
+		return "", &command.ExitError{Code: 5}
 	case name == "lvcreate":
 		f.existing["lv"] = true
 	case name == "blkid" && !f.existing["fs"]:
-		return "", missing
+		return "", &command.ExitError{Code: 2}
 	case name == "blkid":
 		return "ext4\n", nil
 	case name == "mkfs.ext4":
 		f.existing["fs"] = true
 	case name == "findmnt" && !f.existing["mounted"]:
-		return "", missing
+		return "", &command.ExitError{Code: 1}
 	case name == "mount":
 		f.existing["mounted"] = true
 	case line == "drbdadm role clw-shop-pgdata" && f.existing["primary"]:
@@ -183,6 +185,60 @@ func TestAnLVWithoutKnownMetadataIsLeftAlone(t *testing.T) {
 	}
 	if host.ran("drbdadm create-md") {
 		t.Error("the metadata of an unknown LV was overwritten")
+	}
+}
+
+func TestEnsurePicksUpAfterACrashBeforeTheMetadata(t *testing.T) {
+	host := &fakeHost{existing: map[string]bool{}}
+	driver := newDriver(t, host)
+	// the first run dies right after lvcreate
+	crashing := driver
+	crashing.Run = func(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+		if name == "drbdadm" {
+			return "", errors.New("power lost")
+		}
+		return host.run(ctx, timeout, name, args...)
+	}
+	if err := crashing.Ensure(context.Background(), replicated()); err == nil {
+		t.Fatal("the crash went unnoticed")
+	}
+	if err := driver.Ensure(context.Background(), replicated()); err != nil {
+		t.Fatalf("the LV clowder made itself must get its metadata after a crash: %v", err)
+	}
+	if !host.ran("drbdadm create-md") {
+		t.Error("no metadata written")
+	}
+}
+
+func TestOnlyTheToolsOwnExitCodeMeansNotThere(t *testing.T) {
+	tests := []struct {
+		name  string
+		tool  string
+		never string
+	}{
+		{"blkid times out", "blkid", "mkfs.ext4"},
+		{"lvs times out", "lvs", "lvcreate"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			host := &fakeHost{existing: map[string]bool{"lv": true, "fs": false}}
+			driver := newDriver(t, host)
+			volume := replicated()
+			volume.Resource = nil
+			driver.Run = func(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+				if name == test.tool {
+					host.commands = append(host.commands, name)
+					return "", errors.New("no answer within 1m0s")
+				}
+				return host.run(ctx, timeout, name, args...)
+			}
+			if err := driver.Ensure(context.Background(), volume); err == nil {
+				t.Error("Ensure went on after a timeout")
+			}
+			if host.ran(test.never) {
+				t.Errorf("ran %s after %s timed out", test.never, test.tool)
+			}
+		})
 	}
 }
 

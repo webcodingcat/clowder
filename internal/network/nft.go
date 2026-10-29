@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
-	"os/exec"
 	"strings"
+	"time"
+
+	"github.com/webcodingcat/clowder/internal/command"
 )
 
 // Fixed addresses of clowder's network.
@@ -65,13 +67,14 @@ func Render(ruleset Ruleset) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// toolTimeout bounds nft and ip, which answer in milliseconds when well.
+const toolTimeout = 30 * time.Second
+
 // Apply checks the ruleset with nft and then loads it.
 func Apply(ctx context.Context, ruleset string) error {
 	for _, args := range [][]string{{"-c", "-f", "-"}, {"-f", "-"}} {
-		command := exec.CommandContext(ctx, "nft", args...)
-		command.Stdin = strings.NewReader(ruleset)
-		if output, err := command.CombinedOutput(); err != nil {
-			return fmt.Errorf("nft %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		if _, err := command.RunWithInput(ctx, toolTimeout, ruleset, "nft", args...); err != nil {
+			return err
 		}
 	}
 	return nil

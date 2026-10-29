@@ -1,14 +1,14 @@
-// Package network sets up the host's networking for clowder. So far it
-// holds only the node address; WireGuard, routing and nftables follow.
+// Package network sets up the host's network for clowder: clowder0 with the
+// node address, the nft table inet clowder and the containers' DNS resolver.
+// WireGuard and routing between hosts follow in phase 2.
 package network
 
 import (
 	"context"
 	"fmt"
 	"net/netip"
-	"os/exec"
-	"strings"
 
+	"github.com/webcodingcat/clowder/internal/command"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -28,27 +28,24 @@ func NodeAddress(id state.HostID) netip.Addr {
 // missing, so the agent runs it at every start (the interface does not
 // survive a reboot).
 func (Host) SetUpInterface(ctx context.Context, nodeAddress netip.Addr) error {
-	if err := ip(ctx, "link", "show", Interface); err != nil {
-		if err := ip(ctx, "link", "add", Interface, "type", "dummy"); err != nil {
+	// ip exits with 1 when the interface does not exist
+	_, err := command.Run(ctx, toolTimeout, "ip", "link", "show", Interface)
+	if code, exited := command.ExitCode(err); err != nil && (!exited || code != 1) {
+		return fmt.Errorf("look for %s: %w", Interface, err)
+	}
+	if err != nil {
+		if _, err := command.Run(ctx, toolTimeout, "ip", "link", "add", Interface, "type", "dummy"); err != nil {
 			return err
 		}
 	}
-	if err := ip(ctx, "link", "set", Interface, "up"); err != nil {
+	if _, err := command.Run(ctx, toolTimeout, "ip", "link", "set", Interface, "up"); err != nil {
 		return err
 	}
 	for _, address := range []netip.Addr{nodeAddress, Resolver} {
-		if err := ip(ctx, "address", "replace", address.String()+"/32", "dev", Interface); err != nil {
+		if _, err := command.Run(ctx, toolTimeout, "ip", "address", "replace", address.String()+"/32",
+			"dev", Interface); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-// ip runs the ip command of iproute2.
-func ip(ctx context.Context, args ...string) error {
-	output, err := exec.CommandContext(ctx, "ip", args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ip %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
