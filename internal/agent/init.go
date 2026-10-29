@@ -45,9 +45,7 @@ const leaderTimeout = 30 * time.Second
 // data key and the cluster's age key, the host's certificate and WireGuard
 // key, and a Raft group with this host as its only voter. It refuses a host
 // that has a cluster already.
-func Init(ctx context.Context, files Files, options InitOptions, ensureNodeAddress func(context.Context, netip.Addr) error,
-	logger *slog.Logger,
-) error {
+func Init(ctx context.Context, files Files, options InitOptions, hostNetwork HostNetwork, logger *slog.Logger) error {
 	if _, err := os.Stat(files.raftDir()); err == nil {
 		return fmt.Errorf("%s exists: this host was part of a cluster, or an init failed halfway "+
 			"(to start anew, remove all of %s)", files.raftDir(), files.Dir)
@@ -68,7 +66,7 @@ func Init(ctx context.Context, files Files, options InitOptions, ensureNodeAddre
 	if err != nil {
 		return err
 	}
-	if err := ensureNodeAddress(ctx, host.NodeAddress); err != nil {
+	if err := hostNetwork.SetUpInterface(ctx, host.NodeAddress); err != nil {
 		return err
 	}
 	if err := bootstrapRaft(ctx, files, host, keys, hostEntry, options.BootstrapKey, logger); err != nil {

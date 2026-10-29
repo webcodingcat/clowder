@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/cli"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/sopsage"
 )
 
@@ -34,7 +36,39 @@ func freePort(t *testing.T) int {
 	return port
 }
 
-func noNetwork(context.Context, netip.Addr) error { return nil }
+// fakeNetwork stands in for the host's network and remembers the rules.
+type fakeNetwork struct {
+	mu       sync.Mutex
+	rulesets []network.Ruleset
+}
+
+func (f *fakeNetwork) SetUpInterface(context.Context, netip.Addr) error { return nil }
+
+func (f *fakeNetwork) ApplyRules(_ context.Context, ruleset network.Ruleset) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rulesets = append(f.rulesets, ruleset)
+	return nil
+}
+
+func (f *fakeNetwork) StartResolver() (io.Closer, error) { return io.NopCloser(nil), nil }
+
+// waitForRuleset waits up to 10 s until the last applied ruleset satisfies
+// want.
+func (f *fakeNetwork) waitForRuleset(t *testing.T, want func(network.Ruleset) bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		f.mu.Lock()
+		found := len(f.rulesets) > 0 && want(f.rulesets[len(f.rulesets)-1])
+		f.mu.Unlock()
+		if found {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("no such ruleset applied; the last ones: %v", f.rulesets)
+}
 
 // clowder runs the CLI and returns what it printed.
 func clowder(t *testing.T, args ...string) (string, error) {
@@ -54,15 +88,16 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	loopback := netip.MustParseAddr("127.0.0.1")
 	files := Files{Dir: t.TempDir()}
 	apiPort := freePort(t)
+	hostNetwork := &fakeNetwork{}
 	err := Init(context.Background(), files, InitOptions{
 		BootstrapKey: "the-bootstrap-key", Name: "node0", Underlay: loopback,
 		NodeAddress: loopback, RaftPort: freePort(t), APIPort: apiPort,
-	}, noNetwork, logger)
+	}, hostNetwork, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := Init(context.Background(), files, InitOptions{BootstrapKey: "k", Name: "node0", Underlay: loopback},
-		noNetwork, logger); err == nil || !strings.Contains(err.Error(), "was part of a cluster") {
+		hostNetwork, logger); err == nil || !strings.Contains(err.Error(), "was part of a cluster") {
 		t.Errorf("a second init: %v", err)
 	}
 
@@ -77,7 +112,7 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 
 	ctx, stop := context.WithCancel(context.Background())
 	stopped := make(chan error, 1)
-	go func() { stopped <- Run(ctx, files, noNetwork, logger) }()
+	go func() { stopped <- Run(ctx, files, hostNetwork, logger) }()
 	defer func() {
 		stop()
 		if err := <-stopped; err != nil {
@@ -126,6 +161,10 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	if err != nil || !strings.Contains(out, "revision 1") {
 		t.Fatalf("apply: %q, %v", out, err)
 	}
+	// the Floating IP of cluster.yaml reaches the nft rules (HTTP hairpin)
+	hostNetwork.waitForRuleset(t, func(ruleset network.Ruleset) bool {
+		return ruleset.FloatingIP == netip.MustParseAddr("203.0.113.10")
+	})
 	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "nothing to apply") {
 		t.Errorf("diff after apply: %q, %v", out, err)
 	}

@@ -1,0 +1,17 @@
+table inet clowder
+delete table inet clowder
+table inet clowder {
+  chain guard_in {
+    type filter hook input priority filter; policy accept;
+    iifname { "cbr-*", "docker0", "br-*" } ct state established,related accept
+    iifname { "cbr-*", "docker0", "br-*" } ip daddr 169.254.77.53 meta l4proto { tcp, udp } th dport 53 accept
+    iifname { "cbr-*", "docker0", "br-*" } ip daddr 203.0.113.11 tcp dport { 80, 443 } accept
+    iifname { "cbr-*", "docker0", "br-*" } drop
+  }
+  chain guard_fwd {
+    type filter hook forward priority filter - 10; policy accept;
+    iifname { "cbr-*", "docker0", "br-*" } ip daddr 169.254.169.254 drop
+    iifname { "cbr-*", "docker0", "br-*" } ip daddr 10.77.0.0/24 ct status dnat accept
+    iifname { "cbr-*", "docker0", "br-*" } ip daddr 10.77.0.0/24 drop
+  }
+}

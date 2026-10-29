@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/netip"
 	"strconv"
 	"time"
 
@@ -26,12 +25,11 @@ const (
 	catchUpTimeout = 15 * time.Second
 )
 
-// Run is the agent until ctx ends: the node address, the Raft member and the
-// API. It tells systemd when it serves and keeps its watchdog fed while the
-// state answers. Containers, network and storage come in later steps.
-func Run(ctx context.Context, files Files, ensureNodeAddress func(context.Context, netip.Addr) error,
-	logger *slog.Logger,
-) error {
+// Run is the agent until ctx ends: clowder0, the Raft member, the API, the
+// containers' DNS resolver and the nft rules. It tells systemd when it serves
+// and keeps its watchdog fed while the state answers. Containers and storage
+// come in later steps.
+func Run(ctx context.Context, files Files, hostNetwork HostNetwork, logger *slog.Logger) error {
 	host, err := files.readHost()
 	if err != nil {
 		return err
@@ -40,7 +38,7 @@ func Run(ctx context.Context, files Files, ensureNodeAddress func(context.Contex
 	if err != nil {
 		return err
 	}
-	if err := ensureNodeAddress(ctx, host.NodeAddress); err != nil {
+	if err := hostNetwork.SetUpInterface(ctx, host.NodeAddress); err != nil {
 		return err
 	}
 	node, err := raftnode.Open(raftnode.Config{
@@ -60,6 +58,15 @@ func Run(ctx context.Context, files Files, ensureNodeAddress func(context.Contex
 	if err != nil {
 		logger.Warn("serving before the state caught up with the Raft log", "error", err)
 	}
+
+	resolver, err := hostNetwork.StartResolver()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resolver.Close() }() // stopping: nothing to keep
+	reconcilers, stopReconcilers := context.WithCancel(ctx)
+	defer stopReconcilers()
+	go reconcileNetwork(reconcilers, node, hostNetwork, logger)
 
 	server := api.NewServer(api.ServerConfig{
 		Cluster: node, CA: credentials.ca, Certificate: credentials.certificate,

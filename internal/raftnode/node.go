@@ -201,6 +201,14 @@ func (n *Node) WaitIndex(ctx context.Context, index uint64) error {
 	return n.fsm.waitFor(ctx, index)
 }
 
+// Changed returns a channel that closes when the next entry is applied: the
+// agent's reconcilers wait on it.
+func (n *Node) Changed() <-chan struct{} {
+	n.fsm.mu.RLock()
+	defer n.fsm.mu.RUnlock()
+	return n.fsm.changed
+}
+
 // IsLeader tells whether this member leads.
 func (n *Node) IsLeader() bool {
 	return n.raft.State() == raft.Leader

@@ -274,6 +274,25 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   in later steps.
 - `clowder0` is a dummy interface with the node address (`internal/network`), so the address
   exists on a host without peers; `run` creates it at every start.
+- `run` also starts the containers' DNS resolver and keeps the nft rules as the state says
+  (`reconcileNetwork`): after a change of the state when the rules differ, and every 30 s to
+  repair what someone changed by hand. `HostNetwork` is what the agent changes in the
+  network; the test uses a fake.
+
+## Network (`internal/network`)
+
+- `clowder0` carries the node address and the resolver's address `169.254.77.53`.
+- The table `inet clowder` (`Render`, golden file `testdata/isolation.golden.nft`) keeps
+  containers in their place. From a container bridge (`cbr-*`, `docker0`, `br-*`) the host
+  answers only the resolver, the local Traefik on the Floating IP (HTTP hairpin) and the
+  container's own connections. Beyond the host, the metadata API (`169.254.169.254`, whose
+  user data holds the bootstrap key) is dropped, and so are other hosts' node addresses
+  unless clowder redirected the packet there itself (DNAT). `Apply` checks with `nft -c`, then
+  replaces the table in one transaction; Docker's rules stay untouched.
+- The resolver answers on `169.254.77.53:53` (UDP and TCP) and passes every question on to
+  the host's resolvers (`/etc/resolv.conf`). Names of exported services come with exports.
+- Published ports (DNAT to the stack's host, 1b) and the marks for answers over WireGuard
+  (phase 2) join the ruleset later.
 - The test of the package goes the whole way on 127.0.0.1: init, the agent with a notify
   socket, the user's bootstrap (and a wrong key, a second user refused), apply and diff.
 

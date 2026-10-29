@@ -23,10 +23,11 @@ func NodeAddress(id state.HostID) netip.Addr {
 	return netip.AddrFrom4([4]byte{10, 77, 0, byte(id + 1)})
 }
 
-// EnsureNodeAddress creates clowder0 if it is missing, brings it up and
-// gives it the node address. It does only what is missing, so the agent runs
-// it at every start (the interface does not survive a reboot).
-func EnsureNodeAddress(ctx context.Context, address netip.Addr) error {
+// SetUpInterface creates clowder0 if it is missing, brings it up and gives
+// it the node address and the resolver's address. It does only what is
+// missing, so the agent runs it at every start (the interface does not
+// survive a reboot).
+func (Host) SetUpInterface(ctx context.Context, nodeAddress netip.Addr) error {
 	if err := ip(ctx, "link", "show", Interface); err != nil {
 		if err := ip(ctx, "link", "add", Interface, "type", "dummy"); err != nil {
 			return err
@@ -35,7 +36,12 @@ func EnsureNodeAddress(ctx context.Context, address netip.Addr) error {
 	if err := ip(ctx, "link", "set", Interface, "up"); err != nil {
 		return err
 	}
-	return ip(ctx, "address", "replace", address.String()+"/32", "dev", Interface)
+	for _, address := range []netip.Addr{nodeAddress, Resolver} {
+		if err := ip(ctx, "address", "replace", address.String()+"/32", "dev", Interface); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ip runs the ip command of iproute2.

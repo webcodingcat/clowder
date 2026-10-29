@@ -45,7 +45,7 @@ func newInit() *cobra.Command {
 			}
 			options.Underlay = address
 			files := Files{Dir: DefaultDir}
-			if err := Init(cmd.Context(), files, options, network.EnsureNodeAddress, slog.Default()); err != nil {
+			if err := Init(cmd.Context(), files, options, hostNetwork(), slog.Default()); err != nil {
 				return err
 			}
 			if !start {
@@ -78,9 +78,14 @@ func newRun() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
 			defer stop()
-			return Run(ctx, Files{Dir: DefaultDir}, network.EnsureNodeAddress, slog.Default())
+			return Run(ctx, Files{Dir: DefaultDir}, hostNetwork(), slog.Default())
 		},
 	}
+}
+
+// hostNetwork is the host's real network.
+func hostNetwork() network.Host {
+	return network.Host{ResolvConf: "/etc/resolv.conf", Logger: slog.Default()}
 }
 
 func newVersion() *cobra.Command {
