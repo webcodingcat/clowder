@@ -13,6 +13,15 @@ func TestStackAndSecretNamesAreWhatComposeAllows(t *testing.T) {
 	}
 }
 
+func TestClowdersOwnProjectNamesAreNoStacks(t *testing.T) {
+	if ValidStack("clowder-traefik") || !ValidStack("clowder") || !ValidStack("my-clowder-app") {
+		t.Error("only names that start with clowder- are reserved")
+	}
+	if !ValidSecret("clowder-token") {
+		t.Error("a secret may start with clowder-")
+	}
+}
+
 func TestVariableNames(t *testing.T) {
 	for name, valid := range map[string]bool{
 		"DB_PASSWORD": true, "_x": true, "a1": true, "": false, "1A": false, "A-B": false, "A=B": false,

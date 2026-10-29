@@ -43,8 +43,11 @@ func (r *stackRunner) logIn(ctx context.Context, desired desiredState) {
 }
 
 // rules tells the supervisor each service's restart rule, from the stack as
-// the state has it.
+// the state has it; clowder's own Traefik has a rule of its own.
 func (r *stackRunner) rules(stackName, service string) (supervisor.Rule, bool) {
+	if clowdersOwn(stackName) {
+		return traefikRule, true
+	}
 	var source string
 	r.cluster.Read(func(current *state.State) {
 		if stack, ok := current.Stacks[stackName]; ok && stack.Host != nil && *stack.Host == r.host.ID {

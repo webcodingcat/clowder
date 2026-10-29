@@ -2,7 +2,10 @@
 // the CLI, the API, cluster.yaml and the state check them alike.
 package names
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 var (
 	// name is what Compose allows as a project name; it has no "/", which
@@ -13,9 +16,16 @@ var (
 	variable = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
+// ReservedPrefix starts the Compose projects clowder runs itself (its
+// Traefik); no stack may take such a name.
+const ReservedPrefix = "clowder-"
+
+// StackRule says what ValidStack accepts, for messages.
+const StackRule = "use lowercase letters, digits, - and _, and do not start with " + ReservedPrefix
+
 // ValidStack tells whether name may name a stack.
 func ValidStack(stack string) bool {
-	return name.MatchString(stack)
+	return name.MatchString(stack) && !strings.HasPrefix(stack, ReservedPrefix)
 }
 
 // ValidSecret tells whether name may name a secret of a stack.

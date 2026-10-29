@@ -1,6 +1,7 @@
 // Package docker is the agent's way to Docker: a small client of Docker's
-// API on its Unix socket (events, start, restart, list) and docker compose
-// for the stacks, run through internal/command like every host tool.
+// API on its Unix socket (events, start, restart, list, inspect) and
+// docker compose for the stacks, run through internal/command like every
+// host tool.
 package docker
 
 import (
@@ -12,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"time"
@@ -19,6 +21,12 @@ import (
 
 // Socket is where Docker's API listens.
 const Socket = "/var/run/docker.sock"
+
+// Labels Compose puts on a container.
+const (
+	ProjectLabel = "com.docker.compose.project"
+	ServiceLabel = "com.docker.compose.service"
+)
 
 // requestTimeout bounds a call to Docker's API (not the event stream).
 const requestTimeout = 30 * time.Second
@@ -143,6 +151,64 @@ func (c *Client) Containers(ctx context.Context, label string) ([]Container, err
 		return nil, fmt.Errorf("list the containers: %w", err)
 	}
 	return containers, nil
+}
+
+// Details are what Inspect tells about a container.
+type Details struct {
+	Running bool
+	// Health is "healthy", "unhealthy" or "starting"; empty for a container
+	// without a health check.
+	Health string
+	// Addresses are the container's addresses by network.
+	Addresses map[string]netip.Addr
+}
+
+// Inspect reads a container's state and addresses.
+func (c *Client) Inspect(ctx context.Context, id string) (Details, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/containers/"+url.PathEscape(id)+"/json", nil)
+	if err != nil {
+		return Details{}, err
+	}
+	response, err := c.http.Do(request)
+	if err != nil {
+		return Details{}, fmt.Errorf("inspect container %s: %w", id, err)
+	}
+	defer func() { _ = response.Body.Close() }() // read to the end below
+	switch {
+	case response.StatusCode == http.StatusNotFound:
+		return Details{}, fmt.Errorf("inspect container %s: %w", id, ErrNoContainer)
+	case response.StatusCode != http.StatusOK:
+		return Details{}, answerError("inspect container "+id, response)
+	}
+	var raw struct {
+		State struct {
+			Running bool `json:"Running"`
+			Health  *struct {
+				Status string `json:"Status"`
+			} `json:"Health"`
+		} `json:"State"`
+		NetworkSettings struct {
+			Networks map[string]struct {
+				IPAddress string `json:"IPAddress"`
+			} `json:"Networks"`
+		} `json:"NetworkSettings"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&raw); err != nil {
+		return Details{}, fmt.Errorf("inspect container %s: %w", id, err)
+	}
+	details := Details{Running: raw.State.Running, Addresses: map[string]netip.Addr{}}
+	if raw.State.Health != nil {
+		details.Health = raw.State.Health.Status
+	}
+	for network, settings := range raw.NetworkSettings.Networks {
+		// a network the container has left an address in yet
+		if address, err := netip.ParseAddr(settings.IPAddress); err == nil {
+			details.Addresses[network] = address
+		}
+	}
+	return details, nil
 }
 
 func (c *Client) post(ctx context.Context, path string) error {

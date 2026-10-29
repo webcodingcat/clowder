@@ -3,6 +3,7 @@ package compose
 import (
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -10,6 +11,13 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 
 	"github.com/webcodingcat/clowder/internal/names"
+)
+
+var (
+	// routeHost is a domain name of at least two labels, in any case.
+	routeHost = regexp.MustCompile(`^(?i)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+	// routePath is an absolute URL path of the characters RFC 3986 allows.
+	routePath = regexp.MustCompile(`^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$`)
 )
 
 // checkService checks what clowder cannot run in a service and reads its
@@ -106,8 +114,13 @@ func readServiceExtension(config types.ServiceConfig, service *Service) []string
 		if raw.HTTP.Host == "" || raw.HTTP.Port == 0 {
 			problems = append(problems, "x-clowder.http needs host and port")
 		}
-		if raw.HTTP.Path != "" && !strings.HasPrefix(raw.HTTP.Path, "/") {
-			problems = append(problems, fmt.Sprintf("x-clowder.http.path %q must start with /", raw.HTTP.Path))
+		// both end up in a Traefik rule between backticks
+		if raw.HTTP.Host != "" && !routeHost.MatchString(raw.HTTP.Host) {
+			problems = append(problems, fmt.Sprintf("x-clowder.http.host %q is not a domain name", raw.HTTP.Host))
+		}
+		if raw.HTTP.Path != "" && !routePath.MatchString(raw.HTTP.Path) {
+			problems = append(problems, fmt.Sprintf(
+				"x-clowder.http.path %q must start with / and hold only the characters of a URL path", raw.HTTP.Path))
 		}
 		service.HTTP = &HTTPRoute{Host: raw.HTTP.Host, Port: raw.HTTP.Port, Path: raw.HTTP.Path}
 	}

@@ -17,12 +17,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/docker"
 )
 
-// Labels Compose puts on a container.
-const (
-	stackLabel   = "com.docker.compose.project"
-	serviceLabel = "com.docker.compose.service"
-)
-
 // Docker is what the supervisor needs from Docker; docker.Client is the
 // real one.
 type Docker interface {
@@ -60,6 +54,9 @@ type Supervisor struct {
 	// what died in between went unseen (a restart of Docker kills every
 	// container), so the agent starts its stacks as after a boot
 	missed func()
+	// seen is called after each event, so whoever follows the containers
+	// (the routes to them) looks again
+	seen   func()
 	logger *slog.Logger
 
 	mu sync.Mutex
@@ -73,10 +70,11 @@ type Supervisor struct {
 	started map[string]time.Time
 }
 
-// New makes a supervisor; missed is called after a break in Docker's events.
-func New(dockerAPI Docker, rules Rules, backoff Backoff, missed func(), logger *slog.Logger) *Supervisor {
+// New makes a supervisor; missed is called after a break in Docker's
+// events, seen after each event.
+func New(dockerAPI Docker, rules Rules, backoff Backoff, missed, seen func(), logger *slog.Logger) *Supervisor {
 	return &Supervisor{
-		docker: dockerAPI, rules: rules, backoff: backoff, missed: missed, logger: logger,
+		docker: dockerAPI, rules: rules, backoff: backoff, missed: missed, seen: seen, logger: logger,
 		held: map[string]int{}, stopped: map[string]bool{},
 		crashes: map[string]int{}, started: map[string]time.Time{},
 	}
@@ -111,6 +109,7 @@ func (s *Supervisor) Run(ctx context.Context, label string) {
 		}
 		for event := range events {
 			s.handle(ctx, event)
+			s.seen()
 		}
 		select {
 		case err := <-failed:
@@ -126,7 +125,7 @@ func (s *Supervisor) Run(ctx context.Context, label string) {
 
 // handle decides about one event.
 func (s *Supervisor) handle(ctx context.Context, event docker.Event) {
-	stack, service := event.Labels[stackLabel], event.Labels[serviceLabel]
+	stack, service := event.Labels[docker.ProjectLabel], event.Labels[docker.ServiceLabel]
 	id := event.ContainerID
 	switch {
 	case event.Action == "start":
@@ -165,13 +164,14 @@ func (s *Supervisor) crashed(ctx context.Context, stack, service, id string, exi
 		s.crashes[id] = 0 // it ran stably: count anew
 	}
 	attempt := s.crashes[id]
+	restart := known && !held && !stopped && restarts(rule.Restart, exitCode, attempt)
+	if restart {
+		s.crashes[id] = attempt + 1
+	}
 	s.mu.Unlock()
-	if !known || held || stopped || !restarts(rule.Restart, exitCode, attempt) {
+	if !restart {
 		return
 	}
-	s.mu.Lock()
-	s.crashes[id] = attempt + 1
-	s.mu.Unlock()
 	delay := s.delay(attempt)
 	s.logger.Warn("container crashed; restarting", "stack", stack, "service", service,
 		"exit_code", exitCode, "in", delay)
@@ -213,11 +213,12 @@ func (s *Supervisor) unhealthy(ctx context.Context, stack, service, id string) {
 		s.crashes[id] = 0
 	}
 	attempt := s.crashes[id]
-	if known && !held && rule.RestartUnhealthy {
+	restart := known && !held && rule.RestartUnhealthy
+	if restart {
 		s.crashes[id] = attempt + 1
 	}
 	s.mu.Unlock()
-	if !known || held || !rule.RestartUnhealthy {
+	if !restart {
 		return
 	}
 	delay := s.delay(attempt)

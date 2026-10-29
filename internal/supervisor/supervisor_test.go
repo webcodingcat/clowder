@@ -21,6 +21,13 @@ type fakeDocker struct {
 	// failedStarts is how many starts fail before one works
 	failedStarts int
 	missed       int
+	seen         int
+}
+
+func (f *fakeDocker) see() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seen++
 }
 
 func (f *fakeDocker) Events(context.Context, string) (<-chan docker.Event, <-chan error) {
@@ -81,7 +88,7 @@ func running(t *testing.T) (*Supervisor, *fakeDocker) {
 	t.Helper()
 	fake := &fakeDocker{events: make(chan docker.Event)}
 	supervisor := New(fake, rules, Backoff{Base: time.Millisecond, Max: 4 * time.Millisecond, Stable: time.Hour},
-		fake.miss, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		fake.miss, fake.see, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go supervisor.Run(ctx, "clowder.stack")
@@ -91,7 +98,7 @@ func running(t *testing.T) (*Supervisor, *fakeDocker) {
 func event(action, service string, exitCode int) docker.Event {
 	return docker.Event{
 		Action: action, ContainerID: "id-" + service, ExitCode: exitCode,
-		Labels: map[string]string{stackLabel: "shop", serviceLabel: service},
+		Labels: map[string]string{docker.ProjectLabel: "shop", docker.ServiceLabel: service},
 	}
 }
 
@@ -186,6 +193,18 @@ func TestABreakInTheEventsIsReported(t *testing.T) {
 	}
 }
 
+func TestEveryEventIsPassedOn(t *testing.T) {
+	_, fake := running(t)
+	fake.events <- docker.Event{Action: "health_status: healthy", ContainerID: "c1"}
+	fake.events <- docker.Event{Action: "start", ContainerID: "c2"}
+	settle()
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.seen != 2 {
+		t.Errorf("seen %d events, want 2", fake.seen)
+	}
+}
+
 func TestUnhealthyContainersRestartUnlessTheyMayNot(t *testing.T) {
 	_, fake := running(t)
 	fake.events <- event("health_status: unhealthy", "app", 0)
@@ -197,7 +216,7 @@ func TestUnhealthyContainersRestartUnlessTheyMayNot(t *testing.T) {
 }
 
 func TestBackoffDoublesUpToItsMaximum(t *testing.T) {
-	supervisor := New(nil, rules, DefaultBackoff, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	supervisor := New(nil, rules, DefaultBackoff, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	want := []time.Duration{
 		time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second,
 		16 * time.Second, 32 * time.Second, time.Minute, time.Minute,

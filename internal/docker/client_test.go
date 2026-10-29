@@ -2,9 +2,11 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -41,6 +43,14 @@ func fakeDocker(t *testing.T) (string, *[]string) {
 	mux.HandleFunc("GET /containers/json", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprintln(w, `[{"Id":"c1","State":"exited","Labels":{"clowder.stack":"shop"}}]`)
 	})
+	mux.HandleFunc("GET /containers/{id}/json", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("id") != "c1" {
+			http.Error(w, "no such container", http.StatusNotFound)
+			return
+		}
+		_, _ = fmt.Fprintln(w, `{"State":{"Running":true,"Health":{"Status":"healthy"}},`+
+			`"NetworkSettings":{"Networks":{"shop_default":{"IPAddress":"172.18.0.3"},"left":{"IPAddress":""}}}}`)
+	})
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: time.Second}
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })
@@ -71,6 +81,14 @@ func TestTheClientSpeaksDockersAPI(t *testing.T) {
 	containers, err := client.Containers(ctx, "clowder.stack")
 	if err != nil || len(containers) != 1 || containers[0].State != "exited" {
 		t.Errorf("containers %+v, %v", containers, err)
+	}
+	details, err := client.Inspect(ctx, "c1")
+	if err != nil || !details.Running || details.Health != "healthy" || len(details.Addresses) != 1 ||
+		details.Addresses["shop_default"] != netip.MustParseAddr("172.18.0.3") {
+		t.Errorf("details %+v, %v", details, err)
+	}
+	if _, err := client.Inspect(ctx, "gone"); !errors.Is(err, ErrNoContainer) {
+		t.Errorf("a gone container: %v", err)
 	}
 	if len(*calls) < 2 || (*calls)[1] != "start c1" {
 		t.Errorf("calls %v", *calls)

@@ -97,6 +97,9 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		docker: parts.Docker, storage: parts.Storage, open: credentials.dataKey.Open, digestKey: digestKey,
 		logger: logger, applied: map[string][32]byte{}, logins: map[string][32]byte{}, wake: make(chan struct{}, 1),
 	}
+	traefik := &traefikRunner{
+		files: files, host: host, cluster: node, docker: parts.Docker, logger: logger, wake: make(chan struct{}, 1),
+	}
 	server := api.NewServer(api.ServerConfig{
 		Cluster: node, CA: credentials.ca, Certificate: credentials.certificate,
 		APIAddress: func(id state.HostID) string {
@@ -107,7 +110,15 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		HostID: host.ID, Containers: runner,
 	})
 	runner.propose = server.Propose
-	runner.supervisor = supervisor.New(parts.Docker, runner.rules, supervisor.DefaultBackoff, runner.forgetApplied, logger)
+	// after Docker restarted, every container is down: the stacks and
+	// Traefik come up again
+	dockerRestarted := func() {
+		runner.forgetApplied()
+		traefik.forget()
+	}
+	runner.supervisor = supervisor.New(parts.Docker, runner.rules, supervisor.DefaultBackoff,
+		dockerRestarted, traefik.look, logger)
+	traefik.supervisor = runner.supervisor
 	go runner.supervisor.Run(reconcilers, compose.LabelStack)
 	go controller.RunPlacement(reconcilers, node, server.Propose, logger)
 	go controller.RunIngress(reconcilers, node, server.Propose, credentials.dataKey.Open, parts.Hoster, logger)
@@ -118,6 +129,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		if caughtUp != nil && !waitForState(reconcilers, node, logger) {
 			return
 		}
+		go traefik.run(reconcilers)
 		runner.reconcile(reconcilers)
 	}()
 	servers, serveErrors, err := serveAPI(server, host.apiAddresses(), logger)

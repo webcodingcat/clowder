@@ -105,7 +105,9 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 		open:      func(sealed state.Sealed) ([]byte, error) { return []byte(sealed), nil },
 		digestKey: []byte("the test's digest key"),
 	}
-	runner.supervisor = supervisor.New(docker, runner.rules, supervisor.DefaultBackoff, nil, logger)
+	// the tests run passes, never the supervisor's loop, which calls the two
+	// functions left out
+	runner.supervisor = supervisor.New(docker, runner.rules, supervisor.DefaultBackoff, nil, nil, logger)
 	return runner, cluster, docker, storage
 }
 

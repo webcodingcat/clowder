@@ -18,12 +18,13 @@ linters:
     - unconvert
     - unparam
   settings:
-    # Only for internal/state (see exclusions): Apply takes the time from the
-    # command, never from the clock.
+    # Only for internal/state and internal/scheduler (see exclusions): Apply
+    # takes the time from the command, never from the clock, and the
+    # scheduler decides from the state alone.
     forbidigo:
       forbid:
         - pattern: ^time\.(Now|Since|Until)$
-          msg: the state takes the time from the command (Command.At)
+          msg: the state and the scheduler take the time from the state or the command (Command.At)
     depguard:
       rules:
         # The CLI runs on Linux, macOS and Windows: it must not import the
@@ -92,10 +93,10 @@ linters:
         - name: receiver-naming
   exclusions:
     rules:
-      # forbidigo guards the state's determinism only
-      - path-except: internal/state/
+      # forbidigo guards the determinism of the state and the scheduler only
+      - path-except: internal/(state|scheduler)/
         linters: [forbidigo]
-      - path: internal/state/.*_test\.go
+      - path: internal/(state|scheduler)/.*_test\.go
         linters: [forbidigo]
 
 formatters:

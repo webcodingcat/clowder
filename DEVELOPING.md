@@ -217,7 +217,8 @@ Packages in *italics* do not exist yet.
   `.golangci.yml`) refuses direct imports of the Linux-only packages in `cmd/clowder` and
   `internal/cli`; the cross build for Windows and macOS catches indirect ones.
 - **Pure logic, no I/O**: `scheduler`, `state`. Their tests need no host, files or network;
-  depguard (rule `state-pure`) keeps `os`, `net/http` and randomness out of both. `state` uses
+  depguard (rule `state-pure`) keeps `os`, `net/http` and randomness out of both, forbidigo
+  the clock (`time.Now`, `time.Since`, `time.Until`). `state` uses
   the types and `Check` of `clusterdir`, never its file access.
 - **Decides**: `controller` (the leader's loops) writes Raft commands. It talks to external
   services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
@@ -225,7 +226,7 @@ Packages in *italics* do not exist yet.
   *`notify`*; depguard keeps them out of the CLI.
 - **Changes the host**: `agent`, `supervisor`, `raftnode` (Raft over mTLS), `datakey` (the
   key file), `command` (host tools with a timeout) and the drivers `network`, `storage`,
-  `docker`, *`ingress`*.
+  `docker`, `ingress` (Traefik's files; it renders, the agent writes).
 - **Reads the host**: `hostcheck` (for `clowderd check`). It compiles anywhere, but only the
   agent uses it, so depguard keeps it out of the CLI like the packages above.
 
@@ -241,7 +242,8 @@ Packages in *italics* do not exist yet.
   networks), what shares the host's namespaces (`network_mode: host`, `pid`/`ipc: host`),
   and what clowder sets itself (`build`, `container_name`, replicas, network drivers and
   subnets, port ranges, host addresses, `ReservedPort`), and two services with the same
-  published port or HTTP route (`checkUnique`). Every problem is reported at once
+  published port or HTTP route (`checkUnique`). A route's host must be a domain name and its
+  path a URL path: both go into a Traefik rule. Every problem is reported at once
   (`Problems`); the `x-clowder` blocks are decoded strictly, and only an unknown key there
   ends the checks of its block.
 - **Privileges are the cluster's to give.** What reaches beyond the container (`privileged`,
@@ -326,7 +328,7 @@ read and written.
 Every agent holds the same `State` and applies the same `Command`s in Raft's order.
 
 - **Deterministic.** `Apply` uses no clock (a command carries the leader's time in `At`), no
-  randomness and no I/O; lint bans `time.Now` from the package (forbidigo). A handler checks
+  randomness and no I/O; lint bans the clock from the package (forbidigo). A handler checks
   everything before it changes anything, so a refused command leaves no trace; the state's
   `Index` follows the log either way.
 - **Commands.** A command has a kind, a payload of the type with the same name (`AddHost`,
@@ -626,6 +628,37 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   volumes (`put-volume`), then the stack's host and `starting` (`set-stack-status`). The
   stack's host does the rest.
 
+## Traefik (`internal/ingress`, `agent/traefik.go`)
+
+- Every agent runs Traefik (`ingress.Image`, pinned) as the Compose project
+  `clowder-traefik` in the host network, with `restart: "no"` like every container. It is no
+  stack: the state knows nothing of it, its files live in `<Dir>/traefik/` beside `stacks/`
+  (so the search for stacks that left never finds it), and `names` refuses stack names that
+  start with `clowder-`. `clowdersOwn` answers whether a project is clowder's own; every
+  place of the stack runner that treats Traefik apart asks it: the supervisor's rule
+  (restart always, also when unhealthy) and the clean-up of secrets.
+- `ingress.RenderStatic` writes `traefik.yml`: the entrypoints `web` and `websecure` on the
+  Floating IP :80 and :443, `internal` on the node address :7480 (phase 2) trusting
+  `X-Forwarded-For` only from the node network, and `ping` on 127.0.0.1:7446 for the health
+  check. The public entrypoints trust no `X-Forwarded-For`, so Traefik sets the client's
+  address itself. `ingress.RenderCompose` writes the Compose file.
+- `traefikRunner` has a loop of its own beside the stack runner, so a long image pull of a
+  stack never holds up the ingress. It runs compose up as the stack runner does
+  (`composeUpHeld`, under the supervisor's hold) when the hash of the Compose file and
+  `traefik.yml` differs from the one Traefik came up with: at the first pass after the agent
+  started, after Docker restarted (`forget`), and after a new image pin or Floating IP.
+- **Routes.** `ingress.RenderDynamic` writes the file provider's `routes.yaml`: per
+  `x-clowder.http` a router `<stack>.<service>` on `web` and a service whose servers are the
+  containers of that service on this host that run and, if they have a health check, are
+  healthy (`docker.Inspect`; the address in the network whose name sorts first). A route
+  without such a container keeps its router with no servers, so Traefik answers 503, not
+  404. Traefik watches the directory, so new routes need no restart.
+- The runner's passes come at every change of the state, every 30 s, and at once when the
+  supervisor sees an event of Docker's (`look`: start, die, health status): a container that
+  turns unhealthy leaves its route within seconds.
+- Golden files in `internal/ingress/testdata`; `bin/dev test-tools` checks the Compose file
+  with Debian's docker-compose.
+
 ## Hoster and ingress (`internal/hoster`, `internal/controller`)
 
 - `cluster.yaml` names the hoster in a section of its own, chosen by `type` like backup
@@ -648,7 +681,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   the API at most once per 30 s, about 120 of Hetzner's 3600 requests an hour.
 - Every host has the Floating IP on its public interface, held or not (`clowderd check`
   requires it): the hoster routes it to one host only, so whatever binds it (published
-  ports, later Traefik) can bind it on every host and at boot.
+  ports, Traefik) can bind it on every host and at boot.
 - Only the leader's loops call the hoster: the controller opens the token from the state
   and makes the client (`HostParts.Hoster`, a fake in the tests). depguard keeps `hoster`
   out of the CLI.

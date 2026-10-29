@@ -1,0 +1,30 @@
+http:
+  routers:
+    blog.web:
+      entryPoints:
+        - web
+      rule: Host(`blog.example.com`)
+      service: blog.web
+    shop.api:
+      entryPoints:
+        - web
+      rule: Host(`shop.example.com`) && PathPrefix(`/api`)
+      service: shop.api
+    shop.app:
+      entryPoints:
+        - web
+      rule: Host(`shop.example.com`)
+      service: shop.app
+  services:
+    blog.web:
+      loadBalancer:
+        servers: []
+    shop.api:
+      loadBalancer:
+        servers:
+          - url: http://172.18.0.4:9000
+    shop.app:
+      loadBalancer:
+        servers:
+          - url: http://172.18.0.2:8080
+          - url: http://172.18.0.3:8080

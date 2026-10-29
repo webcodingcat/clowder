@@ -45,6 +45,42 @@ func (f Files) hostCertificate() string { return filepath.Join(f.Dir, "pki", "ho
 func (f Files) hostKey() string         { return filepath.Join(f.Dir, "pki", "host-key.pem") }
 func (f Files) raftDir() string         { return filepath.Join(f.Dir, "raft") }
 
+func (f Files) lastTrim() string { return filepath.Join(f.Dir, "storage", "last-trim") }
+
+// The files of the stacks on this host: per stack its rendered Compose file
+// and the record of its volume copies.
+func (f Files) stacksDir() string            { return filepath.Join(f.Dir, "stacks") }
+func (f Files) stackDir(name string) string  { return filepath.Join(f.stacksDir(), name) }
+func (f Files) stackFile(name string) string { return filepath.Join(f.stackDir(name), "compose.yaml") }
+
+func (f Files) volumesRecord(name string) string {
+	return filepath.Join(f.stackDir(name), "volumes.json")
+}
+
+// The files of a stack's secrets: a file per secret a service asks for as a
+// file (bind-mounted to /run/secrets/<name>), and the second Compose file
+// with the secret variables.
+func (f Files) secretsDir(stack string) string { return filepath.Join(f.SecretsDir, stack) }
+
+func (f Files) secretFilesDir(stack string) string {
+	return filepath.Join(f.secretsDir(stack), "files")
+}
+
+func (f Files) secretEnvFile(stack string) string {
+	return filepath.Join(f.secretsDir(stack), "env.yaml")
+}
+
+func (f Files) secretFile(stack, name string) string {
+	return filepath.Join(f.secretFilesDir(stack), name)
+}
+
+// Traefik's files sit beside stacks/, so the search for stacks that left
+// this host never finds them: its Compose file, the directory of
+// traefik.yml and the one of the routes, which Traefik watches.
+func (f Files) traefikCompose() string    { return filepath.Join(f.Dir, "traefik", "compose.yaml") }
+func (f Files) traefikStaticDir() string  { return filepath.Join(f.Dir, "traefik", "static") }
+func (f Files) traefikDynamicDir() string { return filepath.Join(f.Dir, "traefik", "dynamic") }
+
 // Host is host.json: who this host is in the cluster. init and join write it
 // last, so a host with this file has all the others.
 type Host struct {

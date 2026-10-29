@@ -324,6 +324,14 @@ func TestWhatClowderCannotRunIsReported(t *testing.T) {
 			"services: {web: {image: x, x-clowder: {http: {host: shop.example.com, path: api, port: 80}}}}",
 			`path "api" must start with /`,
 		},
+		"route path with a backtick": {
+			"services: {web: {image: x, x-clowder: {http: {host: shop.example.com, path: \"/a`) || Host(`b\", port: 80}}}}",
+			"hold only the characters of a URL path",
+		},
+		"route host that is no domain": {
+			"services: {web: {image: x, x-clowder: {http: {host: \"shop`) || Host(`x\", port: 80}}}}",
+			"is not a domain name",
+		},
 		"x-clowder on a network": {
 			"services: {web: {image: x}}\nnetworks: {default: {x-clowder: {class: fast}}}", "not used on networks",
 		},

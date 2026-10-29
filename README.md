@@ -14,6 +14,9 @@ upgrade a running cluster. On one host, what runs today:
 - `clowder host ...` drains, removes and enables hosts.
 - `clowder stack create|apply|delete|ps|logs` runs Compose stacks with their volumes and
   secrets.
+- A service with `x-clowder.http: {host, port}` gets HTTP requests for that host on the
+  Floating IP's port 80 through Traefik, only to containers that run and are healthy; the
+  client's address arrives in `X-Forwarded-For`. HTTPS follows with ACME.
 - The cluster keeps the Floating IP routed to its ingress host through the hoster's API
   (`hoster` in `cluster.yaml`), also when someone moves it by hand.
 

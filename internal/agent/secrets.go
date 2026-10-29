@@ -25,23 +25,6 @@ import (
 // containers still use it.
 const DefaultSecretsDir = "/run/clowder-secrets"
 
-// The files of a stack's secrets: a file per secret a service asks for as a
-// file (bind-mounted to /run/secrets/<name>), and the second Compose file
-// with the secret variables.
-func (f Files) secretsDir(stack string) string { return filepath.Join(f.SecretsDir, stack) }
-
-func (f Files) secretFilesDir(stack string) string {
-	return filepath.Join(f.secretsDir(stack), "files")
-}
-
-func (f Files) secretEnvFile(stack string) string {
-	return filepath.Join(f.secretsDir(stack), "env.yaml")
-}
-
-func (f Files) secretFile(stack, name string) string {
-	return filepath.Join(f.secretFilesDir(stack), name)
-}
-
 // stackSecrets are what compose up of a stack needs of its secrets.
 type stackSecrets struct {
 	// files holds the value of each secret a service asks for as a file.
@@ -162,7 +145,7 @@ func (r *stackRunner) removeSecretsOfOthers(desired desiredState) {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if _, staying := desired.stacks[name]; staying {
+		if _, staying := desired.stacks[name]; staying || clowdersOwn(name) {
 			continue
 		}
 		if _, err := os.Stat(r.files.stackFile(name)); !errors.Is(err, os.ErrNotExist) {

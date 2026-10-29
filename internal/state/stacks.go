@@ -19,7 +19,7 @@ type CreateStack struct {
 func applyCreateStack(s *State, cmd Command, payload CreateStack) error {
 	switch {
 	case !names.ValidStack(payload.Name):
-		return fmt.Errorf("stack name %q: use lowercase letters, digits, - and _", payload.Name)
+		return fmt.Errorf("stack name %q: %s", payload.Name, names.StackRule)
 	case payload.Owner == "":
 		return errors.New("the stack needs an owner")
 	}
@@ -73,7 +73,7 @@ const (
 func applyPutStack(s *State, _ Command, payload PutStack) error {
 	switch {
 	case !names.ValidStack(payload.Name):
-		return fmt.Errorf("stack name %q: use lowercase letters, digits, - and _", payload.Name)
+		return fmt.Errorf("stack name %q: %s", payload.Name, names.StackRule)
 	case payload.Owner == "":
 		return errors.New("the stack needs an owner")
 	case payload.Source == "":

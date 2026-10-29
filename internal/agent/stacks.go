@@ -10,7 +10,6 @@ import (
 	"maps"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -19,6 +18,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
+	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/storage"
@@ -33,6 +33,8 @@ type Docker interface {
 	ComposePs(ctx context.Context, stack, file string) (string, error)
 	ComposeLogs(ctx context.Context, stack, file string, follow bool, out io.Writer) error
 	Login(ctx context.Context, registry, username, password string) error
+	Containers(ctx context.Context, label string) ([]docker.Container, error)
+	Inspect(ctx context.Context, id string) (docker.Details, error)
 }
 
 // Storage is what the agent needs from the storage driver; storage.Driver is
@@ -50,18 +52,6 @@ type stateReader interface {
 	Read(use func(current *state.State))
 	Changed() <-chan struct{}
 }
-
-// The files of the stacks on this host: per stack its rendered Compose file
-// and the record of its volume copies.
-func (f Files) stacksDir() string            { return filepath.Join(f.Dir, "stacks") }
-func (f Files) stackDir(name string) string  { return filepath.Join(f.stacksDir(), name) }
-func (f Files) stackFile(name string) string { return filepath.Join(f.stackDir(name), "compose.yaml") }
-
-func (f Files) volumesRecord(name string) string {
-	return filepath.Join(f.stackDir(name), "volumes.json")
-}
-
-func (f Files) lastTrim() string { return filepath.Join(f.Dir, "storage", "last-trim") }
 
 // stackRunner runs the stacks the state places on this host.
 type stackRunner struct {
@@ -103,10 +93,12 @@ type desiredState struct {
 	self       state.Host
 }
 
-func (r *stackRunner) read() (desiredState, error) {
+// readDesired reads what the host self should run, from a copy of the
+// state, outside the lock Raft's Apply waits for.
+func readDesired(cluster stateReader, self state.HostID) (desiredState, error) {
 	var copied *state.State
 	var err error
-	r.cluster.Read(func(current *state.State) { copied, err = current.Copy() })
+	cluster.Read(func(current *state.State) { copied, err = current.Copy() })
 	if err != nil {
 		return desiredState{}, err
 	}
@@ -115,15 +107,15 @@ func (r *stackRunner) read() (desiredState, error) {
 		hostNames: map[state.HostID]string{}, registries: copied.Registries,
 	}
 	for name, stack := range copied.Stacks {
-		if stack.Host != nil && *stack.Host == r.host.ID {
+		if stack.Host != nil && *stack.Host == self {
 			desired.stacks[name] = stack
 		}
 	}
 	for id, host := range copied.Hosts {
 		desired.hostNames[id] = host.Name
 	}
-	if self, ok := copied.Hosts[r.host.ID]; ok {
-		desired.self = *self
+	if host, ok := copied.Hosts[self]; ok {
+		desired.self = *host
 	}
 	return desired, nil
 }
@@ -147,7 +139,7 @@ func (r *stackRunner) reconcile(ctx context.Context) {
 
 // pass brings this host once to what the state says.
 func (r *stackRunner) pass(ctx context.Context) {
-	desired, err := r.read()
+	desired, err := readDesired(r.cluster, r.host.ID)
 	if err != nil {
 		r.logger.Error("read the state", "error", err)
 		return
@@ -256,16 +248,21 @@ func (r *stackRunner) up(ctx context.Context, name string, rendered []byte, secr
 	if secrets.env != nil {
 		files = append(files, r.files.secretEnvFile(name))
 	}
-	release := r.supervisor.Hold(name)
-	err := r.docker.ComposeUp(ctx, name, files)
-	release()
-	if err != nil {
+	if err := composeUpHeld(ctx, r.docker, r.supervisor, name, files); err != nil {
 		return err
 	}
 	r.mu.Lock()
 	r.applied[name] = hash
 	r.mu.Unlock()
 	return r.removeStaleSecrets(name, secrets)
+}
+
+// composeUpHeld runs compose up for a project while the supervisor holds
+// it: containers that compose up stops or recreates do not crash.
+func composeUpHeld(ctx context.Context, dockerAPI Docker, holder *supervisor.Supervisor, project string, files []string) error {
+	release := holder.Hold(project)
+	defer release()
+	return dockerAPI.ComposeUp(ctx, project, files)
 }
 
 // upHash covers everything compose up reads: the rendered file, the secret

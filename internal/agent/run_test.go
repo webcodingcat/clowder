@@ -190,6 +190,9 @@ type fakeDocker struct {
 	failedUps int
 	// upFiles are the files of the last compose up
 	upFiles []string
+	// containers and details are what Docker lists and inspects
+	containers []docker.Container
+	details    map[string]docker.Details
 }
 
 func (f *fakeDocker) Events(ctx context.Context, _ string) (<-chan docker.Event, <-chan error) {
@@ -233,6 +236,22 @@ func (f *fakeDocker) ComposeLogs(_ context.Context, _, _ string, _ bool, out io.
 }
 
 func (f *fakeDocker) Login(context.Context, string, string, string) error { return nil }
+
+func (f *fakeDocker) Containers(context.Context, string) ([]docker.Container, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.containers), nil
+}
+
+func (f *fakeDocker) Inspect(_ context.Context, id string) (docker.Details, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	details, ok := f.details[id]
+	if !ok {
+		return docker.Details{}, docker.ErrNoContainer
+	}
+	return details, nil
+}
 
 // keyFile writes a bootstrap key into a file of its own, as the user keeps it.
 func keyFile(t *testing.T, key string) string {

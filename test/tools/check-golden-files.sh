@@ -1,7 +1,7 @@
 #!/bin/sh
 # Check the renderers' golden files with the tools the hosts run them with:
 # nft for the ruleset, drbdadm for the resource files, docker-compose for the
-# rendered stacks. Runs inside a Debian container from the repository root
+# rendered stacks and Traefik's Compose file. Runs inside a Debian container from the repository root
 # (bin/dev test-tools); nft -c needs CAP_NET_ADMIN.
 # Usage: test/tools/check-golden-files.sh
 set -eu
@@ -17,7 +17,7 @@ install_tools() {
 # hosts, together with its secret variables as the agent passes both, and
 # that it fills in no variable: the stacks' values are filled in on the
 # user's machine already (a USER set here must not show up), and a $ in a
-# secret is meant as it stands.
+# secret is meant as it stands. Then Traefik's Compose file.
 check_compose() {
   for rendered in internal/compose/testdata/*/rendered.golden.yaml; do
     secrets="$(dirname "${rendered}")/secrets.golden.yaml"
@@ -31,6 +31,12 @@ check_compose() {
     fi
     echo "docker-compose: ${rendered} OK"
   done
+  traefik=internal/ingress/testdata/compose.golden.yaml
+  if ! output="$(docker-compose -f "${traefik}" config 2>&1)"; then
+    echo "${output}"
+    return 1
+  fi
+  echo "docker-compose: ${traefik} OK"
 }
 
 # check_nft: Check every golden ruleset.

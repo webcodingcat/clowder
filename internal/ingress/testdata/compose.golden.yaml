@@ -1,0 +1,25 @@
+name: clowder-traefik
+services:
+  traefik:
+    command:
+      - --configFile=/etc/traefik/traefik.yml
+    healthcheck:
+      interval: 10s
+      retries: 3
+      start_period: 10s
+      test:
+        - CMD
+        - traefik
+        - healthcheck
+        - --ping
+        - --configFile=/etc/traefik/traefik.yml
+      timeout: 5s
+    image: traefik:v3.7.16
+    labels:
+      clowder.stack: clowder-traefik
+    network_mode: host
+    read_only: true
+    restart: "no"
+    volumes:
+      - /var/lib/clowder/traefik/static:/etc/traefik:ro
+      - /var/lib/clowder/traefik/dynamic:/etc/traefik-dynamic:ro

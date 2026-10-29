@@ -1,0 +1,23 @@
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+log:
+  level: WARN
+entryPoints:
+  internal:
+    address: 10.77.0.1:7480
+    forwardedHeaders:
+      trustedIPs:
+        - 10.77.0.0/24
+  ping:
+    address: 127.0.0.1:7446
+  web:
+    address: 203.0.113.10:80
+  websecure:
+    address: 203.0.113.10:443
+ping:
+  entryPoint: ping
+providers:
+  file:
+    directory: /etc/traefik-dynamic
+    watch: true
