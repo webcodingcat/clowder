@@ -147,8 +147,12 @@ type Stack struct {
 	// sealed with the data key.
 	Secrets  map[string]Sealed `json:"secrets,omitempty"`
 	Priority int               `json:"priority"`
-	Host     *HostID           `json:"host,omitempty"` // nil: not placed yet
-	Status   StackStatus       `json:"status"`
+	// Ports ("udp/9987") and Routes ("shop.example.com/") are what the stack
+	// publishes; no other stack may have the same.
+	Ports  []string    `json:"ports,omitempty"`
+	Routes []string    `json:"routes,omitempty"`
+	Host   *HostID     `json:"host,omitempty"` // nil: not placed yet
+	Status StackStatus `json:"status"`
 	// Stopped lists services pushed out by higher priorities.
 	Stopped  []string  `json:"stopped,omitempty"`
 	LastMove time.Time `json:"last_move,omitzero"`

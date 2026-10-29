@@ -43,6 +43,11 @@ type PutStack struct {
 	Owner    string `json:"owner"`
 	Source   string `json:"source"`
 	Priority int    `json:"priority"`
+	// Ports and Routes are what the stack publishes, as the API read them
+	// from Source (compose.Stack.PublishedPorts and Routes): the state does
+	// not parse Compose files, but must refuse what another stack has.
+	Ports  []string `json:"ports,omitempty"`
+	Routes []string `json:"routes,omitempty"`
 	// Secrets replace the stack's secrets as a whole: every sender sends all
 	// the stack asks for, an operation too. So whoever cannot decrypt the
 	// stack's secrets file can only remove the secrets, never keep them for a
@@ -87,6 +92,9 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 	if err := s.checkUnlocked(stackLock(payload.Name), payload.Operation); err != nil {
 		return err
 	}
+	if err := s.checkUnclaimed(payload); err != nil {
+		return err
+	}
 	stack, exists := s.Stacks[payload.Name]
 	switch {
 	case !exists:
@@ -105,8 +113,32 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 	stack.Generation++
 	stack.Source = payload.Source
 	stack.Priority = payload.Priority
+	stack.Ports, stack.Routes = payload.Ports, payload.Routes
 	stack.Secrets = payload.Secrets
 	s.StacksRevision++
+	return nil
+}
+
+// checkUnclaimed refuses a port or an HTTP route that another stack has:
+// both stacks would reach the same address. A stack's own earlier
+// generation does not count, so an apply keeps what it had.
+func (s *State) checkUnclaimed(payload PutStack) error {
+	for _, name := range slices.Sorted(maps.Keys(s.Stacks)) {
+		if name == payload.Name {
+			continue
+		}
+		other := s.Stacks[name]
+		for _, port := range payload.Ports {
+			if slices.Contains(other.Ports, port) {
+				return fmt.Errorf("stack %s: port %s is published by stack %s already", payload.Name, port, name)
+			}
+		}
+		for _, route := range payload.Routes {
+			if slices.Contains(other.Routes, route) {
+				return fmt.Errorf("stack %s: route %s belongs to stack %s already", payload.Name, route, name)
+			}
+		}
+	}
 	return nil
 }
 

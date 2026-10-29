@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -94,6 +95,13 @@ func TestTheShopExampleLoads(t *testing.T) {
 	}
 	if cache.Ports[1] != (PublishedPort{Protocol: "udp", Published: 9987, Target: 9987}) {
 		t.Errorf("cache udp port: %+v", cache.Ports[1])
+	}
+	// what the cluster keeps of them, to refuse them to other stacks
+	if ports := strings.Join(stack.PublishedPorts(), " "); !strings.Contains(ports, "udp/9987") {
+		t.Errorf("published ports %q", ports)
+	}
+	if routes := stack.Routes(); !slices.Equal(routes, []string{"shop.example.com/"}) {
+		t.Errorf("routes %v", routes)
 	}
 	pgdata := stack.Volumes["pgdata"]
 	if pgdata.Class != "fast" || pgdata.Size != 20<<30 || pgdata.Replicas != 2 {
@@ -305,7 +313,16 @@ func TestWhatClowderCannotRunIsReported(t *testing.T) {
 		},
 		"one port twice": {
 			"services: {web: {image: x, ports: [\"8080:80\"]}, api: {image: x, ports: [\"8080:81\"]}}",
-			"port tcp/8080 is published by api already",
+			"service web: port tcp/8080 is api's already",
+		},
+		"one route twice": {
+			"services:\n  web: {image: x, x-clowder: {http: {host: Shop.example.com, port: 80}}}\n" +
+				"  api: {image: x, x-clowder: {http: {host: shop.example.com, path: /, port: 81}}}",
+			"service web: route shop.example.com/ is api's already",
+		},
+		"route path without a slash": {
+			"services: {web: {image: x, x-clowder: {http: {host: shop.example.com, path: api, port: 80}}}}",
+			`path "api" must start with /`,
 		},
 		"x-clowder on a network": {
 			"services: {web: {image: x}}\nnetworks: {default: {x-clowder: {class: fast}}}", "not used on networks",

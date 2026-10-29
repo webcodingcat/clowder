@@ -105,7 +105,7 @@ func (s *Server) applyStack(w http.ResponseWriter, r *http.Request) {
 	}
 	s.write(w, r, state.KindPutStack, state.PutStack{
 		Name: name, Owner: state.OwnerCLI, Source: apply.Source, Priority: priority, Secrets: secrets,
-		ConfigRevision: revision,
+		Ports: stack.PublishedPorts(), Routes: stack.Routes(), ConfigRevision: revision,
 	})
 }
 

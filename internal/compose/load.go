@@ -113,7 +113,7 @@ func check(project *types.Project) (*Stack, error) {
 		problems = append(problems, serviceProblems...)
 		stack.Services[name] = service
 	}
-	problems = append(problems, checkPortsUnique(stack.Services)...)
+	problems = append(problems, checkUnique(stack.Services)...)
 	problems = append(problems, checkReferences(stack)...)
 	if len(problems) > 0 {
 		return nil, problems

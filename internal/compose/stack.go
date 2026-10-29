@@ -6,6 +6,8 @@ package compose
 import (
 	"maps"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/compose-spec/compose-go/v2/types"
 )
@@ -79,6 +81,32 @@ func (s *Stack) SecretNames() []string {
 	return slices.Sorted(maps.Keys(asked))
 }
 
+// PublishedPorts are the keys of the ports the stack publishes, sorted:
+// the cluster refuses a port another stack has.
+func (s *Stack) PublishedPorts() []string {
+	var keys []string
+	for _, service := range s.Services {
+		for _, port := range service.Ports {
+			keys = append(keys, port.Key())
+		}
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// Routes are the keys of the stack's HTTP routes, sorted: the cluster
+// refuses a route another stack has.
+func (s *Stack) Routes() []string {
+	var keys []string
+	for _, service := range s.Services {
+		if service.HTTP != nil {
+			keys = append(keys, service.HTTP.Key())
+		}
+	}
+	slices.Sort(keys)
+	return keys
+}
+
 // HTTPRoute sends requests for Host (and Path) to Port of the service.
 type HTTPRoute struct {
 	Host string
@@ -86,11 +114,26 @@ type HTTPRoute struct {
 	Path string
 }
 
+// Key is the route as the cluster tracks it: the host in lowercase (DNS
+// ignores case) and the path, "/" for none; "shop.example.com/api".
+func (r HTTPRoute) Key() string {
+	path := r.Path
+	if path == "" {
+		path = "/"
+	}
+	return strings.ToLower(r.Host) + path
+}
+
 // PublishedPort is a TCP or UDP port published on the Floating IP.
 type PublishedPort struct {
 	Protocol  string
 	Published uint16
 	Target    uint32
+}
+
+// Key is the port as the cluster tracks it: "udp/9987".
+func (p PublishedPort) Key() string {
+	return p.Protocol + "/" + strconv.Itoa(int(p.Published))
 }
 
 // Volume holds the clowder fields of a named volume.

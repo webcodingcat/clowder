@@ -106,6 +106,9 @@ func readServiceExtension(config types.ServiceConfig, service *Service) []string
 		if raw.HTTP.Host == "" || raw.HTTP.Port == 0 {
 			problems = append(problems, "x-clowder.http needs host and port")
 		}
+		if raw.HTTP.Path != "" && !strings.HasPrefix(raw.HTTP.Path, "/") {
+			problems = append(problems, fmt.Sprintf("x-clowder.http.path %q must start with /", raw.HTTP.Path))
+		}
 		service.HTTP = &HTTPRoute{Host: raw.HTTP.Host, Port: raw.HTTP.Port, Path: raw.HTTP.Path}
 	}
 	problems = append(problems, checkSecretRequests(config, raw)...)
@@ -261,18 +264,24 @@ func ReservedPort(port uint16) bool {
 	}
 }
 
-// checkPortsUnique: two services of a stack cannot publish the same port.
-func checkPortsUnique(services map[string]Service) Problems {
+// checkUnique: two services of a stack cannot publish the same port or
+// take the same HTTP route (the cluster checks the same between stacks).
+func checkUnique(services map[string]Service) Problems {
 	var problems Problems
 	owners := map[string]string{}
+	claim := func(service, what, key string) {
+		if owner, taken := owners[what+" "+key]; taken {
+			problems = append(problems, fmt.Sprintf("service %s: %s %s is %s's already", service, what, key, owner))
+			return
+		}
+		owners[what+" "+key] = service
+	}
 	for _, name := range slices.Sorted(maps.Keys(services)) {
 		for _, port := range services[name].Ports {
-			key := fmt.Sprintf("%s/%d", port.Protocol, port.Published)
-			if owner, taken := owners[key]; taken {
-				problems = append(problems, fmt.Sprintf("service %s: port %s is published by %s already", name, key, owner))
-				continue
-			}
-			owners[key] = name
+			claim(name, "port", port.Key())
+		}
+		if route := services[name].HTTP; route != nil {
+			claim(name, "route", route.Key())
 		}
 	}
 	return problems

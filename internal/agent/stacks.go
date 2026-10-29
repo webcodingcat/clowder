@@ -193,7 +193,9 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 	}
 	// rendered before any volume is made: a stack that cannot run (no
 	// Floating IP before the first cluster apply) leaves nothing behind
-	floatingIP, _ := netip.ParseAddr(desired.config.Ingress.FloatingIP) // empty: Render refuses it
+	// cluster.yaml's check made sure it parses; before the first apply it is
+	// empty, the zero address, which Render refuses
+	floatingIP, _ := netip.ParseAddr(desired.config.Ingress.FloatingIP)
 	rendered, err := compose.Render(parsed, compose.Target{
 		FloatingIP: floatingIP, NodeAddress: r.host.NodeAddress, Resolver: network.Resolver,
 		Volumes: mounted, SecretsDir: r.files.secretFilesDir(stack.Name), SecretDigests: secrets.digests,
@@ -260,13 +262,9 @@ func (r *stackRunner) up(ctx context.Context, name string, rendered []byte, secr
 // variables and the secret files.
 func upHash(rendered []byte, secrets stackSecrets) [32]byte {
 	hash := sha256.New()
-	for _, part := range [][]byte{rendered, secrets.env} {
-		_, _ = fmt.Fprintf(hash, "%d:", len(part)) // lengths keep the parts apart; a hash never fails
-		hash.Write(part)
-	}
+	writeParts(hash, rendered, secrets.env)
 	for _, name := range slices.Sorted(maps.Keys(secrets.files)) {
-		_, _ = fmt.Fprintf(hash, "%s=%d:", name, len(secrets.files[name]))
-		hash.Write(secrets.files[name])
+		writeParts(hash, []byte(name), secrets.files[name])
 	}
 	return [32]byte(hash.Sum(nil))
 }

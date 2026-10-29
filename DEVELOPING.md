@@ -237,7 +237,8 @@ Packages in *italics* do not exist yet.
   read-only, configs from a file, devices, anonymous and external volumes, external
   networks), what shares the host's namespaces (`network_mode: host`, `pid`/`ipc: host`),
   and what clowder sets itself (`build`, `container_name`, replicas, network drivers and
-  subnets, port ranges, host addresses, `ReservedPort`). Every problem is reported at once
+  subnets, port ranges, host addresses, `ReservedPort`), and two services with the same
+  published port or HTTP route (`checkUnique`). Every problem is reported at once
   (`Problems`); the `x-clowder` blocks are decoded strictly, and only an unknown key there
   ends the checks of its block.
 - **Privileges are the cluster's to give.** What reaches beyond the container (`privileged`,
@@ -339,7 +340,11 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **Stacks.** `create-stack` registers a stack as `created` (no Source, `CreatedBy` from the
   actor, `Owner` the channel: cli or gitops); only `put-stack` moves it on, to `pending`, and
   nothing places a `created` stack. `put-stack` changes registered stacks only, and makes a
-  `running` stack `starting` until its host reports the new generation up.
+  `running` stack `starting` until its host reports the new generation up. It carries
+  the stack's published ports (`udp/9987`) and HTTP routes (`shop.example.com/api`) as the
+  API read them from the source: the state does not parse Compose files (that would pull
+  compose-go into it), but refuses a port or route another stack has. They live on their
+  stack, so a delete frees them and nothing separate can drift.
   `delete-stack` with `WithVolumes` takes the volumes along in the same command, so the
   placement cannot put one back in between. `set-stack-wait-reason` records why the
   placement finds no place for a stack or a volume it newly names (`WaitReason`, shown by
@@ -572,8 +577,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   rules stay untouched.
 - The resolver passes every question on to the host's resolvers (`/etc/resolv.conf`). Names
   of exported services come with exports.
-- Published ports (DNAT to the stack's host, 1b) and the marks for answers over WireGuard
-  (phase 2) join the ruleset later.
+- Published ports are bound on every host's Floating IP and node address (Stacks,
+  Rendering). The DNAT that brings them to a stack on another host, and the marks for
+  answers over WireGuard, join the ruleset in phase 2, where two hosts can test them.
 
 ## Storage (`internal/storage`)
 

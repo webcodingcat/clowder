@@ -353,6 +353,31 @@ func TestAnApplyReplacesTheSecretsAsAWhole(t *testing.T) {
 	}, "not a secret name")
 }
 
+func TestAPortOrRouteBelongsToOneStack(t *testing.T) {
+	c := newCluster(t)
+	spec := "services: {}"
+	c.createShop()
+	c.mustApply(KindCreateStack, UserActor("alice"), CreateStack{Name: "blog", Owner: OwnerCLI})
+	shop := PutStack{Name: "shop", Owner: OwnerCLI, Source: spec, Ports: []string{"udp/9987"}, Routes: []string{"shop.example.com/"}}
+	c.mustApply(KindPutStack, UserActor("alice"), shop)
+	c.mustApply(KindPutStack, UserActor("alice"), shop) // its own earlier generation does not count
+
+	c.refuse(KindPutStack, UserActor("alice"), PutStack{Name: "blog", Owner: OwnerCLI, Source: spec, Ports: []string{"udp/9987"}},
+		"port udp/9987 is published by stack shop already")
+	c.refuse(KindPutStack, UserActor("alice"), PutStack{Name: "blog", Owner: OwnerCLI, Source: spec, Routes: []string{"shop.example.com/"}},
+		"route shop.example.com/ belongs to stack shop already")
+	// another protocol or path is another address
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{
+		Name: "blog", Owner: OwnerCLI, Source: spec, Ports: []string{"tcp/9987"}, Routes: []string{"shop.example.com/blog"},
+	})
+
+	// a deleted stack frees what it had
+	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop"})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{
+		Name: "blog", Owner: OwnerCLI, Source: spec, Ports: []string{"udp/9987"}, Routes: []string{"shop.example.com/"},
+	})
+}
+
 func TestStacksBelongToTheirOwner(t *testing.T) {
 	c := newCluster(t)
 	spec := "services: {}"
