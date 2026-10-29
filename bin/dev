@@ -98,7 +98,8 @@ cmd_test() {
     set -- ./...
   fi
   local status=0
-  in_image "${GO_IMAGE}" go test "$@" || status=$?
+  # with the race detector: the agent's loops share the runner and the state
+  in_image "${GO_IMAGE}" go test -race "$@" || status=$?
   if [[ " $* " == *" -update "* ]]; then
     give_back internal
   fi
@@ -111,8 +112,9 @@ cmd_test_sops() {
     'apk add --no-cache sops >/dev/null && go test -tags sops ./internal/sopsage'
 }
 
-# cmd_test_tools: Check the renderers' golden files with Debian's nft and
-# drbdadm (the hostname node0 is a host of the resource files).
+# cmd_test_tools: Check the renderers' golden files with Debian's nft,
+# drbdadm and docker-compose (the hostname node0 is a host of the resource
+# files).
 cmd_test_tools() {
   docker run --rm --cap-add NET_ADMIN --hostname node0 -v "${DOCKER_ROOT}:/src" -w /src \
     "${DEBIAN_IMAGE}" sh test/tools/check-golden-files.sh

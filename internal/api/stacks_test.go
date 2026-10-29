@@ -61,7 +61,7 @@ func TestClusterYAMLThatWouldBreakAStackIsRefused(t *testing.T) {
 	cluster := &fakeCluster{state: bootstrappedState(t), leader: true}
 	cluster.state.Stacks = map[string]*state.Stack{"monitoring": {Name: "monitoring", Source: privilegedSource}}
 	server := &Server{config: ServerConfig{Cluster: cluster}}
-	err := server.checkStacksAgainst(context.Background(), clusterdir.Config{}.WithDefaults())
+	_, err := server.checkStacksAgainst(context.Background(), clusterdir.Config{}.WithDefaults())
 	if err == nil || !strings.Contains(err.Error(), "stack monitoring: service exporter: privileged") {
 		t.Errorf("taking a running stack out of stacks.privileged: %v", err)
 	}

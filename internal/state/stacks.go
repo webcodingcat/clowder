@@ -20,11 +20,19 @@ type ApplyConfig struct {
 	Secrets    map[string]Sealed `json:"secrets"`
 	JoinKeys   []Sealed          `json:"join_keys"`
 	Registries map[string]Sealed `json:"registries"`
+	// StacksRevision is the state of the stacks the new cluster.yaml was
+	// checked against: if a stack changed in between, the check no longer
+	// holds and the command is refused.
+	StacksRevision int64 `json:"stacks_revision"`
 }
 
 func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 	if problems := clusterdir.Check(payload.Spec); len(problems) > 0 {
 		return problems
+	}
+	if payload.StacksRevision != s.StacksRevision {
+		return fmt.Errorf("cluster.yaml was checked against stacks revision %d, but %d came in between; apply again",
+			payload.StacksRevision, s.StacksRevision)
 	}
 	for _, name := range clusterdir.SecretNames(payload.Spec) {
 		if _, ok := payload.Secrets[name]; !ok {
@@ -76,6 +84,10 @@ type PutStack struct {
 	// stack's secrets file can only remove the secrets, never keep them for a
 	// changed stack.
 	Secrets map[string]Sealed `json:"secrets,omitempty"`
+	// ConfigRevision is the cluster.yaml the stack was checked against
+	// (storage classes, priorities, privileges): if a cluster apply came in
+	// between, the check no longer holds and the command is refused.
+	ConfigRevision int64 `json:"config_revision"`
 	// Operation is set when the operation holding the lock makes the change.
 	Operation string `json:"operation,omitempty"`
 }
@@ -99,6 +111,9 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 		return fmt.Errorf("stack %s has no Compose file", payload.Name)
 	case len(payload.Secrets) > MaxStackSecrets:
 		return fmt.Errorf("stack %s has %d secrets, more than %d", payload.Name, len(payload.Secrets), MaxStackSecrets)
+	case payload.ConfigRevision != s.Config.Revision:
+		return fmt.Errorf("stack %s was checked against cluster.yaml revision %d, but %d came in between; apply again",
+			payload.Name, payload.ConfigRevision, s.Config.Revision)
 	}
 	for _, secret := range slices.Sorted(maps.Keys(payload.Secrets)) {
 		if !names.ValidSecret(secret) {
@@ -122,6 +137,7 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 	stack.Source = payload.Source
 	stack.Priority = payload.Priority
 	stack.Secrets = payload.Secrets
+	s.StacksRevision++
 	return nil
 }
 

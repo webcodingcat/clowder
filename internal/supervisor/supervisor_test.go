@@ -107,13 +107,27 @@ func TestACrashedContainerIsRestarted(t *testing.T) {
 	}
 }
 
+func TestASignalThatOnlyReloadsIsNoStop(t *testing.T) {
+	_, fake := running(t)
+	reload := event("kill", "app", 0) // docker kill -s HUP: the container runs on
+	reload.Signal = 1
+	fake.events <- reload
+	fake.events <- event("die", "app", 1) // and crashes later
+	settle()
+	if started, _ := fake.counts(); started != 1 {
+		t.Errorf("%d starts of a container that crashed after a reload", started)
+	}
+}
+
 func TestWantedStopsAreNoCrashes(t *testing.T) {
 	supervisor, fake := running(t)
 	release := supervisor.Hold("shop")
 	fake.events <- event("die", "app", 0)
 	settle()
 	release()
-	fake.events <- event("kill", "app", 0) // docker stop by hand: kill comes before die
+	stop := event("kill", "app", 0) // docker stop by hand: kill (SIGTERM) comes before die
+	stop.Signal = 15
+	fake.events <- stop
 	fake.events <- event("die", "app", 143)
 	settle()
 	if started, _ := fake.counts(); started != 0 {

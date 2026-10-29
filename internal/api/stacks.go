@@ -55,15 +55,17 @@ type Containers interface {
 	Logs(ctx context.Context, stack string, follow bool, out io.Writer) error
 }
 
-// createStack registers a stack for clowder stack apply. Creating a stack
-// that is registered and was never applied again does nothing, so a create
+// createStack registers a stack for clowder stack apply. The same user
+// creating a stack again that was never applied does nothing, so a create
 // whose files could not be written can be repeated.
 func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	caller := identityOf(r).Name
 	var registered bool
 	s.config.Cluster.Read(func(current *state.State) {
 		stack, ok := current.Stacks[name]
-		registered = ok && stack.Status == state.StackCreated && stack.Owner == state.OwnerCLI
+		registered = ok && stack.Status == state.StackCreated && stack.Owner == state.OwnerCLI &&
+			stack.CreatedBy == caller
 	})
 	if registered {
 		writeJSON(w, http.StatusOK, Written{})
@@ -86,7 +88,8 @@ func (s *Server) applyStack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var config clusterdir.Config
-	s.config.Cluster.Read(func(current *state.State) { config = current.Config.Spec })
+	var revision int64
+	s.config.Cluster.Read(func(current *state.State) { config, revision = current.Config.Spec, current.Config.Revision })
 	priority, err := checkAgainstCluster(stack, config)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -99,6 +102,7 @@ func (s *Server) applyStack(w http.ResponseWriter, r *http.Request) {
 	}
 	s.write(w, r, state.KindPutStack, state.PutStack{
 		Name: name, Owner: state.OwnerCLI, Source: apply.Source, Priority: priority, Secrets: secrets,
+		ConfigRevision: revision,
 	})
 }
 

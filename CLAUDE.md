@@ -18,7 +18,7 @@ are not needed on the host.
 |---|---|
 | `bin/dev lint` | golangci-lint (gofumpt, goimports, the import rule), shellcheck, shfmt, yamllint, `tofu fmt` |
 | `bin/dev format` | apply what the formatters can fix |
-| `bin/dev test` | the unit tests (seconds, no VMs) |
+| `bin/dev test` | the unit tests with the race detector (seconds, no VMs) |
 | `bin/dev test-sops` | the tests of `internal/sopsage` against the real sops |
 | `bin/dev test-tools` | the golden files of the renderers against the real `nft`, `drbdadm` and `docker-compose` |
 | `bin/dev build` | `clowderd` for Linux, `clowder` for Linux, macOS and Windows into `dist/` |

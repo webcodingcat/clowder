@@ -316,11 +316,12 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, entries)
 }
 
-// userKinds are the commands a follower may forward for a user: those the
-// user routes of the API make.
+// userKinds are the commands a follower may forward for a user: exactly
+// those the user routes of the API and the bootstrap make; a kind joins when
+// its route does.
 var userKinds = map[string]bool{
 	state.KindApplyConfig: true, state.KindSetHostPhase: true,
-	state.KindAddUser: true, state.KindRemoveUser: true, state.KindRevoke: true,
+	state.KindAddUser:     true, // the bootstrap's first user
 	state.KindCreateStack: true, state.KindPutStack: true, state.KindDeleteStack: true,
 }
 

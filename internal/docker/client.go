@@ -47,6 +47,8 @@ type Event struct {
 	// Labels are the container's labels (clowder.stack, Compose's service).
 	Labels   map[string]string
 	ExitCode int
+	// Signal is what a kill sent (15 for docker stop, 1 for a reload, ...).
+	Signal int
 }
 
 // Events streams the events of containers with a label until ctx ends or
@@ -83,7 +85,11 @@ func (c *Client) Events(ctx context.Context, label string) (<-chan Event, <-chan
 				return
 			}
 			exitCode, _ := strconv.Atoi(raw.Actor.Attributes["exitCode"]) // only die carries one
-			event := Event{Action: raw.Action, ContainerID: raw.Actor.ID, Labels: raw.Actor.Attributes, ExitCode: exitCode}
+			signal, _ := strconv.Atoi(raw.Actor.Attributes["signal"])     // only kill carries one
+			event := Event{
+				Action: raw.Action, ContainerID: raw.Actor.ID, Labels: raw.Actor.Attributes,
+				ExitCode: exitCode, Signal: signal,
+			}
 			select {
 			case events <- event:
 			case <-ctx.Done():

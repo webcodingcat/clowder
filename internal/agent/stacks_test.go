@@ -82,7 +82,7 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 	})
 	cluster.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Name: "shop", Owner: state.OwnerCLI})
 	cluster.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Name: "shop", Owner: state.OwnerCLI,
+		Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
 		Source: "name: shop\nservices: {app: {image: nginx, volumes: [db:/data]}}\n" +
 			"volumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n",
 	})
@@ -190,7 +190,7 @@ func putShopWithSecrets(cluster *testCluster, password, apiKey string) {
 		secrets["api-key"] = state.Sealed(apiKey)
 	}
 	cluster.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Name: "shop", Owner: state.OwnerCLI, Secrets: secrets,
+		Name: "shop", Owner: state.OwnerCLI, Secrets: secrets, ConfigRevision: 1,
 		Source: "name: shop\nservices:\n  app: " + app + "\nvolumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n",
 	})
 }

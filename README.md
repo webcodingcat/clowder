@@ -5,11 +5,14 @@ replicated volumes (DRBD 9), the real client IP behind a Floating IP, priorities
 through the hoster's API. First hoster: Hetzner Cloud.
 
 Status: under construction (phase 1a, see the roadmap in [DEVELOPING.md](DEVELOPING.md)).
-What runs: on a host `clowderd check` and `clowderd init`, which starts the agent (with the
-containers' isolation and DNS resolver); from the CLI `clowder cluster
-bootstrap|apply|diff|status|schema`, `clowder host ...` and `clowder stack
-create|apply|delete|ps|logs`, which runs Compose stacks with their volumes and secrets on
-one host.
+On one host, what runs today:
+
+- `clowderd check` checks a host, `clowderd init` makes it the first of a cluster and starts
+  the agent, which keeps the containers apart and answers their DNS.
+- `clowder cluster bootstrap|apply|diff|status|schema` sets the cluster up and changes it.
+- `clowder host ...` drains, removes and enables hosts.
+- `clowder stack create|apply|delete|ps|logs` runs Compose stacks with their volumes and
+  secrets.
 
 A stack's passwords live in a SOPS file next to its `clowder.yaml`; the CLI decrypts it
 with your age key, and the cluster keeps the values sealed. Who can read them: whoever can

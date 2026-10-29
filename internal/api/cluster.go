@@ -61,7 +61,8 @@ func (s *Server) applyCluster(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("read the request: %w", err))
 		return
 	}
-	if err := s.checkStacksAgainst(r.Context(), apply.Spec.WithDefaults()); err != nil {
+	stacksRevision, err := s.checkStacksAgainst(r.Context(), apply.Spec.WithDefaults())
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -70,15 +71,19 @@ func (s *Server) applyCluster(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	payload.StacksRevision = stacksRevision
 	s.write(w, r, state.KindApplyConfig, payload)
 }
 
 // checkStacksAgainst refuses a cluster.yaml that a stack of the cluster
 // would not pass: a storage class it uses, a priority category it names, its
-// place in stacks.privileged must not go while the stack is there.
-func (s *Server) checkStacksAgainst(ctx context.Context, config clusterdir.Config) error {
+// place in stacks.privileged must not go while the stack is there. It tells
+// the stacks revision it checked, which the state compares at commit.
+func (s *Server) checkStacksAgainst(ctx context.Context, config clusterdir.Config) (int64, error) {
 	sources := map[string]string{}
+	var revision int64
 	s.config.Cluster.Read(func(current *state.State) {
+		revision = current.StacksRevision
 		for name, stack := range current.Stacks {
 			sources[name] = stack.Source
 		}
@@ -92,7 +97,7 @@ func (s *Server) checkStacksAgainst(ctx context.Context, config clusterdir.Confi
 		if _, err := checkAgainstCluster(stack, config); err != nil {
 			var stackProblems compose.Problems
 			if !errors.As(err, &stackProblems) {
-				return err
+				return 0, err
 			}
 			for _, problem := range stackProblems {
 				problems = append(problems, "stack "+name+": "+problem)
@@ -100,9 +105,9 @@ func (s *Server) checkStacksAgainst(ctx context.Context, config clusterdir.Confi
 		}
 	}
 	if len(problems) > 0 {
-		return fmt.Errorf("cluster.yaml would break stacks of the cluster: %w", problems)
+		return 0, fmt.Errorf("cluster.yaml would break stacks of the cluster: %w", problems)
 	}
-	return nil
+	return revision, nil
 }
 
 func (s *Server) sealApply(apply ClusterApply) (state.ApplyConfig, error) {

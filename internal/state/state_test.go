@@ -259,6 +259,11 @@ func testConfig() clusterdir.Config {
 	}
 }
 
+// testSecrets are the secrets testConfig needs.
+func testSecrets() map[string]Sealed {
+	return map[string]Sealed{"hcloud-token": Sealed("sealed")}
+}
+
 func TestApplyConfigCountsRevisionsAndReplacesTheSecrets(t *testing.T) {
 	c := newCluster(t)
 	secrets := map[string]Sealed{"hcloud-token": Sealed("sealed")}
@@ -301,6 +306,20 @@ func TestAStackIsCreatedBeforeItIsApplied(t *testing.T) {
 		t.Errorf("applied stack %+v", stack)
 	}
 	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop"})
+}
+
+func TestChecksAgainstAnOlderClusterYAMLOrStacksAreRefused(t *testing.T) {
+	c := newCluster(t)
+	c.createShop()
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
+	// cluster.yaml checked against the stacks before that apply
+	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets()},
+		"stacks revision 0, but 1 came in between")
+	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets(), StacksRevision: 1})
+	// a stack checked against cluster.yaml before that apply
+	c.refuse(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"},
+		"cluster.yaml revision 0, but 1 came in between")
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}", ConfigRevision: 1})
 }
 
 func TestAnApplyReplacesTheSecretsAsAWhole(t *testing.T) {

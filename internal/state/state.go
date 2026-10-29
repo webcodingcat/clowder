@@ -31,20 +31,23 @@ type Sealed []byte
 type State struct {
 	// Index is the Raft index of the last applied command; reads that need
 	// a write to be visible wait for it.
-	Index      uint64                `json:"index"`
-	Keys       *ClusterKeys          `json:"keys,omitempty"`
-	Config     ClusterConfig         `json:"config"`
-	Secrets    map[string]Sealed     `json:"secrets,omitempty"`
-	JoinKeys   []Sealed              `json:"join_keys,omitempty"`
-	Registries map[string]Sealed     `json:"registries,omitempty"`
-	Hosts      map[HostID]*Host      `json:"hosts,omitempty"`
-	Users      map[string]*User      `json:"users,omitempty"`
-	Revoked    map[string]time.Time  `json:"revoked,omitempty"` // certificate serial -> when
-	Stacks     map[string]*Stack     `json:"stacks,omitempty"`
-	Volumes    map[string]*Volume    `json:"volumes,omitempty"` // "<stack>/<volume>"
-	Operations map[string]*Operation `json:"operations,omitempty"`
-	Locks      map[string]string     `json:"locks,omitempty"` // "stack/<name>" or "volume/<id>" -> operation
-	Audit      []AuditEntry          `json:"audit,omitempty"`
+	Index      uint64               `json:"index"`
+	Keys       *ClusterKeys         `json:"keys,omitempty"`
+	Config     ClusterConfig        `json:"config"`
+	Secrets    map[string]Sealed    `json:"secrets,omitempty"`
+	JoinKeys   []Sealed             `json:"join_keys,omitempty"`
+	Registries map[string]Sealed    `json:"registries,omitempty"`
+	Hosts      map[HostID]*Host     `json:"hosts,omitempty"`
+	Users      map[string]*User     `json:"users,omitempty"`
+	Revoked    map[string]time.Time `json:"revoked,omitempty"` // certificate serial -> when
+	Stacks     map[string]*Stack    `json:"stacks,omitempty"`
+	// StacksRevision counts the stacks' applies: a cluster apply checked
+	// against the stacks commits only if none came in between.
+	StacksRevision int64                 `json:"stacks_revision,omitempty"`
+	Volumes        map[string]*Volume    `json:"volumes,omitempty"` // "<stack>/<volume>"
+	Operations     map[string]*Operation `json:"operations,omitempty"`
+	Locks          map[string]string     `json:"locks,omitempty"` // "stack/<name>" or "volume/<id>" -> operation
+	Audit          []AuditEntry          `json:"audit,omitempty"`
 }
 
 // ClusterKeys are the keys init creates. The CA certificate is public; its

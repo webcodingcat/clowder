@@ -305,6 +305,12 @@ func (r *stackRunner) describe(desired desiredState, id string) (storage.Volume,
 // removeOthers stops the stacks that left this host and removes the volume
 // copies the state no longer places here. A stack's directory goes once
 // nothing of it is left on this host.
+//
+// The files tell how far a leaver got, so a crash at any point is picked up:
+// its compose.yaml exists until compose down worked (stop), its
+// volumes.json lists the copies still here (removeVolumes), and its
+// directory goes with the last copy. Its secrets go once compose.yaml is
+// gone (removeSecretsOfOthers).
 func (r *stackRunner) removeOthers(ctx context.Context, desired desiredState) {
 	entries, err := os.ReadDir(r.files.stacksDir())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

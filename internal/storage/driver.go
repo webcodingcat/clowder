@@ -124,13 +124,9 @@ func (d Driver) setMarker(name, kind, volumeID string) error {
 
 // ensureLV creates the thin LV unless it is there, and marks it as clowder's.
 func (d Driver) ensureLV(ctx context.Context, volume Volume) error {
-	path := volumeGroup(volume.Pool) + "/" + volume.LV
-	_, err := d.Run(ctx, shortTimeout, "lvs", path)
-	if code, ok := command.ExitCode(err); err != nil && (!ok || code != lvsNotFound) {
-		return fmt.Errorf("look for the LV of %s: %w", volume.ID, err)
-	}
-	if err == nil {
-		return nil
+	exists, err := d.lvExists(ctx, volume)
+	if err != nil || exists {
+		return err
 	}
 	if _, err := d.Run(ctx, shortTimeout, "lvcreate", "--quiet", "--thin", volume.Pool,
 		"--virtualsize", strconv.FormatInt(volume.SizeBytes, 10)+"b", "--name", volume.LV); err != nil {
@@ -139,6 +135,19 @@ func (d Driver) ensureLV(ctx context.Context, volume Volume) error {
 	// a crash right here leaves an LV without the marker; Ensure then
 	// refuses it and a human looks (it is empty)
 	return d.setMarker(volume.LV, "created", volume.ID)
+}
+
+// lvExists tells whether the copy's LV exists; only lvs's own "not found"
+// means no, any other failure is an error.
+func (d Driver) lvExists(ctx context.Context, volume Volume) (bool, error) {
+	_, err := d.Run(ctx, shortTimeout, "lvs", volumeGroup(volume.Pool)+"/"+volume.LV)
+	if code, ok := command.ExitCode(err); err != nil && ok && code == lvsNotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("look for the LV of %s: %w", volume.ID, err)
+	}
+	return true, nil
 }
 
 // ensureResource writes the resource file and brings the resource up as
@@ -260,7 +269,8 @@ func (d Driver) mounted(ctx context.Context, mountPoint string) (bool, error) {
 }
 
 // Remove unmounts the copy, takes the DRBD resource down and removes it and
-// the LV with the data.
+// the LV with the data. It picks up after a crash at any point: what is gone
+// already is skipped.
 func (d Driver) Remove(ctx context.Context, volume Volume) error {
 	mountPoint := d.MountPoint(volume)
 	isMounted, err := d.mounted(ctx, mountPoint)
@@ -275,15 +285,25 @@ func (d Driver) Remove(ctx context.Context, volume Volume) error {
 	leftovers := []string{d.marker(volume.LV, "created")}
 	if volume.Resource != nil {
 		name := volume.Resource.Name
-		if _, err := d.Run(ctx, shortTimeout, "drbdadm", "down", name); err != nil {
-			return fmt.Errorf("take down the DRBD resource of %s: %w", volume.ID, err)
+		resourceFile := filepath.Join(d.ResourceDir, name+".res")
+		// without its file drbdadm knows the resource no more: it was down
+		// before the file went
+		if _, err := os.Stat(resourceFile); err == nil {
+			if _, err := d.Run(ctx, shortTimeout, "drbdadm", "down", name); err != nil {
+				return fmt.Errorf("take down the DRBD resource of %s: %w", volume.ID, err)
+			}
 		}
-		leftovers = append(leftovers, filepath.Join(d.ResourceDir, name+".res"),
-			d.marker(name, "metadata"), d.marker(name, "primary"))
+		leftovers = append(leftovers, resourceFile, d.marker(name, "metadata"), d.marker(name, "primary"))
 	}
-	path := volumeGroup(volume.Pool) + "/" + volume.LV
-	if _, err := d.Run(ctx, shortTimeout, "lvremove", "--yes", path); err != nil {
-		return fmt.Errorf("remove the LV of %s: %w", volume.ID, err)
+	exists, err := d.lvExists(ctx, volume)
+	if err != nil {
+		return err
+	}
+	if exists {
+		path := volumeGroup(volume.Pool) + "/" + volume.LV
+		if _, err := d.Run(ctx, shortTimeout, "lvremove", "--yes", path); err != nil {
+			return fmt.Errorf("remove the LV of %s: %w", volume.ID, err)
+		}
 	}
 	for _, file := range append(leftovers, mountPoint) {
 		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {

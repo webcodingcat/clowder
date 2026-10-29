@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/docker"
@@ -133,8 +134,9 @@ func (s *Supervisor) handle(ctx context.Context, event docker.Event) {
 		s.started[id] = time.Now()
 		delete(s.stopped, id)
 		s.mu.Unlock()
-	case event.Action == "stop" || event.Action == "kill":
-		// docker stop: the container stays down, unless the agent did it
+	case event.Action == "stop" || (event.Action == "kill" && endsContainer(event.Signal)):
+		// docker stop or kill: the container stays down, unless the agent did
+		// it; a kill that only signals (a reload with SIGHUP) is no stop
 		s.mu.Lock()
 		if s.held[stack] == 0 {
 			s.stopped[id] = true
@@ -193,20 +195,44 @@ func (s *Supervisor) crashed(ctx context.Context, stack, service, id string, exi
 	})
 }
 
+// endsContainer tells whether a kill's signal is docker stop's or docker
+// kill's (SIGTERM, SIGKILL, SIGINT), not one a service takes as a command.
+func endsContainer(signal int) bool {
+	return signal == int(syscall.SIGTERM) || signal == int(syscall.SIGKILL) || signal == int(syscall.SIGINT)
+}
+
 // unhealthy restarts a container whose health check fails, unless its
-// service says not to (x-clowder.restart_unhealthy: false).
+// service says not to (x-clowder.restart_unhealthy: false). It backs off
+// like a crash: a container that stays unhealthy is not restarted at every
+// health check.
 func (s *Supervisor) unhealthy(ctx context.Context, stack, service, id string) {
 	rule, known := s.rules(stack, service)
 	s.mu.Lock()
 	held := s.held[stack] > 0
+	if since, ok := s.started[id]; ok && time.Since(since) >= s.backoff.Stable {
+		s.crashes[id] = 0
+	}
+	attempt := s.crashes[id]
+	if known && !held && rule.RestartUnhealthy {
+		s.crashes[id] = attempt + 1
+	}
 	s.mu.Unlock()
 	if !known || held || !rule.RestartUnhealthy {
 		return
 	}
-	s.logger.Warn("container unhealthy; restarting", "stack", stack, "service", service)
-	if err := s.docker.Restart(ctx, id); err != nil {
-		s.logger.Error("restart an unhealthy container", "stack", stack, "service", service, "error", err)
-	}
+	delay := s.delay(attempt)
+	s.logger.Warn("container unhealthy; restarting", "stack", stack, "service", service, "in", delay)
+	time.AfterFunc(delay, func() {
+		s.mu.Lock()
+		held := s.held[stack] > 0 || s.stopped[id]
+		s.mu.Unlock()
+		if held || ctx.Err() != nil {
+			return
+		}
+		if err := s.docker.Restart(ctx, id); err != nil && !errors.Is(err, docker.ErrNoContainer) {
+			s.logger.Error("restart an unhealthy container", "stack", stack, "service", service, "error", err)
+		}
+	})
 }
 
 // delay is the wait before restart number attempt (from 0).

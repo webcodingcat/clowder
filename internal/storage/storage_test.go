@@ -64,6 +64,10 @@ func (f *fakeHost) run(_ context.Context, _ time.Duration, name string, args ...
 		return "", &command.ExitError{Code: 5}
 	case name == "lvcreate":
 		f.existing["lv"] = true
+	case name == "lvremove":
+		f.existing["lv"] = false
+	case name == "umount":
+		f.existing["mounted"] = false
 	case name == "blkid" && !f.existing["fs"]:
 		return "", &command.ExitError{Code: 2}
 	case name == "blkid":
@@ -146,6 +150,32 @@ func TestEnsuringAgainChangesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, never := range []string{"lvcreate", "drbdadm create-md", "drbdadm primary", "mkfs.ext4", "mount "} {
+		if host.ran(never) {
+			t.Errorf("ran %q again:\n%s", never, strings.Join(host.commands, "\n"))
+		}
+	}
+}
+
+func TestRemovingAgainSkipsWhatIsGone(t *testing.T) {
+	host := &fakeHost{existing: map[string]bool{}}
+	driver := newDriver(t, host)
+	if err := driver.Ensure(context.Background(), replicated()); err != nil {
+		t.Fatal(err)
+	}
+	if err := driver.Remove(context.Background(), replicated()); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"umount", "drbdadm down clw-shop-pgdata", "lvremove --yes vg-fast/clw-shop-pgdata-g1"} {
+		if !host.ran(want) {
+			t.Errorf("did not run %q; ran:\n%s", want, strings.Join(host.commands, "\n"))
+		}
+	}
+	// a crash before the copy's record was written again: removed once more
+	host.commands = nil
+	if err := driver.Remove(context.Background(), replicated()); err != nil {
+		t.Fatalf("a second remove: %v", err)
+	}
+	for _, never := range []string{"umount", "drbdadm down", "lvremove"} {
 		if host.ran(never) {
 			t.Errorf("ran %q again:\n%s", never, strings.Join(host.commands, "\n"))
 		}

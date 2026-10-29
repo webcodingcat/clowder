@@ -31,7 +31,8 @@ export HLAB=/path/to/hlab/bin/hlab
 spike/run.sh up      # the spike of phase 0: a lab "clowder" with three hosts
 ```
 
-The live tests replace `spike/`; they live in `test/live` behind the build tag `live`.
+The live tests will replace `spike/`; they will live in `test/live` behind the build tag
+`live` (not written yet).
 
 ## Roadmap
 
@@ -55,7 +56,12 @@ Known gaps to close in phase 2, harmless on a single host:
   have applied the leader's commit index.
 - The agent runs its stacks one after another in one loop: a long image pull or `mkfs`
   holds up the others, and a command left behind on a suspended DRBD volume leaves a
-  goroutine behind at every pass.
+  goroutine behind at every pass. It also runs `Ensure` on every volume at every pass; it
+  should skip that when nothing changed.
+- `storage.Ensure` promotes a resource with `--force` when this host has no `primary` marker.
+  That is right for a new volume on one host; after a failover it would force an outdated
+  copy. Whether a volume was ever initialised must come from the state, not a local file.
+- A volume a stack no longer names stays: nothing sends `delete-volume` yet.
 
 ## A stack's way
 
@@ -70,8 +76,12 @@ Known gaps to close in phase 2, harmless on a single host:
 3. The leader's placement picks a host and a pool for each volume, commits the volumes
    (`put-volume`) and the stack's host (`set-stack-status starting`).
 4. That host's agent makes the volumes (LV, DRBD, ext4, mount), renders the Compose file,
-   runs `docker compose up` and reports `running`. Its supervisor restarts what crashes.
+   writes the secrets to tmpfs, runs `docker compose up` and reports `running`. Its
+   supervisor restarts what crashes.
 5. `clowder stack ps|logs shop` asks the stack's host, through any agent.
+6. A later `stack apply` raises the stack's generation: the stack keeps its host, the
+   placement adds only volumes it newly names, and the host's agent brings the new
+   generation up (Compose recreates the containers whose configuration changed).
 
 ## Words
 
@@ -88,6 +98,7 @@ Known gaps to close in phase 2, harmless on a single host:
 | active, passive | a host that runs stacks; a second host that waits until there are three |
 | actor | who sent a command: `leader`, `host/<id>` or `user/<name>` |
 | sealed | encrypted with the cluster's data key before it goes into the state |
+| generation | of a stack: counts its applies, a label on its containers; of a volume: grows with a restore or class move, part of its LV's name |
 
 ## The two binaries
 
@@ -143,7 +154,10 @@ Packages in *italics* do not exist yet.
   container can read the host's keys, other stacks' volumes and secrets, and change the rules
   that keep containers apart, so the API allows it only for stacks that `cluster.yaml` names
   in `stacks.privileged`; and `cluster apply` refuses a `cluster.yaml` that a stack of the
-  cluster would no longer pass (its privileges, storage classes, priorities).
+  cluster would no longer pass (its privileges, storage classes, priorities). Both checks
+  hold at commit: `put-stack` carries the `cluster.yaml` revision it was checked against and
+  `apply-config` the stacks revision (`State.StacksRevision`), and the state refuses either
+  when the other changed in between.
 - `Source` fills in the variables and env files of the user's machine; the result is stored
   in the cluster state and on the stack's host as it is, not sealed. Passwords belong in the
   stack's secrets file, never in a `${VARIABLE}` or the Compose file.
@@ -229,6 +243,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
                                     fenced ⇄L disabled (flapping brake)
   any phase ─L→ removed
   ```
+
+  In words: a new host joins as `joining`; the leader makes it `passive` (waiting) or
+  `active` (running stacks), and drains it for maintenance and back. A host that stops
+  answering is `failed`; it comes back `active` by itself, or the leader powers it off
+  (`fenced`) before its stacks start elsewhere. A fenced host that is back recovers
+  (`recovering`, then `active`); one that fails again and again is `disabled` until a user
+  enables it. Any host can be `removed`.
 
 - Versions: `CommandVersion` and `SnapshotVersion`, from 1; this release reads its own and
   the one before. Payload fields are added, not changed; unknown fields are ignored. The
@@ -451,6 +472,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   system.
 - `PoolUsage` reads a pool's size and how full its data and metadata are.
 - `Trim` (fstrim) gives deleted blocks back to the pool.
+- `Remove` picks up after a crash at any point: a resource without its file is down
+  already, an LV that `lvs` does not find is gone already.
 - A copy's LV is `compose.VolumeName(stack, volume, generation)`; its DRBD resource has the
   same name, so a restored volume (a new generation) is a new LV next to the old one.
 
@@ -476,8 +499,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   volume.
 - Docker restarts nothing (`restart: "no"`); the supervisor follows Docker's events and
   applies each service's restart rule with a backoff (1 s doubling to 60 s, reset after
-  10 minutes up). A container stopped by hand (kill, stop) stays stopped; `unhealthy` means
-  a restart unless the service says otherwise. While the agent runs `compose up` or `down`
+  10 minutes up). A container stopped by hand (stop, or a kill with SIGTERM, SIGKILL or
+  SIGINT; a kill with another signal, such as a reload with SIGHUP, is no stop) stays
+  stopped; `unhealthy` means a restart, with the same backoff, unless the service says
+  otherwise. While the agent runs `compose up` or `down`
   for a stack, it `Hold`s the stack, so the supervisor does not fight it.
 - A start that fails counts as another crash and is tried again after the backoff; a
   container that is gone (`docker.ErrNoContainer`) is let be. `destroy` events drop what the
