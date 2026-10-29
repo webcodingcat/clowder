@@ -137,7 +137,44 @@ func check(project *types.Project) (*Stack, error) {
 		return nil, problems
 	}
 	stack.Project = withoutExtensions(project)
+	stack.source = project
 	return stack, nil
+}
+
+// Source is the stack as one self-contained Compose file: variables filled
+// in, env files merged into the environment, x-clowder kept. The CLI sends
+// it, the cluster stores it, and Parse reads it again on the leader and on
+// the stack's host, where the user's files are not.
+func (s *Stack) Source() ([]byte, error) {
+	project := *s.source
+	project.Services = types.Services{}
+	for name, service := range s.source.Services {
+		// the environment holds them already; their paths are the user's
+		service.EnvFiles = nil
+		project.Services[name] = service
+	}
+	encoded, err := project.MarshalYAML()
+	if err != nil {
+		return nil, fmt.Errorf("write the stack %s: %w", s.Name, err)
+	}
+	return encoded, nil
+}
+
+// Parse reads a stack from its Source and checks it again. It fills in no
+// variables: Source did, and a "$" in a value is meant as it stands.
+func Parse(ctx context.Context, name string, source []byte) (*Stack, error) {
+	details := types.ConfigDetails{
+		WorkingDir:  "/",
+		ConfigFiles: []types.ConfigFile{{Filename: "compose.yaml", Content: source}},
+	}
+	project, err := loader.LoadWithContext(ctx, details, func(o *loader.Options) {
+		o.SetProjectName(name, true)
+		o.SkipInterpolation = true
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read the stack %s: %w", name, err)
+	}
+	return check(project)
 }
 
 // checkVolume reads the clowder fields of a named volume.

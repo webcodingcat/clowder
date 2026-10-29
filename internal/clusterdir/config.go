@@ -1,5 +1,10 @@
 package clusterdir
 
+import (
+	"strconv"
+	"strings"
+)
+
 // Config is cluster.yaml: everything cluster-wide. Changes take effect with
 // `clowder cluster apply`; the file is the source, the cluster keeps a copy.
 // Secrets never appear here, only references to secrets.sops.yaml. The json
@@ -83,6 +88,18 @@ type StorageClass struct {
 	// Reserve kept free in the pool for snapshots and metadata, e.g. "20%".
 	Reserve  string   `yaml:"reserve,omitempty" json:"reserve,omitempty"`
 	Fallback []string `yaml:"fallback,omitempty" json:"fallback,omitempty"`
+}
+
+// DefaultReservePercent is a pool's reserve when its class names none.
+const DefaultReservePercent = 20
+
+// ReservePercent is the class's reserve in percent of its pool; Check has
+// made sure Reserve reads.
+func (c StorageClass) ReservePercent() int {
+	if number, err := strconv.Atoi(strings.TrimSuffix(c.Reserve, "%")); err == nil {
+		return number
+	}
+	return DefaultReservePercent
 }
 
 // Replication limits DRBD's resync so it never crowds out the cluster's own

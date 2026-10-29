@@ -142,22 +142,32 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) error {
 	return nil
 }
 
-// ReportVersion is an agent telling which version it runs.
-type ReportVersion struct {
-	Host    HostID `json:"host"`
-	Version string `json:"version"`
+// ReportHost is an agent telling what it is: the version it runs, what it
+// offers after the system reserve, and its thin pools (by pool name,
+// "vg/thin"). The leader places volumes by the pools. Agents send it when
+// something changed, not on every health check.
+type ReportHost struct {
+	Host     HostID          `json:"host"`
+	Version  string          `json:"version"`
+	Capacity Resources       `json:"capacity"`
+	Pools    map[string]Pool `json:"pools,omitempty"`
 }
 
-func applyReportVersion(s *State, cmd Command, payload ReportVersion) error {
+func applyReportHost(s *State, cmd Command, payload ReportHost) error {
 	host, ok := s.Hosts[payload.Host]
 	switch {
 	case !ok:
 		return fmt.Errorf("no host %d", payload.Host)
 	case cmd.Actor != HostActor(host.ID):
-		return fmt.Errorf("only host %s itself reports its version", host.Name)
+		return fmt.Errorf("only host %s itself reports about itself", host.Name)
 	case payload.Version == "":
 		return errors.New("the version is empty")
 	}
-	host.Version = payload.Version
+	for name, pool := range payload.Pools {
+		if pool.SizeBytes <= 0 || pool.UsedBytes < 0 {
+			return fmt.Errorf("host %s: pool %s with size %d and use %d", host.Name, name, pool.SizeBytes, pool.UsedBytes)
+		}
+	}
+	host.Version, host.Capacity, host.Pools = payload.Version, payload.Capacity, payload.Pools
 	return nil
 }

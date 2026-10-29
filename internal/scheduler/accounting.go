@@ -1,9 +1,4 @@
-// Package storage keeps the volumes of this host: thin LVs in LVM thin
-// pools, DRBD 9 resources for replicated volumes, ext4 and the mount under
-// /var/lib/clowder/volumes. Every command that touches a volume runs with a
-// timeout and is left behind if it hangs (internal/command): without quorum,
-// DRBD suspends I/O.
-package storage
+package scheduler
 
 // Fits tells whether a new volume fits a thin pool without overcommit: the
 // sizes of all its volumes and the new one stay within the pool less its

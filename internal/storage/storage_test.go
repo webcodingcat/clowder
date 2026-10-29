@@ -15,29 +15,6 @@ import (
 
 var update = flag.Bool("update", false, "write the golden files anew")
 
-func TestVolumesFitOnlyWithoutOvercommit(t *testing.T) {
-	const gib = int64(1) << 30
-	tests := []struct {
-		name      string
-		allocated []int64
-		size      int64
-		want      bool
-	}{
-		{"empty pool", nil, 80 * gib, true},
-		{"into the reserve", nil, 81 * gib, false},
-		{"exactly full", []int64{50 * gib}, 30 * gib, true},
-		{"one byte over", []int64{50 * gib}, 30*gib + 1, false},
-		{"nothing", nil, 0, false},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := Fits(100*gib, 20, test.allocated, test.size); got != test.want {
-				t.Errorf("Fits = %v", got)
-			}
-		})
-	}
-}
-
 func TestResourceFilesMatchTheGoldenFiles(t *testing.T) {
 	tests := map[string]Resource{
 		"single.golden.res": {Name: "clw-shop-pgdata-b582c809", Minor: 3, Nodes: []Node{

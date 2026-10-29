@@ -308,8 +308,8 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 		allowed bool
 	}{
 		{
-			"its own version", state.KindReportVersion, state.HostActor(1),
-			state.ReportVersion{Host: 1, Version: testVersion},
+			"its own version", state.KindReportHost, state.HostActor(1),
+			state.ReportHost{Host: 1, Version: testVersion},
 			true,
 		},
 		{
@@ -318,8 +318,8 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 			true,
 		},
 		{
-			"another host's version", state.KindReportVersion, state.HostActor(0),
-			state.ReportVersion{Host: 0, Version: "9.9.9"},
+			"another host's version", state.KindReportHost, state.HostActor(0),
+			state.ReportHost{Host: 0, Version: "9.9.9"},
 			false,
 		},
 		{

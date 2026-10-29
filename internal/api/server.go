@@ -44,9 +44,12 @@ type ServerConfig struct {
 	// APIAddress gives a host's API address (its node address and Port).
 	APIAddress func(id state.HostID) string
 	// Keys seals secrets for the state and opens them (the data key).
-	Keys    Keys
-	Version string
-	Logger  *slog.Logger
+	Keys Keys
+	// HostID is this agent's host; Containers answers for its stacks.
+	HostID     state.HostID
+	Containers Containers
+	Version    string
+	Logger     *slog.Logger
 }
 
 // Keys is the cluster's data key as the server uses it.
@@ -57,18 +60,20 @@ type Keys interface {
 
 // Server is an agent's API.
 type Server struct {
-	config    ServerConfig
-	mux       *http.ServeMux
+	config ServerConfig
+	mux    *http.ServeMux
+	// forwarder carries writes to the leader; streamer relays answers of
+	// other hosts that may take long (logs that follow), so it has no timeout.
 	forwarder *http.Client
+	streamer  *http.Client
 }
 
 // NewServer sets up the routes.
 func NewServer(config ServerConfig) *Server {
 	server := &Server{config: config, mux: http.NewServeMux()}
-	server.forwarder = &http.Client{
-		Timeout:   waitTimeout,
-		Transport: &http.Transport{TLSClientConfig: pki.ClientTLSToHosts(config.Certificate, config.CA, server.revoked)},
-	}
+	transport := &http.Transport{TLSClientConfig: pki.ClientTLSToHosts(config.Certificate, config.CA, server.revoked)}
+	server.forwarder = &http.Client{Timeout: waitTimeout, Transport: transport}
+	server.streamer = &http.Client{Transport: transport}
 	server.handle("GET /v1/status", pki.RoleUser, server.status)
 	server.handle("GET /v1/hosts", pki.RoleUser, server.hosts)
 	server.handle("POST /v1/hosts/{id}/{action}", pki.RoleUser, server.hostAction)
@@ -76,7 +81,14 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/audit", pki.RoleUser, server.audit)
 	server.handle("GET /v1/cluster", pki.RoleUser, server.cluster)
 	server.handle("PUT /v1/cluster", pki.RoleUser, server.applyCluster)
+	server.handle("GET /v1/stacks", pki.RoleUser, server.stacks)
+	server.handle("PUT /v1/stacks/{name}", pki.RoleUser, server.applyStack)
+	server.handle("DELETE /v1/stacks/{name}", pki.RoleUser, server.deleteStack)
+	server.handle("GET /v1/stacks/{name}/ps", pki.RoleUser, server.stackPs)
+	server.handle("GET /v1/stacks/{name}/logs", pki.RoleUser, server.stackLogs)
 	server.handle("POST /v1/internal/propose", pki.RoleHost, server.internalPropose)
+	server.handle("GET /v1/internal/stacks/{name}/ps", pki.RoleHost, server.localPs)
+	server.handle("GET /v1/internal/stacks/{name}/logs", pki.RoleHost, server.localLogs)
 	server.handleOpen("GET /v1/bootstrap", server.bootstrapOffer)
 	server.handleOpen("POST /v1/bootstrap", server.bootstrap)
 	return server
@@ -308,7 +320,8 @@ var userKinds = map[string]bool{
 
 // hostKinds are what a host reports about itself.
 var hostKinds = map[string]bool{
-	state.KindReportVersion: true, state.KindSetHostPhase: true, state.KindAdvanceOperation: true,
+	state.KindReportHost: true, state.KindSetHostPhase: true, state.KindAdvanceOperation: true,
+	state.KindSetStackStatus: true,
 }
 
 // internalPropose is where a follower forwards a user's write and where an
@@ -344,7 +357,7 @@ func (s *Server) write(w http.ResponseWriter, r *http.Request, kind string, payl
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if index, ok := s.commit(w, r, cmd, s.propose); ok {
+	if index, ok := s.commit(w, r, cmd, s.Propose); ok {
 		writeJSON(w, http.StatusOK, Written{Index: index})
 	}
 }
@@ -383,9 +396,10 @@ func (s *Server) proposeHere(ctx context.Context, cmd state.Command) (uint64, er
 	return s.config.Cluster.Propose(ctx, cmd)
 }
 
-// propose commits a command: directly on the leader, else by forwarding it
-// to the leader's internal endpoint.
-func (s *Server) propose(ctx context.Context, cmd state.Command) (uint64, error) {
+// Propose commits a command: directly on the leader, else by forwarding it
+// to the leader's internal endpoint. It is the one way to commit, for the
+// API's routes as for the agent's own reports and the leader's controllers.
+func (s *Server) Propose(ctx context.Context, cmd state.Command) (uint64, error) {
 	if s.config.Cluster.IsLeader() {
 		return s.proposeHere(ctx, cmd)
 	}

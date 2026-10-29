@@ -201,14 +201,22 @@ func TestEveryPhaseHasAWayOut(t *testing.T) {
 	}
 }
 
-func TestOnlyAHostReportsItsVersion(t *testing.T) {
+func TestOnlyAHostReportsAboutItself(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
-	c.mustApply(KindReportVersion, HostActor(0), ReportVersion{Host: 0, Version: "1.3.0"})
-	c.mustApply(KindReportVersion, HostActor(1), ReportVersion{Host: 1, Version: "1.2.9"})
-	c.refuse(KindReportVersion, HostActor(1), ReportVersion{Host: 0, Version: "9.9.9"}, "only host")
+	pools := map[string]Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: 100 << 30, UsedBytes: 1 << 30}}
+	c.mustApply(KindReportHost, HostActor(0), ReportHost{Host: 0, Version: "1.3.0", Pools: pools})
+	c.mustApply(KindReportHost, HostActor(1), ReportHost{Host: 1, Version: "1.2.9"})
+	c.refuse(KindReportHost, HostActor(1), ReportHost{Host: 0, Version: "9.9.9"}, "only host")
+	c.refuse(KindReportHost, HostActor(1), ReportHost{
+		Host: 1, Version: "1.2.9",
+		Pools: map[string]Pool{"vg/thin": {SizeBytes: 0}},
+	}, "pool vg/thin")
 	if got := c.state.MinVersion(); got != "1.2.9" {
 		t.Errorf("MinVersion %s", got)
+	}
+	if c.state.Hosts[0].Pools["vg-fast/thin"].SizeBytes != 100<<30 {
+		t.Errorf("pools %v", c.state.Hosts[0].Pools)
 	}
 }
 
@@ -269,14 +277,14 @@ func TestApplyConfigCountsRevisionsAndReplacesTheSecrets(t *testing.T) {
 
 func TestStacksBelongToTheirOwner(t *testing.T) {
 	c := newCluster(t)
-	spec := json.RawMessage(`{"services":{}}`)
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Spec: spec})
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Spec: spec, Priority: 700})
+	spec := "services: {}"
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec, Priority: 700})
 	stack := c.state.Stacks["shop"]
 	if stack.Generation != 2 || stack.Status != StackPending || stack.Priority != 700 {
 		t.Errorf("stack %+v", stack)
 	}
-	c.refuse(KindPutStack, LeaderActor, PutStack{Name: "shop", Owner: GitOpsOwner("main"), Spec: spec}, "belongs to cli")
+	c.refuse(KindPutStack, LeaderActor, PutStack{Name: "shop", Owner: GitOpsOwner("main"), Source: spec}, "belongs to cli")
 
 	host := HostID(0)
 	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host})
@@ -290,7 +298,7 @@ func TestStacksBelongToTheirOwner(t *testing.T) {
 
 func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Spec: json.RawMessage(`{}`)})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
 	minor := 5
 	volume := Volume{
 		ID: "shop/pgdata", Generation: 1, Class: "fast", SizeBytes: 1 << 30, Replicas: 1, Minor: &minor,
@@ -334,14 +342,14 @@ func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 
 func TestOperationsHoldTheirLocks(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Spec: json.RawMessage(`{}`)})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
 	move := Operation{ID: "01A", Kind: "move-stack", Locks: []string{"stack/shop", "volume/shop/pgdata"}}
 	c.mustApply(KindStartOperation, LeaderActor, StartOperation{Operation: move})
 
-	c.refuse(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Spec: json.RawMessage(`{}`)},
+	c.refuse(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"},
 		"locked by operation 01A")
 	// the operation itself may change what it holds
-	c.mustApply(KindPutStack, LeaderActor, PutStack{Name: "shop", Owner: OwnerCLI, Spec: json.RawMessage(`{}`), Operation: "01A"})
+	c.mustApply(KindPutStack, LeaderActor, PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}", Operation: "01A"})
 	backup := Operation{ID: "01B", Kind: "backup", Locks: []string{"volume/shop/pgdata"}}
 	before := c.encoded()
 	err := c.apply(KindStartOperation, LeaderActor, StartOperation{Operation: backup})
@@ -414,13 +422,13 @@ func TestOnlyTheLastFinishedOperationsAreKept(t *testing.T) {
 func TestTheAuditKeepsTheLastEntries(t *testing.T) {
 	c := newCluster(t)
 	for range auditSize + 10 {
-		c.mustApply(KindReportVersion, HostActor(0), ReportVersion{Host: 0, Version: "1.0.0"})
+		c.mustApply(KindReportHost, HostActor(0), ReportHost{Host: 0, Version: "1.0.0"})
 	}
 	audit := c.state.Audit
 	if len(audit) != auditSize || audit[len(audit)-1].Index != c.index || audit[0].Index != c.index-auditSize+1 {
 		t.Errorf("%d entries from %d to %d", len(audit), audit[0].Index, audit[len(audit)-1].Index)
 	}
-	if last := audit[len(audit)-1]; last.Actor != HostActor(0) || last.Kind != KindReportVersion {
+	if last := audit[len(audit)-1]; last.Actor != HostActor(0) || last.Kind != KindReportHost {
 		t.Errorf("last entry %+v", last)
 	}
 }
@@ -429,7 +437,7 @@ func TestSnapshotsGiveTheSameState(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
 	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"})
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Spec: json.RawMessage(`{"a":1}`)})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {a: {image: x}}"})
 
 	var buffer bytes.Buffer
 	if err := c.state.WriteSnapshot(&buffer); err != nil {

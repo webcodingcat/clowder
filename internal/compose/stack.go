@@ -21,6 +21,8 @@ type Stack struct {
 	// Project is the Compose model without the x-clowder fields; Render
 	// starts from it.
 	Project *types.Project
+	// source is the model with them, for Source.
+	source *types.Project
 }
 
 // Priority is either a number from 0 to 1000 or the name of a category from

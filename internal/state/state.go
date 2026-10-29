@@ -6,7 +6,6 @@
 package state
 
 import (
-	"encoding/json"
 	"maps"
 	"net/netip"
 	"slices"
@@ -96,7 +95,8 @@ type Host struct {
 	Voter             bool      `json:"voter"`
 	Phase             HostPhase `json:"phase"`
 	Capacity          Resources `json:"capacity"`
-	// Pools are the thin pools by storage class.
+	// Pools are the host's thin pools by name ("vg/thin"), as it reported
+	// them; storage classes name pools.
 	Pools map[string]Pool `json:"pools,omitempty"`
 	// Version of the agent, as it last reported it.
 	Version string `json:"version,omitempty"`
@@ -128,11 +128,12 @@ type Stack struct {
 	Owner string `json:"owner"` // OwnerCLI or GitOpsOwner(source)
 	// Generation counts the applies of this stack.
 	Generation int64 `json:"generation"`
-	// Spec is the normalized Compose file the CLI sent.
-	Spec     json.RawMessage `json:"spec"`
-	Priority int             `json:"priority"`
-	Host     *HostID         `json:"host,omitempty"` // nil: not placed yet
-	Status   StackStatus     `json:"status"`
+	// Source is the stack's Compose file as the CLI checked and sent it
+	// (compose.Stack.Source): self-contained, x-clowder included.
+	Source   string      `json:"source"`
+	Priority int         `json:"priority"`
+	Host     *HostID     `json:"host,omitempty"` // nil: not placed yet
+	Status   StackStatus `json:"status"`
 	// Stopped lists services pushed out by higher priorities.
 	Stopped  []string  `json:"stopped,omitempty"`
 	LastMove time.Time `json:"last_move,omitzero"`

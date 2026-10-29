@@ -1,7 +1,6 @@
 package state
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -39,12 +38,13 @@ func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 	return nil
 }
 
-// PutStack creates a stack or replaces its spec.
+// PutStack creates a stack or replaces its Compose file; the agent of its
+// host applies the new generation.
 type PutStack struct {
-	Name     string          `json:"name"`
-	Owner    string          `json:"owner"`
-	Spec     json.RawMessage `json:"spec"`
-	Priority int             `json:"priority"`
+	Name     string `json:"name"`
+	Owner    string `json:"owner"`
+	Source   string `json:"source"`
+	Priority int    `json:"priority"`
 	// Operation is set when the operation holding the lock makes the change.
 	Operation string `json:"operation,omitempty"`
 }
@@ -59,8 +59,8 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 		return fmt.Errorf("stack name %q: use lowercase letters, digits, - and _", payload.Name)
 	case payload.Owner == "":
 		return errors.New("the stack needs an owner")
-	case len(payload.Spec) == 0:
-		return fmt.Errorf("stack %s has no spec", payload.Name)
+	case payload.Source == "":
+		return fmt.Errorf("stack %s has no Compose file", payload.Name)
 	}
 	if err := s.checkUnlocked(stackLock(payload.Name), payload.Operation); err != nil {
 		return err
@@ -73,7 +73,7 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 		return fmt.Errorf("stack %s belongs to %s, not to %s", stack.Name, stack.Owner, payload.Owner)
 	}
 	stack.Generation++
-	stack.Spec = payload.Spec
+	stack.Source = payload.Source
 	stack.Priority = payload.Priority
 	return nil
 }

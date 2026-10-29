@@ -20,6 +20,49 @@ func loadText(t *testing.T, text string) (*Stack, error) {
 	return Load(context.Background(), LoadOptions{Name: "test", WorkingDir: dir, Files: []string{file}})
 }
 
+func TestTheSourceReadsBackWithoutTheUsersFiles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, text string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("app.env", "TOKEN=from-the-env-file\n")
+	write("compose.yaml", "services:\n  app:\n    image: example/app:${TAG}\n    env_file: [app.env]\n"+
+		"    environment: {PRICE: \"$$5\"}\n    x-clowder: {priority: 300}\n"+
+		"volumes:\n  data:\n    x-clowder: {class: fast, size: 1G, replicas: 1}\n")
+	stack, err := Load(context.Background(), LoadOptions{
+		Name: "shop", WorkingDir: dir, Files: []string{filepath.Join(dir, "compose.yaml")},
+		Environment: map[string]string{"TAG": "1.2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := stack.Source()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(source), dir) {
+		t.Errorf("the source points into the user's directory:\n%s", source)
+	}
+	if err := os.RemoveAll(dir); err != nil { // the cluster has none of the user's files
+		t.Fatal(err)
+	}
+	parsed, err := Parse(context.Background(), "shop", source)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, source)
+	}
+	app := parsed.Project.Services["app"]
+	environment := app.Environment
+	if app.Image != "example/app:1.2" || *environment["TOKEN"] != "from-the-env-file" || *environment["PRICE"] != "$5" {
+		t.Errorf("image %s, environment %v", app.Image, environment)
+	}
+	if parsed.Services["app"].Priority.Value == nil || *parsed.Services["app"].Priority.Value != 300 ||
+		parsed.Volumes["data"].Replicas != 1 {
+		t.Errorf("the x-clowder fields did not survive: %+v %+v", parsed.Services["app"], parsed.Volumes["data"])
+	}
+}
+
 func TestTheShopExampleLoads(t *testing.T) {
 	stack, err := Load(context.Background(), LoadOptions{
 		Name:       "shop",

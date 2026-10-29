@@ -201,7 +201,7 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if _, ok := s.commit(w, r, cmd, s.propose); ok {
+	if _, ok := s.commit(w, r, cmd, s.Propose); ok {
 		writeJSON(w, http.StatusOK, BootstrapAnswer{Certificate: string(certificatePEM)})
 	}
 }

@@ -23,22 +23,23 @@ import (
 // until one answers, and after a write it asks reads to wait for that write,
 // whichever agent answers them.
 type Client struct {
-	seeds   []string
-	http    *http.Client
-	version string
+	seeds []string
+	// http answers within its timeout; streaming has none (logs that follow)
+	http      *http.Client
+	streaming *http.Client
+	version   string
 	// written is the index of this client's last write.
 	written uint64
 }
 
 // NewClient connects with a user's certificate to the agents at seeds.
 func NewClient(seeds []string, certificate tls.Certificate, ca *x509.Certificate, version string) *Client {
+	transport := &http.Transport{TLSClientConfig: pki.ClientTLSToHosts(certificate, ca, nil)}
 	return &Client{
-		seeds:   seeds,
-		version: version,
-		http: &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: &http.Transport{TLSClientConfig: pki.ClientTLSToHosts(certificate, ca, nil)},
-		},
+		seeds:     seeds,
+		version:   version,
+		http:      &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		streaming: &http.Client{Transport: transport},
 	}
 }
 
@@ -55,6 +56,39 @@ func (c *Client) Post(ctx context.Context, path string, in any) (Written, error)
 // Put replaces what is at path with in. Reads after it wait for the write.
 func (c *Client) Put(ctx context.Context, path string, in any) (Written, error) {
 	return c.write(ctx, http.MethodPut, path, in)
+}
+
+// Delete removes what is at path. Reads after it wait for the write.
+func (c *Client) Delete(ctx context.Context, path string) (Written, error) {
+	return c.write(ctx, http.MethodDelete, path, nil)
+}
+
+// Stream copies what path answers to out as it comes (logs that follow);
+// it has no timeout of its own, ctx ends it.
+func (c *Client) Stream(ctx context.Context, path string, out io.Writer) error {
+	var unreachable []string
+	for _, seed := range c.seeds {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+Address(seed)+path, nil)
+		if err != nil {
+			return err
+		}
+		request.Header.Set(VersionHeader, c.version)
+		response, err := c.streaming.Do(request)
+		if err != nil {
+			unreachable = append(unreachable, fmt.Sprintf("%s: %v", seed, err))
+			continue
+		}
+		defer func() { _ = response.Body.Close() }() // copied to the end below
+		if response.StatusCode >= 300 {
+			return statusError(response)
+		}
+		_, err = io.Copy(out, response.Body)
+		if ctx.Err() != nil {
+			return nil // the caller stopped following
+		}
+		return err
+	}
+	return fmt.Errorf("no agent answered:\n  %s", strings.Join(unreachable, "\n  "))
 }
 
 func (c *Client) write(ctx context.Context, method, path string, in any) (Written, error) {
@@ -106,6 +140,16 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	return fmt.Errorf("no agent answered:\n  %s", strings.Join(unreachable, "\n  "))
 }
 
+// statusError reads an answer that is not 2xx: the API's Error, or the text.
+func statusError(response *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20)) // for the message only
+	var answer Error
+	if json.Unmarshal(body, &answer) != nil || answer.Message == "" {
+		answer.Message = strings.TrimSpace(string(body))
+	}
+	return &StatusError{Status: response.StatusCode, Message: answer.Message}
+}
+
 // send runs a request and decodes a 2xx answer into out; any other answer
 // becomes a StatusError.
 func send(client *http.Client, request *http.Request, out any) error {
@@ -115,16 +159,12 @@ func send(client *http.Client, request *http.Request, out any) error {
 		return err
 	}
 	defer func() { _ = response.Body.Close() }() // read to the end below
+	if response.StatusCode >= 300 {
+		return statusError(response)
+	}
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
 		return fmt.Errorf("read the answer: %w", err)
-	}
-	if response.StatusCode >= 300 {
-		var answer Error
-		if json.Unmarshal(body, &answer) != nil || answer.Message == "" {
-			answer.Message = strings.TrimSpace(string(body))
-		}
-		return &StatusError{Status: response.StatusCode, Message: answer.Message}
 	}
 	if out == nil {
 		return nil
