@@ -11,6 +11,7 @@ services:
     restart: unless-stopped
     environment:
       DB_HOST: db
+      GREETING: "Hello $$USER"
     x-clowder:
       http: {host: shop.example.com, port: 8080}
     deploy:

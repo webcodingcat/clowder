@@ -10,7 +10,7 @@
 #   test-sops the tests of internal/sopsage against the real sops (Alpine's
 #             package)
 #   test-tools  the golden files of the renderers against the real tools
-#             (nft -c, drbdadm) in Debian
+#             (nft -c, drbdadm, docker-compose) in Debian
 #   build     clowderd for linux/amd64, clowder for linux, darwin and windows
 #             into dist/
 #   package   build, then the Debian packages of clowder and clowderd into dist/
@@ -37,7 +37,8 @@ readonly SHFMT_IMAGE=mvdan/shfmt:v3.14.1
 # The yamllint image has only a major tag; the digest pins yamllint 1.32.0.
 readonly YAMLLINT_IMAGE=cytopia/yamllint:1@sha256:596fb19eb71e55ba5b2fa56d8c18a615ec82adc8d3bf2d73918cb78c8f3240fb
 readonly TOFU_IMAGE=ghcr.io/opentofu/opentofu:1.13.2
-# The hosts run Debian 13: its nft and drbdadm check the renderers' output.
+# The hosts run Debian 13: its nft, drbdadm and docker-compose check the
+# renderers' output.
 readonly DEBIAN_IMAGE=debian:trixie-slim
 # Go's module and build cache survive between runs.
 readonly CACHE_VOLUME=clowder-gocache

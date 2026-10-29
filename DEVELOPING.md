@@ -135,9 +135,13 @@ Packages in *italics* do not exist yet.
 - The `x-clowder` blocks are decoded strictly: an unknown key is an error, not ignored.
 - `Render` writes the file docker compose gets on a host: `restart: "no"` (the agent restarts),
   the agent's resolver, each port on the Floating IP and the node address, labels, a fixed
-  bridge name per network (`BridgeName`), volumes bound to `<mount>/data`.
+  bridge name per network (`BridgeName`), volumes bound to `<mount>/data`. Every `$` in a
+  value becomes `$$` (`EscapeDollars`): the values were filled in on the user's machine, and
+  docker compose on the host would fill in variables once more, from the agent's
+  environment.
 - The rendered example `testdata/shop/rendered.golden.yaml` is the golden file. After an
   intended change: `bin/dev test ./internal/compose -update`, then review the diff.
+  `bin/dev test-tools` checks it with Debian's `docker-compose` and that it fills in nothing.
 
 ## Cluster directory (`internal/clusterdir`)
 
@@ -462,8 +466,8 @@ maintainer scripts (reload systemd after install and removal, stop the agent bef
 
 `.github/workflows/ci.yml` runs `bin/dev lint`, `bin/dev test`, `bin/dev test-sops`,
 `bin/dev test-tools` and `bin/dev package` on every push and pull request and keeps `dist/` as
-an artifact. `test-tools` checks the renderers' golden files with Debian's `nft -c` and
-`drbdadm` (`test/tools/check-golden-files.sh`). The live tests need `/dev/kvm` and stay
+an artifact. `test-tools` checks the renderers' golden files with Debian's `nft -c`,
+`drbdadm` and `docker-compose` (`test/tools/check-golden-files.sh`). The live tests need `/dev/kvm` and stay
 manual.
 
 ## Releases

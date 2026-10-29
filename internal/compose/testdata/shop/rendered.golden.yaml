@@ -11,6 +11,7 @@ services:
       - 169.254.77.53
     environment:
       DB_HOST: db
+      GREETING: Hello $$USER
     image: ghcr.io/example/shop:1.4
     labels:
       clowder.generation: "3"

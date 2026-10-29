@@ -1,14 +1,17 @@
 package compose
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net/netip"
 	"path"
 	"strconv"
+	"strings"
 
 	"github.com/compose-spec/compose-go/v2/types"
+	"go.yaml.in/yaml/v3"
 )
 
 // Target is what the agent of a host knows when it renders a stack.
@@ -72,11 +75,52 @@ func Render(stack *Stack, target Target) ([]byte, error) {
 		}
 		project.Volumes[name] = renderVolume(stack.Name, name, volume, mounted)
 	}
-	rendered, err := project.MarshalYAML()
+	marshaled, err := project.MarshalYAML()
+	if err != nil {
+		return nil, fmt.Errorf("render stack %s: %w", stack.Name, err)
+	}
+	rendered, err := EscapeDollars(marshaled)
 	if err != nil {
 		return nil, fmt.Errorf("render stack %s: %w", stack.Name, err)
 	}
 	return rendered, nil
+}
+
+// EscapeDollars writes every $ in a value of a Compose file as $$. The
+// values arrive interpolated already (Load, on the user's machine), but
+// docker compose on the host interpolates the file it gets once more: a $
+// left in a value is meant as it stands. Keys are never interpolated.
+func EscapeDollars(file []byte) ([]byte, error) {
+	var document yaml.Node
+	if err := yaml.Unmarshal(file, &document); err != nil {
+		return nil, fmt.Errorf("escape the $ signs: %w", err)
+	}
+	escapeValues(&document)
+	var escaped bytes.Buffer
+	encoder := yaml.NewEncoder(&escaped)
+	encoder.SetIndent(2) // as compose-go writes it
+	if err := encoder.Encode(&document); err != nil {
+		return nil, fmt.Errorf("escape the $ signs: %w", err)
+	}
+	if err := encoder.Close(); err != nil {
+		return nil, fmt.Errorf("escape the $ signs: %w", err)
+	}
+	return escaped.Bytes(), nil
+}
+
+func escapeValues(node *yaml.Node) {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		node.Value = strings.ReplaceAll(node.Value, "$", "$$")
+	case yaml.MappingNode:
+		for i := 1; i < len(node.Content); i += 2 { // keys at even places
+			escapeValues(node.Content[i])
+		}
+	default:
+		for _, child := range node.Content {
+			escapeValues(child)
+		}
+	}
 }
 
 func renderService(stackName string, service types.ServiceConfig, target Target) types.ServiceConfig {

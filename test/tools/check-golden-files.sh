@@ -1,16 +1,33 @@
 #!/bin/sh
 # Check the renderers' golden files with the tools the hosts run them with:
-# nft for the ruleset, drbdadm for the resource files. Runs inside a Debian
-# container from the repository root (bin/dev test-tools); nft -c needs
-# CAP_NET_ADMIN.
+# nft for the ruleset, drbdadm for the resource files, docker-compose for the
+# rendered stacks. Runs inside a Debian container from the repository root
+# (bin/dev test-tools); nft -c needs CAP_NET_ADMIN.
 # Usage: test/tools/check-golden-files.sh
 set -eu
 
-# install_tools: Install nftables and drbd-utils quietly.
+# install_tools: Install nftables, drbd-utils and docker-compose quietly.
 install_tools() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get -qq update >/dev/null
-  apt-get -qq install -y --no-install-recommends nftables drbd-utils >/dev/null
+  apt-get -qq install -y --no-install-recommends nftables drbd-utils docker-compose >/dev/null
+}
+
+# check_compose: Check every rendered stack with the docker-compose of the
+# hosts, and that it fills in no variable: the stacks' values are filled in
+# on the user's machine already (a USER set here must not show up).
+check_compose() {
+  for rendered in internal/compose/testdata/*/rendered.golden.yaml; do
+    if ! output="$(USER=filled-in-on-the-host docker-compose -f "${rendered}" config 2>&1)"; then
+      echo "${output}"
+      return 1
+    fi
+    if echo "${output}" | grep -q filled-in-on-the-host; then
+      echo "docker-compose filled in a variable of ${rendered}"
+      return 1
+    fi
+    echo "docker-compose: ${rendered} OK"
+  done
 }
 
 # check_nft: Check every golden ruleset.
@@ -40,6 +57,7 @@ main() {
   install_tools
   check_nft
   check_drbd
+  check_compose
 }
 
 main "$@"
