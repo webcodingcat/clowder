@@ -9,8 +9,8 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=notify
-# clowderd run (the agent loop) is not built yet; until then the package
-# installs this unit without enabling it.
+# The package installs the unit without enabling it; clowderd init (and
+# later join) enables and starts it.
 ExecStart=/usr/bin/clowderd run
 # The agent reports to systemd every few seconds; a hung agent is restarted
 # well within the 45 s after which the cluster counts a host as failed.

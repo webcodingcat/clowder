@@ -161,6 +161,34 @@ func (n *Node) Propose(ctx context.Context, cmd state.Command) (uint64, error) {
 	return future.Index(), nil
 }
 
+// CatchUp waits until the state holds what the log holds: after a restart
+// Raft replays the log in the background. It waits for a leader; on the
+// leader, a barrier makes sure every entry is applied. A follower is as far
+// as its leader has told it.
+func (n *Node) CatchUp(ctx context.Context) error {
+	for {
+		if _, ok := n.Leader(); ok {
+			break
+		}
+		select {
+		case <-time.After(50 * time.Millisecond):
+		case <-ctx.Done():
+			return fmt.Errorf("wait for a Raft leader: %w", ctx.Err())
+		}
+	}
+	if !n.IsLeader() {
+		return nil
+	}
+	timeout := proposeTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = min(timeout, time.Until(deadline))
+	}
+	if err := n.raft.Barrier(timeout).Error(); err != nil {
+		return fmt.Errorf("apply the Raft log: %w", err)
+	}
+	return nil
+}
+
 // Read runs a function on the current state. It must not keep the state or
 // parts of it: Apply changes them in place.
 func (n *Node) Read(use func(current *state.State)) {

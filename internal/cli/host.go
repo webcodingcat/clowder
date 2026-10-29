@@ -32,7 +32,7 @@ func newHost(g *globals) *cobra.Command {
 		Short: "List the hosts",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			client, err := g.connect()
+			client, _, err := g.connect()
 			if err != nil {
 				return err
 			}
@@ -49,7 +49,7 @@ func newHost(g *globals) *cobra.Command {
 			Short: action.Description,
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				client, err := g.connect()
+				client, _, err := g.connect()
 				if err != nil {
 					return err
 				}

@@ -48,6 +48,15 @@ func (c *Client) Get(ctx context.Context, path string, out any) error {
 
 // Post writes in (nil for none) to path. Reads after it wait for the write.
 func (c *Client) Post(ctx context.Context, path string, in any) (Written, error) {
+	return c.write(ctx, http.MethodPost, path, in)
+}
+
+// Put replaces what is at path with in. Reads after it wait for the write.
+func (c *Client) Put(ctx context.Context, path string, in any) (Written, error) {
+	return c.write(ctx, http.MethodPut, path, in)
+}
+
+func (c *Client) write(ctx context.Context, method, path string, in any) (Written, error) {
 	var body []byte
 	if in != nil {
 		encoded, err := json.Marshal(in)
@@ -57,7 +66,7 @@ func (c *Client) Post(ctx context.Context, path string, in any) (Written, error)
 		body = encoded
 	}
 	var written Written
-	if err := c.do(ctx, http.MethodPost, path, body, &written); err != nil {
+	if err := c.do(ctx, method, path, body, &written); err != nil {
 		return written, err
 	}
 	c.written = max(c.written, written.Index)

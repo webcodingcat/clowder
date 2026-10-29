@@ -1,0 +1,205 @@
+package agent
+
+import (
+	"cmp"
+	"context"
+	"crypto/ecdh"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/netip"
+	"os"
+	"time"
+
+	"filippo.io/age"
+
+	"github.com/webcodingcat/clowder/internal/datakey"
+	"github.com/webcodingcat/clowder/internal/pki"
+	"github.com/webcodingcat/clowder/internal/raftnode"
+	"github.com/webcodingcat/clowder/internal/state"
+)
+
+// InitOptions are what cloud-init gives clowderd init.
+type InitOptions struct {
+	// BootstrapKey is the key OpenTofu made; it lets the first user in and
+	// later hosts join.
+	BootstrapKey string
+	Name         string
+	Underlay     netip.Addr
+	// NodeAddress, RaftPort and APIPort are fixed in a cluster; tests change
+	// them to run on 127.0.0.1.
+	NodeAddress netip.Addr
+	RaftPort    int
+	APIPort     int
+}
+
+// leaderTimeout is how long init waits for its own Raft member to lead.
+const leaderTimeout = 30 * time.Second
+
+// Init makes this host the first of a new cluster: it creates the CA, the
+// data key and the cluster's age key, the host's certificate and WireGuard
+// key, and a Raft group with this host as its only voter. It refuses a host
+// that has a cluster already.
+func Init(ctx context.Context, files Files, options InitOptions, ensureNodeAddress func(context.Context, netip.Addr) error,
+	logger *slog.Logger,
+) error {
+	if _, err := os.Stat(files.raftDir()); err == nil {
+		return fmt.Errorf("%s exists: this host was part of a cluster (remove the directory to start anew)",
+			files.raftDir())
+	}
+	if options.BootstrapKey == "" || options.Name == "" || !options.Underlay.IsValid() {
+		return errors.New("init needs the bootstrap key, the host's name and its underlay address")
+	}
+	host := Host{
+		ID: 0, Name: options.Name, NodeAddress: options.NodeAddress, Underlay: options.Underlay,
+		RaftPort: options.RaftPort, APIPort: options.APIPort,
+	}
+	if !host.NodeAddress.IsValid() {
+		host.NodeAddress = NodeAddress(host.ID)
+	}
+	host.RaftPort = cmp.Or(host.RaftPort, RaftPort)
+	host.APIPort = cmp.Or(host.APIPort, APIPort)
+	keys, hostEntry, err := createKeys(files, host)
+	if err != nil {
+		return err
+	}
+	if err := ensureNodeAddress(ctx, host.NodeAddress); err != nil {
+		return err
+	}
+	if err := bootstrapRaft(ctx, files, host, keys, hostEntry, options.BootstrapKey, logger); err != nil {
+		return err
+	}
+	// host.json last: a host with it has everything else
+	return files.writeHost(host)
+}
+
+// createKeys makes the cluster's keys and this host's, writes the host's to
+// disk and returns what goes into the state.
+func createKeys(files Files, host Host) (state.ClusterKeys, state.Host, error) {
+	var keys state.ClusterKeys
+	ca, err := pki.NewCA(host.Name, time.Now())
+	if err != nil {
+		return keys, state.Host{}, err
+	}
+	dataKey, err := datakey.New()
+	if err != nil {
+		return keys, state.Host{}, err
+	}
+	ageIdentity, err := age.GenerateX25519Identity()
+	if err != nil {
+		return keys, state.Host{}, fmt.Errorf("make the cluster's age key: %w", err)
+	}
+	hostKey, err := pki.NewKey()
+	if err != nil {
+		return keys, state.Host{}, err
+	}
+	certificatePEM, err := ca.IssueHost(hostKey.Public().(ed25519.PublicKey), int(host.ID),
+		[]netip.Addr{host.Underlay, host.NodeAddress}, time.Now())
+	if err != nil {
+		return keys, state.Host{}, err
+	}
+	certificate, err := pki.ParseCertificate(certificatePEM)
+	if err != nil {
+		return keys, state.Host{}, err
+	}
+	wireGuardKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return keys, state.Host{}, fmt.Errorf("make the WireGuard key: %w", err)
+	}
+
+	hostKeyPEM, err := pki.EncodeKey(hostKey)
+	if err != nil {
+		return keys, state.Host{}, err
+	}
+	caKeyPEM, err := ca.KeyPEM()
+	if err != nil {
+		return keys, state.Host{}, err
+	}
+	writes := []struct {
+		path    string
+		content []byte
+	}{
+		{files.caCertificate(), ca.CertificatePEM()},
+		{files.hostCertificate(), certificatePEM},
+		{files.hostKey(), hostKeyPEM},
+		{files.wireGuardKey(), []byte(base64.StdEncoding.EncodeToString(wireGuardKey.Bytes()) + "\n")},
+	}
+	for _, write := range writes {
+		if err := writePrivate(write.path, write.content); err != nil {
+			return keys, state.Host{}, err
+		}
+	}
+	if err := dataKey.Save(files.dataKey()); err != nil {
+		return keys, state.Host{}, err
+	}
+
+	keys.CACertificate = ca.CertificatePEM()
+	if keys.CAKey, err = dataKey.Seal(caKeyPEM); err != nil {
+		return keys, state.Host{}, err
+	}
+	if keys.AgeIdentity, err = dataKey.Seal([]byte(ageIdentity.String())); err != nil {
+		return keys, state.Host{}, err
+	}
+	entry := state.Host{
+		ID: host.ID, Name: host.Name, Underlay: host.Underlay,
+		WGPublicKey:       base64.StdEncoding.EncodeToString(wireGuardKey.PublicKey().Bytes()),
+		CertificateSerial: pki.Serial(certificate),
+	}
+	return keys, entry, nil
+}
+
+// bootstrapRaft starts the Raft group and writes the bootstrap command.
+func bootstrapRaft(ctx context.Context, files Files, host Host, keys state.ClusterKeys, entry state.Host,
+	bootstrapKey string, logger *slog.Logger,
+) error {
+	credentials, err := files.readCredentials()
+	if err != nil {
+		return err
+	}
+	node, err := raftnode.Open(raftnode.Config{
+		Dir: files.raftDir(), ID: host.ID, Bind: host.raftAddress(), Advertise: host.raftAddress(),
+		Certificate: credentials.certificate, CA: credentials.ca, Logger: logger,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = node.Close() }() // the bootstrap is committed, or its error reported
+	if err := node.Bootstrap(); err != nil {
+		return err
+	}
+	if err := waitForLead(ctx, node); err != nil {
+		return err
+	}
+	joinKey, err := credentials.dataKey.Seal([]byte(bootstrapKey))
+	if err != nil {
+		return err
+	}
+	cmd, err := state.NewCommand(state.KindBootstrap, time.Now(), state.HostActor(host.ID),
+		state.Bootstrap{Keys: keys, JoinKey: joinKey, Host: entry})
+	if err != nil {
+		return err
+	}
+	if _, err := node.Propose(ctx, cmd); err != nil {
+		return fmt.Errorf("bootstrap the cluster state: %w", err)
+	}
+	return nil
+}
+
+// waitForLead waits until this member leads its new group.
+func waitForLead(ctx context.Context, node *raftnode.Node) error {
+	deadline := time.Now().Add(leaderTimeout)
+	for !node.IsLeader() {
+		if time.Now().After(deadline) {
+			return errors.New("the new Raft group elected no leader")
+		}
+		select {
+		case <-time.After(50 * time.Millisecond):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}

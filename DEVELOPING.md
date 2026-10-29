@@ -51,7 +51,7 @@ clowder is built in phases; each ends with live tests on HLab.
 | Binary | Package | Runs on | Does |
 |---|---|---|---|
 | `clowder` | `cmd/clowder`, `internal/cli` | Linux, macOS, Windows | the user's CLI: reads the cluster directory, talks to an agent over mTLS |
-| `clowderd` | `cmd/clowderd`, `internal/agent` | Linux | the agent (systemd service `clowderd`) and the host commands: `check` now; `run`, `init`, `join`, `recover` to come |
+| `clowderd` | `cmd/clowderd`, `internal/agent` | Linux | the agent (`run`, systemd service `clowderd`) and the host commands `check`, `init`; `join` and `recover` to come |
 
 `cmd/clowderd` has the build constraint `linux`. Both get their version from
 `internal/buildinfo.Version`, which `bin/dev build` stamps from the Git tag (or
@@ -73,7 +73,7 @@ Packages in *italics* do not exist yet.
   services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
   changes the host.
 - **Changes the host**: `agent`, *`supervisor`*, `raftnode` (Raft over mTLS), `datakey` (the
-  key file) and the drivers *`network`*, *`storage`*, *`docker`*, *`ingress`*.
+  key file) and the drivers `network` (so far `clowder0`), *`storage`*, *`docker`*, *`ingress`*.
 - **Reads the host**: `hostcheck` (for `clowderd check`). It compiles anywhere, but only the
   agent uses it, so depguard keeps it out of the CLI like the packages above.
 
@@ -165,9 +165,6 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 
 ## Raft (`internal/raftnode`) and the data key (`internal/datakey`)
 
-`raftnode`, `datakey` and the server of `api` are built and tested, but no binary runs them
-yet: `clowderd run` and `clowderd init` put them together.
-
 - `raftnode` runs hashicorp/raft: log and stable store in BoltDB (`raft.db`), a snapshot every
   8192 entries (2 kept), the state of `internal/state` as the replicated machine. Raft's own
   log lines go through `log/slog` (hclog's bridge).
@@ -212,10 +209,39 @@ yet: `clowderd run` and `clowderd init` put them together.
   `PutVolume`, ...); everyone else is refused while the lock is held.
 - The CLI finds the cluster directory (`--cluster`, `$CLOWDER_CLUSTER`, the working directory)
   and the user (`--user`, `$CLOWDER_USER`, the only credentials file), then talks to the
-  cluster with the user's certificate. So far: `cluster status`, `host list`,
+  cluster with the user's certificate: `cluster status|apply|diff|schema`, `host list`,
   `host drain|undrain|remove|enable`.
+- `cluster apply` sends `cluster.yaml` with the secrets of `secrets.sops.yaml` in clear inside
+  mutual TLS (`PUT /v1/cluster`); the agent seals them with the data key before they go into
+  the state. Its hash covers both, so `cluster diff` tells changed fields of `cluster.yaml`
+  from changed secrets without the cluster showing any secret.
+- The first user has no certificate yet (`cluster bootstrap`): `GET /v1/bootstrap` gives the
+  CA certificate with a `pki.TrustProof` for each valid bootstrap key, and the CLI trusts the CA
+  only if one matches its key. `POST /v1/bootstrap`, over TLS checked against that CA, carries
+  the user's public key with an HMAC of the bootstrap key and a time (at most 5 minutes off).
+  It works once: when the cluster has a user, users add the others. The CLI then writes the
+  cluster directory (`clusterdir.Create`).
 - The tests run real HTTPS servers: a follower forwarding to the leader, refused callers, the
   CLI against an agent with a cluster directory and SOPS-encrypted credentials.
+
+## The agent (`internal/agent`)
+
+- A host's files are under `/var/lib/clowder`: `host.json` (ID, name, addresses, ports),
+  `keys/` (data key, WireGuard key), `pki/` (CA certificate, host certificate and key), `raft/`.
+  init and join write `host.json` last, so a host with it has everything else.
+- `clowderd init --bootstrap-key ... --underlay ...` (from cloud-init) makes the first host:
+  the CA, the data key, the cluster's age key, the host's certificate and WireGuard key, a
+  Raft group with this host as its only voter and the bootstrap command. Then it enables and
+  starts `clowderd.service`. It refuses a host that has a `raft/` directory.
+- `clowderd run` (the service): the node address on `clowder0`, the Raft member, the API on
+  the underlay and the node address. It waits up to 15 s for its state to catch up with the
+  Raft log (on the leader a barrier), then tells systemd `READY=1`, and feeds the watchdog
+  while the state's lock answers. Containers, the network beyond `clowder0` and storage come
+  in later steps.
+- `clowder0` is a dummy interface with the node address (`internal/network`), so the address
+  exists on a host without peers; `run` creates it at every start.
+- The test of the package goes the whole way on 127.0.0.1: init, the agent with a notify
+  socket, the user's bootstrap (and a wrong key, a second user refused), apply and diff.
 
 ## Host check (`internal/hostcheck`, `clowderd check`)
 
@@ -253,9 +279,8 @@ maintainer scripts (reload systemd after install and removal, stop the agent bef
   public repository (dist `proxmox-9`); the host's APT sources must list it. `coccinelle`
   lets the DKMS build run offline.
 - `clowderd.service`: `Type=notify`, `WatchdogSec=15`, `Restart=always` without a start
-  limit, `KillMode=process` (helpers finish their step; containers belong to dockerd). It
-  starts `clowderd run`, which does not exist yet; the package installs the unit without
-  enabling it.
+  limit, `KillMode=process` (helpers finish their step; containers belong to dockerd). The
+  package installs it without enabling it; `clowderd init` enables and starts it.
 - `clowder-tasks.slice`: memory limit for the agent's short-lived tasks.
 
 ## CI

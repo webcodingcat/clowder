@@ -1,22 +1,35 @@
 package cli
 
 import (
+	"bytes"
+	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 
 	"github.com/spf13/cobra"
 
 	"github.com/webcodingcat/clowder/internal/api"
+	"github.com/webcodingcat/clowder/internal/buildinfo"
+	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/pki"
 )
 
 func newCluster(g *globals) *cobra.Command {
 	cluster := &cobra.Command{Use: "cluster", Short: "The cluster as a whole"}
-	cluster.AddCommand(&cobra.Command{
+	cluster.AddCommand(newStatus(g), newBootstrap(g), newApply(g), newDiff(g), newSchema())
+	return cluster
+}
+
+func newStatus(g *globals) *cobra.Command {
+	return &cobra.Command{
 		Use:   "status",
 		Short: "Show the cluster, its leader and its hosts",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			client, err := g.connect()
+			client, _, err := g.connect()
 			if err != nil {
 				return err
 			}
@@ -26,8 +39,7 @@ func newCluster(g *globals) *cobra.Command {
 			}
 			return printStatus(cmd.OutOrStdout(), status)
 		},
-	})
-	return cluster
+	}
 }
 
 func printStatus(out io.Writer, status api.Status) error {
@@ -40,4 +52,185 @@ func printStatus(out io.Writer, status api.Status) error {
 		return err
 	}
 	return printHosts(out, status.Hosts)
+}
+
+func newBootstrap(g *globals) *cobra.Command {
+	var recipient, seed, bootstrapKey string
+	command := &cobra.Command{
+		Use:   "bootstrap <user>",
+		Short: "Become the first user of a new cluster and set up its directory",
+		Long: "Asks the first host for the cluster's CA, trusts it only if the host proves it knows the\n" +
+			"bootstrap key, and gets the first user's certificate. Writes the cluster directory:\n" +
+			"credentials/<user>.sops.yaml, secrets.sops.yaml, cluster.yaml to fill in and .sops.yaml.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			user := args[0]
+			if err := pki.CheckUserName(user); err != nil {
+				return err
+			}
+			path, err := clusterdir.Target(g.cluster)
+			if err != nil {
+				return err
+			}
+			key, err := pki.NewKey()
+			if err != nil {
+				return err
+			}
+			caPEM, certificatePEM, err := api.Bootstrap(cmd.Context(), seed, []byte(bootstrapKey), user,
+				key.Public().(ed25519.PublicKey), buildinfo.Version)
+			if err != nil {
+				return err
+			}
+			keyPEM, err := pki.EncodeKey(key)
+			if err != nil {
+				return err
+			}
+			err = clusterdir.Create(clusterdir.NewDirectory{
+				Path: path, Recipient: recipient, Seed: seed, BootstrapKey: bootstrapKey,
+				Credentials: clusterdir.Credentials{User: user, CA: caPEM, Certificate: certificatePEM, Key: string(keyPEM)},
+			})
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s is the first user of the cluster. Next:\n"+
+				"  1. fill in cluster.yaml (the Floating IP, the storage classes)\n"+
+				"  2. sops edit secrets.sops.yaml (the hoster token)\n"+
+				"  3. clowder cluster apply\n", user)
+			return err
+		},
+	}
+	command.Flags().StringVar(&recipient, "age", "", "your age public key (age1...) or SSH public key")
+	command.Flags().StringVar(&seed, "seed", "", "address of the first host")
+	command.Flags().StringVar(&bootstrapKey, "key", "", "the cluster's bootstrap key (from OpenTofu)")
+	for _, name := range []string{"age", "seed", "key"} {
+		_ = command.MarkFlagRequired(name) // the flags exist; this cannot fail
+	}
+	return command
+}
+
+// localApply is what clowder cluster apply would send.
+func localApply(directory *clusterdir.Directory) (api.ClusterApply, error) {
+	secrets, err := directory.Secrets()
+	if err != nil {
+		return api.ClusterApply{}, err
+	}
+	return api.ClusterApply{
+		Spec: directory.Config, Secrets: secrets.Values, JoinKeys: secrets.JoinKeys, Registries: secrets.Registries,
+	}, nil
+}
+
+func newApply(g *globals) *cobra.Command {
+	return &cobra.Command{
+		Use:   "apply",
+		Short: "Send cluster.yaml and the secrets to the cluster",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, directory, err := g.connect()
+			if err != nil {
+				return err
+			}
+			apply, err := localApply(directory)
+			if err != nil {
+				return err
+			}
+			if _, err := client.Put(cmd.Context(), "/v1/cluster", apply); err != nil {
+				return err
+			}
+			var applied api.ClusterInfo
+			if err := client.Get(cmd.Context(), "/v1/cluster", &applied); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "applied: revision %d\n", applied.Revision)
+			return err
+		},
+	}
+}
+
+func newDiff(g *globals) *cobra.Command {
+	return &cobra.Command{
+		Use:   "diff",
+		Short: "Show whether cluster.yaml and the secrets differ from what the cluster runs",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, directory, err := g.connect()
+			if err != nil {
+				return err
+			}
+			local, err := localApply(directory)
+			if err != nil {
+				return err
+			}
+			hash, err := local.Hash()
+			if err != nil {
+				return err
+			}
+			var applied api.ClusterInfo
+			if err := client.Get(cmd.Context(), "/v1/cluster", &applied); err != nil {
+				return err
+			}
+			changed, err := changedFields(applied.Spec, local.Spec)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			switch {
+			case hash == applied.Hash:
+				_, err = fmt.Fprintf(out, "nothing to apply (revision %d)\n", applied.Revision)
+			case len(changed) > 0:
+				_, err = fmt.Fprintf(out, "cluster.yaml differs in: %v\n", changed)
+			default:
+				_, err = fmt.Fprintln(out, "the secrets differ (secrets.sops.yaml)")
+			}
+			return err
+		},
+	}
+}
+
+// changedFields lists the top-level keys of cluster.yaml whose values
+// differ.
+func changedFields(applied, local clusterdir.Config) ([]string, error) {
+	fields := func(config clusterdir.Config) (map[string]json.RawMessage, error) {
+		encoded, err := json.Marshal(config)
+		if err != nil {
+			return nil, err
+		}
+		var byField map[string]json.RawMessage
+		return byField, json.Unmarshal(encoded, &byField)
+	}
+	before, err := fields(applied)
+	if err != nil {
+		return nil, err
+	}
+	after, err := fields(local)
+	if err != nil {
+		return nil, err
+	}
+	var changed []string
+	for _, name := range slices.Sorted(maps.Keys(after)) {
+		if !bytes.Equal(before[name], after[name]) {
+			changed = append(changed, name)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(before)) {
+		if _, kept := after[name]; !kept {
+			changed = append(changed, name)
+		}
+	}
+	return changed, nil
+}
+
+func newSchema() *cobra.Command {
+	return &cobra.Command{
+		Use:   "schema",
+		Short: "Print the JSON schema of cluster.yaml (for editors)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			schema, err := clusterdir.Schema()
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), string(schema))
+			return err
+		},
+	}
 }

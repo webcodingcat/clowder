@@ -42,8 +42,16 @@ type ServerConfig struct {
 	Certificate tls.Certificate
 	// APIAddress gives a host's API address (its node address and Port).
 	APIAddress func(id state.HostID) string
-	Version    string
-	Logger     *slog.Logger
+	// Keys seals secrets for the state and opens them (the data key).
+	Keys    Keys
+	Version string
+	Logger  *slog.Logger
+}
+
+// Keys is the cluster's data key as the server uses it.
+type Keys interface {
+	Seal(plaintext []byte) (state.Sealed, error)
+	Open(sealed state.Sealed) ([]byte, error)
 }
 
 // Server is an agent's API.
@@ -65,7 +73,11 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("POST /v1/hosts/{id}/{action}", pki.RoleUser, server.hostAction)
 	server.handle("GET /v1/users", pki.RoleUser, server.users)
 	server.handle("GET /v1/audit", pki.RoleUser, server.audit)
+	server.handle("GET /v1/cluster", pki.RoleUser, server.cluster)
+	server.handle("PUT /v1/cluster", pki.RoleUser, server.applyCluster)
 	server.handle("POST /v1/internal/propose", pki.RoleHost, server.internalPropose)
+	server.handleOpen("GET /v1/bootstrap", server.bootstrapOffer)
+	server.handleOpen("POST /v1/bootstrap", server.bootstrap)
 	return server
 }
 
@@ -108,10 +120,7 @@ func (s *Server) handle(pattern string, role pki.Role, handler http.HandlerFunc)
 			writeError(w, http.StatusForbidden, fmt.Errorf("%s may not call %s", identity.Name, r.URL.Path))
 			return
 		}
-		if caller := r.Header.Get(VersionHeader); !buildinfo.Compatible(caller, s.config.Version) {
-			writeError(w, http.StatusBadRequest, fmt.Errorf(
-				"version %s cannot talk to agent %s (at most one minor version apart); update the older one",
-				caller, s.config.Version))
+		if !s.checkVersion(w, r) {
 			return
 		}
 		if err := s.waitForMinIndex(r); err != nil {
@@ -120,6 +129,27 @@ func (s *Server) handle(pattern string, role pki.Role, handler http.HandlerFunc)
 		}
 		handler(w, r.WithContext(context.WithValue(r.Context(), identityKey{}, identity)))
 	})
+}
+
+// handleOpen registers a route callers reach without a certificate: the
+// bootstrap, which proves itself with the bootstrap key instead.
+func (s *Server) handleOpen(pattern string, handler http.HandlerFunc) {
+	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		if s.checkVersion(w, r) {
+			handler(w, r)
+		}
+	})
+}
+
+// checkVersion refuses a caller too far from this agent's version.
+func (s *Server) checkVersion(w http.ResponseWriter, r *http.Request) bool {
+	if caller := r.Header.Get(VersionHeader); !buildinfo.Compatible(caller, s.config.Version) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf(
+			"version %s cannot talk to agent %s (at most one minor version apart); update the older one",
+			caller, s.config.Version))
+		return false
+	}
+	return true
 }
 
 func (s *Server) revoked(serial string) bool {
@@ -285,9 +315,17 @@ func (s *Server) write(w http.ResponseWriter, r *http.Request, kind string, payl
 	s.answerWrite(w, r, cmd)
 }
 
-// answerWrite commits a command, here as the leader or through it, and
-// answers with its index.
+// answerWrite commits a command and answers with its index.
 func (s *Server) answerWrite(w http.ResponseWriter, r *http.Request, cmd state.Command) {
+	if index, ok := s.commit(w, r, cmd); ok {
+		writeJSON(w, http.StatusOK, Written{Index: index})
+	}
+}
+
+// commit commits a command, here as the leader or through it. On success it
+// sets the index header and leaves the answer to the caller; on failure it
+// answers with the error.
+func (s *Server) commit(w http.ResponseWriter, r *http.Request, cmd state.Command) (uint64, bool) {
 	ctx, cancel := context.WithTimeout(r.Context(), waitTimeout)
 	defer cancel()
 	index, err := s.propose(ctx, cmd)
@@ -302,8 +340,9 @@ func (s *Server) answerWrite(w http.ResponseWriter, r *http.Request, cmd state.C
 		writeError(w, http.StatusServiceUnavailable, err)
 	default:
 		w.Header().Set(IndexHeader, strconv.FormatUint(index, 10))
-		writeJSON(w, http.StatusOK, Written{Index: index})
+		return index, true
 	}
+	return 0, false
 }
 
 // propose commits a command: directly on the leader, else by forwarding it

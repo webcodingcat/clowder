@@ -12,10 +12,15 @@ import (
 // that talks to a host. It trusts any host of the CA that is not revoked,
 // whatever name or address it was reached by: a seed may be a name, and a
 // host certificate lists only the host's addresses. revoked may be nil (the
-// CLI does not know the list; the agent it reaches checks the CLI).
+// CLI does not know the list; the agent it reaches checks the CLI). Without a
+// certificate (an empty one) the caller shows none: a user's first contact.
 func HostClientTLS(certificate tls.Certificate, ca *x509.Certificate, revoked func(serial string) bool) *tls.Config {
+	var certificates []tls.Certificate
+	if len(certificate.Certificate) > 0 {
+		certificates = []tls.Certificate{certificate}
+	}
 	return &tls.Config{
-		Certificates:       []tls.Certificate{certificate},
+		Certificates:       certificates,
 		InsecureSkipVerify: true, //nolint:gosec // VerifyConnection checks the chain instead of the name
 		VerifyConnection:   verifyHost(ca, revoked),
 		MinVersion:         tls.VersionTLS13,

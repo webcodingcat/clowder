@@ -47,8 +47,8 @@ type Secrets struct {
 
 // RegistryLogin is the login for one registry.
 type RegistryLogin struct {
-	Username string `yaml:"username"`
-	Password string `yaml:"password"`
+	Username string `yaml:"username" json:"username"`
+	Password string `yaml:"password" json:"password"`
 }
 
 // Credentials is one user's credentials/<user>.sops.yaml after decryption.
@@ -62,20 +62,15 @@ type Credentials struct {
 // Find returns the cluster directory: the flag if set, else $CLOWDER_CLUSTER,
 // else the working directory if it holds a cluster.yaml.
 func Find(flag string) (string, error) {
-	for _, candidate := range []string{flag, os.Getenv(EnvVar)} {
-		if candidate != "" {
-			return candidate, nil
-		}
+	dir, err := Target(flag)
+	if err != nil || flag != "" || os.Getenv(EnvVar) != "" {
+		return dir, err
 	}
-	workingDir, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("find the cluster directory: %w", err)
+	if _, err := os.Stat(filepath.Join(dir, ConfigFile)); err != nil {
+		return "", fmt.Errorf("no cluster directory: use --cluster, set %s or run where %s is",
+			EnvVar, ConfigFile)
 	}
-	if _, err := os.Stat(filepath.Join(workingDir, ConfigFile)); err == nil {
-		return workingDir, nil
-	}
-	return "", fmt.Errorf("no cluster directory: use --cluster, set %s or run where %s is",
-		EnvVar, ConfigFile)
+	return dir, nil
 }
 
 // Load reads and checks cluster.yaml in dir.
