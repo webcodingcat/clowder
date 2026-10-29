@@ -6,6 +6,7 @@ coding standards, `bin/dev` the commands.
 ## Getting started
 
 You need Bash and Docker. On Windows, use Git Bash or WSL; Docker Desktop with WSL2 works.
+From PowerShell, call it through Git's Bash: `& "C:\Program Files\Git\bin\bash.exe" bin/dev test`.
 
 ```bash
 bin/dev test     # unit tests, seconds
@@ -66,7 +67,8 @@ Packages in *italics* do not exist yet.
   `cli-portable`) refuses direct imports of the Linux-only packages in `cmd/clowder` and
   `internal/cli`; the cross build for Windows and macOS in `bin/dev build` catches indirect
   ones.
-- **Pure logic, no I/O**: *`scheduler`*, `state`. They are tested with table tests only.
+- **Pure logic, no I/O**: *`scheduler`*, `state`. Their tests need no host, files or network.
+  `state` uses the types and `Check` of `clusterdir`, never its file access.
 - **Decides**: *`controller`* (the leader's loops) writes Raft commands. It talks to external
   services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
   changes the host.
@@ -128,10 +130,22 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   command leaves no trace; the state's `Index` follows the log either way.
 - A command has a kind, a payload of the type with the same name (`AddHost`, `PutStack`, ...)
   and an actor (`leader`, `host/<id>`, `user/<name>`) that the API takes from the caller's
-  certificate. Phase changes check who asks: some only the host itself reports
-  (`phaseChanges`).
-- Versions: `CommandVersion` and `SnapshotVersion`; this release reads its own and the one
-  before. Payload fields are added, not changed; unknown fields are ignored.
+  certificate. Which actor may send which kind is the API's check; the state checks only
+  what it alone can tell: a host reports only about itself and never moves another host.
+- Host phases (`phaseChanges`, L = the leader, H = the host itself):
+
+  ```
+  joining ─L→ passive ─L→ active ⇄L draining
+     └──────L──────────────↗  │ L        │ L
+                         failed ←────────┘
+             active ←H── failed ─L→ fenced ─H→ recovering ─H→ active
+                                    fenced ⇄L disabled (flapping brake)
+  any phase ─L→ removed
+  ```
+
+- Versions: `CommandVersion` and `SnapshotVersion`, from 1; this release reads its own and
+  the one before. Payload fields are added, not changed; unknown fields are ignored. The
+  json tags of `clusterdir.Config` are part of this format.
 - Operations hold locks (`stack/<name>`, `volume/<id>`); a change to a locked stack or volume
   is refused with a `LockedError`. Only failover takes locks over (`TakeOver`).
 - Secrets arrive sealed (`Sealed`, age for the data key); `state` never sees them in clear.
@@ -156,6 +170,10 @@ built for the running kernel, drbd-utils ≥ 9.28, DRBD autostart and usage repo
 filter, thin pools (`--pool`), Docker's `daemon.json`, docker compose, unattended-upgrades and
 the Floating IP (`--floating-ip`). Each check reads through the `Host` interface, so the unit
 tests use a fake host; exit status 1 if any check fails.
+
+Each command has 10 s. One that hangs (`lvs` while DRBD suspends I/O) is left behind with its
+goroutine: fine for `clowderd check`, which exits; the agent will run the checks in their own
+process for the same reason (Volumes).
 
 ## Volumes
 
@@ -210,7 +228,7 @@ The workflow needs two secrets in this repository:
 
 | Secret | What |
 |---|---|
-| `APT_SIGNING_KEY` | ASCII-armoured private OpenPGP key without passphrase that signs the APT repository |
+| `APT_SIGNING_KEY` | ASCII-armored private OpenPGP key without passphrase that signs the APT repository |
 | `APT_DEPLOY_KEY` | private SSH key; its public half is a deploy key with write access on `webcodingcat/clowder-apt` |
 
 `publish.sh` imports the key into a throw-away keyring and publishes the public half as

@@ -86,3 +86,12 @@ func TestBridgeNamesFitTheKernelLimit(t *testing.T) {
 		t.Errorf("bridge name changed: %s", got)
 	}
 }
+
+func TestVolumeNamesOfDifferentStacksNeverMeet(t *testing.T) {
+	if VolumeName("a-b", "c", 1) == VolumeName("a", "b-c", 1) {
+		t.Error("stack a-b volume c and stack a volume b-c share a Docker volume")
+	}
+	if VolumeName("shop", "pgdata", 1) == VolumeName("shop", "pgdata", 2) {
+		t.Error("a new generation keeps the old volume")
+	}
+}

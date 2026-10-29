@@ -148,7 +148,11 @@ func TestEachMissingPieceFailsItsCheck(t *testing.T) {
 		"unattended upgrades for everything": {
 			func(h *fakeHost) {
 				h.commands["dpkg-query --show --showformat=${db:Status-Status} unattended-upgrades"] = "installed"
-				h.commands["apt-config dump Unattended-Upgrade::Package-Blacklist"] = `"linux-";`
+				// linux-firmware keeps only itself; drbd-utils is no "drbd" entry
+				h.commands["apt-config dump Unattended-Upgrade::Package-Blacklist"] = "" +
+					"Unattended-Upgrade::Package-Blacklist:: \"linux-firmware\";\n" +
+					"Unattended-Upgrade::Package-Blacklist:: \"linux-\";\n" +
+					"Unattended-Upgrade::Package-Blacklist:: \"drbd-utils\";\n"
 			},
 			"unattended upgrades", "docker, drbd, clowder",
 		},
@@ -193,5 +197,19 @@ func TestPrintShowsStatusNameAndDetail(t *testing.T) {
 	}
 	if out.String() != "OK   drbd module: drbd 9.3.4\n" {
 		t.Errorf("got %q", out.String())
+	}
+}
+
+func TestUnattendedUpgradesThatKeepClowdersPackagesBackPass(t *testing.T) {
+	host := goodHost()
+	host.commands["dpkg-query --show --showformat=${db:Status-Status} unattended-upgrades"] = "installed"
+	host.commands["apt-config dump Unattended-Upgrade::Package-Blacklist"] = "Unattended-Upgrade::Package-Blacklist \"\";\n"
+	for _, entry := range []string{"linux-", "docker", "drbd", "clowder"} {
+		host.commands["apt-config dump Unattended-Upgrade::Package-Blacklist"] +=
+			"Unattended-Upgrade::Package-Blacklist:: \"" + entry + "\";\n"
+	}
+	status, detail := checkUnattendedUpgrades(context.Background(), host, Options{})
+	if status != OK {
+		t.Errorf("%s: %s", status, detail)
 	}
 }

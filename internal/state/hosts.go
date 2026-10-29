@@ -3,6 +3,7 @@ package state
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Bootstrap starts the cluster: the keys init made and the first host.
@@ -82,13 +83,16 @@ type SetHostPhase struct {
 	Voter *bool     `json:"voter,omitempty"` // changes the Raft role along with the phase
 }
 
-// mover is who may make a phase change: the leader (on its own or for a
-// user) or the agent of the host itself, reporting what it sees.
+// mover is who may make a phase change: the leader, on its own or for a
+// user, or the host itself, reporting what only it can see. A host never
+// moves another host. Which actor may send which kind of command at all is
+// the API's check; the state checks only what it alone can tell, whose host
+// a report is about.
 type mover int
 
 const (
 	byLeader mover = iota
-	byAgent
+	byTheHost
 )
 
 // phaseChanges are the allowed moves; any phase may also go to Removed, by
@@ -98,9 +102,9 @@ var phaseChanges = map[HostPhase]map[HostPhase]mover{
 	Passive:    {Active: byLeader},
 	Active:     {Draining: byLeader, Failed: byLeader},
 	Draining:   {Active: byLeader, Failed: byLeader},
-	Failed:     {Active: byAgent, Fenced: byLeader},
-	Fenced:     {Recovering: byAgent, Disabled: byLeader},
-	Recovering: {Active: byAgent},
+	Failed:     {Active: byTheHost, Fenced: byLeader},
+	Fenced:     {Recovering: byTheHost, Disabled: byLeader},
+	Recovering: {Active: byTheHost},
 	Disabled:   {Fenced: byLeader},
 }
 
@@ -119,12 +123,12 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) error {
 	if !allowed {
 		return fmt.Errorf("host %s cannot go from %s to %s", host.Name, host.Phase, payload.Phase)
 	}
-	fromAgent := cmd.Actor == HostActor(host.ID)
+	fromHost := strings.HasPrefix(cmd.Actor, hostActorPrefix)
 	switch {
-	case who == byAgent && !fromAgent:
+	case who == byTheHost && cmd.Actor != HostActor(host.ID):
 		return fmt.Errorf("only host %s itself reports %s", host.Name, payload.Phase)
-	case who == byLeader && fromAgent:
-		return fmt.Errorf("host %s cannot move itself to %s", host.Name, payload.Phase)
+	case who == byLeader && fromHost:
+		return fmt.Errorf("%s cannot move host %s to %s; only the leader does", cmd.Actor, host.Name, payload.Phase)
 	}
 	host.Phase = payload.Phase
 	if payload.Voter != nil {

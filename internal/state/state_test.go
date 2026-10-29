@@ -114,7 +114,7 @@ func TestNothingButTheBootstrapRunsOnAnEmptyState(t *testing.T) {
 	}
 }
 
-func TestCommandsOfOtherVersionsAndKinds(t *testing.T) {
+func TestCommandsOfUnknownVersionsOrKindsAreRefused(t *testing.T) {
 	c := newCluster(t)
 	for _, test := range []struct {
 		version int
@@ -123,6 +123,7 @@ func TestCommandsOfOtherVersionsAndKinds(t *testing.T) {
 	}{
 		{CommandVersion + 1, KindAddUser, "not readable"},
 		{CommandVersion - 2, KindAddUser, "not readable"},
+		{0, KindAddUser, "not readable"}, // a command without a version field
 		{CommandVersion, "make-coffee", "unknown command"},
 	} {
 		cmd := Command{Version: test.version, Kind: test.kind, At: testTime, Actor: LeaderActor, Payload: []byte("{}")}
@@ -165,9 +166,11 @@ func TestHostPhasesMoveOnlyAsAllowed(t *testing.T) {
 		{"host is up to date", Recovering, Active, HostActor(1), ""},
 		{"flapping brake", Fenced, Disabled, LeaderActor, ""},
 		{"leader removes from any phase", Recovering, Removed, LeaderActor, ""},
-		{"host cannot declare itself failed", Active, Failed, HostActor(1), "cannot move itself"},
+		{"host cannot declare itself failed", Active, Failed, HostActor(1), "only the leader"},
 		{"leader cannot report recovery", Fenced, Recovering, LeaderActor, "only host"},
 		{"another host cannot report", Failed, Active, HostActor(2), "only host"},
+		{"another host cannot declare failed", Active, Failed, HostActor(2), "only the leader"},
+		{"another host cannot remove", Active, Removed, HostActor(2), "only the leader"},
 		{"no shortcut", Fenced, Active, HostActor(1), "cannot go from"},
 		{"removed stays removed", Removed, Active, LeaderActor, "removed"},
 	}
@@ -217,6 +220,8 @@ func TestVersionsCompareByNumber(t *testing.T) {
 		{"1.2.3", "1.2.3", 0},
 		{"0.0.0~dev+abc", "0.1.0", -1},
 		{"dev", "0.0.1", -1},
+		{"1.2.3~rc1", "1.2.3", -1},
+		{"1.2.3~rc2", "1.2.3~rc1", 1},
 	}
 	for _, test := range tests {
 		if got := compareVersions(test.a, test.b); got != test.want {
@@ -277,13 +282,13 @@ func TestApplyConfigCountsRevisionsAndReplacesTheSecrets(t *testing.T) {
 func TestStacksBelongToTheirOwner(t *testing.T) {
 	c := newCluster(t)
 	spec := json.RawMessage(`{"services":{}}`)
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: "cli", Spec: spec})
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: "cli", Spec: spec, Priority: 700})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Spec: spec})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Spec: spec, Priority: 700})
 	stack := c.state.Stacks["shop"]
 	if stack.Generation != 2 || stack.Status != StackPending || stack.Priority != 700 {
 		t.Errorf("stack %+v", stack)
 	}
-	c.refuse(KindPutStack, LeaderActor, PutStack{Name: "shop", Owner: "gitops:main", Spec: spec}, "belongs to cli")
+	c.refuse(KindPutStack, LeaderActor, PutStack{Name: "shop", Owner: GitOpsOwner("main"), Spec: spec}, "belongs to cli")
 
 	host := HostID(0)
 	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host})
@@ -291,12 +296,13 @@ func TestStacksBelongToTheirOwner(t *testing.T) {
 		t.Errorf("placing a stack is a move: %v", stack.LastMove)
 	}
 	gone := HostID(7)
-	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Host: &gone}, "not a member")
+	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Status: StackRunning, Host: &gone}, "not a member")
+	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Status: "dancing"}, "unknown status")
 }
 
 func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: "cli", Spec: json.RawMessage(`{}`)})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Spec: json.RawMessage(`{}`)})
 	minor := 5
 	volume := Volume{
 		ID: "shop/pgdata", Generation: 1, Class: "fast", Replicas: 1, Minor: &minor,
@@ -316,15 +322,22 @@ func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 	tooHigh := 1000
 	other.Minor = &tooHigh
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: other}, "not from 0 to 999")
+	twice := volume
+	twice.Placements = []Placement{{Host: 0, Class: "fast"}, {Host: 0, Class: "fast"}}
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: twice}, "two copies on host 0")
+
+	c.refuse(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop"}, "still has volume shop/pgdata")
+	c.mustApply(KindDeleteVolume, UserActor("alice"), DeleteVolume{ID: "shop/pgdata"})
+	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop"})
 }
 
 func TestOperationsHoldTheirLocks(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: "cli", Spec: json.RawMessage(`{}`)})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Spec: json.RawMessage(`{}`)})
 	move := Operation{ID: "01A", Kind: "move-stack", Locks: []string{"stack/shop", "volume/shop/pgdata"}}
 	c.mustApply(KindStartOperation, LeaderActor, StartOperation{Operation: move})
 
-	c.refuse(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: "cli", Spec: json.RawMessage(`{}`)},
+	c.refuse(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Spec: json.RawMessage(`{}`)},
 		"locked by operation 01A")
 	backup := Operation{ID: "01B", Kind: "backup", Locks: []string{"volume/shop/pgdata"}}
 	before := c.encoded()
@@ -402,7 +415,7 @@ func TestSnapshotsGiveTheSameState(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
 	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"})
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: "cli", Spec: json.RawMessage(`{"a":1}`)})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Spec: json.RawMessage(`{"a":1}`)})
 
 	var buffer bytes.Buffer
 	if err := c.state.WriteSnapshot(&buffer); err != nil {

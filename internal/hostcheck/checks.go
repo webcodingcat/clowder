@@ -28,6 +28,8 @@ var (
 	usageCountOff    = regexp.MustCompile(`(?m)^\s*usage-count\s+no\s*;`)
 	// a reject pattern ("r|...|") that names drbd; an accept pattern does not count
 	rejectsDRBD = regexp.MustCompile(`"r\|[^|"]*drbd`)
+	// a value in apt-config dump: Unattended-Upgrade::Package-Blacklist:: "drbd";
+	quoted = regexp.MustCompile(`"([^"]*)"`)
 )
 
 // checks in the order they are printed.
@@ -264,9 +266,16 @@ func checkUnattendedUpgrades(ctx context.Context, host Host, _ Options) (Status,
 	if err != nil {
 		return Fail, fmt.Sprintf("apt-config: %v", err)
 	}
+	// unattended-upgrades matches each entry against the start of a package
+	// name, so these four keep every kernel, Docker, DRBD and clowder package;
+	// a longer entry such as linux-firmware would keep only that one
+	entries := map[string]bool{}
+	for _, match := range quoted.FindAllStringSubmatch(dump, -1) {
+		entries[match[1]] = true
+	}
 	var missing []string
 	for _, pattern := range []string{"linux-", "docker", "drbd", "clowder"} {
-		if !strings.Contains(dump, pattern) {
+		if !entries[pattern] {
 			missing = append(missing, pattern)
 		}
 	}

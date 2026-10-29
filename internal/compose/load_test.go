@@ -37,6 +37,7 @@ func TestTheShopExampleLoads(t *testing.T) {
 	if app.HTTP == nil || app.HTTP.Host != "shop.example.com" || app.HTTP.Port != 8080 {
 		t.Errorf("app route: %+v", app.HTTP)
 	}
+	// cpus "0.5" stays 0.5 although compose-go calls the field NanoCPUs
 	if app.MemoryReservation != 256<<20 || app.CPUReservation != 0.5 {
 		t.Errorf("app reservation: %d bytes, %v CPUs", app.MemoryReservation, app.CPUReservation)
 	}
@@ -166,6 +167,19 @@ func TestWhatClowderCannotRunIsReported(t *testing.T) {
 		"secret from a file": {
 			"services: {web: {image: x}}\nsecrets: {token: {file: ./token.txt}}", "secret token: file",
 		},
+		"host uts": {
+			"services: {web: {image: x, uts: host}}", "uts: host",
+		},
+		"host user namespace": {
+			"services: {web: {image: x, userns_mode: host}}", "userns_mode: host",
+		},
+		"one port twice": {
+			"services: {web: {image: x, ports: [\"8080:80\"]}, api: {image: x, ports: [\"8080:81\"]}}",
+			"port tcp/8080 is published by api already",
+		},
+		"x-clowder on a network": {
+			"services: {web: {image: x}}\nnetworks: {default: {x-clowder: {class: fast}}}", "not used on networks",
+		},
 		"config from a file": {
 			"services: {web: {image: x}}\nconfigs: {app: {file: ./app.conf}}", "config app: file",
 		},
@@ -201,7 +215,7 @@ func TestAllProblemsAreReportedAtOnce(t *testing.T) {
 	}
 }
 
-func TestReservedPorts(t *testing.T) {
+func TestReservedPortsCannotBePublished(t *testing.T) {
 	for _, port := range []uint16{22, 53, 80, 443, 7400, 7499, 10000, 10999, 20000, 29999, 51800, 51831} {
 		if !ReservedPort(port) {
 			t.Errorf("%d should be reserved", port)

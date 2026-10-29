@@ -94,13 +94,13 @@ func TestVerifyRefuses(t *testing.T) {
 	}
 }
 
-func TestUserNamesMustFitACertificate(t *testing.T) {
+func TestUserNamesFollowOneRule(t *testing.T) {
 	ca := newTestCA(t)
 	key, err := NewKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"", "a/b", "a,b"} {
+	for _, name := range []string{"", "a/b", "a,b", "Alice.Smith"} {
 		if _, err := ca.IssueUser(key.Public(), name, testTime); err == nil {
 			t.Errorf("%q: no error", name)
 		}

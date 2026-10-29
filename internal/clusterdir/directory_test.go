@@ -18,6 +18,10 @@ func useTestKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("SOPS_AGE_KEY_FILE", key)
+	// no SSH key of the developer's home joins in
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("SOPS_AGE_KEY", "")
 }
 

@@ -11,10 +11,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/sopsage"
 )
 
@@ -27,9 +27,6 @@ const (
 	// EnvVar names the cluster directory when --cluster is not given.
 	EnvVar = "CLOWDER_CLUSTER"
 )
-
-// userName is what a user may be called; the name becomes a file name.
-var userName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 // Directory is a loaded cluster directory.
 type Directory struct {
@@ -93,7 +90,7 @@ func Load(dir string) (*Directory, error) {
 	if problems := Check(config); len(problems) > 0 {
 		return nil, problems
 	}
-	config.Priorities = config.Priorities.withDefaults()
+	config = config.WithDefaults()
 	return &Directory{Path: dir, Config: config}, nil
 }
 
@@ -119,8 +116,8 @@ func (d *Directory) Secrets() (*Secrets, error) {
 
 // Credentials decrypts the credentials of one user.
 func (d *Directory) Credentials(user string) (*Credentials, error) {
-	if !userName.MatchString(user) {
-		return nil, fmt.Errorf("user name %q: use lowercase letters, digits, - and _", user)
+	if err := pki.CheckUserName(user); err != nil {
+		return nil, err
 	}
 	var credentials Credentials
 	file := filepath.Join(d.Path, CredentialsDir, user+credentialsTail)

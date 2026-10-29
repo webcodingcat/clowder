@@ -49,9 +49,12 @@ const (
 // LeaderActor is the leader acting on its own (its control loops).
 const LeaderActor = "leader"
 
+// hostActorPrefix starts the actor of every host.
+const hostActorPrefix = "host/"
+
 // HostActor is the agent of a host, as its certificate names it.
 func HostActor(id HostID) string {
-	return "host/" + strconv.Itoa(int(id))
+	return hostActorPrefix + strconv.Itoa(int(id))
 }
 
 // UserActor is a user of the CLI, as their certificate names them.
@@ -114,7 +117,7 @@ var ErrNotBootstrapped = errors.New("the cluster is not bootstrapped yet")
 // the log entry is applied either way.
 func (s *State) Apply(index uint64, cmd Command) error {
 	s.Index = index
-	if cmd.Version < CommandVersion-1 || cmd.Version > CommandVersion {
+	if cmd.Version < max(1, CommandVersion-1) || cmd.Version > CommandVersion {
 		return fmt.Errorf("%s: command version %d is not readable by this agent (%d)",
 			cmd.Kind, cmd.Version, CommandVersion)
 	}

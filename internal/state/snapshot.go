@@ -44,7 +44,7 @@ func ReadSnapshot(in io.Reader) (*State, error) {
 		return nil, fmt.Errorf("read the snapshot: %w", err)
 	}
 	switch {
-	case file.Version < SnapshotVersion-1 || file.Version > SnapshotVersion:
+	case file.Version < max(1, SnapshotVersion-1) || file.Version > SnapshotVersion:
 		return nil, fmt.Errorf("snapshot version %d is not readable by this agent (%d)", file.Version, SnapshotVersion)
 	case file.State == nil:
 		return nil, errors.New("the snapshot holds no state")

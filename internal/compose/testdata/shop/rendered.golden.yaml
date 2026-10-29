@@ -89,14 +89,14 @@ networks:
       com.docker.network.bridge.name: cbr-8d9001d32c6
 volumes:
   cachedata:
-    name: clw-shop-cachedata-g2
+    name: clw-shop-cachedata-d5ad5a21-g2
     driver: local
     driver_opts:
       device: /var/lib/clowder/volumes/shop-cachedata/data
       o: bind
       type: none
   pgdata:
-    name: clw-shop-pgdata-g1
+    name: clw-shop-pgdata-b582c809-g1
     driver: local
     driver_opts:
       device: /var/lib/clowder/volumes/shop-pgdata/data

@@ -119,7 +119,7 @@ func renderNetwork(stackName, name string, network types.NetworkConfig) types.Ne
 // The generation is in the name because Docker cannot change the options of
 // an existing volume (a restore or class move makes a new one).
 func renderVolume(stackName, name string, volume types.VolumeConfig, mounted MountedVolume) types.VolumeConfig {
-	volume.Name = fmt.Sprintf("clw-%s-%s-g%d", stackName, name, mounted.Generation)
+	volume.Name = VolumeName(stackName, name, mounted.Generation)
 	volume.Driver = "local"
 	volume.DriverOpts = types.Options{
 		"type":   "none",
@@ -127,6 +127,13 @@ func renderVolume(stackName, name string, volume types.VolumeConfig, mounted Mou
 		"device": path.Join(mounted.Dir, "data"),
 	}
 	return volume
+}
+
+// VolumeName is the Docker volume of a stack volume. Stack and volume names
+// may contain "-", so a hash of both keeps "a-b" + "c" apart from "a" + "b-c";
+// the names stay in front for people reading docker volume ls.
+func VolumeName(stackName, volume string, generation int64) string {
+	return fmt.Sprintf("clw-%s-%s-%s-g%d", stackName, volume, shortHash(stackName+"/"+volume, 8), generation)
 }
 
 // BridgeName is the Linux bridge of a stack network: "cbr-" and the first 11
@@ -137,6 +144,11 @@ func BridgeName(stackName, network string) string {
 	if network != "default" {
 		key += "/" + network
 	}
+	return "cbr-" + shortHash(key, 11)
+}
+
+// shortHash is the first hex digits of the SHA-256 of key.
+func shortHash(key string, digits int) string {
 	sum := sha256.Sum256([]byte(key))
-	return "cbr-" + hex.EncodeToString(sum[:])[:11]
+	return hex.EncodeToString(sum[:])[:digits]
 }

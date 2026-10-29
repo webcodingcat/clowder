@@ -89,11 +89,12 @@ func applyStartOperation(s *State, _ Command, payload StartOperation) error {
 	}
 	holders := map[string]bool{}
 	for _, lock := range operation.Locks {
-		if err := s.checkUnlocked(lock); err != nil {
-			if !payload.TakeOver {
-				return err
-			}
-			holders[s.Locks[lock]] = true
+		holder, held := s.Locks[lock]
+		switch {
+		case held && !payload.TakeOver:
+			return &LockedError{Lock: lock, Operation: holder}
+		case held:
+			holders[holder] = true
 		}
 	}
 	for _, holder := range slices.Sorted(maps.Keys(holders)) {

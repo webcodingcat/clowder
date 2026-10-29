@@ -71,9 +71,9 @@ type check struct {
 // Run runs every check and returns the results in a fixed order.
 func Run(ctx context.Context, host Host, options Options) []Result {
 	var results []Result
-	for _, check := range checks {
-		status, detail := check.run(ctx, host, options)
-		results = append(results, Result{Name: check.name, Status: status, Detail: detail})
+	for _, next := range checks {
+		status, detail := next.run(ctx, host, options)
+		results = append(results, Result{Name: next.name, Status: status, Detail: detail})
 	}
 	return results
 }

@@ -93,6 +93,9 @@ func check(project *types.Project) (*Stack, error) {
 		if len(network.Ipam.Config) > 0 {
 			report("network %s: ipam subnets are not supported (Docker's address pools assign them)", name)
 		}
+		if _, ok := network.Extensions[extensionKey]; ok {
+			report("network %s: x-clowder is not used on networks", name)
+		}
 	}
 	// a file named here lives on this machine, not on the host that runs the stack
 	for _, name := range slices.Sorted(maps.Keys(project.Secrets)) {
@@ -110,6 +113,7 @@ func check(project *types.Project) (*Stack, error) {
 		problems = append(problems, serviceProblems...)
 		stack.Services[name] = service
 	}
+	problems = append(problems, checkPortsUnique(stack.Services)...)
 	for _, export := range stack.Exports {
 		if _, ok := stack.Services[export]; !ok {
 			report("stack: exports %q, which is not a service of this stack", export)
@@ -210,11 +214,16 @@ func checkService(config types.ServiceConfig, volumes types.Volumes) (Service, P
 		strings.HasPrefix(config.NetworkMode, "service:") {
 		report("network_mode %q is not supported", config.NetworkMode)
 	}
-	if config.Pid == "host" {
-		report("pid: host is not supported")
-	}
-	if config.Ipc == "host" {
-		report("ipc: host is not supported")
+	for _, namespace := range []struct{ field, value string }{
+		{"pid", config.Pid},
+		{"ipc", config.Ipc},
+		{"uts", config.Uts},
+		{"userns_mode", config.UserNSMode},
+		{"cgroup", config.Cgroup},
+	} {
+		if namespace.value == "host" {
+			report("%s: host is not supported", namespace.field)
+		}
 	}
 	if config.ContainerName != "" {
 		report("container_name is set by clowder")
@@ -377,4 +386,21 @@ func without(extensions types.Extensions) types.Extensions {
 	clean := maps.Clone(extensions)
 	delete(clean, extensionKey)
 	return clean
+}
+
+// checkPortsUnique: two services of a stack cannot publish the same port.
+func checkPortsUnique(services map[string]Service) Problems {
+	var problems Problems
+	owners := map[string]string{}
+	for _, name := range slices.Sorted(maps.Keys(services)) {
+		for _, port := range services[name].Ports {
+			key := fmt.Sprintf("%s/%d", port.Protocol, port.Published)
+			if owner, taken := owners[key]; taken {
+				problems = append(problems, fmt.Sprintf("service %s: port %s is published by %s already", name, key, owner))
+				continue
+			}
+			owners[key] = name
+		}
+	}
+	return problems
 }

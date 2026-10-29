@@ -6,11 +6,13 @@
 package state
 
 import (
+	"cmp"
 	"encoding/json"
-	"fmt"
 	"maps"
 	"net/netip"
+	"regexp"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
@@ -121,7 +123,7 @@ type User struct {
 // Stack is an applied Compose stack.
 type Stack struct {
 	Name  string `json:"name"`
-	Owner string `json:"owner"` // "cli" or "gitops:<source>"
+	Owner string `json:"owner"` // OwnerCLI or GitOpsOwner(source)
 	// Generation counts the applies of this stack.
 	Generation int64 `json:"generation"`
 	// Spec is the normalized Compose file the CLI sent.
@@ -132,6 +134,15 @@ type Stack struct {
 	// Stopped lists services pushed out by higher priorities.
 	Stopped  []string  `json:"stopped,omitempty"`
 	LastMove time.Time `json:"last_move,omitzero"`
+}
+
+// OwnerCLI owns the stacks applied with clowder stack apply.
+const OwnerCLI = "cli"
+
+// GitOpsOwner owns the stacks of a GitOps source; a stack has one owner, so
+// the CLI and a source never overwrite each other.
+func GitOpsOwner(source string) string {
+	return "gitops:" + source
 }
 
 // StackStatus says what the stack is doing.
@@ -207,24 +218,43 @@ func (s *State) MinVersion() string {
 	return oldest
 }
 
-// compareVersions orders "major.minor.patch" versions; a version that does
-// not parse sorts before every other, so it holds new commands back.
+// version is "major.minor.patch" with an optional suffix: 1.2.3~rc1 (a
+// release candidate) or 0.0.0~dev+abc (a development build).
+var version = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)(.*)$`)
+
+// compareVersions orders versions as Debian does: a suffix sorts before the
+// plain release (1.2.3~rc1 < 1.2.3). A version that does not parse sorts
+// before every other, so it holds new commands back.
 func compareVersions(a, b string) int {
-	parse := func(version string) ([3]int, bool) {
-		var parts [3]int
-		_, err := fmt.Sscanf(version, "%d.%d.%d", &parts[0], &parts[1], &parts[2])
-		return parts, err == nil
+	parse := func(text string) (numbers [3]int, suffix string, ok bool) {
+		match := version.FindStringSubmatch(text)
+		if match == nil {
+			return numbers, "", false
+		}
+		for index := range numbers {
+			numbers[index], _ = strconv.Atoi(match[index+1])
+		}
+		return numbers, match[4], true
 	}
-	first, firstOK := parse(a)
-	second, secondOK := parse(b)
+	first, firstSuffix, firstOK := parse(a)
+	second, secondSuffix, secondOK := parse(b)
 	switch {
-	case firstOK && secondOK:
+	case !firstOK || !secondOK:
+		return cmp.Compare(boolRank(firstOK), boolRank(secondOK))
+	case first != second:
 		return slices.Compare(first[:], second[:])
-	case firstOK:
-		return 1
-	case secondOK:
-		return -1
+	case firstSuffix == "" || secondSuffix == "":
+		// the one with a suffix is the earlier build
+		return cmp.Compare(len(secondSuffix), len(firstSuffix))
 	default:
-		return 0
+		return cmp.Compare(firstSuffix, secondSuffix)
 	}
+}
+
+// boolRank orders false before true.
+func boolRank(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

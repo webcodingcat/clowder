@@ -18,7 +18,7 @@ formatters can fix.
   single letters only for loop variables, receivers and one-line closures. Understandable
   abbreviations (`cfg`, `ip`, `cmd`, IDs like `hostID`) are fine.
 - One job per function; no `Run()` that only calls `run()`.
-- Comments and doc comments say why (DRBD's or the kernel's behaviour, a caveat); the code says
+- Comments and doc comments say why (DRBD's or the kernel's behavior, a caveat); the code says
   what. Doc comments are sentences; other comments may be short lowercase fragments.
 - Imports in three groups: standard library, others, this module (`goimports` with the local
   prefix sorts them).

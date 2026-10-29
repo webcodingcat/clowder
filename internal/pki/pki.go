@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"net"
 	"net/netip"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -128,8 +129,8 @@ func (ca *CA) IssueHost(public crypto.PublicKey, id int, addresses []netip.Addr,
 
 // IssueUser issues the certificate a user's CLI presents.
 func (ca *CA) IssueUser(public crypto.PublicKey, name string, now time.Time) ([]byte, error) {
-	if name == "" || strings.ContainsAny(name, "/,=+") {
-		return nil, fmt.Errorf("user name %q is not usable in a certificate", name)
+	if err := CheckUserName(name); err != nil {
+		return nil, err
 	}
 	template, err := newTemplate(pkix.Name{
 		CommonName:         name,
@@ -153,6 +154,18 @@ func (ca *CA) issue(template *x509.Certificate, public crypto.PublicKey) ([]byte
 		return nil, fmt.Errorf("issue %s: %w", template.Subject.CommonName, err)
 	}
 	return encodeCertificate(der), nil
+}
+
+// userName is what a user may be called: the name goes into certificates and
+// becomes the file name of the user's credentials.
+var userName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// CheckUserName refuses a name a user cannot have.
+func CheckUserName(name string) error {
+	if !userName.MatchString(name) {
+		return fmt.Errorf("user name %q: use lowercase letters, digits, - and _", name)
+	}
+	return nil
 }
 
 // HostName is the name in a host's certificate.

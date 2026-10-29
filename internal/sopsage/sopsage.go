@@ -270,6 +270,8 @@ func checkMAC(meta metadata, dataKey, sum []byte) error {
 	if err != nil {
 		return fmt.Errorf("lastmodified %q: %w", meta.LastModified, err)
 	}
+	// sops seals the MAC with the time as it formats it (UTC, "Z"); another
+	// tool may have written the same time with an offset
 	stored, _, err := decryptValue(meta.MAC, dataKey, lastModified.Format(time.RFC3339))
 	if err != nil {
 		return fmt.Errorf("mac: %w", err)

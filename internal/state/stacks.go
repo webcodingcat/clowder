@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
@@ -29,7 +31,7 @@ func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 			return fmt.Errorf("secret %s is used in cluster.yaml but missing", name)
 		}
 	}
-	s.Config = ClusterConfig{Revision: s.Config.Revision + 1, Hash: payload.Hash, Spec: payload.Spec}
+	s.Config = ClusterConfig{Revision: s.Config.Revision + 1, Hash: payload.Hash, Spec: payload.Spec.WithDefaults()}
 	s.Secrets = payload.Secrets
 	s.JoinKeys = payload.JoinKeys
 	s.Registries = payload.Registries
@@ -67,7 +69,8 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 	return nil
 }
 
-// DeleteStack removes a stack; its volumes go with their own commands.
+// DeleteStack removes a stack. Its volumes go first, each with its own
+// command, so no volume is left without its stack.
 type DeleteStack struct {
 	Name string `json:"name"`
 }
@@ -75,6 +78,11 @@ type DeleteStack struct {
 func applyDeleteStack(s *State, _ Command, payload DeleteStack) error {
 	if _, ok := s.Stacks[payload.Name]; !ok {
 		return fmt.Errorf("no stack %s", payload.Name)
+	}
+	for _, id := range slices.Sorted(maps.Keys(s.Volumes)) {
+		if strings.HasPrefix(id, payload.Name+"/") {
+			return fmt.Errorf("stack %s still has volume %s", payload.Name, id)
+		}
 	}
 	if err := s.checkUnlocked(stackLock(payload.Name)); err != nil {
 		return err
@@ -95,6 +103,11 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) error {
 	stack, ok := s.Stacks[payload.Name]
 	if !ok {
 		return fmt.Errorf("no stack %s", payload.Name)
+	}
+	switch payload.Status {
+	case StackPending, StackStarting, StackRunning, StackWaitingForHost, StackStopped:
+	default:
+		return fmt.Errorf("stack %s: unknown status %q", payload.Name, payload.Status)
 	}
 	if err := s.checkLiveHost(payload.Host); err != nil {
 		return err
@@ -155,10 +168,17 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) error {
 			}
 		}
 	}
+	// fewer placements than replicas is allowed: a degraded volume waits for
+	// its missing copies
+	placed := map[HostID]bool{}
 	for _, placement := range volume.Placements {
 		if err := s.checkLiveHost(&placement.Host); err != nil {
 			return fmt.Errorf("volume %s: %w", volume.ID, err)
 		}
+		if placed[placement.Host] {
+			return fmt.Errorf("volume %s: two copies on host %d", volume.ID, placement.Host)
+		}
+		placed[placement.Host] = true
 	}
 	s.Volumes[volume.ID] = &volume
 	return nil
