@@ -130,8 +130,13 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 	case stack.Owner != payload.Owner:
 		return fmt.Errorf("stack %s belongs to %s, not to %s", stack.Name, stack.Owner, payload.Owner)
 	}
-	if stack.Status == StackCreated {
+	switch stack.Status {
+	case StackCreated:
 		stack.Status = StackPending // the only way out of created
+	case StackRunning:
+		// the host reports running again once the new generation is up, so
+		// users can tell when it is
+		stack.Status = StackStarting
 	}
 	stack.Generation++
 	stack.Source = payload.Source

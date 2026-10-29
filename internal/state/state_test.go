@@ -358,6 +358,12 @@ func TestStacksBelongToTheirOwner(t *testing.T) {
 		t.Errorf("placing a stack is a move: %v", stack.LastMove)
 	}
 	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host})
+	// a new generation of a running stack starts until its host reports it
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec})
+	if stack.Status != StackStarting || stack.Generation != 3 || *stack.Host != host {
+		t.Errorf("after a new apply of a running stack: %+v", stack)
+	}
+	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host})
 	c.refuse(KindSetStackStatus, HostActor(1), SetStackStatus{Name: "shop", Status: StackStopped, Host: &host},
 		"only its host")
 	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackPending}, "only where it is")
