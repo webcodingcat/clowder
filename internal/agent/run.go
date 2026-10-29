@@ -85,10 +85,14 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	defer stopReconcilers()
 	go reconcileNetwork(reconcilers, node, parts.Network, logger)
 
+	digestKey, err := credentials.dataKey.Derive(secretDigestPurpose)
+	if err != nil {
+		return err
+	}
 	runner := &stackRunner{
 		files: files, host: host, version: buildinfo.Version, cluster: node,
-		docker: parts.Docker, storage: parts.Storage, open: credentials.dataKey.Open, logger: logger,
-		applied: map[string][32]byte{}, logins: map[string][32]byte{},
+		docker: parts.Docker, storage: parts.Storage, open: credentials.dataKey.Open, digestKey: digestKey,
+		logger: logger, applied: map[string][32]byte{}, logins: map[string][32]byte{},
 	}
 	server := api.NewServer(api.ServerConfig{
 		Cluster: node, CA: credentials.ca, Certificate: credentials.certificate,

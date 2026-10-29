@@ -72,7 +72,9 @@ type stackRunner struct {
 	docker  Docker
 	storage Storage
 	open    func(sealed state.Sealed) ([]byte, error)
-	logger  *slog.Logger
+	// digestKey keys the digests of secret files (secretDigestPurpose)
+	digestKey []byte
+	logger    *slog.Logger
 	// supervisor and propose need the runner first (the supervisor its
 	// rules, the API server its containers), so Run sets them afterwards
 	supervisor *supervisor.Supervisor
@@ -193,8 +195,8 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 	// Floating IP before the first cluster apply) leaves nothing behind
 	floatingIP, _ := netip.ParseAddr(desired.config.Ingress.FloatingIP) // empty: Render refuses it
 	rendered, err := compose.Render(parsed, compose.Target{
-		Generation: stack.Generation, FloatingIP: floatingIP, NodeAddress: r.host.NodeAddress,
-		Resolver: network.Resolver, Volumes: mounted, SecretsDir: r.files.secretFilesDir(stack.Name),
+		FloatingIP: floatingIP, NodeAddress: r.host.NodeAddress, Resolver: network.Resolver,
+		Volumes: mounted, SecretsDir: r.files.secretFilesDir(stack.Name), SecretDigests: secrets.digests,
 	})
 	if err != nil {
 		return err

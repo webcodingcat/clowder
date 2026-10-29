@@ -38,6 +38,28 @@ func TestSealedSecretsOpenOnlyWithTheirKey(t *testing.T) {
 	}
 }
 
+func TestDerivedKeysDependOnTheKeyAndThePurpose(t *testing.T) {
+	key := newKey(t)
+	derive := func(key *Key, purpose string) string {
+		t.Helper()
+		derived, err := key.Derive(purpose)
+		if err != nil || len(derived) != 32 {
+			t.Fatalf("derived %d bytes, %v", len(derived), err)
+		}
+		return string(derived)
+	}
+	again, err := Parse(key.Text())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if derive(key, "a") != derive(again, "a") {
+		t.Error("the same key and purpose gave two keys")
+	}
+	if derive(key, "a") == derive(key, "b") || derive(key, "a") == derive(newKey(t), "a") {
+		t.Error("another purpose or key gave the same key")
+	}
+}
+
 func TestTheKeySurvivesItsFile(t *testing.T) {
 	key := newKey(t)
 	path := filepath.Join(t.TempDir(), "keys", "data-key.txt")

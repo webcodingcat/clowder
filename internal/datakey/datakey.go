@@ -7,6 +7,8 @@ package datakey
 
 import (
 	"bytes"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -95,4 +97,16 @@ func (k *Key) Open(sealed state.Sealed) ([]byte, error) {
 		return nil, fmt.Errorf("open: %w", err)
 	}
 	return plaintext, nil
+}
+
+// Derive gives a key of 32 bytes for one purpose (HKDF-SHA256), the same on
+// every host and after every restart; it tells nothing about the data key.
+func (k *Key) Derive(purpose string) ([]byte, error) {
+	// the key's text form is its secret scalar in a fixed encoding (the
+	// key file holds exactly it), so it stays the same wherever it is read
+	derived, err := hkdf.Key(sha256.New, []byte(k.identity.String()), nil, purpose, 32)
+	if err != nil {
+		return nil, fmt.Errorf("derive a key for %s: %w", purpose, err)
+	}
+	return derived, nil
 }

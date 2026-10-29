@@ -28,7 +28,6 @@ func loadShop(t *testing.T) *Stack {
 // shopTarget is a host where every volume of the shop is mounted.
 func shopTarget() Target {
 	return Target{
-		Generation:  3,
 		FloatingIP:  netip.MustParseAddr("203.0.113.11"),
 		NodeAddress: netip.MustParseAddr("10.77.0.3"),
 		Resolver:    netip.MustParseAddr("169.254.77.53"),
@@ -37,6 +36,8 @@ func shopTarget() Target {
 			"cachedata": {Dir: "/var/lib/clowder/volumes/shop-cachedata", Generation: 2},
 		},
 		SecretsDir: "/run/clowder-secrets/shop/files",
+		// only db asks for a secret file; app's secret is a variable
+		SecretDigests: map[string]string{"db": "digest-of-db-password"},
 	}
 }
 
@@ -84,7 +85,11 @@ func TestRenderNeedsACompleteTarget(t *testing.T) {
 	unmounted.Volumes = map[string]MountedVolume{}
 	noFloatingIP := shopTarget()
 	noFloatingIP.FloatingIP = netip.Addr{}
-	for want, target := range map[string]Target{"not mounted": unmounted, "no floating IP": noFloatingIP} {
+	noDigest := shopTarget()
+	noDigest.SecretDigests = nil
+	for want, target := range map[string]Target{
+		"not mounted": unmounted, "no floating IP": noFloatingIP, "no digest of the secrets of service db": noDigest,
+	} {
 		if _, err := Render(loadShop(t), target); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("want an error with %q, got %v", want, err)
 		}

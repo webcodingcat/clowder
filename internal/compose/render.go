@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/netip"
 	"path"
-	"strconv"
 	"strings"
 
 	"github.com/compose-spec/compose-go/v2/types"
@@ -16,8 +15,6 @@ import (
 
 // Target is what the agent of a host knows when it renders a stack.
 type Target struct {
-	// Generation of the stack; it goes into the labels.
-	Generation int64
 	// FloatingIP and NodeAddress: published ports bind to both, so the
 	// Floating IP reaches the container when this host is the ingress host
 	// and the node address when another host forwards to it.
@@ -30,6 +27,11 @@ type Target struct {
 	Volumes map[string]MountedVolume
 	// SecretsDir holds a file per secret the services ask for as a file.
 	SecretsDir string
+	// SecretDigests per service that asks for secret files: a keyed digest
+	// of their values (LabelSecrets). A changed file keeps its path, so
+	// without it Compose would not recreate the container; with a key, the
+	// label tells nothing about the values to whoever reads it.
+	SecretDigests map[string]string
 }
 
 // MountedVolume is a volume as it is mounted on the host.
@@ -38,10 +40,13 @@ type MountedVolume struct {
 	Generation int64
 }
 
-// Labels that the agent puts on every container.
+// Labels that the agent puts on containers: the stack on every one, the
+// digest of its secret files on those that ask for some. Nothing else, so
+// an apply recreates only the containers whose configuration or secret
+// files changed.
 const (
-	LabelStack      = "clowder.stack"
-	LabelGeneration = "clowder.generation"
+	LabelStack   = "clowder.stack"
+	LabelSecrets = "clowder.secrets"
 )
 
 // Render returns the Compose file that docker compose gets on the host.
@@ -62,10 +67,15 @@ func Render(stack *Stack, target Target) ([]byte, error) {
 	project.Secrets = types.Secrets{}
 	for name, service := range stack.Project.Services {
 		rendered := renderService(stack.Name, service, target)
-		for _, secret := range stack.Services[name].Secrets {
+		if len(stack.Services[name].Secrets) > 0 {
 			if target.SecretsDir == "" {
 				return nil, fmt.Errorf("render stack %s: the target has no directory for secrets", stack.Name)
 			}
+			if target.SecretDigests[name] == "" {
+				return nil, fmt.Errorf("render stack %s: no digest of the secrets of service %s", stack.Name, name)
+			}
+		}
+		for _, secret := range stack.Services[name].Secrets {
 			// Compose's own secrets are refused, so no name is taken
 			project.Secrets[secret] = types.SecretConfig{File: path.Join(target.SecretsDir, secret)}
 			rendered.Secrets = append(rendered.Secrets, types.ServiceSecretConfig{Source: secret})
@@ -182,7 +192,9 @@ func renderService(stackName string, service types.ServiceConfig, target Target)
 		labels[key] = value
 	}
 	labels[LabelStack] = stackName
-	labels[LabelGeneration] = strconv.FormatInt(target.Generation, 10)
+	if digest := target.SecretDigests[service.Name]; digest != "" {
+		labels[LabelSecrets] = digest
+	}
 	service.Labels = labels
 	return service
 }

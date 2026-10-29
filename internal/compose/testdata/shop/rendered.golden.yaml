@@ -14,7 +14,6 @@ services:
       GREETING: Hello $$USER
     image: ghcr.io/example/shop:1.4
     labels:
-      clowder.generation: "3"
       clowder.stack: shop
     networks:
       default: null
@@ -28,7 +27,6 @@ services:
       - 169.254.77.53
     image: valkey/valkey:8
     labels:
-      clowder.generation: "3"
       clowder.stack: shop
     networks:
       default: null
@@ -66,7 +64,7 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/db-password
     image: postgres:17
     labels:
-      clowder.generation: "3"
+      clowder.secrets: digest-of-db-password
       clowder.stack: shop
     networks:
       default: null

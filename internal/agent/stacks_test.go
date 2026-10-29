@@ -6,11 +6,14 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
@@ -99,7 +102,8 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 		version: "1.0.0", cluster: cluster, docker: docker, storage: storage, logger: logger,
 		propose: cluster.propose, applied: map[string][32]byte{}, logins: map[string][32]byte{},
 		// the tests' sealed values are their clear text
-		open: func(sealed state.Sealed) ([]byte, error) { return []byte(sealed), nil },
+		open:      func(sealed state.Sealed) ([]byte, error) { return []byte(sealed), nil },
+		digestKey: []byte("the test's digest key"),
 	}
 	runner.supervisor = supervisor.New(docker, runner.rules, supervisor.DefaultBackoff, nil, logger)
 	return runner, cluster, docker, storage
@@ -205,6 +209,7 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 	if content, err := os.ReadFile(password); err != nil || string(content) != "first" {
 		t.Errorf("the secret file: %q, %v", content, err)
 	}
+	firstLabel := secretsLabel(t, runner)
 	if info, err := os.Stat(password); err != nil || info.Mode().Perm() != 0o444 {
 		t.Errorf("the secret file's mode: %v, %v", info, err)
 	}
@@ -221,6 +226,10 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 	if content, err := os.ReadFile(password); err != nil || string(content) != "second" {
 		t.Errorf("the changed secret file: %q, %v", content, err)
 	}
+	// the file keeps its path: only the label makes compose recreate app
+	if secretsLabel(t, runner) == firstLabel {
+		t.Error("the label of app did not change with its secret file")
+	}
 	if _, err := os.Stat(env); !os.IsNotExist(err) {
 		t.Errorf("the secret variables stayed: %v", err)
 	}
@@ -232,6 +241,48 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 	runner.pass(context.Background())
 	if _, err := os.Stat(runner.files.secretsDir("shop")); !os.IsNotExist(err) {
 		t.Errorf("the secrets of a stack that left stayed: %v", err)
+	}
+}
+
+// secretsLabel reads the digest label of app from shop's rendered file.
+func secretsLabel(t *testing.T, runner *stackRunner) string {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(runner.files.stackDir("shop"), "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rendered struct {
+		Services map[string]struct {
+			Labels map[string]string `yaml:"labels"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(content, &rendered); err != nil {
+		t.Fatal(err)
+	}
+	label := rendered.Services["app"].Labels[compose.LabelSecrets]
+	if label == "" {
+		t.Fatal("app has no digest of its secret files")
+	}
+	return label
+}
+
+func TestSecretDigestsAreKeyedAndUnambiguous(t *testing.T) {
+	values := map[string]string{"a": "bc", "ab": "c", "x": "1"}
+	digest := secretDigest([]byte("key"), values, []string{"a", "x"})
+	if digest != secretDigest([]byte("key"), values, []string{"x", "a"}) {
+		t.Error("the order of the names changed the digest")
+	}
+	for what, other := range map[string]string{
+		"another key":                    secretDigest([]byte("other"), values, []string{"a", "x"}),
+		"another value":                  secretDigest([]byte("key"), map[string]string{"a": "bc", "x": "2"}, []string{"a", "x"}),
+		"the same bytes split elsewhere": secretDigest([]byte("key"), values, []string{"ab", "x"}),
+	} {
+		if other == digest {
+			t.Errorf("%s gave the same digest", what)
+		}
+	}
+	if strings.Contains(digest, "bc") || len(digest) != 64 {
+		t.Errorf("digest %q", digest)
 	}
 }
 

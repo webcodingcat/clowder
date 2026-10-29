@@ -2,6 +2,10 @@ package agent
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -41,9 +45,30 @@ func (f Files) secretFile(stack, name string) string {
 type stackSecrets struct {
 	// files holds the value of each secret a service asks for as a file.
 	files map[string][]byte
+	// digests holds, per service that asks for secret files, the digest of
+	// their values (compose.Target.SecretDigests).
+	digests map[string]string
 	// env is the second Compose file with the secret variables; nil if the
 	// stack sets none.
 	env []byte
+}
+
+// secretDigestPurpose names the key, derived from the data key, that the
+// digests of secret files are made with.
+const secretDigestPurpose = "clowder secrets label"
+
+// secretDigest is an HMAC-SHA256 over the secrets of one service, in name
+// order, each name and value preceded by its length, so no two sets of
+// secrets give the same input.
+func secretDigest(key []byte, values map[string]string, names []string) string {
+	mac := hmac.New(sha256.New, key)
+	for _, name := range slices.Sorted(slices.Values(names)) {
+		for _, part := range []string{name, values[name]} {
+			_, _ = mac.Write(binary.BigEndian.AppendUint64(nil, uint64(len(part)))) // a hash never fails to write
+			_, _ = mac.Write([]byte(part))
+		}
+	}
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // openSecrets opens the sealed values of the secrets the stack asks for.
@@ -64,10 +89,13 @@ func (r *stackRunner) openSecrets(parsed *compose.Stack, sealed map[string]state
 	if err != nil {
 		return stackSecrets{}, err
 	}
-	secrets := stackSecrets{files: map[string][]byte{}, env: env}
-	for _, service := range parsed.Services {
+	secrets := stackSecrets{files: map[string][]byte{}, digests: map[string]string{}, env: env}
+	for serviceName, service := range parsed.Services {
 		for _, name := range service.Secrets {
 			secrets.files[name] = []byte(values[name])
+		}
+		if len(service.Secrets) > 0 {
+			secrets.digests[serviceName] = secretDigest(r.digestKey, values, service.Secrets)
 		}
 	}
 	return secrets, nil
