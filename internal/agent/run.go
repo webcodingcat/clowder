@@ -32,17 +32,20 @@ const (
 	reconcileInterval = 30 * time.Second
 )
 
-// HostParts are what the agent changes on its host; tests use fakes.
+// HostParts are what the agent changes on its host, and the hoster's API
+// it calls while it leads; tests use fakes.
 type HostParts struct {
 	Network HostNetwork
 	Storage Storage
 	Docker  Docker
+	Hoster  controller.ConnectHoster
 }
 
 // Run is the agent until ctx ends: clowder0, the Raft member, the API, the
 // containers' DNS resolver, the nft rules, the stacks of this host with
-// their volumes and, while it leads, the placement of stacks. It tells
-// systemd when it serves and keeps its watchdog fed while the state answers.
+// their volumes and, while it leads, the placement of stacks and the
+// Floating IP. It tells systemd when it serves and keeps its watchdog fed
+// while the state answers.
 func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger) error {
 	if files.SecretsDir == "" {
 		return errors.New("run needs a directory for the stacks' secrets")
@@ -107,6 +110,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	runner.supervisor = supervisor.New(parts.Docker, runner.rules, supervisor.DefaultBackoff, runner.forgetApplied, logger)
 	go runner.supervisor.Run(reconcilers, compose.LabelStack)
 	go controller.RunPlacement(reconcilers, node, server.Propose, logger)
+	go controller.RunIngress(reconcilers, node, server.Propose, credentials.dataKey.Open, parts.Hoster, logger)
 	go runner.trim(reconcilers)
 	go func() {
 		// a state that lags may still place a stack here that has moved on,

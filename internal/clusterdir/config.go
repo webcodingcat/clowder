@@ -15,10 +15,8 @@ type Config struct {
 	Name string `yaml:"name" json:"name" jsonschema:"required"`
 	// Seeds are a few addresses the CLI tries first; it asks the cluster for
 	// the current members.
-	Seeds []string `yaml:"seeds" json:"seeds" jsonschema:"required,minItems=1"`
-	// Hoster is the hoster plugin, e.g. hetzner.
-	Hoster      string    `yaml:"hoster" json:"hoster" jsonschema:"required"`
-	HosterToken SecretRef `yaml:"hoster_token" json:"hoster_token" jsonschema:"required"`
+	Seeds  []string `yaml:"seeds" json:"seeds" jsonschema:"required,minItems=1"`
+	Hoster Hoster   `yaml:"hoster" json:"hoster" jsonschema:"required"`
 	// Network the hosts use for WireGuard: private or public.
 	Network        string                  `yaml:"network,omitempty" json:"network,omitempty" jsonschema:"enum=private,enum=public"`
 	Ingress        Ingress                 `yaml:"ingress" json:"ingress" jsonschema:"required"`
@@ -69,6 +67,16 @@ func (p Priorities) withDefaults() Priorities {
 		defaults.Default = p.Default
 	}
 	return defaults
+}
+
+// Hoster is the cloud the hosts run in; Type picks the plugin, like the
+// types of backup targets and alert channels.
+type Hoster struct {
+	Type  string    `yaml:"type" json:"type" jsonschema:"required,enum=hetzner"`
+	Token SecretRef `yaml:"token" json:"token" jsonschema:"required"`
+	// API is the full URL of the hoster's API when it is not the hoster's
+	// own (a test lab).
+	API string `yaml:"api,omitempty" json:"api,omitempty"`
 }
 
 // SecretRef points to a value in secrets.sops.yaml.

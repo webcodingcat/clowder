@@ -220,6 +220,21 @@ func TestOnlyAHostReportsAboutItself(t *testing.T) {
 	}
 }
 
+func TestTheIngressIsAnActiveHostWithAServerRef(t *testing.T) {
+	c := newCluster(t)
+	c.refuse(KindSetIngress, LeaderActor, SetIngress{Host: 0}, "host node0 has no server ref")
+	c.refuse(KindSetIngress, LeaderActor, SetIngress{Host: 5}, "no host 5")
+	host := testHost(1)
+	host.ServerRef = "4711"
+	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: host})
+	c.refuse(KindSetIngress, LeaderActor, SetIngress{Host: 1}, "host node1 is joining, not active")
+	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
+	c.mustApply(KindSetIngress, LeaderActor, SetIngress{Host: 1})
+	if c.state.Ingress == nil || *c.state.Ingress != 1 {
+		t.Errorf("ingress %v", c.state.Ingress)
+	}
+}
+
 func TestOnlyOneFirstUser(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1", First: true})
@@ -252,8 +267,8 @@ func TestRemovingAUserRevokesTheirCertificates(t *testing.T) {
 
 func testConfig() clusterdir.Config {
 	return clusterdir.Config{
-		Name: "prod", Seeds: []string{"10.0.0.2"}, Hoster: "hetzner",
-		HosterToken:    clusterdir.SecretRef{Secret: "hcloud-token"},
+		Name: "prod", Seeds: []string{"10.0.0.2"},
+		Hoster:         clusterdir.Hoster{Type: "hetzner", Token: clusterdir.SecretRef{Secret: "hcloud-token"}},
 		Ingress:        clusterdir.Ingress{FloatingIP: "203.0.113.11"},
 		StorageClasses: map[string]clusterdir.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 	}

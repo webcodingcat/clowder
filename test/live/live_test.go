@@ -199,8 +199,9 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 		t.Fatalf("the module's cluster_yaml: %v", err)
 	}
 	config.Name = "live"
-	config.Hoster = "hetzner"
-	config.HosterToken = clusterdir.SecretRef{Secret: "hcloud-token"}
+	config.Hoster = clusterdir.Hoster{
+		Type: "hetzner", Token: clusterdir.SecretRef{Secret: "hcloud-token"}, API: os.Getenv("HCLOUD_ENDPOINT"),
+	}
 	content, err := yaml.Marshal(config)
 	if err != nil {
 		t.Fatal(err)

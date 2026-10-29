@@ -73,8 +73,8 @@ func newLeader(t *testing.T, poolSize int64) *leader {
 	})
 	l.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
 		Spec: clusterdir.Config{
-			Name: "prod", Seeds: []string{"10.0.0.2"}, Hoster: "hetzner",
-			HosterToken:    clusterdir.SecretRef{Secret: "token"},
+			Name: "prod", Seeds: []string{"10.0.0.2"},
+			Hoster:         clusterdir.Hoster{Type: "hetzner", Token: clusterdir.SecretRef{Secret: "token"}},
 			Ingress:        clusterdir.Ingress{FloatingIP: "203.0.113.10"},
 			StorageClasses: map[string]clusterdir.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 		},

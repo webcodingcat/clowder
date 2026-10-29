@@ -34,6 +34,7 @@ const (
 	KindAddHost            = "add-host"
 	KindSetHostPhase       = "set-host-phase"
 	KindReportHost         = "report-host"
+	KindSetIngress         = "set-ingress"
 	KindAddUser            = "add-user"
 	KindRemoveUser         = "remove-user"
 	KindRevoke             = "revoke"
@@ -98,6 +99,7 @@ var handlers = map[string]handler{
 	KindAddHost:            decoded(applyAddHost),
 	KindSetHostPhase:       decoded(applySetHostPhase),
 	KindReportHost:         decoded(applyReportHost),
+	KindSetIngress:         decoded(applySetIngress),
 	KindAddUser:            decoded(applyAddUser),
 	KindRemoveUser:         decoded(applyRemoveUser),
 	KindRevoke:             decoded(applyRevoke),

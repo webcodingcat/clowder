@@ -26,6 +26,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/docker"
+	"github.com/webcodingcat/clowder/internal/hoster"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/sopsage"
 	"github.com/webcodingcat/clowder/internal/storage"
@@ -45,6 +46,53 @@ func freePort(t *testing.T) int {
 }
 
 // fakeNetwork stands in for the host's network and remembers the rules.
+// fakeHoster is the hoster's API: it remembers where the Floating IP goes
+// and with which token it was asked.
+type fakeHoster struct {
+	mu     sync.Mutex
+	token  string
+	target string
+}
+
+func (f *fakeHoster) connect(_ clusterdir.Hoster, token string) (hoster.Hoster, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.token = token
+	return f, nil
+}
+
+func (f *fakeHoster) FloatingIPTarget(context.Context, netip.Addr) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.target, nil
+}
+
+func (f *fakeHoster) AssignFloatingIP(_ context.Context, _ netip.Addr, serverRef string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.target = serverRef
+	return nil
+}
+
+func (*fakeHoster) PowerOff(context.Context, string) error { return nil }
+func (*fakeHoster) PowerOn(context.Context, string) error  { return nil }
+
+// waitForTarget fails the test unless the Floating IP comes to the server.
+func (f *fakeHoster) waitForTarget(t *testing.T, serverRef, token string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		f.mu.Lock()
+		target, usedToken := f.target, f.token
+		f.mu.Unlock()
+		if target == serverRef && usedToken == token {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("the Floating IP is not on server %s with token %q", serverRef, token)
+}
+
 type fakeNetwork struct {
 	mu       sync.Mutex
 	rulesets []network.Ruleset
@@ -258,7 +306,8 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	stopped := make(chan error, 1)
 	hostStorage := &fakeStorage{dir: t.TempDir()}
 	hostDocker := &fakeDocker{}
-	parts := HostParts{Network: hostNetwork, Storage: hostStorage, Docker: hostDocker}
+	hostHoster := &fakeHoster{}
+	parts := HostParts{Network: hostNetwork, Storage: hostStorage, Docker: hostDocker, Hoster: hostHoster.connect}
 	go func() { stopped <- Run(ctx, files, parts, logger) }()
 	defer func() {
 		stop()
@@ -313,6 +362,8 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	hostNetwork.waitForRuleset(t, func(ruleset network.Ruleset) bool {
 		return ruleset.FloatingIP == netip.MustParseAddr("203.0.113.10")
 	})
+	// and the leader routes it to this host's server, with the token opened
+	hostHoster.waitForTarget(t, "1000001", "CHANGE-ME")
 	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "nothing to apply") {
 		t.Errorf("diff after apply: %q, %v", out, err)
 	}

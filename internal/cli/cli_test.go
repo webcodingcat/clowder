@@ -111,8 +111,8 @@ func startCluster(t *testing.T) string {
 
 	dir := t.TempDir()
 	config := clusterdir.Config{
-		Name: "test", Seeds: []string{server.Listener.Addr().String()}, Hoster: "hetzner",
-		HosterToken:    clusterdir.SecretRef{Secret: "hcloud-token"},
+		Name: "test", Seeds: []string{server.Listener.Addr().String()},
+		Hoster:         clusterdir.Hoster{Type: "hetzner", Token: clusterdir.SecretRef{Secret: "hcloud-token"}},
 		Ingress:        clusterdir.Ingress{FloatingIP: "203.0.113.11"},
 		StorageClasses: map[string]clusterdir.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 	}

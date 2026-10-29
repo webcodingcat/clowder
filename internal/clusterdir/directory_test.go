@@ -148,9 +148,45 @@ func TestMisspeltKeysAreRefused(t *testing.T) {
 	}
 }
 
+func TestTheHostersAPIIsAFullURL(t *testing.T) {
+	for api, valid := range map[string]bool{
+		"":                             true,
+		"https://api.hetzner.cloud/v1": true,
+		"http://198.18.0.1/v1":         true,
+		"api.hetzner.cloud/v1":         false,
+		"ftp://api.example.com":        false,
+		"https:///v1":                  false,
+	} {
+		hoster := Hoster{Type: "hetzner", Token: SecretRef{Secret: "token"}, API: api}
+		if problems := checkHoster(hoster); (len(problems) == 0) != valid {
+			t.Errorf("api %q: valid %v, problems %v", api, valid, problems)
+		}
+	}
+}
+
+func TestTheFlatHosterFieldsAreRefused(t *testing.T) {
+	dir := t.TempDir()
+	content, err := os.ReadFile(filepath.Join("testdata", "prod", ConfigFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat := strings.Replace(string(content), "hoster:\n  type: hetzner\n  token: {secret: hcloud-token}\n",
+		"hoster: hetzner\nhoster_token: {secret: hcloud-token}\n", 1)
+	if flat == string(content) {
+		t.Fatal("the example has no hoster section to replace")
+	}
+	if err := os.WriteFile(filepath.Join(dir, ConfigFile), []byte(flat), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "hoster") {
+		t.Errorf("want an error about hoster, got %v", err)
+	}
+}
+
 func TestCheckReportsEveryProblem(t *testing.T) {
 	config := Config{
 		Seeds:   []string{"10.0.0.1:99999"},
+		Hoster:  Hoster{Type: "aws", API: "api.example.com/v1"},
 		Network: "both",
 		Ingress: Ingress{FloatingIP: "2001:db8::1"},
 		StorageClasses: map[string]StorageClass{
@@ -175,7 +211,8 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 		Metrics: Metrics{Listen: "everywhere"},
 	}
 	want := []string{
-		"name is required", `"10.0.0.1:99999"`, "hoster is required", "hoster_token",
+		"name is required", `"10.0.0.1:99999"`, `hoster.type "aws"`, "hoster.token",
+		`hoster.api "api.example.com/v1" is not a full URL`,
 		`network "both"`, "not an IPv4 address", `pool "nopool"`, `reserve "95%"`,
 		`falls back to "slow"`, "storage class empty", "resync_rate", "top: 2000",
 		`default "medium"`, `"Monitoring" is not a stack name`, "reservations.memory", "reservations.cpus", `"borg"`,

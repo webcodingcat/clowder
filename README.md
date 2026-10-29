@@ -4,8 +4,9 @@ A small cluster orchestrator for Docker Compose stacks on hosts with about 4 GB 
 replicated volumes (DRBD 9), the real client IP behind a Floating IP, priorities, fencing
 through the hoster's API. First hoster: Hetzner Cloud.
 
-Status: under construction (phase 1a, see the roadmap in [DEVELOPING.md](DEVELOPING.md)).
-On one host, what runs today:
+Status: under construction (phase 1b, see the roadmap in [DEVELOPING.md](DEVELOPING.md)).
+Until `v1.0.0`, the state and `cluster.yaml` may change between releases without a way to
+upgrade a running cluster. On one host, what runs today:
 
 - `clowderd check` checks a host, `clowderd init` makes it the first of a cluster and starts
   the agent, which keeps the containers apart and answers their DNS.
@@ -13,6 +14,8 @@ On one host, what runs today:
 - `clowder host ...` drains, removes and enables hosts.
 - `clowder stack create|apply|delete|ps|logs` runs Compose stacks with their volumes and
   secrets.
+- The cluster keeps the Floating IP routed to its ingress host through the hoster's API
+  (`hoster` in `cluster.yaml`), also when someone moves it by hand.
 
 A stack's passwords live in a SOPS file next to its `clowder.yaml`; the CLI decrypts it
 with your age key, and the cluster keeps the values sealed. Who can read them: whoever can
@@ -30,8 +33,8 @@ through a stack that `cluster.yaml` allows privileges (`stacks.privileged`).
 (Debian 13), a private network, the Floating IP, one volume per storage class and a Cloud
 firewall. Its cloud-init installs DRBD 9 from LINBIT and `clowderd` from clowder's APT
 repository, prepares the host, checks it with `clowderd check` and runs `clowderd init`. This
-takes about 5 minutes, more when it reboots the host into a newer kernel (at most twice); `journalctl -u clowder-setup`
-shows how far it got.
+takes about 5 minutes, more when it reboots the host into a newer kernel (at most twice);
+`journalctl -u clowder-setup` shows how far it got.
 
 ```bash
 export HCLOUD_TOKEN=...

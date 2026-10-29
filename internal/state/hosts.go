@@ -142,6 +142,28 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) error {
 	return nil
 }
 
+// SetIngress records the host that should hold the Floating IP. Only an
+// active host with a ServerRef can: the hoster routes the address to a
+// server by that ID.
+type SetIngress struct {
+	Host HostID `json:"host"`
+}
+
+func applySetIngress(s *State, _ Command, payload SetIngress) error {
+	host, ok := s.Hosts[payload.Host]
+	switch {
+	case !ok:
+		return fmt.Errorf("no host %d", payload.Host)
+	case host.Phase != Active:
+		return fmt.Errorf("host %s is %s, not active", host.Name, host.Phase)
+	case host.ServerRef == "":
+		return fmt.Errorf("host %s has no server ref", host.Name)
+	}
+	id := payload.Host
+	s.Ingress = &id
+	return nil
+}
+
 // ReportHost is an agent telling what it is: the version it runs, what it
 // offers after the system reserve, and its thin pools (by pool name,
 // "vg/thin"). The leader places volumes by the pools. Agents send it when

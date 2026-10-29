@@ -5,6 +5,7 @@ import (
 	"maps"
 	"net"
 	"net/netip"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -39,12 +40,7 @@ func Check(config Config) Problems {
 			report("seeds: %q is neither an address nor a host name", seed)
 		}
 	}
-	if config.Hoster == "" {
-		report("hoster is required")
-	}
-	if missingSecret(&config.HosterToken) {
-		report("hoster_token: {secret: <name>} is required")
-	}
+	problems = append(problems, checkHoster(config.Hoster)...)
 	if config.Network != "" && config.Network != "private" && config.Network != "public" {
 		report("network %q is neither private nor public", config.Network)
 	}
@@ -110,6 +106,25 @@ func validSeed(seed string) bool {
 		return true
 	}
 	return host != "" && !strings.ContainsAny(host, " /:")
+}
+
+// checkHoster: a known type, its token, and an API that is a full http or
+// https URL: the token goes there.
+func checkHoster(hoster Hoster) Problems {
+	var problems Problems
+	if hoster.Type != "hetzner" {
+		problems = append(problems, fmt.Sprintf("hoster.type %q is not supported (hetzner)", hoster.Type))
+	}
+	if missingSecret(&hoster.Token) {
+		problems = append(problems, "hoster.token: {secret: <name>} is required")
+	}
+	if hoster.API != "" {
+		api, err := url.Parse(hoster.API)
+		if err != nil || (api.Scheme != "http" && api.Scheme != "https") || api.Host == "" {
+			problems = append(problems, fmt.Sprintf("hoster.api %q is not a full URL with http:// or https://", hoster.API))
+		}
+	}
+	return problems
 }
 
 // checkStorageClasses: a class has a pool or falls back to other classes,
@@ -227,7 +242,7 @@ func SecretNames(config Config) []string {
 			names[reference.Secret] = true
 		}
 	}
-	add(&config.HosterToken)
+	add(&config.Hoster.Token)
 	if config.Backup != nil {
 		add(&config.Backup.Password)
 	}

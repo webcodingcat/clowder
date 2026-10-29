@@ -1,7 +1,8 @@
 name: prod
 seeds: [203.0.113.10, 203.0.113.11]
-hoster: hetzner
-hoster_token: {secret: hcloud-token}
+hoster:
+  type: hetzner
+  token: {secret: hcloud-token}
 network: private
 ingress:
   floating_ip: 198.51.100.7

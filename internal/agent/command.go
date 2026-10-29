@@ -18,6 +18,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/command"
 	"github.com/webcodingcat/clowder/internal/docker"
+	"github.com/webcodingcat/clowder/internal/hoster"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/storage"
@@ -103,7 +104,8 @@ func hostNetwork() network.Host {
 	return network.Host{ResolvConf: "/etc/resolv.conf", Logger: slog.Default()}
 }
 
-// hostParts are the host's real network, storage and Docker.
+// hostParts are the host's real network, storage and Docker, and the
+// hoster's real API.
 func hostParts() HostParts {
 	return HostParts{
 		Network: hostNetwork(),
@@ -114,6 +116,7 @@ func hostParts() HostParts {
 			Run:         command.Run,
 		},
 		Docker: docker.NewClient(docker.Socket),
+		Hoster: hoster.New,
 	}
 }
 

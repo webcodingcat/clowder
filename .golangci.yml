@@ -42,6 +42,8 @@ linters:
               desc: Linux only (clowderd)
             - pkg: github.com/webcodingcat/clowder/internal/controller
               desc: "agent only (clowderd): the leader's loops run inside the agent"
+            - pkg: github.com/webcodingcat/clowder/internal/hoster
+              desc: "agent only (clowderd): only the leader's loops call the hoster's API"
             - pkg: github.com/webcodingcat/clowder/internal/network
               desc: Linux only (clowderd)
             - pkg: github.com/webcodingcat/clowder/internal/storage

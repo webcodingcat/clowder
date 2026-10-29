@@ -104,8 +104,6 @@ Known gaps to close in phase 2. They do no harm on a single host:
   That is right for a new volume on one host; after a failover it would force an outdated
   copy. Whether a volume was ever initialised must come from the state, not a local file.
 - A volume a stack no longer names stays: nothing sends `delete-volume` yet.
-- `cluster.yaml` has no field for the hoster API's endpoint; fencing against HLab (phase 2)
-  needs one.
 - `examples/hetzner` ignores later changes to the server's user data, so a storage class
   added later gets a volume but no thin pool on an existing host.
 
@@ -214,7 +212,8 @@ Packages in *italics* do not exist yet.
   the types and `Check` of `clusterdir`, never its file access.
 - **Decides**: `controller` (the leader's loops) writes Raft commands. It talks to external
   services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
-  changes the host.
+  changes the host. Their clients sit beside it: `hoster` (with `hoster/hetzner`),
+  *`notify`*; depguard keeps them out of the CLI.
 - **Changes the host**: `agent`, `supervisor`, `raftnode` (Raft over mTLS), `datakey` (the
   key file), `command` (host tools with a timeout) and the drivers `network`, `storage`,
   `docker`, *`ingress`*.
@@ -273,7 +272,7 @@ Packages in *italics* do not exist yet.
   with their lengths: it is on disk and in `docker inspect`, and without the key it says
   nothing about a short password. A change to these labels changes every container's
   configuration: an agent of a release with other labels recreates all containers once
-  after the upgrade (so did the one that dropped `clowder.generation`, after `v0.0.1`).
+  after the upgrade.
 - **Golden files.** `testdata/shop/rendered.golden.yaml` and `secrets.golden.yaml`. After an
   intended change: `bin/dev test ./internal/compose -update`, then review the diff.
   `bin/dev test-tools` checks both with Debian's `docker-compose`, and that it fills in
@@ -328,7 +327,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **In use so far:** `bootstrap` (init), `apply-config`, `add-user` (the first user),
   `set-host-phase` (host actions), `create-stack`, `put-stack` and `delete-stack` (the user),
   `put-volume`, `set-stack-status` and `set-stack-wait-reason` (placement, the stack's
-  host), `report-host` (each agent). The other kinds (`delete-volume`, hosts joining,
+  host), `set-ingress` (the ingress loop), `report-host` (each agent). The other kinds (`delete-volume`, hosts joining,
   operations, users beyond the first) are there for the next steps; they are tested, but
   nothing sends them yet.
 - **Stacks.** `create-stack` registers a stack as `created` (no Source, `CreatedBy` from the
@@ -367,8 +366,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   the release before ("unknown command"), so its state misses that command: a kind may come
   without a gate only if what it changes may differ between agents for a while, as the
   display-only `set-stack-wait-reason`; anything later commands depend on needs the gate.
-  The json tags of `clusterdir.Config` are part of this format. The rule holds since the
-  first release (`v0.0.1`).
+  The json tags of `clusterdir.Config` are part of this format. **These rules hold from
+  `v1.0.0`**, the first release for clusters in production. Until then no such cluster
+  runs, so the state, the commands and `cluster.yaml` change freely: no migrations, no
+  gates, and `CommandVersion` and `SnapshotVersion` stay at 1.
 - **Locks.** Operations hold locks (`stack/<name>`, `volume/<stack>/<volume>`); a change to a
   locked stack or volume is refused with a `LockedError`, unless the holding operation makes
   it (`Operation` in the payload). Only failover takes locks over (`TakeOver`).
@@ -604,6 +605,33 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   copy of the state (`State.Copy`), outside the lock Raft's `Apply` waits for, then writes the
   volumes (`put-volume`), then the stack's host and `starting` (`set-stack-status`). The
   stack's host does the rest.
+
+## Hoster and ingress (`internal/hoster`, `internal/controller`)
+
+- `cluster.yaml` names the hoster in a section of its own, chosen by `type` like backup
+  targets and alert channels: `hoster: {type: hetzner, token: {secret: ...}}`, and `api`
+  for a lab's API instead of the hoster's (a full `http://` or `https://` URL: the token
+  goes there).
+- `hoster.Hoster` is what clowder asks of a hoster: where the Floating IP is routed, route
+  it, power a server off and on (fencing, phase 2). A server is its `ServerRef`, the
+  hoster's ID that `clowderd init --server-ref` records. `hoster.New` picks the plugin.
+- `hoster/hetzner` is a small client of the Hetzner Cloud API on `net/http`: the official
+  SDK would bring Prometheus' client and more into clowderd. It finds the Floating IP among
+  the project's (the API cannot look one up by its address) and waits for each action to
+  finish. Its errors carry the API's message, never the token.
+- `controller.RunIngress` acts only on the leader. The ingress host (`State.Ingress`,
+  `set-ingress`) is the recorded one while it is active and has a server ref, so the
+  Floating IP never switches back by itself; otherwise the first of
+  `ingress.preferred_hosts` that can, else the one with the lowest ID that can. At a change
+  of the state and every 30 s it asks the hoster where the Floating IP is and routes it to
+  the ingress host when it is elsewhere (moved by hand, or a new ingress host); it reads
+  the API at most once per 30 s, about 120 of Hetzner's 3600 requests an hour.
+- Every host has the Floating IP on its public interface, held or not (`clowderd check`
+  requires it): the hoster routes it to one host only, so whatever binds it (published
+  ports, later Traefik) can bind it on every host and at boot.
+- Only the leader's loops call the hoster: the controller opens the token from the state
+  and makes the client (`HostParts.Hoster`, a fake in the tests). depguard keeps `hoster`
+  out of the CLI.
 
 ## Containers (`internal/docker`, `internal/supervisor`)
 
