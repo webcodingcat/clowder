@@ -135,6 +135,28 @@ func Decrypt(file []byte, identities []age.Identity) ([]byte, error) {
 	return encodeYAML(&document, 2)
 }
 
+// LeftInClear lists the values of a SOPS file that are not encrypted, as
+// paths of keys joined with ".": those a rule like unencrypted_suffix kept
+// in clear. Empty values and nulls do not count: SOPS never encrypts them.
+func LeftInClear(file []byte) ([]string, error) {
+	var document yaml.Node
+	if err := yaml.Unmarshal(file, &document); err != nil {
+		return nil, fmt.Errorf("read the file: %w", err)
+	}
+	root, _, err := splitMetadata(&document)
+	if err != nil {
+		return nil, err
+	}
+	var inClear []string
+	err = walkLeaves(root, nil, func(leaf *yaml.Node, path []string) error {
+		if leaf.Value != "" && leaf.Tag != "!!null" && !strings.HasPrefix(leaf.Value, "ENC[") {
+			inClear = append(inClear, strings.Join(path, "."))
+		}
+		return nil
+	})
+	return inClear, err
+}
+
 // normalizeForMAC: SOPS hashes the value after reading its type, so a bool
 // written as "true" by another tool is hashed as "True".
 func normalizeForMAC(plaintext []byte, valueType string) []byte {

@@ -1,6 +1,7 @@
 package sopsage
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -44,7 +45,8 @@ func walkLeaves(node *yaml.Node, path []string, visit func(leaf *yaml.Node, path
 func plainValue(node *yaml.Node) (plaintext []byte, valueType string, skip bool, err error) {
 	var value any
 	if err := node.Decode(&value); err != nil {
-		return nil, "", false, fmt.Errorf("read %q: %w", node.Value, err)
+		// no value in the message: it may be a secret
+		return nil, "", false, errors.New("a value cannot be read")
 	}
 	switch typed := value.(type) {
 	case nil:
@@ -68,7 +70,7 @@ func plainValue(node *yaml.Node) (plaintext []byte, valueType string, skip bool,
 		text, err := typed.MarshalText()
 		return text, "time", false, err
 	default:
-		return nil, "", false, fmt.Errorf("value %q has an unsupported type %T", node.Value, value)
+		return nil, "", false, fmt.Errorf("a value has an unsupported type %T", value)
 	}
 }
 
@@ -86,7 +88,7 @@ func setPlain(node *yaml.Node, plaintext []byte, valueType string) error {
 	case "bool":
 		value, err := strconv.ParseBool(string(plaintext))
 		if err != nil {
-			return fmt.Errorf("bool %q: %w", plaintext, err)
+			return errors.New("a decrypted bool is neither true nor false")
 		}
 		node.Tag, node.Value = "!!bool", strconv.FormatBool(value)
 	case "time":

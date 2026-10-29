@@ -28,6 +28,8 @@ type Target struct {
 	// Volumes per volume name: the directory where its file system is
 	// mounted, and its generation.
 	Volumes map[string]MountedVolume
+	// SecretsDir holds a file per secret the services ask for as a file.
+	SecretsDir string
 }
 
 // MountedVolume is a volume as it is mounted on the host.
@@ -57,8 +59,18 @@ func Render(stack *Stack, target Target) ([]byte, error) {
 	}
 	project := *stack.Project
 	project.Services = types.Services{}
+	project.Secrets = types.Secrets{}
 	for name, service := range stack.Project.Services {
-		project.Services[name] = renderService(stack.Name, service, target)
+		rendered := renderService(stack.Name, service, target)
+		for _, secret := range stack.Services[name].Secrets {
+			if target.SecretsDir == "" {
+				return nil, fmt.Errorf("render stack %s: the target has no directory for secrets", stack.Name)
+			}
+			// Compose's own secrets are refused, so no name is taken
+			project.Secrets[secret] = types.SecretConfig{File: path.Join(target.SecretsDir, secret)}
+			rendered.Secrets = append(rendered.Secrets, types.ServiceSecretConfig{Source: secret})
+		}
+		project.Services[name] = rendered
 	}
 	project.Networks = types.Networks{}
 	for name, network := range stack.Project.Networks {
@@ -84,6 +96,36 @@ func Render(stack *Stack, target Target) ([]byte, error) {
 		return nil, fmt.Errorf("render stack %s: %w", stack.Name, err)
 	}
 	return rendered, nil
+}
+
+// RenderSecretEnv returns the second Compose file the stack comes up with:
+// only the variables its services set to secrets (x-clowder.secret_env),
+// from values (secret name -> value). The agent keeps it on tmpfs, apart
+// from the rendered file on disk. Nil if the stack sets none.
+func RenderSecretEnv(stack *Stack, values map[string]string) ([]byte, error) {
+	services := map[string]any{}
+	for name, service := range stack.Services {
+		if len(service.SecretEnv) == 0 {
+			continue
+		}
+		environment := map[string]string{}
+		for variable, secret := range service.SecretEnv {
+			value, ok := values[secret]
+			if !ok {
+				return nil, fmt.Errorf("render the secrets of stack %s: no value for %s", stack.Name, secret)
+			}
+			environment[variable] = value
+		}
+		services[name] = map[string]any{"environment": environment}
+	}
+	if len(services) == 0 {
+		return nil, nil
+	}
+	marshaled, err := yaml.Marshal(map[string]any{"services": services})
+	if err != nil {
+		return nil, fmt.Errorf("render the secrets of stack %s: %w", stack.Name, err)
+	}
+	return EscapeDollars(marshaled)
 }
 
 // EscapeDollars writes every $ in a value of a Compose file as $$. The

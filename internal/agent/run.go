@@ -43,6 +43,9 @@ type HostParts struct {
 // their volumes and, while it leads, the placement of stacks. It tells
 // systemd when it serves and keeps its watchdog fed while the state answers.
 func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger) error {
+	if files.SecretsDir == "" {
+		return errors.New("run needs a directory for the stacks' secrets")
+	}
 	host, err := files.readHost()
 	if err != nil {
 		return err

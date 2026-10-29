@@ -4,6 +4,9 @@
 package compose
 
 import (
+	"maps"
+	"slices"
+
 	"github.com/compose-spec/compose-go/v2/types"
 )
 
@@ -15,9 +18,13 @@ type Stack struct {
 	// Exports are services of this stack that other stacks may reach.
 	Exports []string
 	// Imports are services of other stacks ("stack/service") this one reaches.
-	Imports  []string
-	Services map[string]Service
-	Volumes  map[string]Volume
+	Imports []string
+	// SecretsFile is the SOPS file with the stack's secrets, relative to its
+	// first file. Only Load has it: it is the user's path, so Source leaves
+	// it out.
+	SecretsFile string
+	Services    map[string]Service
+	Volumes     map[string]Volume
 	// Project is the Compose model without the x-clowder fields; Render
 	// starts from it.
 	Project *types.Project
@@ -51,6 +58,25 @@ type Service struct {
 	// (privileged, a capability that reaches beyond the container, a
 	// security_opt); only stacks the cluster allows them may have them.
 	Privileges []string
+	// Secrets appear in the container as files /run/secrets/<name>;
+	// SecretEnv sets variables to secrets (variable name -> secret name).
+	Secrets   []string
+	SecretEnv map[string]string
+}
+
+// SecretNames are the names of the secrets the stack's services ask for,
+// sorted, each once.
+func (s *Stack) SecretNames() []string {
+	asked := map[string]bool{}
+	for _, service := range s.Services {
+		for _, name := range service.Secrets {
+			asked[name] = true
+		}
+		for _, name := range service.SecretEnv {
+			asked[name] = true
+		}
+	}
+	return slices.Sorted(maps.Keys(asked))
 }
 
 // HTTPRoute sends requests for Host (and Path) to Port of the service.

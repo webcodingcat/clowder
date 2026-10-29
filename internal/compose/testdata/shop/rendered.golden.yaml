@@ -62,12 +62,16 @@ services:
     restart: "no"
     dns:
       - 169.254.77.53
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/db-password
     image: postgres:17
     labels:
       clowder.generation: "3"
       clowder.stack: shop
     networks:
       default: null
+    secrets:
+      - source: db-password
     volumes:
       - type: volume
         source: pgdata
@@ -103,3 +107,6 @@ volumes:
       device: /var/lib/clowder/volumes/shop-pgdata/data
       o: bind
       type: none
+secrets:
+  db-password:
+    file: /run/clowder-secrets/shop/files/db-password

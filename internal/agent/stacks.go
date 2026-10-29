@@ -28,7 +28,7 @@ import (
 // Docker is what the agent needs from Docker; docker.Client is the real one.
 type Docker interface {
 	supervisor.Docker
-	ComposeUp(ctx context.Context, stack, file string) error
+	ComposeUp(ctx context.Context, stack string, files []string) error
 	ComposeDown(ctx context.Context, stack, file string) error
 	ComposePs(ctx context.Context, stack, file string) (string, error)
 	ComposeLogs(ctx context.Context, stack, file string, follow bool, out io.Writer) error
@@ -173,6 +173,10 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 	if err != nil {
 		return err
 	}
+	secrets, err := r.openSecrets(parsed, stack.Secrets)
+	if err != nil {
+		return err
+	}
 	volumes := map[string]storage.Volume{}
 	mounted := map[string]compose.MountedVolume{}
 	for name := range parsed.Volumes {
@@ -190,7 +194,7 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 	floatingIP, _ := netip.ParseAddr(desired.config.Ingress.FloatingIP) // empty: Render refuses it
 	rendered, err := compose.Render(parsed, compose.Target{
 		Generation: stack.Generation, FloatingIP: floatingIP, NodeAddress: r.host.NodeAddress,
-		Resolver: network.Resolver, Volumes: mounted,
+		Resolver: network.Resolver, Volumes: mounted, SecretsDir: r.files.secretFilesDir(stack.Name),
 	})
 	if err != nil {
 		return err
@@ -205,7 +209,7 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 			return err
 		}
 	}
-	if err := r.up(ctx, stack.Name, rendered); err != nil {
+	if err := r.up(ctx, stack.Name, rendered, secrets); err != nil {
 		return err
 	}
 	if stack.Status == state.StackRunning {
@@ -216,10 +220,11 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 	})
 }
 
-// up writes a stack's Compose file and runs compose up, unless this file
-// came up before. A failed compose up is tried again at the next pass.
-func (r *stackRunner) up(ctx context.Context, name string, rendered []byte) error {
-	hash := sha256.Sum256(rendered)
+// up writes a stack's Compose file and secrets and runs compose up, unless
+// all of it came up before. A failed compose up is tried again at the next
+// pass.
+func (r *stackRunner) up(ctx context.Context, name string, rendered []byte, secrets stackSecrets) error {
+	hash := upHash(rendered, secrets)
 	r.mu.Lock()
 	applied, ok := r.applied[name]
 	r.mu.Unlock()
@@ -230,8 +235,15 @@ func (r *stackRunner) up(ctx context.Context, name string, rendered []byte) erro
 	if err := atomicfile.Write(file, rendered, 0o600); err != nil {
 		return err
 	}
+	if err := r.writeSecrets(name, secrets); err != nil {
+		return err
+	}
+	files := []string{file}
+	if secrets.env != nil {
+		files = append(files, r.files.secretEnvFile(name))
+	}
 	release := r.supervisor.Hold(name)
-	err := r.docker.ComposeUp(ctx, name, file)
+	err := r.docker.ComposeUp(ctx, name, files)
 	release()
 	if err != nil {
 		return err
@@ -239,7 +251,22 @@ func (r *stackRunner) up(ctx context.Context, name string, rendered []byte) erro
 	r.mu.Lock()
 	r.applied[name] = hash
 	r.mu.Unlock()
-	return nil
+	return r.removeStaleSecrets(name, secrets)
+}
+
+// upHash covers everything compose up reads: the rendered file, the secret
+// variables and the secret files.
+func upHash(rendered []byte, secrets stackSecrets) [32]byte {
+	hash := sha256.New()
+	for _, part := range [][]byte{rendered, secrets.env} {
+		_, _ = fmt.Fprintf(hash, "%d:", len(part)) // lengths keep the parts apart; a hash never fails
+		hash.Write(part)
+	}
+	for _, name := range slices.Sorted(maps.Keys(secrets.files)) {
+		_, _ = fmt.Fprintf(hash, "%s=%d:", name, len(secrets.files[name]))
+		hash.Write(secrets.files[name])
+	}
+	return [32]byte(hash.Sum(nil))
 }
 
 // describe turns a volume of the state into this host's copy of it, as the
@@ -304,6 +331,7 @@ func (r *stackRunner) removeOthers(ctx context.Context, desired desiredState) {
 			}
 		}
 	}
+	r.removeSecretsOfOthers(desired)
 }
 
 // stop runs compose down for a stack that left this host, once: its

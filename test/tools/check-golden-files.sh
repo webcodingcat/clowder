@@ -14,11 +14,14 @@ install_tools() {
 }
 
 # check_compose: Check every rendered stack with the docker-compose of the
-# hosts, and that it fills in no variable: the stacks' values are filled in
-# on the user's machine already (a USER set here must not show up).
+# hosts, together with its secret variables as the agent passes both, and
+# that it fills in no variable: the stacks' values are filled in on the
+# user's machine already (a USER set here must not show up), and a $ in a
+# secret is meant as it stands.
 check_compose() {
   for rendered in internal/compose/testdata/*/rendered.golden.yaml; do
-    if ! output="$(USER=filled-in-on-the-host docker-compose -f "${rendered}" config 2>&1)"; then
+    secrets="$(dirname "${rendered}")/secrets.golden.yaml"
+    if ! output="$(USER=filled-in-on-the-host docker-compose -f "${rendered}" -f "${secrets}" config 2>&1)"; then
       echo "${output}"
       return 1
     fi

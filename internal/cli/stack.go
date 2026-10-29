@@ -12,6 +12,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
@@ -106,7 +107,12 @@ func writeStackFiles(name, dir, recipient string, missing []string) error {
 		case stackFile:
 			template := fmt.Sprintf("# The stack %s: a Compose file with clowder's rules (x-clowder blocks).\n"+
 				"# clowder stack apply %s sends it to the cluster.\n"+
-				"name: %s\nservices:\n  app:\n    image: nginx:stable\n", name, name, name)
+				"name: %s\n"+
+				"x-clowder:\n"+
+				"  # the stack's secrets, edited with sops; a service asks for them with\n"+
+				"  # x-clowder.secrets (files in /run/secrets) or x-clowder.secret_env\n"+
+				"  secrets_file: %s\n"+
+				"services:\n  app:\n    image: nginx:stable\n", name, name, name, stackSecretsFile)
 			err = os.WriteFile(path, []byte(template), 0o644)
 		case stackSecretsFile:
 			err = clusterdir.WriteSOPS(path, map[string]string{}, recipient)
@@ -143,12 +149,16 @@ func newStackApply(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			secrets, err := readStackSecrets(stack, filepath.Dir(files[0]))
+			if err != nil {
+				return err
+			}
 			client, _, err := g.connect()
 			if err != nil {
 				return err
 			}
 			if _, err := client.Put(cmd.Context(), "/v1/stacks/"+url.PathEscape(name),
-				api.StackApply{Source: string(source)}); err != nil {
+				api.StackApply{Source: string(source), Secrets: secrets}); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s applied; clowder stack ps %s shows how it starts\n", name, name)
@@ -158,6 +168,49 @@ func newStackApply(g *globals) *cobra.Command {
 	command.Flags().StringSliceVarP(&files, "file", "f", nil,
 		"the stack's files, repeatable; the first names the stack (default: <name>/"+stackFile+")")
 	return command
+}
+
+// readStackSecrets decrypts the stack's secrets file with the user's age key
+// and takes the values the stack asks for: each a string, not empty. Whoever
+// cannot decrypt the file cannot apply a stack with secrets. No message
+// names a value.
+func readStackSecrets(stack *compose.Stack, dir string) (map[string]string, error) {
+	asked := stack.SecretNames()
+	if len(asked) == 0 {
+		return nil, nil
+	}
+	file := stack.SecretsFile
+	if !filepath.IsAbs(file) {
+		file = filepath.Join(dir, file)
+	}
+	cleartext, err := clusterdir.ReadSOPS(file)
+	if err != nil {
+		return nil, err
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(cleartext, &document); err != nil || len(document.Content) == 0 ||
+		document.Content[0].Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s is not a map of names to secrets", file)
+	}
+	inFile := map[string]*yaml.Node{}
+	entries := document.Content[0].Content
+	for index := 0; index+1 < len(entries); index += 2 { // key, value, key, value, ...
+		inFile[entries[index].Value] = entries[index+1]
+	}
+	values := map[string]string{}
+	for _, name := range asked {
+		value, ok := inFile[name]
+		switch {
+		case !ok:
+			return nil, fmt.Errorf("%s has no secret %s", file, name)
+		case value.Kind != yaml.ScalarNode || value.Tag != "!!str":
+			return nil, fmt.Errorf("secret %s in %s is not a string; quote it", name, file)
+		case value.Value == "":
+			return nil, fmt.Errorf("secret %s in %s is empty", name, file)
+		}
+		values[name] = value.Value
+	}
+	return values, nil
 }
 
 // environment is the process environment for ${VARIABLE} in Compose files.

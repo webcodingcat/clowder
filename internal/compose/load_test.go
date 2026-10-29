@@ -169,6 +169,44 @@ func TestTheFilesAreBoundToTheirStack(t *testing.T) {
 	}
 }
 
+func TestServicesAskForSecretsInXClowder(t *testing.T) {
+	stack, err := loadText(t, `x-clowder: {secrets_file: secrets.sops.yaml}
+services:
+  db: {image: x, x-clowder: {secrets: [db-password]}}
+  app: {image: x, environment: {LOG: info}, x-clowder: {secret_env: {DB_PASSWORD: db-password, API_KEY: api-key}}}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(stack.SecretNames(), ","); got != "api-key,db-password" || stack.SecretsFile != "secrets.sops.yaml" {
+		t.Errorf("secrets %s from %q", got, stack.SecretsFile)
+	}
+	source, err := stack.Source()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(source), "secrets_file") {
+		t.Errorf("the user's path went into the source:\n%s", source)
+	}
+	if _, err := loadText(t, "services: {db: {image: x, x-clowder: {secrets: [db-password]}}}\n"); err == nil ||
+		!strings.Contains(err.Error(), "secrets_file names no file") {
+		t.Errorf("secrets without a file: %v", err)
+	}
+	for problem, compose := range map[string]string{
+		"Compose's secrets":           "services: {web: {image: x}}\nsecrets: {token: {environment: TOKEN}}",
+		"use x-clowder.secrets":       "services: {web: {image: x, secrets: [token]}}\nsecrets: {token: {environment: T}}",
+		`"Db" is not a secret name`:   "services: {web: {image: x, x-clowder: {secrets: [Db]}}}",
+		"named twice":                 "services: {web: {image: x, x-clowder: {secrets: [db, db]}}}",
+		`"1X" is not a variable name`: "services: {web: {image: x, x-clowder: {secret_env: {1X: db}}}}",
+		"set in environment as well":  "services: {web: {image: x, environment: {X: a}, x-clowder: {secret_env: {X: db}}}}",
+		"file and environment":        "services: {web: {image: x}}\nconfigs: {app: {environment: APP}}",
+	} {
+		if _, err := loadText(t, "x-clowder: {secrets_file: s.yaml}\n"+compose); err == nil || !strings.Contains(err.Error(), problem) {
+			t.Errorf("want a problem with %q, got %v", problem, err)
+		}
+	}
+}
+
 func TestPrivilegesBeyondTheContainerAreNamed(t *testing.T) {
 	stack, err := loadText(t, `services:
   plain: {image: x, cap_add: [NET_ADMIN, cap_chown], security_opt: [no-new-privileges:true]}
@@ -257,7 +295,7 @@ func TestWhatClowderCannotRunIsReported(t *testing.T) {
 			"services: {web: {image: x}}\nnetworks: {default: {ipam: {config: [{subnet: 10.77.0.0/24}]}}}", "ipam",
 		},
 		"secret from a file": {
-			"services: {web: {image: x}}\nsecrets: {token: {file: ./token.txt}}", "secret token: file",
+			"services: {web: {image: x}}\nsecrets: {token: {file: ./token.txt}}", "secret token: Compose's secrets",
 		},
 		"host uts": {
 			"services: {web: {image: x, uts: host}}", "uts: host",
@@ -273,7 +311,7 @@ func TestWhatClowderCannotRunIsReported(t *testing.T) {
 			"services: {web: {image: x}}\nnetworks: {default: {x-clowder: {class: fast}}}", "not used on networks",
 		},
 		"config from a file": {
-			"services: {web: {image: x}}\nconfigs: {app: {file: ./app.conf}}", "config app: file",
+			"services: {web: {image: x}}\nconfigs: {app: {file: ./app.conf}}", "config app: file and environment",
 		},
 		"external volume": {
 			"services: {web: {image: x}}\nvolumes: {data: {external: true}}", "external volumes",

@@ -4,6 +4,7 @@ name: shop
 x-clowder:
   priority: high
   exports: [db]
+  secrets_file: secrets.sops.yaml
 
 services:
   app:
@@ -15,6 +16,7 @@ services:
       GREETING: "Hello $$USER"
     x-clowder:
       http: {host: shop.example.com, port: 8080}
+      secret_env: {DB_PASSWORD: db-password}
     deploy:
       resources:
         reservations: {memory: 256M, cpus: "0.5"}
@@ -23,11 +25,14 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - /etc/localtime:/etc/localtime:ro
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/db-password
     healthcheck:
       test: ["CMD", "pg_isready"]
       interval: 10s
     x-clowder:
       priority: critical
+      secrets: [db-password]
   cache:
     image: valkey/valkey:8
     restart: on-failure:3

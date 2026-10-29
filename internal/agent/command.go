@@ -81,7 +81,7 @@ func newRun() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
 			defer stop()
-			return Run(ctx, Files{Dir: DefaultDir}, hostParts(), slog.Default())
+			return Run(ctx, Files{Dir: DefaultDir, SecretsDir: DefaultSecretsDir}, hostParts(), slog.Default())
 		},
 	}
 }

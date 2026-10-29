@@ -14,15 +14,18 @@ const extensionKey = "x-clowder"
 // so a misspelled key is an error instead of being ignored.
 
 type rawStackExtension struct {
-	Priority any      `json:"priority"`
-	Exports  []string `json:"exports"`
-	Imports  []string `json:"imports"`
+	Priority    any      `json:"priority"`
+	Exports     []string `json:"exports"`
+	Imports     []string `json:"imports"`
+	SecretsFile string   `json:"secrets_file"`
 }
 
 type rawServiceExtension struct {
-	Priority         any           `json:"priority"`
-	HTTP             *rawHTTPRoute `json:"http"`
-	RestartUnhealthy *bool         `json:"restart_unhealthy"`
+	Priority         any               `json:"priority"`
+	HTTP             *rawHTTPRoute     `json:"http"`
+	RestartUnhealthy *bool             `json:"restart_unhealthy"`
+	Secrets          []string          `json:"secrets"`
+	SecretEnv        map[string]string `json:"secret_env"`
 }
 
 type rawHTTPRoute struct {

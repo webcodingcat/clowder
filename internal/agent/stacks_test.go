@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -94,9 +95,11 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 	docker, storage := &fakeDocker{}, &fakeStorage{dir: t.TempDir()}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	runner := &stackRunner{
-		files: Files{Dir: t.TempDir()}, host: Host{ID: 0, Name: "node0", NodeAddress: netip.MustParseAddr("10.77.0.1")},
+		files: Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}, host: Host{ID: 0, Name: "node0", NodeAddress: netip.MustParseAddr("10.77.0.1")},
 		version: "1.0.0", cluster: cluster, docker: docker, storage: storage, logger: logger,
 		propose: cluster.propose, applied: map[string][32]byte{}, logins: map[string][32]byte{},
+		// the tests' sealed values are their clear text
+		open: func(sealed state.Sealed) ([]byte, error) { return []byte(sealed), nil },
 	}
 	runner.supervisor = supervisor.New(docker, runner.rules, supervisor.DefaultBackoff, nil, logger)
 	return runner, cluster, docker, storage
@@ -174,6 +177,61 @@ func TestAStackThatLeftIsStoppedAndForgotten(t *testing.T) {
 	}
 	if _, err := os.Stat(runner.files.stackDir("shop")); !os.IsNotExist(err) {
 		t.Errorf("the stack's directory is left: %v", err)
+	}
+}
+
+// putShopWithSecrets applies shop again: app asks for db-password as a file
+// and, with apiKey set, for api-key as the variable API_KEY.
+func putShopWithSecrets(cluster *testCluster, password, apiKey string) {
+	app := "{image: nginx, volumes: [db:/data], x-clowder: {secrets: [db-password]}}"
+	secrets := map[string]state.Sealed{"db-password": state.Sealed(password)}
+	if apiKey != "" {
+		app = "{image: nginx, volumes: [db:/data], x-clowder: {secrets: [db-password], secret_env: {API_KEY: api-key}}}"
+		secrets["api-key"] = state.Sealed(apiKey)
+	}
+	cluster.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
+		Name: "shop", Owner: state.OwnerCLI, Secrets: secrets,
+		Source: "name: shop\nservices:\n  app: " + app + "\nvolumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n",
+	})
+}
+
+func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
+	runner, cluster, docker, _ := newTestRunner(t)
+	password := runner.files.secretFile("shop", "db-password")
+	env := runner.files.secretEnvFile("shop")
+
+	putShopWithSecrets(cluster, "first", "key")
+	runner.pass(context.Background())
+	if content, err := os.ReadFile(password); err != nil || string(content) != "first" {
+		t.Errorf("the secret file: %q, %v", content, err)
+	}
+	if info, err := os.Stat(password); err != nil || info.Mode().Perm() != 0o444 {
+		t.Errorf("the secret file's mode: %v, %v", info, err)
+	}
+	if content, err := os.ReadFile(env); err != nil || !strings.Contains(string(content), "API_KEY: key") {
+		t.Errorf("the secret variables: %q, %v", content, err)
+	}
+	if len(docker.upFiles) != 2 || docker.upFiles[1] != env {
+		t.Errorf("compose up with %v", docker.upFiles)
+	}
+
+	// a new password and no variable any more: rewritten, env.yaml gone
+	putShopWithSecrets(cluster, "second", "")
+	runner.pass(context.Background())
+	if content, err := os.ReadFile(password); err != nil || string(content) != "second" {
+		t.Errorf("the changed secret file: %q, %v", content, err)
+	}
+	if _, err := os.Stat(env); !os.IsNotExist(err) {
+		t.Errorf("the secret variables stayed: %v", err)
+	}
+	if ups := docker.count("up shop"); ups != 2 || len(docker.upFiles) != 1 {
+		t.Errorf("%d compose ups, the last with %v", ups, docker.upFiles)
+	}
+
+	cluster.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{Name: "shop", Status: state.StackPending})
+	runner.pass(context.Background())
+	if _, err := os.Stat(runner.files.secretsDir("shop")); !os.IsNotExist(err) {
+		t.Errorf("the secrets of a stack that left stayed: %v", err)
 	}
 }
 

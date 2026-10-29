@@ -25,6 +25,10 @@ import (
 // for the leader.
 const waitTimeout = 10 * time.Second
 
+// maxRequestBytes bounds every request body: a stack with all its secrets
+// (state.MaxStackSecretsBytes) fits with room to spare.
+const maxRequestBytes = 1 << 20
+
 // Cluster is what the server needs from the agent's Raft member.
 type Cluster interface {
 	Propose(ctx context.Context, cmd state.Command) (uint64, error)
@@ -110,6 +114,7 @@ func (s *Server) TLSConfig() *tls.Config {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	s.mux.ServeHTTP(w, r)
 }
 

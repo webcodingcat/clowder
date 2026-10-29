@@ -153,25 +153,45 @@ func (d *Directory) Credentials(user string) (*Credentials, error) {
 
 // decryptInto decrypts a SOPS file and decodes it strictly into target.
 func (d *Directory) decryptInto(file string, target any) error {
-	sealed, err := os.ReadFile(file)
+	cleartext, err := ReadSOPS(file)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("%s is missing: %w", file, err)
-		}
-		return fmt.Errorf("read %s: %w", file, err)
-	}
-	identities, err := sopsage.LoadIdentities()
-	if err != nil {
-		return fmt.Errorf("load the age key for %s: %w", file, err)
-	}
-	cleartext, err := sopsage.Decrypt(sealed, identities)
-	if err != nil {
-		return fmt.Errorf("decrypt %s (is your age key set up for SOPS?): %w", file, err)
+		return err
 	}
 	if err := decodeStrict(cleartext, target); err != nil {
 		return fmt.Errorf("%s: %w", file, err)
 	}
 	return nil
+}
+
+// ReadSOPS decrypts a SOPS file with the user's age key, as sops finds it.
+// It refuses a file with values left in clear (a rule like
+// unencrypted_suffix): these files hold secrets, and such a value would sit
+// in the repository in clear.
+func ReadSOPS(file string) ([]byte, error) {
+	sealed, err := os.ReadFile(file)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%s is missing: %w", file, err)
+		}
+		return nil, fmt.Errorf("read %s: %w", file, err)
+	}
+	identities, err := sopsage.LoadIdentities()
+	if err != nil {
+		return nil, fmt.Errorf("load the age key for %s: %w", file, err)
+	}
+	cleartext, err := sopsage.Decrypt(sealed, identities)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt %s (is your age key set up for SOPS?): %w", file, err)
+	}
+	inClear, err := sopsage.LeftInClear(sealed)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", file, err)
+	}
+	if len(inClear) > 0 {
+		return nil, fmt.Errorf("%s keeps %s in clear; encrypt every value (no unencrypted_suffix)",
+			file, strings.Join(inClear, ", "))
+	}
+	return cleartext, nil
 }
 
 // decodeStrict decodes YAML and refuses keys the target does not know, so a

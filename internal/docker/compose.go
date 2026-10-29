@@ -15,11 +15,15 @@ const (
 	readTimeout = 30 * time.Second
 )
 
-// ComposeUp starts or updates a stack from its rendered Compose file:
-// Docker recreates only the containers whose configuration changed.
-func (c *Client) ComposeUp(ctx context.Context, stack, file string) error {
-	_, err := command.Run(ctx, upTimeout, "docker", "compose", "--project-name", stack, "--file", file,
-		"up", "--detach", "--remove-orphans")
+// ComposeUp starts or updates a stack from its rendered Compose files (the
+// stack, and its secret variables if it has any): Docker recreates only the
+// containers whose configuration changed.
+func (c *Client) ComposeUp(ctx context.Context, stack string, files []string) error {
+	args := []string{"compose", "--project-name", stack}
+	for _, file := range files {
+		args = append(args, "--file", file)
+	}
+	_, err := command.Run(ctx, upTimeout, "docker", append(args, "up", "--detach", "--remove-orphans")...)
 	return err
 }
 

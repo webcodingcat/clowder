@@ -138,6 +138,8 @@ type fakeDocker struct {
 	calls
 	// failedUps is how many compose ups fail before one works
 	failedUps int
+	// upFiles are the files of the last compose up
+	upFiles []string
 }
 
 func (f *fakeDocker) Events(ctx context.Context, _ string) (<-chan docker.Event, <-chan error) {
@@ -152,8 +154,11 @@ func (f *fakeDocker) Events(ctx context.Context, _ string) (<-chan docker.Event,
 func (f *fakeDocker) Start(context.Context, string) error   { return nil }
 func (f *fakeDocker) Restart(context.Context, string) error { return nil }
 
-func (f *fakeDocker) ComposeUp(_ context.Context, stack, _ string) error {
+func (f *fakeDocker) ComposeUp(_ context.Context, stack string, files []string) error {
 	f.add("up %s", stack)
+	f.mu.Lock()
+	f.upFiles = files
+	f.mu.Unlock()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failedUps > 0 {
@@ -210,7 +215,7 @@ func clowder(t *testing.T, args ...string) (string, error) {
 func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	loopback := netip.MustParseAddr("127.0.0.1")
-	files := Files{Dir: t.TempDir()}
+	files := Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}
 	apiPort := freePort(t)
 	hostNetwork := &fakeNetwork{}
 	err := Init(context.Background(), files, InitOptions{

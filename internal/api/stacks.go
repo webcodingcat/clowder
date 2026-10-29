@@ -19,9 +19,12 @@ import (
 )
 
 // StackApply is clowder stack apply: the stack's Compose file as
-// compose.Stack.Source writes it.
+// compose.Stack.Source writes it, and the values of the secrets it asks for
+// (name -> value). The values travel in clear inside mutual TLS, like the
+// cluster's secrets; the agent seals them before they go into the state.
 type StackApply struct {
-	Source string `json:"source"`
+	Source  string            `json:"source"`
+	Secrets map[string]string `json:"secrets,omitempty"`
 }
 
 // StackInfo is one stack as the CLI shows it.
@@ -89,9 +92,51 @@ func (s *Server) applyStack(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	secrets, err := s.sealStackSecrets(stack, apply.Secrets)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	s.write(w, r, state.KindPutStack, state.PutStack{
-		Name: name, Owner: state.OwnerCLI, Source: apply.Source, Priority: priority,
+		Name: name, Owner: state.OwnerCLI, Source: apply.Source, Priority: priority, Secrets: secrets,
 	})
+}
+
+// sealStackSecrets checks that the values sent are exactly those the stack
+// asks for, within the limits, and seals them. It is the one way stack
+// secrets come in; a later one (the cluster decrypting a file for GitOps)
+// goes next to it. No message names a value.
+func (s *Server) sealStackSecrets(stack *compose.Stack, values map[string]string) (map[string]state.Sealed, error) {
+	asked := stack.SecretNames()
+	sent := slices.Sorted(maps.Keys(values))
+	switch {
+	case !slices.Equal(asked, sent):
+		return nil, fmt.Errorf("stack %s asks for the secrets %v, but %v came", stack.Name, asked, sent)
+	case len(asked) > state.MaxStackSecrets:
+		return nil, fmt.Errorf("stack %s asks for %d secrets, more than %d", stack.Name, len(asked), state.MaxStackSecrets)
+	}
+	sealed := map[string]state.Sealed{}
+	total := 0
+	for _, name := range asked {
+		value := values[name]
+		total += len(value)
+		switch {
+		case value == "":
+			return nil, fmt.Errorf("secret %s is empty", name)
+		case len(value) > state.MaxSecretBytes:
+			return nil, fmt.Errorf("secret %s is larger than %d bytes", name, state.MaxSecretBytes)
+		case total > state.MaxStackSecretsBytes:
+			return nil, fmt.Errorf("the secrets of stack %s are larger than %d bytes", stack.Name, state.MaxStackSecretsBytes)
+		}
+		var err error
+		if sealed[name], err = s.config.Keys.Seal([]byte(value)); err != nil {
+			return nil, fmt.Errorf("seal secret %s: %w", name, err)
+		}
+	}
+	if len(sealed) == 0 {
+		return nil, nil
+	}
+	return sealed, nil
 }
 
 // checkAgainstCluster checks what only the cluster knows (storage classes,

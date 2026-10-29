@@ -303,6 +303,22 @@ func TestAStackIsCreatedBeforeItIsApplied(t *testing.T) {
 	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop"})
 }
 
+func TestAnApplyReplacesTheSecretsAsAWhole(t *testing.T) {
+	c := newCluster(t)
+	spec := "services: {}"
+	c.createShop()
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{
+		Name: "shop", Owner: OwnerCLI, Source: spec, Secrets: map[string]Sealed{"db-password": Sealed("sealed")},
+	})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec})
+	if secrets := c.state.Stacks["shop"].Secrets; len(secrets) != 0 {
+		t.Errorf("an apply without secrets kept %v", secrets)
+	}
+	c.refuse(KindPutStack, UserActor("alice"), PutStack{
+		Name: "shop", Owner: OwnerCLI, Source: spec, Secrets: map[string]Sealed{"../x": Sealed("s")},
+	}, "not a secret name")
+}
+
 func TestStacksBelongToTheirOwner(t *testing.T) {
 	c := newCluster(t)
 	spec := "services: {}"

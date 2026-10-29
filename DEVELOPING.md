@@ -145,8 +145,19 @@ Packages in *italics* do not exist yet.
   in `stacks.privileged`; and `cluster apply` refuses a `cluster.yaml` that a stack of the
   cluster would no longer pass (its privileges, storage classes, priorities).
 - `Source` fills in the variables and env files of the user's machine; the result is stored
-  in the cluster state and on the stack's host as it is, not sealed. Passwords in a Compose
-  file are readable to whoever reads the state; stacks have no sealed secrets yet.
+  in the cluster state and on the stack's host as it is, not sealed. Passwords belong in the
+  stack's secrets file, never in a `${VARIABLE}` or the Compose file.
+- Secrets: a service asks with `x-clowder.secrets: [name]` (a file `/run/secrets/<name>` in
+  the container, for images that read `*_FILE`) or `x-clowder.secret_env: {VARIABLE: name}`.
+  The stack names its SOPS file in `x-clowder.secrets_file` (relative to its first file; a
+  map of names to strings; several stacks may share one). Compose's own `secrets:` are
+  refused, and so are `configs:` with `file` or `environment`: docker compose on the host
+  would read the agent's environment. `Source` leaves `secrets_file` out (the user's path).
+  `Render` writes the secrets as Compose secrets with `file:` in `Target.SecretsDir`;
+  `RenderSecretEnv` writes the variables as a second Compose file, which `bin/dev
+  test-tools` checks together with the rendered one (golden file
+  `testdata/shop/secrets.golden.yaml`). A variable ends up in Docker's container
+  configuration on the host's disk and in `docker inspect`; a file does not.
 - The `x-clowder` blocks are decoded strictly: an unknown key is an error, not ignored.
 - `Render` writes the file docker compose gets on a host: `restart: "no"` (the agent restarts),
   the agent's resolver, each port on the Floating IP and the node address, labels, a fixed
@@ -232,6 +243,11 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - `Copy` gives a deep copy without the audit, for work too slow for the state's lock (the
   placement parses every stack) or that keeps parts of the state (the agent's stacks).
 - Secrets arrive sealed (`Sealed`, age for the data key); `state` never sees them in clear.
+  A stack's secrets come with its `put-stack` and replace the old ones as a whole: whoever
+  cannot decrypt the stack's secrets file can remove its secrets with an apply, never keep
+  them for a changed stack. The limits (`MaxStackSecrets`, `MaxSecretBytes`,
+  `MaxStackSecretsBytes`) are here; the state checks the count and the names, the API the
+  sizes it sees in clear.
 - Snapshots are gzip-compressed JSON (`WriteSnapshot`, `ReadSnapshot`). The audit keeps the
   last 10 000 commands, finished operations the last 100.
 
@@ -306,13 +322,24 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   (`clusterdir.WriteSOPS`, `WriteSOPSConfig`, shared with `cluster bootstrap`). Stack
   directories belong outside the cluster directory, whose `.sops.yaml` rule would match
   their files; working there, users point the CLI at the cluster with `$CLOWDER_CLUSTER`.
+  Colleagues are added with sops itself: their key into the stack's `.sops.yaml`, then
+  `sops updatekeys secrets.sops.yaml` in the stack's directory.
 - `stack apply` loads the stack's files on the user's machine (`compose.Load`, all problems
   at once; by default `<name>/clowder.yaml`) and sends the merged, self-contained file
-  (`compose.Stack.Source`); the agent
-  parses it again and checks it against the cluster (storage classes). `stack delete` refuses
+  (`compose.Stack.Source`). If the stack asks for secrets, it decrypts the secrets file with
+  the user's age key (`clusterdir.ReadSOPS`, which refuses values left in clear, as for the
+  cluster's own SOPS files) and sends the values asked for, each a string and not empty, in
+  clear inside mutual TLS like `cluster apply`. The agent
+  parses it again and checks it against the cluster (storage classes, privileges), and
+  `sealStackSecrets` checks that exactly the secrets the stack asks for came, within the
+  limits, and seals them. No message names a value. `stack delete` refuses
   a stack with volumes unless `--delete-volumes` says so. `stack ps <name>` and `stack logs`
   ask the stack's host through `/v1/internal/stacks/<name>/ps|logs`, wherever the CLI came
   in.
+- Who can read a stack's secrets: whoever can decrypt its secrets file, and every host (a
+  stack must start anywhere). Until there are permissions, also every user of the cluster
+  through a stack named in `stacks.privileged`: such a container reaches the secrets and the
+  data key on its host. Every request body is limited to 1 MiB (`maxRequestBytes`).
 - `cluster apply` sends `cluster.yaml` with the secrets of `secrets.sops.yaml` in clear inside
   mutual TLS (`PUT /v1/cluster`); the agent seals them with the data key before they go into
   the state. Its hash covers both, so `cluster diff` tells changed fields of `cluster.yaml`
@@ -354,6 +381,22 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   again at the next pass. Stacks that left the host get `compose down`; volume copies the
   state no longer places here (or in an older generation) are removed. Each stack's
   `volumes.json` records its copies before they are made, so a crash leaves nothing unknown.
+- A stack's secrets live on tmpfs only (`Files.SecretsDir`, `/run/clowder-secrets`, made by
+  the agent itself, not a systemd `RuntimeDirectory`, which would go at each stop of the
+  agent while containers use it):
+
+  ```
+  /run/clowder-secrets/<stack>/      0700
+    files/<name>                     0444  bind-mounted to /run/secrets/<name>
+    env.yaml                         0600  the secret variables, a second Compose file
+  ```
+
+  Before `compose up` the runner opens the sealed values and writes what is new or changed
+  (by rename: a running container keeps the old file until it is recreated); after a
+  successful `compose up` it removes what the stack no longer asks for. The hash that decides
+  about `compose up` covers the rendered file, `env.yaml` and the secret files; a changed
+  secret comes with a new generation, whose label recreates the containers. The secrets of a
+  stack that is not placed here and has no Compose file left go at each pass.
 - After a boot no container runs (`restart: "no"`): the runner remembers which files came
   up only in memory, so its first pass runs `compose up` for every stack, and so does the
   pass after Docker restarted (the supervisor's events broke off). The first pass waits until
@@ -367,7 +410,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   socket, the user's bootstrap (and a wrong key, a second user refused), apply and diff, the
   Floating IP reaching the nft rules, and a stack with a volume applied, listed and deleted.
   `stacks_test.go` runs single passes of the runner against a state in memory: a failed
-  `compose up`, a new volume generation, a stack that leaves the host.
+  `compose up`, a new volume generation, a stack that leaves the host, secrets written,
+  changed and removed. That docker compose fails on a missing secret file, and recreates
+  a container for a new generation, is for the live tests: CI has no Docker daemon.
 
 ## Network (`internal/network`)
 
@@ -425,6 +470,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 
 - `docker.Client` talks to Docker's API on its socket for events, start and restart, and
   runs `docker compose` (up, down, ps, logs) and `docker login` through `internal/command`.
+  `up` gets the rendered file and, for a stack with secret variables, `env.yaml`; down, ps
+  and logs need the rendered file alone.
   `command.Stream` passes the logs on as they come; it has no timeout, as it touches no
   volume.
 - Docker restarts nothing (`restart: "no"`); the supervisor follows Docker's events and

@@ -36,16 +36,15 @@ func shopTarget() Target {
 			"pgdata":    {Dir: "/var/lib/clowder/volumes/shop-pgdata", Generation: 1},
 			"cachedata": {Dir: "/var/lib/clowder/volumes/shop-cachedata", Generation: 2},
 		},
+		SecretsDir: "/run/clowder-secrets/shop/files",
 	}
 }
 
-func TestRenderedShopMatchesTheGoldenFile(t *testing.T) {
-	rendered, err := Render(loadShop(t), shopTarget())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	golden := filepath.Join("testdata", "shop", "rendered.golden.yaml")
+// matchGolden compares a rendered file with its golden file in
+// testdata/shop; -update writes it anew.
+func matchGolden(t *testing.T, name string, rendered []byte) {
+	t.Helper()
+	golden := filepath.Join("testdata", "shop", name)
 	if *update {
 		if err := os.WriteFile(golden, rendered, 0o600); err != nil {
 			t.Fatal(err)
@@ -56,9 +55,28 @@ func TestRenderedShopMatchesTheGoldenFile(t *testing.T) {
 		t.Fatalf("%v (run the test with -update to write it)", err)
 	}
 	if !bytes.Equal(rendered, want) {
-		t.Errorf("rendered stack differs from %s; run with -update and review the diff:\n%s",
-			golden, rendered)
+		t.Errorf("rendered file differs from %s; run with -update and review the diff:\n%s", golden, rendered)
 	}
+}
+
+func TestRenderedShopMatchesTheGoldenFile(t *testing.T) {
+	rendered, err := Render(loadShop(t), shopTarget())
+	if err != nil {
+		t.Fatal(err)
+	}
+	matchGolden(t, "rendered.golden.yaml", rendered)
+}
+
+func TestTheSecretVariablesMatchTheGoldenFile(t *testing.T) {
+	stack := loadShop(t)
+	if _, err := RenderSecretEnv(stack, map[string]string{}); err == nil {
+		t.Error("rendered without the value")
+	}
+	rendered, err := RenderSecretEnv(stack, map[string]string{"db-password": "pa$$word\nline two", "unused": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matchGolden(t, "secrets.golden.yaml", rendered)
 }
 
 func TestRenderNeedsACompleteTarget(t *testing.T) {

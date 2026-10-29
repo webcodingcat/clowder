@@ -30,6 +30,9 @@ const (
 // certificates are readable by root only.
 type Files struct {
 	Dir string
+	// SecretsDir holds the stacks' secrets in clear (DefaultSecretsDir, on
+	// tmpfs); run needs it, init does not.
+	SecretsDir string
 }
 
 // The files of a host.

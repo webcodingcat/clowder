@@ -71,9 +71,23 @@ type PutStack struct {
 	Owner    string `json:"owner"`
 	Source   string `json:"source"`
 	Priority int    `json:"priority"`
+	// Secrets replace the stack's secrets as a whole: every sender sends all
+	// the stack asks for, an operation too. So whoever cannot decrypt the
+	// stack's secrets file can only remove the secrets, never keep them for a
+	// changed stack.
+	Secrets map[string]Sealed `json:"secrets,omitempty"`
 	// Operation is set when the operation holding the lock makes the change.
 	Operation string `json:"operation,omitempty"`
 }
+
+// The limits of a stack's secrets: every apply writes them into the Raft
+// log. The API checks the values' sizes before it seals them; the state can
+// check only the count, as it sees them sealed.
+const (
+	MaxStackSecrets      = 64
+	MaxSecretBytes       = 64 << 10
+	MaxStackSecretsBytes = 256 << 10
+)
 
 func applyPutStack(s *State, _ Command, payload PutStack) error {
 	switch {
@@ -83,6 +97,13 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 		return errors.New("the stack needs an owner")
 	case payload.Source == "":
 		return fmt.Errorf("stack %s has no Compose file", payload.Name)
+	case len(payload.Secrets) > MaxStackSecrets:
+		return fmt.Errorf("stack %s has %d secrets, more than %d", payload.Name, len(payload.Secrets), MaxStackSecrets)
+	}
+	for _, secret := range slices.Sorted(maps.Keys(payload.Secrets)) {
+		if !names.ValidSecret(secret) {
+			return fmt.Errorf("stack %s: %q is not a secret name", payload.Name, secret)
+		}
 	}
 	if err := s.checkUnlocked(stackLock(payload.Name), payload.Operation); err != nil {
 		return err
@@ -100,6 +121,7 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 	stack.Generation++
 	stack.Source = payload.Source
 	stack.Priority = payload.Priority
+	stack.Secrets = payload.Secrets
 	return nil
 }
 

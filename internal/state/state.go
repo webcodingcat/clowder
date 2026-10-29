@@ -133,10 +133,13 @@ type Stack struct {
 	Generation int64 `json:"generation"`
 	// Source is the stack's Compose file as the CLI checked and sent it
 	// (compose.Stack.Source): self-contained, x-clowder included.
-	Source   string      `json:"source"`
-	Priority int         `json:"priority"`
-	Host     *HostID     `json:"host,omitempty"` // nil: not placed yet
-	Status   StackStatus `json:"status"`
+	Source string `json:"source"`
+	// Secrets are the values of the secrets the stack asks for, by name,
+	// sealed with the data key.
+	Secrets  map[string]Sealed `json:"secrets,omitempty"`
+	Priority int               `json:"priority"`
+	Host     *HostID           `json:"host,omitempty"` // nil: not placed yet
+	Status   StackStatus       `json:"status"`
 	// Stopped lists services pushed out by higher priorities.
 	Stopped  []string  `json:"stopped,omitempty"`
 	LastMove time.Time `json:"last_move,omitzero"`

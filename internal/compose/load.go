@@ -13,6 +13,7 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"go.yaml.in/yaml/v3"
 
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
@@ -57,7 +58,14 @@ func Load(ctx context.Context, options LoadOptions) (*Stack, error) {
 	if project.Name != options.Name {
 		return nil, fmt.Errorf("the compose files are for stack %q, not %q", project.Name, options.Name)
 	}
-	return check(project)
+	stack, err := check(project)
+	if err != nil {
+		return nil, err
+	}
+	if len(stack.SecretNames()) > 0 && stack.SecretsFile == "" {
+		return nil, Problems{"stack: its services ask for secrets, but x-clowder.secrets_file names no file"}
+	}
+	return stack, nil
 }
 
 // CheckNames binds the files to their stack: the first says its name as
@@ -110,6 +118,7 @@ func check(project *types.Project) (*Stack, error) {
 	stack.Priority = priority
 	stack.Exports = stackExtension.Exports
 	stack.Imports = stackExtension.Imports
+	stack.SecretsFile = stackExtension.SecretsFile
 
 	for _, name := range slices.Sorted(maps.Keys(project.Volumes)) {
 		volume, volumeProblems := checkVolume(name, project.Volumes[name])
@@ -131,15 +140,15 @@ func check(project *types.Project) (*Stack, error) {
 			report("network %s: x-clowder is not used on networks", name)
 		}
 	}
-	// a file named here lives on this machine, not on the host that runs the stack
+	// a file named here lives on this machine, not on the host that runs the
+	// stack, and a variable would be read from the agent's environment there
 	for _, name := range slices.Sorted(maps.Keys(project.Secrets)) {
-		if project.Secrets[name].File != "" {
-			report("secret %s: file is not supported", name)
-		}
+		report("secret %s: Compose's secrets are not supported; a service asks with x-clowder.secrets", name)
 	}
 	for _, name := range slices.Sorted(maps.Keys(project.Configs)) {
-		if project.Configs[name].File != "" {
-			report("config %s: file is not supported; use content", name)
+		config := project.Configs[name]
+		if config.File != "" || config.Environment != "" {
+			report("config %s: file and environment are not supported; use content", name)
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(project.Services)) {
@@ -181,6 +190,16 @@ func check(project *types.Project) (*Stack, error) {
 // the stack's host, where the user's files are not.
 func (s *Stack) Source() ([]byte, error) {
 	project := *s.source
+	// the secrets file is the user's path; its values travel apart
+	if stackExtension, ok := project.Extensions[extensionKey].(map[string]any); ok {
+		project.Extensions = maps.Clone(project.Extensions)
+		stackExtension = maps.Clone(stackExtension)
+		delete(stackExtension, "secrets_file")
+		project.Extensions[extensionKey] = stackExtension
+		if len(stackExtension) == 0 {
+			delete(project.Extensions, extensionKey)
+		}
+	}
 	project.Services = types.Services{}
 	for name, service := range s.source.Services {
 		// the environment holds them already; their paths are the user's
@@ -351,6 +370,29 @@ func checkService(config types.ServiceConfig, volumes types.Volumes) (Service, P
 		}
 		service.HTTP = &HTTPRoute{Host: raw.HTTP.Host, Port: raw.HTTP.Port, Path: raw.HTTP.Path}
 	}
+	if len(config.Secrets) > 0 {
+		report("secrets: Compose's secrets are not supported; use x-clowder.secrets")
+	}
+	for _, name := range raw.Secrets {
+		if !names.ValidSecret(name) {
+			report("x-clowder.secrets: %q is not a secret name (lowercase letters, digits, - and _)", name)
+		}
+	}
+	if len(slices.Compact(slices.Sorted(slices.Values(raw.Secrets)))) != len(raw.Secrets) {
+		report("x-clowder.secrets: a secret is named twice")
+	}
+	for _, variable := range slices.Sorted(maps.Keys(raw.SecretEnv)) {
+		switch {
+		case !names.ValidVariable(variable):
+			report("x-clowder.secret_env: %q is not a variable name", variable)
+		case !names.ValidSecret(raw.SecretEnv[variable]):
+			report("x-clowder.secret_env: %q is not a secret name", raw.SecretEnv[variable])
+		}
+		if _, ok := config.Environment[variable]; ok {
+			report("x-clowder.secret_env: %s is set in environment as well", variable)
+		}
+	}
+	service.Secrets, service.SecretEnv = raw.Secrets, raw.SecretEnv
 	return service, problems
 }
 

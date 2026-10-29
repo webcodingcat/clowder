@@ -65,6 +65,16 @@ func TestDecryptReadsFilesOfTheRealSops(t *testing.T) {
 	}
 }
 
+func TestLeftInClearNamesTheValuesSopsKeptInClear(t *testing.T) {
+	inClear, err := LeftInClear(readTestdata(t, "plain.sops.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(inClear, ",") != "note_unencrypted" {
+		t.Errorf("left in clear: %v", inClear)
+	}
+}
+
 func TestEncryptThenDecryptGivesThePlaintextBack(t *testing.T) {
 	sealed, err := Encrypt(readTestdata(t, "plain.yaml"), []string{testRecipient}, time.Now())
 	if err != nil {

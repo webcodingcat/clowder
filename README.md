@@ -8,7 +8,13 @@ Status: under construction (phase 1a, see the roadmap in [DEVELOPING.md](DEVELOP
 What runs: on a host `clowderd check` and `clowderd init`, which starts the agent (with the
 containers' isolation and DNS resolver); from the CLI `clowder cluster
 bootstrap|apply|diff|status|schema`, `clowder host ...` and `clowder stack
-create|apply|delete|ps|logs`, which runs Compose stacks with their volumes on one host.
+create|apply|delete|ps|logs`, which runs Compose stacks with their volumes and secrets on
+one host.
+
+A stack's passwords live in a SOPS file next to its `clowder.yaml`; the CLI decrypts it
+with your age key, and the cluster keeps the values sealed. Who can read them: whoever can
+decrypt that file, every host of the cluster, and, until clowder has permissions, every user
+through a stack that `cluster.yaml` allows privileges (`stacks.privileged`).
 
 | Binary | For | Platforms |
 |---|---|---|
