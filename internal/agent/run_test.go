@@ -302,6 +302,13 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 		"volumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := clowder(t, "--cluster", dir, "stack", "apply", "shop", "-f", composeFile); err == nil ||
+		!strings.Contains(err.Error(), "register it first") {
+		t.Errorf("an apply before create: %v", err)
+	}
+	if _, err := clowder(t, "--cluster", dir, "stack", "create", "shop"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := clowder(t, "--cluster", dir, "stack", "apply", "shop", "-f", composeFile); err != nil {
 		t.Fatal(err)
 	}

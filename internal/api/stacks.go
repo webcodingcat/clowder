@@ -28,6 +28,7 @@ type StackApply struct {
 type StackInfo struct {
 	Name       string   `json:"name"`
 	Owner      string   `json:"owner"`
+	CreatedBy  string   `json:"created_by,omitempty"`
 	Generation int64    `json:"generation"`
 	Priority   int      `json:"priority"`
 	Status     string   `json:"status"`
@@ -49,6 +50,11 @@ type Containers interface {
 	Ps(ctx context.Context, stack string) ([]ContainerInfo, error)
 	// Logs writes the stack's logs to out; with follow, until ctx ends.
 	Logs(ctx context.Context, stack string, follow bool, out io.Writer) error
+}
+
+// createStack registers a stack for clowder stack apply.
+func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
+	s.write(w, r, state.KindCreateStack, state.CreateStack{Name: r.PathValue("name"), Owner: state.OwnerCLI})
 }
 
 // applyStack checks a stack against the cluster and commits it.
@@ -139,8 +145,8 @@ func (s *Server) stacks(w http.ResponseWriter, _ *http.Request) {
 
 func stackInfo(current *state.State, stack *state.Stack) StackInfo {
 	info := StackInfo{
-		Name: stack.Name, Owner: stack.Owner, Generation: stack.Generation, Priority: stack.Priority,
-		Status: string(stack.Status), Stopped: stack.Stopped,
+		Name: stack.Name, Owner: stack.Owner, CreatedBy: stack.CreatedBy, Generation: stack.Generation,
+		Priority: stack.Priority, Status: string(stack.Status), Stopped: stack.Stopped,
 	}
 	if stack.Host != nil {
 		if host, ok := current.Hosts[*stack.Host]; ok {
@@ -186,15 +192,18 @@ func stackOf(volumeID string) string {
 // written) when there is none.
 func (s *Server) stackHost(w http.ResponseWriter, name string) (state.HostID, bool) {
 	var host *state.HostID
-	var exists bool
+	var exists, created bool
 	s.config.Cluster.Read(func(current *state.State) {
 		if stack, ok := current.Stacks[name]; ok {
-			exists, host = true, stack.Host
+			exists, created, host = true, stack.Status == state.StackCreated, stack.Host
 		}
 	})
 	switch {
 	case !exists:
 		writeError(w, http.StatusNotFound, fmt.Errorf("no stack %s", name))
+		return 0, false
+	case created:
+		writeError(w, http.StatusConflict, fmt.Errorf("stack %s is created, but was never applied", name))
 		return 0, false
 	case host == nil:
 		writeError(w, http.StatusConflict, fmt.Errorf("stack %s is not placed on a host yet", name))

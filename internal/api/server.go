@@ -82,6 +82,7 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/cluster", pki.RoleUser, server.cluster)
 	server.handle("PUT /v1/cluster", pki.RoleUser, server.applyCluster)
 	server.handle("GET /v1/stacks", pki.RoleUser, server.stacks)
+	server.handle("POST /v1/stacks/{name}", pki.RoleUser, server.createStack)
 	server.handle("PUT /v1/stacks/{name}", pki.RoleUser, server.applyStack)
 	server.handle("DELETE /v1/stacks/{name}", pki.RoleUser, server.deleteStack)
 	server.handle("GET /v1/stacks/{name}/ps", pki.RoleUser, server.stackPs)
@@ -315,7 +316,7 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 var userKinds = map[string]bool{
 	state.KindApplyConfig: true, state.KindSetHostPhase: true,
 	state.KindAddUser: true, state.KindRemoveUser: true, state.KindRevoke: true,
-	state.KindPutStack: true, state.KindDeleteStack: true,
+	state.KindCreateStack: true, state.KindPutStack: true, state.KindDeleteStack: true,
 }
 
 // hostKinds are what a host reports about itself.

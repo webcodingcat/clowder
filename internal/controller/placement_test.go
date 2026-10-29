@@ -82,6 +82,7 @@ func TestAPendingStackIsPlacedWithItsVolumes(t *testing.T) {
 		Host: 0, Version: "1.0.0",
 		Pools: map[string]state.Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: 100 << 30}},
 	})
+	l.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Name: "shop", Owner: state.OwnerCLI})
 	l.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
 		Name: "shop", Owner: state.OwnerCLI,
 		Source: "services: {app: {image: x}}\nvolumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 1}\n",

@@ -8,7 +8,7 @@ Status: under construction (phase 1a, see the roadmap in [DEVELOPING.md](DEVELOP
 What runs: on a host `clowderd check` and `clowderd init`, which starts the agent (with the
 containers' isolation and DNS resolver); from the CLI `clowder cluster
 bootstrap|apply|diff|status|schema`, `clowder host ...` and `clowder stack
-apply|delete|ps|logs`, which runs Compose stacks with their volumes on one host.
+create|apply|delete|ps|logs`, which runs Compose stacks with their volumes on one host.
 
 | Binary | For | Platforms |
 |---|---|---|

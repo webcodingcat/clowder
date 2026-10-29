@@ -275,9 +275,38 @@ func TestApplyConfigCountsRevisionsAndReplacesTheSecrets(t *testing.T) {
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Secrets: secrets}, "name is required")
 }
 
+// createShop registers the stack shop of the CLI, as clowder stack create
+// does.
+func (c *cluster) createShop() {
+	c.t.Helper()
+	c.mustApply(KindCreateStack, UserActor("alice"), CreateStack{Name: "shop", Owner: OwnerCLI})
+}
+
+func TestAStackIsCreatedBeforeItIsApplied(t *testing.T) {
+	c := newCluster(t)
+	spec := "services: {}"
+	c.refuse(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec}, "register it first")
+	c.createShop()
+	c.refuse(KindCreateStack, UserActor("bob"), CreateStack{Name: "shop", Owner: OwnerCLI}, "exists already")
+	c.refuse(KindCreateStack, UserActor("alice"), CreateStack{Name: "Shop", Owner: OwnerCLI}, "stack name")
+	stack := c.state.Stacks["shop"]
+	if stack.Status != StackCreated || stack.CreatedBy != "alice" || stack.Generation != 0 {
+		t.Errorf("created stack %+v", stack)
+	}
+	host := HostID(0)
+	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Status: StackStarting, Host: &host},
+		"never applied")
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec})
+	if stack.Status != StackPending || stack.Generation != 1 {
+		t.Errorf("applied stack %+v", stack)
+	}
+	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop"})
+}
+
 func TestStacksBelongToTheirOwner(t *testing.T) {
 	c := newCluster(t)
 	spec := "services: {}"
+	c.createShop()
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec})
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec, Priority: 700})
 	stack := c.state.Stacks["shop"]
@@ -304,6 +333,7 @@ func TestStacksBelongToTheirOwner(t *testing.T) {
 
 func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 	c := newCluster(t)
+	c.createShop()
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
 	minor := 5
 	volume := Volume{
@@ -350,6 +380,7 @@ func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 
 func TestOperationsHoldTheirLocks(t *testing.T) {
 	c := newCluster(t)
+	c.createShop()
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
 	move := Operation{ID: "01A", Kind: "move-stack", Locks: []string{"stack/shop", "volume/shop/pgdata"}}
 	c.mustApply(KindStartOperation, LeaderActor, StartOperation{Operation: move})
@@ -445,6 +476,7 @@ func TestSnapshotsGiveTheSameState(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
 	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"})
+	c.createShop()
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {a: {image: x}}"})
 
 	var buffer bytes.Buffer

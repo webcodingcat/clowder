@@ -38,7 +38,33 @@ func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 	return nil
 }
 
-// PutStack creates a stack or replaces its Compose file; the agent of its
+// CreateStack registers a stack before its first apply.
+type CreateStack struct {
+	Name  string `json:"name"`
+	Owner string `json:"owner"`
+}
+
+func applyCreateStack(s *State, cmd Command, payload CreateStack) error {
+	switch {
+	case !names.ValidStack(payload.Name):
+		return fmt.Errorf("stack name %q: use lowercase letters, digits, - and _", payload.Name)
+	case payload.Owner == "":
+		return errors.New("the stack needs an owner")
+	}
+	if _, exists := s.Stacks[payload.Name]; exists {
+		return fmt.Errorf("stack %s exists already", payload.Name)
+	}
+	createdBy := cmd.Actor
+	if IsUserActor(cmd.Actor) {
+		createdBy = strings.TrimPrefix(cmd.Actor, userActorPrefix)
+	}
+	s.Stacks[payload.Name] = &Stack{
+		Name: payload.Name, Owner: payload.Owner, CreatedBy: createdBy, Status: StackCreated,
+	}
+	return nil
+}
+
+// PutStack replaces the Compose file of a registered stack; the agent of its
 // host applies the new generation.
 type PutStack struct {
 	Name     string `json:"name"`
@@ -62,11 +88,14 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 		return err
 	}
 	stack, exists := s.Stacks[payload.Name]
-	if !exists {
-		stack = &Stack{Name: payload.Name, Owner: payload.Owner, Status: StackPending}
-		s.Stacks[payload.Name] = stack
-	} else if stack.Owner != payload.Owner {
+	switch {
+	case !exists:
+		return fmt.Errorf("no stack %s; register it first (clowder stack create %s)", payload.Name, payload.Name)
+	case stack.Owner != payload.Owner:
 		return fmt.Errorf("stack %s belongs to %s, not to %s", stack.Name, stack.Owner, payload.Owner)
+	}
+	if stack.Status == StackCreated {
+		stack.Status = StackPending // the only way out of created
 	}
 	stack.Generation++
 	stack.Source = payload.Source
@@ -121,8 +150,11 @@ type SetStackStatus struct {
 
 func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) error {
 	stack, ok := s.Stacks[payload.Name]
-	if !ok {
+	switch {
+	case !ok:
 		return fmt.Errorf("no stack %s", payload.Name)
+	case stack.Status == StackCreated:
+		return fmt.Errorf("stack %s was never applied", payload.Name)
 	}
 	switch payload.Status {
 	case StackPending, StackStarting, StackRunning, StackWaitingForHost, StackStopped:

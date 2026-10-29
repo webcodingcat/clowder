@@ -56,6 +56,14 @@ func source(volumes string) string {
 	return "services:\n  app:\n    image: example/app\nvolumes:\n" + volumes
 }
 
+func TestAStackNeverAppliedIsNotPlaced(t *testing.T) {
+	current := cluster()
+	current.Stacks["shop"] = &state.Stack{Name: "shop", Status: state.StackCreated}
+	if placements, waiting := Plan(context.Background(), current); len(placements)+len(waiting) > 0 {
+		t.Errorf("placements %+v, waiting %+v", placements, waiting)
+	}
+}
+
 func TestAStackGoesWhereItsVolumesFit(t *testing.T) {
 	current := cluster()
 	current.Stacks["shop"] = &state.Stack{Name: "shop", Source: source(

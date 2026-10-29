@@ -122,10 +122,13 @@ type User struct {
 	Serials []string `json:"serials,omitempty"`
 }
 
-// Stack is an applied Compose stack.
+// Stack is a registered Compose stack.
 type Stack struct {
 	Name  string `json:"name"`
-	Owner string `json:"owner"` // OwnerCLI or GitOpsOwner(source)
+	Owner string `json:"owner"` // the channel: OwnerCLI or GitOpsOwner(source)
+	// CreatedBy is the actor that registered the stack: a user's name, or
+	// the actor itself for anyone else.
+	CreatedBy string `json:"created_by,omitempty"`
 	// Generation counts the applies of this stack.
 	Generation int64 `json:"generation"`
 	// Source is the stack's Compose file as the CLI checked and sent it
@@ -153,6 +156,9 @@ type StackStatus string
 
 // The states of a stack.
 const (
+	// StackCreated is registered and never applied: it has no Source, and
+	// nothing places or runs it until put-stack moves it to pending.
+	StackCreated        StackStatus = "created"
 	StackPending        StackStatus = "pending"
 	StackStarting       StackStatus = "starting"
 	StackRunning        StackStatus = "running"

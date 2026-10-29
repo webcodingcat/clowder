@@ -17,8 +17,28 @@ import (
 
 func newStack(g *globals) *cobra.Command {
 	stack := &cobra.Command{Use: "stack", Short: "The Compose stacks of the cluster"}
-	stack.AddCommand(newStackApply(g), newStackDelete(g), newStackPs(g), newStackLogs(g))
+	stack.AddCommand(newStackCreate(g), newStackApply(g), newStackDelete(g), newStackPs(g), newStackLogs(g))
 	return stack
+}
+
+func newStackCreate(g *globals) *cobra.Command {
+	return &cobra.Command{
+		Use:   "create <name>",
+		Short: "Register a stack in the cluster before its first apply",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			client, _, err := g.connect()
+			if err != nil {
+				return err
+			}
+			if _, err := client.Post(cmd.Context(), "/v1/stacks/"+url.PathEscape(name), nil); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s created; clowder stack apply %s runs it\n", name, name)
+			return err
+		},
+	}
 }
 
 func newStackApply(g *globals) *cobra.Command {
@@ -124,10 +144,10 @@ func newStackPs(g *globals) *cobra.Command {
 
 func printStacks(out io.Writer, stacks []api.StackInfo) error {
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(table, "NAME\tSTATUS\tHOST\tPRIORITY\tGENERATION\tSTOPPED") // tabwriter reports errors on Flush
+	_, _ = fmt.Fprintln(table, "NAME\tSTATUS\tHOST\tPRIORITY\tGENERATION\tSTOPPED\tCREATED BY") // tabwriter reports errors on Flush
 	for _, stack := range stacks {
-		_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%d\t%d\t%s\n", stack.Name, stack.Status, stack.Host,
-			stack.Priority, stack.Generation, strings.Join(stack.Stopped, ","))
+		_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%d\t%d\t%s\t%s\n", stack.Name, stack.Status, stack.Host,
+			stack.Priority, stack.Generation, strings.Join(stack.Stopped, ","), stack.CreatedBy)
 	}
 	return table.Flush()
 }

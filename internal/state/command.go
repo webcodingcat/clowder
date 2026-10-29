@@ -37,6 +37,7 @@ const (
 	KindAddUser          = "add-user"
 	KindRemoveUser       = "remove-user"
 	KindRevoke           = "revoke"
+	KindCreateStack      = "create-stack"
 	KindPutStack         = "put-stack"
 	KindDeleteStack      = "delete-stack"
 	KindSetStackStatus   = "set-stack-status"
@@ -99,6 +100,7 @@ var handlers = map[string]handler{
 	KindAddUser:          decoded(applyAddUser),
 	KindRemoveUser:       decoded(applyRemoveUser),
 	KindRevoke:           decoded(applyRevoke),
+	KindCreateStack:      decoded(applyCreateStack),
 	KindPutStack:         decoded(applyPutStack),
 	KindDeleteStack:      decoded(applyDeleteStack),
 	KindSetStackStatus:   decoded(applySetStackStatus),

@@ -42,6 +42,9 @@ func Plan(ctx context.Context, current *state.State) ([]Placement, []Waiting) {
 	var waiting []Waiting
 	for _, name := range slices.Sorted(maps.Keys(current.Stacks)) {
 		stack := current.Stacks[name]
+		if stack.Status == state.StackCreated {
+			continue // never applied: nothing to place
+		}
 		parsed, err := compose.Parse(ctx, name, []byte(stack.Source))
 		if err != nil {
 			waiting = append(waiting, Waiting{Stack: name, Reason: err.Error()})

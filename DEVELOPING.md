@@ -59,10 +59,12 @@ Known gaps to close in phase 2, harmless on a single host:
 
 ## A stack's way
 
-1. `clowder stack apply shop -f compose.yaml` loads and checks the files on the user's
-   machine and sends one self-contained Compose file (`PUT /v1/stacks/shop`).
-2. The agent that takes the call checks it against the cluster and commits `put-stack`
-   through the leader: the stack is `pending`.
+1. `clowder stack create shop` registers the name (`create-stack`): the stack is `created`,
+   and nothing places or runs it yet.
+2. `clowder stack apply shop -f compose.yaml` loads and checks the files on the user's
+   machine and sends one self-contained Compose file (`PUT /v1/stacks/shop`). The agent that
+   takes the call checks it against the cluster and commits `put-stack` through the leader:
+   the stack is `pending`.
 3. The leader's placement picks a host and a pool for each volume, commits the volumes
    (`put-volume`) and the stack's host (`set-stack-status starting`).
 4. That host's agent makes the volumes (LV, DRBD, ext4, mount), renders the Compose file,
@@ -190,12 +192,16 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   what it alone can tell: a host reports only about itself and never moves another host,
   and about a stack only while it runs on that host, without moving it.
 - In use so far: `bootstrap` (init), `apply-config`, `add-user` (the first user),
-  `set-host-phase` (host actions), `put-stack` and `delete-stack` (the user; with
-  `WithVolumes` the volumes go in the same command, so the placement cannot put one back
+  `set-host-phase` (host actions), `create-stack`, `put-stack` and `delete-stack` (the user;
+  with `WithVolumes` the volumes go in the same command, so the placement cannot put one back
   in between), `put-volume` and `set-stack-status` (placement, the stack's host),
   `report-host` (each agent). The other kinds (`delete-volume`, hosts joining, operations,
   users beyond the first) and the fields they fill are there for the next steps; they are
   tested, but nothing sends them yet.
+- A stack is registered before it is applied: `create-stack` makes it `created` (no Source,
+  `CreatedBy` from the actor, `Owner` the channel: cli or gitops). Only `put-stack` moves it
+  on, to `pending`; nothing places a `created` stack or sets its status. `put-stack` changes
+  registered stacks only.
 - Host phases (`phaseChanges`; L = the leader, on its own or for a user; H = the host itself):
 
   ```
@@ -286,7 +292,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - The CLI finds the cluster directory (`--cluster`, `$CLOWDER_CLUSTER`, the working directory)
   and the user (`--user`, `$CLOWDER_USER`, the only credentials file), then talks to the
   cluster with the user's certificate: `cluster status|apply|diff|schema`, `host list`,
-  `host drain|undrain|remove|enable`, `stack apply|delete|ps|logs`.
+  `host drain|undrain|remove|enable`, `stack create|apply|delete|ps|logs`.
 - `stack apply` loads the Compose files on the user's machine (`compose.Load`, all problems
   at once) and sends the merged, self-contained file (`compose.Stack.Source`); the agent
   parses it again and checks it against the cluster (storage classes). `stack delete` refuses

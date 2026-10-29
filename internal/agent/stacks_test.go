@@ -79,6 +79,7 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 		},
 		Secrets: map[string]state.Sealed{"token": state.Sealed("t")},
 	})
+	cluster.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Name: "shop", Owner: state.OwnerCLI})
 	cluster.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
 		Name: "shop", Owner: state.OwnerCLI,
 		Source: "services: {app: {image: nginx, volumes: [db:/data]}}\n" +
