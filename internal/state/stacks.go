@@ -169,6 +169,9 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) error {
 	if err := s.checkUnlocked(volumeLock(volume.ID), payload.Operation); err != nil {
 		return err
 	}
+	if err := checkVolume(volume); err != nil {
+		return err
+	}
 	if old, ok := s.Volumes[volume.ID]; ok && volume.Generation < old.Generation {
 		return fmt.Errorf("volume %s: generation %d is older than %d", volume.ID, volume.Generation, old.Generation)
 	}
@@ -196,6 +199,34 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) error {
 	}
 	s.Volumes[volume.ID] = &volume
 	return nil
+}
+
+// checkVolume holds what a volume's record must be on its own: the state is
+// the last place to catch a wrong one.
+func checkVolume(volume Volume) error {
+	copies := 0
+	for _, placement := range volume.Placements {
+		if !placement.Tiebreaker {
+			copies++
+		}
+	}
+	switch {
+	case volume.Replicas < 0 || volume.Replicas > 3:
+		return fmt.Errorf("volume %s: %d replicas, not 0 to 3", volume.ID, volume.Replicas)
+	case volume.Class == "" || volume.SizeBytes <= 0:
+		return fmt.Errorf("volume %s needs a class and a size", volume.ID)
+	case copies > max(volume.Replicas, 1):
+		// replicas 0 is one plain LV on one host
+		return fmt.Errorf("volume %s: %d copies for %d replicas", volume.ID, copies, volume.Replicas)
+	case (volume.Replicas == 0) != (volume.Minor == nil):
+		return fmt.Errorf("volume %s: a DRBD minor exactly when it has replicas", volume.ID)
+	}
+	switch volume.Status {
+	case VolumeOK, VolumeDegraded, VolumeResyncing, VolumeRestorePending:
+		return nil
+	default:
+		return fmt.Errorf("volume %s: unknown status %q", volume.ID, volume.Status)
+	}
 }
 
 // DeleteVolume removes a volume's record.

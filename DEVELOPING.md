@@ -46,6 +46,25 @@ clowder is built in phases; each ends with live tests on HLab.
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
+Known gap until phase 2: Raft and the forwarding of writes run on the node address, which
+other hosts reach only through the WireGuard mesh. A single host needs neither.
+
+## Words
+
+| Word | Means |
+|---|---|
+| underlay | the network the hosts share at the hoster (private network or public addresses) |
+| node address | `10.77.0.<ID + 1>`, a host's address in the overlay; on `clowder0`, reached by other hosts through WireGuard |
+| Floating IP | the cluster's one public address; the hoster routes it to the ingress host |
+| leader | the Raft leader among the agents; it decides (placement, failover) and commits every write |
+| voter | a host that takes part in Raft's elections; others follow the log only |
+| quorum | a majority of the voters (Raft) or of a volume's copies (DRBD); without it, nothing changes |
+| fencing | powering a failed host off through the hoster's API before its stacks start elsewhere |
+| tiebreaker | a diskless DRBD member that gives a volume with two copies its third vote |
+| active, passive | a host that runs stacks; a second host that waits until there are three |
+| actor | who sent a command: `leader`, `host/<id>` or `user/<name>` |
+| sealed | encrypted with the cluster's data key before it goes into the state |
+
 ## The two binaries
 
 | Binary | Package | Runs on | Does |
@@ -63,7 +82,8 @@ The package layout is planned for the whole of v1; packages appear as the phases
 Packages in *italics* do not exist yet.
 
 - **Portable**: `cli`, `api`, `clusterdir`, `sopsage`, `pki`, `compose`, `units`,
-  `buildinfo`, `logging`. The CLI may import only these. `.golangci.yml` (depguard, rule
+  `buildinfo`, `logging`, `atomicfile` (files written whole or not at all). The CLI may import
+  only these. `.golangci.yml` (depguard, rule
   `cli-portable`) refuses direct imports of the Linux-only packages in `cmd/clowder` and
   `internal/cli`; the cross build for Windows and macOS in `bin/dev build` catches indirect
   ones.
@@ -132,7 +152,11 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   and an actor (`leader`, `host/<id>`, `user/<name>`) that the API takes from the caller's
   certificate. Which actor may send which kind is the API's check; the state checks only
   what it alone can tell: a host reports only about itself and never moves another host.
-- Host phases (`phaseChanges`, L = the leader, H = the host itself):
+- In use so far: `bootstrap` (init), `apply-config`, `add-user` (the first user),
+  `set-host-phase` (host actions), `report-version`. The other kinds (hosts joining, stacks,
+  volumes, operations, users beyond the first) and the fields they fill are there for the
+  next steps; they are tested, but nothing sends them yet.
+- Host phases (`phaseChanges`; L = the leader, on its own or for a user; H = the host itself):
 
   ```
   joining ─L→ passive ─L→ active ⇄L draining
@@ -146,8 +170,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - Versions: `CommandVersion` and `SnapshotVersion`, from 1; this release reads its own and
   the one before. Payload fields are added, not changed; unknown fields are ignored. The
   json tags of `clusterdir.Config` are part of this format.
-- Operations hold locks (`stack/<name>`, `volume/<id>`); a change to a locked stack or volume
-  is refused with a `LockedError`. Only failover takes locks over (`TakeOver`).
+- Operations hold locks (`stack/<name>`, `volume/<stack>/<volume>`); a change to a locked
+  stack or volume is refused with a `LockedError`, unless the holding operation makes it.
+  Only failover takes locks over (`TakeOver`).
+- Invariants the state holds itself, as the last place to catch a wrong command: one first
+  user, valid names, volumes with 0 to 3 replicas and a DRBD minor exactly when replicated,
+  one copy per host, a stack deleted only without volumes, a removed host's certificate
+  revoked. `time.Now` is banned from the package by lint (forbidigo).
 - Secrets arrive sealed (`Sealed`, age for the data key); `state` never sees them in clear.
 - Snapshots are gzip-compressed JSON (`WriteSnapshot`, `ReadSnapshot`). The audit keeps the
   last 10 000 commands, finished operations the last 100.
@@ -193,8 +222,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   leader or forwards to the leader's `/v1/internal/propose`. A write answers with its Raft
   index (`X-Clowder-Index`); the client sends it on with later reads (`X-Clowder-Min-Index`),
   and the agent waits until it has applied it.
-- The actor of a command is the caller of the first agent. Hosts are trusted with the users
-  they forward for, but a host speaks only for itself.
+- The actor of a command is the caller of the first agent; its time (`At`) is the leader's
+  clock. `/v1/internal/propose` takes two things only: a user's command that a follower
+  forwards (the kinds the user routes make), and a host's report about itself (its version,
+  its phase, a step done). The leader's own commands (operations, placements, new hosts) are
+  made on the leader and never come in from outside; a host never speaks for another host or
+  for the leader. A forwarding host names the user, since the user's certificate ended at the
+  first agent.
 - A refusal of the state is HTTP 409 with its reason; a write that did not commit is 503.
 - `api.HostActions` lists the user's host actions with the phases they start from; the server
   checks them and the CLI makes its subcommands from them.

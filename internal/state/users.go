@@ -11,6 +11,9 @@ import (
 type AddUser struct {
 	Name   string `json:"name"`
 	Serial string `json:"serial"`
+	// First is the bootstrap's user, who may only come into a cluster
+	// without users: two bootstraps at once cannot both get in.
+	First bool `json:"first,omitempty"`
 }
 
 func applyAddUser(s *State, _ Command, payload AddUser) error {
@@ -21,6 +24,8 @@ func applyAddUser(s *State, _ Command, payload AddUser) error {
 		return errors.New("the certificate has no serial")
 	case s.serialInUse(payload.Serial):
 		return fmt.Errorf("serial %s is used already", payload.Serial)
+	case payload.First && len(s.Users) > 0:
+		return errors.New("the cluster has its first user already; users add others")
 	}
 	user, ok := s.Users[payload.Name]
 	if !ok {

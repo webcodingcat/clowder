@@ -168,20 +168,31 @@ func newDiff(g *globals) *cobra.Command {
 			if err := client.Get(cmd.Context(), "/v1/cluster", &applied); err != nil {
 				return err
 			}
+			out := cmd.OutOrStdout()
+			if hash == applied.Hash {
+				_, err = fmt.Fprintf(out, "nothing to apply (revision %d)\n", applied.Revision)
+				return err
+			}
 			changed, err := changedFields(applied.Spec, local.Spec)
 			if err != nil {
 				return err
 			}
-			out := cmd.OutOrStdout()
-			switch {
-			case hash == applied.Hash:
-				_, err = fmt.Fprintf(out, "nothing to apply (revision %d)\n", applied.Revision)
-			case len(changed) > 0:
-				_, err = fmt.Fprintf(out, "cluster.yaml differs in: %v\n", changed)
-			default:
-				_, err = fmt.Fprintln(out, "the secrets differ (secrets.sops.yaml)")
+			if len(changed) > 0 {
+				if _, err := fmt.Fprintf(out, "cluster.yaml differs in: %v\n", changed); err != nil {
+					return err
+				}
 			}
-			return err
+			// the applied cluster.yaml with the local secrets: if that hash
+			// differs too, the secrets changed
+			secretsOnly := local
+			secretsOnly.Spec = applied.Spec
+			if appliedSpecHash, err := secretsOnly.Hash(); err != nil {
+				return err
+			} else if appliedSpecHash != applied.Hash {
+				_, err = fmt.Fprintln(out, "the secrets differ (secrets.sops.yaml)")
+				return err
+			}
+			return nil
 		},
 	}
 }

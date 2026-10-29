@@ -63,9 +63,17 @@ func HostActor(id HostID) string {
 	return hostActorPrefix + strconv.Itoa(int(id))
 }
 
+// userActorPrefix starts the actor of every user.
+const userActorPrefix = "user/"
+
+// IsUserActor tells whether an actor is a user of the CLI.
+func IsUserActor(actor string) bool {
+	return strings.HasPrefix(actor, userActorPrefix)
+}
+
 // UserActor is a user of the CLI, as their certificate names them.
 func UserActor(name string) string {
-	return "user/" + name
+	return userActorPrefix + name
 }
 
 // NewCommand wraps a payload into a command of the current version.

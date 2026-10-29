@@ -21,7 +21,7 @@ func HostClientTLS(certificate tls.Certificate, ca *x509.Certificate, revoked fu
 	}
 	return &tls.Config{
 		Certificates:       certificates,
-		InsecureSkipVerify: true, //nolint:gosec // VerifyConnection checks the chain instead of the name
+		InsecureSkipVerify: true, // VerifyConnection checks the chain instead of the name
 		VerifyConnection:   verifyHost(ca, revoked),
 		MinVersion:         tls.VersionTLS13,
 	}

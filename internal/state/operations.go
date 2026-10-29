@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -45,6 +46,19 @@ const keptFinished = 100
 func stackLock(name string) string { return "stack/" + name }
 
 func volumeLock(id string) string { return "volume/" + id }
+
+// validLock accepts what stackLock and volumeLock make: a lock that names
+// nothing would never conflict, and so protect nothing.
+func validLock(lock string) bool {
+	if name, ok := strings.CutPrefix(lock, "stack/"); ok {
+		return stackName.MatchString(name)
+	}
+	if id, ok := strings.CutPrefix(lock, "volume/"); ok {
+		stack, volume, ok := strings.Cut(id, "/")
+		return ok && stackName.MatchString(stack) && volume != ""
+	}
+	return false
+}
 
 // LockedError says which operation holds a lock. Backups wait for it,
 // commands from users are refused with it.
@@ -87,6 +101,12 @@ func applyStartOperation(s *State, _ Command, payload StartOperation) error {
 	}
 	if err := s.checkLiveHost(operation.Owner); err != nil {
 		return err
+	}
+	for _, lock := range operation.Locks {
+		if !validLock(lock) {
+			return fmt.Errorf("operation %s: lock %q is neither stack/<name> nor volume/<stack>/<volume>",
+				operation.ID, lock)
+		}
 	}
 	holders := map[string]bool{}
 	for _, lock := range operation.Locks {
@@ -177,7 +197,7 @@ func (s *State) finish(id string, outcome OpState, message string) {
 	}
 	var finished []string
 	for _, other := range slices.Sorted(maps.Keys(s.Operations)) {
-		if state := s.Operations[other].State; state == OpDone || state == OpFailed {
+		if outcome := s.Operations[other].State; outcome == OpDone || outcome == OpFailed {
 			finished = append(finished, other)
 		}
 	}

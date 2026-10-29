@@ -212,6 +212,12 @@ func TestOnlyAHostReportsItsVersion(t *testing.T) {
 	}
 }
 
+func TestOnlyOneFirstUser(t *testing.T) {
+	c := newCluster(t)
+	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1", First: true})
+	c.refuse(KindAddUser, LeaderActor, AddUser{Name: "bob", Serial: "b1", First: true}, "first user already")
+}
+
 func TestRemovingAUserRevokesTheirCertificates(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"})
@@ -287,8 +293,8 @@ func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Spec: json.RawMessage(`{}`)})
 	minor := 5
 	volume := Volume{
-		ID: "shop/pgdata", Generation: 1, Class: "fast", Replicas: 1, Minor: &minor,
-		Placements: []Placement{{Host: 0, Class: "fast"}},
+		ID: "shop/pgdata", Generation: 1, Class: "fast", SizeBytes: 1 << 30, Replicas: 1, Minor: &minor,
+		Placements: []Placement{{Host: 0, Class: "fast"}}, Status: VolumeOK,
 	}
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: volume})
 
@@ -305,8 +311,21 @@ func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 	other.Minor = &tooHigh
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: other}, "not from 0 to 999")
 	twice := volume
+	twice.Replicas = 2
 	twice.Placements = []Placement{{Host: 0, Class: "fast"}, {Host: 0, Class: "fast"}}
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: twice}, "two copies on host 0")
+	tooMany := volume
+	tooMany.Replicas = 4
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: tooMany}, "not 0 to 3")
+	noSize := volume
+	noSize.SizeBytes = 0
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: noSize}, "needs a class and a size")
+	plain := volume
+	plain.Replicas = 0
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: plain}, "a DRBD minor exactly when")
+	strange := volume
+	strange.Status = "melting"
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: strange}, "unknown status")
 
 	c.refuse(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop"}, "still has volume shop/pgdata")
 	c.mustApply(KindDeleteVolume, UserActor("alice"), DeleteVolume{ID: "shop/pgdata"})
@@ -347,6 +366,15 @@ func TestOperationsHoldTheirLocks(t *testing.T) {
 	c.mustApply(KindStartOperation, LeaderActor, StartOperation{Operation: backup})
 }
 
+func TestLocksNameAStackOrAVolume(t *testing.T) {
+	c := newCluster(t)
+	for _, lock := range []string{"x", "stack/", "volume/shop", "volume/Shop/data"} {
+		c.refuse(KindStartOperation, LeaderActor, StartOperation{Operation: Operation{
+			ID: "01A", Kind: "backup", Locks: []string{lock},
+		}}, "neither stack")
+	}
+}
+
 func TestFailoverTakesOverLocks(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindStartOperation, LeaderActor, StartOperation{Operation: Operation{
@@ -370,7 +398,9 @@ func TestOnlyTheLastFinishedOperationsAreKept(t *testing.T) {
 	c := newCluster(t)
 	for number := range keptFinished + 5 {
 		id := string(rune('A'+number/26)) + string(rune('A'+number%26))
-		c.mustApply(KindStartOperation, LeaderActor, StartOperation{Operation: Operation{ID: id, Kind: "backup", Locks: []string{"x"}}})
+		c.mustApply(KindStartOperation, LeaderActor, StartOperation{Operation: Operation{
+			ID: id, Kind: "backup", Locks: []string{"volume/shop/pgdata"},
+		}})
 		c.mustApply(KindFinishOperation, LeaderActor, FinishOperation{ID: id})
 	}
 	if len(c.state.Operations) != keptFinished {

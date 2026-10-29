@@ -8,12 +8,20 @@ import (
 	"net/netip"
 	"os/exec"
 	"strings"
+
+	"github.com/webcodingcat/clowder/internal/state"
 )
 
 // Interface is the dummy interface that carries the node address, so the
 // address is there even on a host without peers (one host, or all peers
 // down): Raft, the API and published ports bind to it.
 const Interface = "clowder0"
+
+// NodeAddress is the node address of a host: 10.77.0.<ID + 1>, in the
+// overlay 10.77.0.0/24 that WireGuard connects (state.MaxHosts fits in it).
+func NodeAddress(id state.HostID) netip.Addr {
+	return netip.AddrFrom4([4]byte{10, 77, 0, byte(id + 1)})
+}
 
 // EnsureNodeAddress creates clowder0 if it is missing, brings it up and
 // gives it the node address. It does only what is missing, so the agent runs

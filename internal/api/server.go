@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/buildinfo"
@@ -245,12 +246,25 @@ func (s *Server) hostAction(w http.ResponseWriter, r *http.Request) {
 			phase = host.Phase
 		}
 	})
-	if len(action.From) > 0 && phase != "" && !slices.Contains(action.From, phase) {
+	switch {
+	case phase == "":
+		writeError(w, http.StatusNotFound, fmt.Errorf("no host %d", id))
+		return
+	case len(action.From) > 0 && !slices.Contains(action.From, phase):
 		writeError(w, http.StatusConflict, fmt.Errorf("host %d is %s; %s works on a host that is %s",
-			id, phase, action.Name, action.From[0]))
+			id, phase, action.Name, phaseList(action.From)))
 		return
 	}
 	s.write(w, r, state.KindSetHostPhase, state.SetHostPhase{Host: id, Phase: action.To})
+}
+
+// phaseList reads "active", "active or draining", ...
+func phaseList(phases []state.HostPhase) string {
+	names := make([]string, len(phases))
+	for index, phase := range phases {
+		names[index] = string(phase)
+	}
+	return strings.Join(names, " or ")
 }
 
 func (s *Server) users(w http.ResponseWriter, _ *http.Request) {
@@ -284,9 +298,25 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, entries)
 }
 
-// internalPropose is where a follower forwards a write and where an agent
-// proposes what it reports itself. Hosts are trusted with the actor of a
-// user they forward for, but a host speaks only for itself.
+// userKinds are the commands a follower may forward for a user: those the
+// user routes of the API make.
+var userKinds = map[string]bool{
+	state.KindApplyConfig: true, state.KindSetHostPhase: true,
+	state.KindAddUser: true, state.KindRemoveUser: true, state.KindRevoke: true,
+	state.KindPutStack: true, state.KindDeleteStack: true,
+}
+
+// hostKinds are what a host reports about itself.
+var hostKinds = map[string]bool{
+	state.KindReportVersion: true, state.KindSetHostPhase: true, state.KindAdvanceOperation: true,
+}
+
+// internalPropose is where a follower forwards a user's write and where an
+// agent proposes what it reports about itself. Nothing else comes in from
+// outside: the leader's own commands (operations, placements, new hosts)
+// are made on the leader. A host may name the user it forwards for, since the
+// user's certificate ended at the first agent; it may never speak for another
+// host or for the leader.
 func (s *Server) internalPropose(w http.ResponseWriter, r *http.Request) {
 	var cmd state.Command
 	if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
@@ -294,15 +324,16 @@ func (s *Server) internalPropose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	caller := actorOf(identityOf(r))
-	if state.IsHostActor(cmd.Actor) && cmd.Actor != caller {
-		writeError(w, http.StatusForbidden, fmt.Errorf("%s may not speak for %s", caller, cmd.Actor))
+	allowed := (state.IsUserActor(cmd.Actor) && userKinds[cmd.Kind]) ||
+		(cmd.Actor == caller && hostKinds[cmd.Kind])
+	if !allowed {
+		writeError(w, http.StatusForbidden, fmt.Errorf("%s may not send %s as %s", caller, cmd.Kind, cmd.Actor))
 		return
 	}
-	if !s.config.Cluster.IsLeader() {
-		writeError(w, http.StatusServiceUnavailable, errors.New("not the leader; try again"))
-		return
+	// no second hop: if the lead moved meanwhile, the caller asks again
+	if index, ok := s.commit(w, r, cmd, s.proposeHere); ok {
+		writeJSON(w, http.StatusOK, Written{Index: index})
 	}
-	s.answerWrite(w, r, cmd)
 }
 
 // write turns a request into a command and commits it.
@@ -312,23 +343,19 @@ func (s *Server) write(w http.ResponseWriter, r *http.Request, kind string, payl
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.answerWrite(w, r, cmd)
-}
-
-// answerWrite commits a command and answers with its index.
-func (s *Server) answerWrite(w http.ResponseWriter, r *http.Request, cmd state.Command) {
-	if index, ok := s.commit(w, r, cmd); ok {
+	if index, ok := s.commit(w, r, cmd, s.propose); ok {
 		writeJSON(w, http.StatusOK, Written{Index: index})
 	}
 }
 
-// commit commits a command, here as the leader or through it. On success it
-// sets the index header and leaves the answer to the caller; on failure it
-// answers with the error.
-func (s *Server) commit(w http.ResponseWriter, r *http.Request, cmd state.Command) (uint64, bool) {
+// commit commits a command with propose. On success it sets the index header
+// and leaves the answer to the caller; on failure it answers with the error.
+func (s *Server) commit(w http.ResponseWriter, r *http.Request, cmd state.Command,
+	propose func(context.Context, state.Command) (uint64, error),
+) (uint64, bool) {
 	ctx, cancel := context.WithTimeout(r.Context(), waitTimeout)
 	defer cancel()
-	index, err := s.propose(ctx, cmd)
+	index, err := propose(ctx, cmd)
 	var refused *state.Refused
 	var statusError *StatusError
 	switch {
@@ -345,11 +372,21 @@ func (s *Server) commit(w http.ResponseWriter, r *http.Request, cmd state.Comman
 	return 0, false
 }
 
+// proposeHere commits a command on this agent, which must lead. The command
+// takes the leader's clock (Command.At), whichever agent took the request.
+func (s *Server) proposeHere(ctx context.Context, cmd state.Command) (uint64, error) {
+	if !s.config.Cluster.IsLeader() {
+		return 0, errors.New("not the leader; try again")
+	}
+	cmd.At = time.Now().UTC()
+	return s.config.Cluster.Propose(ctx, cmd)
+}
+
 // propose commits a command: directly on the leader, else by forwarding it
 // to the leader's internal endpoint.
 func (s *Server) propose(ctx context.Context, cmd state.Command) (uint64, error) {
 	if s.config.Cluster.IsLeader() {
-		return s.config.Cluster.Propose(ctx, cmd)
+		return s.proposeHere(ctx, cmd)
 	}
 	id, ok := s.config.Cluster.Leader()
 	if !ok {

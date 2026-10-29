@@ -76,7 +76,7 @@ func Bootstrap(ctx context.Context, seed string, bootstrapKey []byte, user strin
 ) (caPEM, certificatePEM string, err error) {
 	// first contact: nothing to check the agent against yet; the proof does it
 	unchecked := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // the trust proof below decides
+		InsecureSkipVerify: true, // the trust proof below decides
 		MinVersion:         tls.VersionTLS13,
 	}}}
 	url := "https://" + Address(seed) + "/v1/bootstrap"
@@ -169,6 +169,7 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	// the state decides (AddUser.First); this only spares issuing a certificate
 	var hasUsers bool
 	s.config.Cluster.Read(func(current *state.State) { hasUsers = len(current.Users) > 0 })
 	if hasUsers {
@@ -195,12 +196,12 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cmd, err := state.NewCommand(state.KindAddUser, time.Now(), state.UserActor(request.User),
-		state.AddUser{Name: request.User, Serial: pki.Serial(certificate)})
+		state.AddUser{Name: request.User, Serial: pki.Serial(certificate), First: true})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if _, ok := s.commit(w, r, cmd); ok {
+	if _, ok := s.commit(w, r, cmd, s.propose); ok {
 		writeJSON(w, http.StatusOK, BootstrapAnswer{Certificate: string(certificatePEM)})
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/buildinfo"
+	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/raftnode"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -63,7 +64,8 @@ func Run(ctx context.Context, files Files, ensureNodeAddress func(context.Contex
 	server := api.NewServer(api.ServerConfig{
 		Cluster: node, CA: credentials.ca, Certificate: credentials.certificate,
 		APIAddress: func(id state.HostID) string {
-			return net.JoinHostPort(NodeAddress(id).String(), strconv.Itoa(host.APIPort))
+			// every host has the same API port; tests on 127.0.0.1 have one host
+			return net.JoinHostPort(network.NodeAddress(id).String(), strconv.Itoa(host.APIPort))
 		},
 		Keys: credentials.dataKey, Version: buildinfo.Version, Logger: logger,
 	})

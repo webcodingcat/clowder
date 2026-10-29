@@ -278,7 +278,7 @@ func TestCallersAreCheckedOnEveryCall(t *testing.T) {
 
 	// without a certificate the TLS handshake works, the route does not
 	plain := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // the test checks the server's refusal only
+		InsecureSkipVerify: true, // the test checks the server's refusal only
 		MinVersion:         tls.VersionTLS13,
 	}}}
 	response, err := plain.Get(cluster.servers[0].URL + "/v1/status")
@@ -297,24 +297,61 @@ func TestCallersAreCheckedOnEveryCall(t *testing.T) {
 	}
 }
 
-func TestAHostSpeaksOnlyForItself(t *testing.T) {
+func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 	cluster := newTestCluster(t)
 	host1 := cluster.client(cluster.hostCertificate(1), testVersion, 0)
-	cmd, err := state.NewCommand(state.KindReportVersion, time.Now(), state.HostActor(0),
-		state.ReportVersion{Host: 0, Version: "9.9.9"})
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name    string
+		kind    string
+		actor   string
+		payload any
+		allowed bool
+	}{
+		{
+			"its own version", state.KindReportVersion, state.HostActor(1),
+			state.ReportVersion{Host: 1, Version: testVersion},
+			true,
+		},
+		{
+			"a user's write it forwards", state.KindAddUser, state.UserActor("alice"),
+			state.AddUser{Name: "alice", Serial: "a2"},
+			true,
+		},
+		{
+			"another host's version", state.KindReportVersion, state.HostActor(0),
+			state.ReportVersion{Host: 0, Version: "9.9.9"},
+			false,
+		},
+		{
+			"a command as the leader", state.KindAddUser, state.LeaderActor,
+			state.AddUser{Name: "mallory", Serial: "m1"},
+			false,
+		},
+		{
+			"a user's write as itself", state.KindAddUser, state.HostActor(1),
+			state.AddUser{Name: "mallory", Serial: "m2"},
+			false,
+		},
+		{
+			"the leader's own work for a user", state.KindStartOperation, state.UserActor("alice"),
+			state.StartOperation{Operation: state.Operation{ID: "01A", Kind: "backup", Locks: []string{"x"}}},
+			false,
+		},
 	}
-	if _, err := host1.Post(context.Background(), "/v1/internal/propose", cmd); statusOf(err) != http.StatusForbidden {
-		t.Errorf("want 403, got %v", err)
-	}
-	own, err := state.NewCommand(state.KindReportVersion, time.Now(), state.HostActor(1),
-		state.ReportVersion{Host: 1, Version: testVersion})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := host1.Post(context.Background(), "/v1/internal/propose", own); err != nil {
-		t.Errorf("a host reporting its own version: %v", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd, err := state.NewCommand(test.kind, time.Now(), test.actor, test.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = host1.Post(context.Background(), "/v1/internal/propose", cmd)
+			switch {
+			case test.allowed && err != nil:
+				t.Errorf("refused: %v", err)
+			case !test.allowed && statusOf(err) != http.StatusForbidden:
+				t.Errorf("want 403, got %v", err)
+			}
+		})
 	}
 }
 

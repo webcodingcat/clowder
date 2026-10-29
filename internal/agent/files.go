@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/datakey"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -51,11 +52,6 @@ type Host struct {
 	APIPort     int          `json:"api_port"`
 }
 
-// NodeAddress is the node address of a host: 10.77.0.<ID + 1>.
-func NodeAddress(id state.HostID) netip.Addr {
-	return netip.AddrFrom4([4]byte{10, 77, 0, byte(id + 1)})
-}
-
 // raftAddress is where the host's Raft member listens and is reached.
 func (h Host) raftAddress() string {
 	return net.JoinHostPort(h.NodeAddress.String(), strconv.Itoa(h.RaftPort))
@@ -88,7 +84,7 @@ func (f Files) writeHost(host Host) error {
 	if err != nil {
 		return err
 	}
-	return writePrivate(f.hostFile(), append(content, '\n'))
+	return atomicfile.Write(f.hostFile(), append(content, '\n'), 0o600)
 }
 
 // credentials are what the host proves itself with.
@@ -116,15 +112,4 @@ func (f Files) readCredentials() (credentials, error) {
 		return credentials{}, err
 	}
 	return credentials{ca: ca, certificate: certificate, dataKey: dataKey}, nil
-}
-
-// writePrivate writes a file only root may read, creating its directory.
-func writePrivate(path string, content []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, content, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	return nil
 }

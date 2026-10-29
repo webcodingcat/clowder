@@ -13,6 +13,7 @@ import (
 	"net/http/httptrace"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/pki"
@@ -88,16 +89,16 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 		}
 		// a write goes to the next seed only if it never left: one that was
 		// sent may have committed even though no answer came back
-		var sent bool
+		var sent atomic.Bool // set in the transport's goroutine
 		request = request.WithContext(httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-			WroteRequest: func(httptrace.WroteRequestInfo) { sent = true },
+			WroteRequest: func(httptrace.WroteRequestInfo) { sent.Store(true) },
 		}))
 		err = send(c.http, request, out)
 		var statusError *StatusError
 		switch {
 		case err == nil || errors.As(err, &statusError):
 			return err
-		case sent && method != http.MethodGet:
+		case sent.Load() && method != http.MethodGet:
 			return fmt.Errorf("%s: %w (the write may have gone through: look before you repeat it)", seed, err)
 		}
 		unreachable = append(unreachable, fmt.Sprintf("%s: %v", seed, err))

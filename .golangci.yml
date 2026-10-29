@@ -9,12 +9,19 @@ linters:
   enable:
     - depguard
     - errorlint
+    - forbidigo
     - gocritic
     - misspell
     - revive
     - unconvert
     - unparam
   settings:
+    # Only for internal/state (see exclusions): Apply takes the time from the
+    # command, never from the clock.
+    forbidigo:
+      forbid:
+        - pattern: ^time\.Now$
+          msg: the state takes the time from the command (Command.At)
     depguard:
       rules:
         # The CLI runs on Linux, macOS and Windows: it must not import the
@@ -75,6 +82,13 @@ linters:
         - name: indent-error-flow
         - name: error-strings
         - name: receiver-naming
+  exclusions:
+    rules:
+      # forbidigo guards the state's determinism only
+      - path-except: internal/state/
+        linters: [forbidigo]
+      - path: internal/state/.*_test\.go
+        linters: [forbidigo]
 
 formatters:
   enable:

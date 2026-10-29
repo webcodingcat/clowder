@@ -18,6 +18,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/cli"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/sopsage"
 )
 
 func freePort(t *testing.T) int {
@@ -136,8 +137,22 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	if err := os.WriteFile(config, append(content, []byte("network: public\n")...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "network") {
-		t.Errorf("diff after a change: %q, %v", out, err)
+	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "network") ||
+		strings.Contains(out, "secrets") {
+		t.Errorf("diff after a change of cluster.yaml: %q, %v", out, err)
+	}
+	// and now the hoster token as well: diff names both
+	secrets, err := sopsage.Encrypt([]byte("secrets: {hcloud-token: new}\njoin_keys: [the-bootstrap-key]\n"),
+		[]string{identity.Recipient().String()}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, clusterdir.SecretsFile), secrets, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "network") ||
+		!strings.Contains(out, "secrets differ") {
+		t.Errorf("diff after both changed: %q, %v", out, err)
 	}
 	out, err = clowder(t, "--cluster", dir, "cluster", "status")
 	if err != nil || !strings.Contains(out, "leader node0") || !strings.Contains(out, "revision 1") {

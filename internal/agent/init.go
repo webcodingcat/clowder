@@ -16,7 +16,9 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/datakey"
+	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/raftnode"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -47,8 +49,8 @@ func Init(ctx context.Context, files Files, options InitOptions, ensureNodeAddre
 	logger *slog.Logger,
 ) error {
 	if _, err := os.Stat(files.raftDir()); err == nil {
-		return fmt.Errorf("%s exists: this host was part of a cluster (remove the directory to start anew)",
-			files.raftDir())
+		return fmt.Errorf("%s exists: this host was part of a cluster, or an init failed halfway "+
+			"(to start anew, remove all of %s)", files.raftDir(), files.Dir)
 	}
 	if options.BootstrapKey == "" || options.Name == "" || !options.Underlay.IsValid() {
 		return errors.New("init needs the bootstrap key, the host's name and its underlay address")
@@ -58,7 +60,7 @@ func Init(ctx context.Context, files Files, options InitOptions, ensureNodeAddre
 		RaftPort: options.RaftPort, APIPort: options.APIPort,
 	}
 	if !host.NodeAddress.IsValid() {
-		host.NodeAddress = NodeAddress(host.ID)
+		host.NodeAddress = network.NodeAddress(host.ID)
 	}
 	host.RaftPort = cmp.Or(host.RaftPort, RaftPort)
 	host.APIPort = cmp.Or(host.APIPort, APIPort)
@@ -128,7 +130,8 @@ func createKeys(files Files, host Host) (state.ClusterKeys, state.Host, error) {
 		{files.wireGuardKey(), []byte(base64.StdEncoding.EncodeToString(wireGuardKey.Bytes()) + "\n")},
 	}
 	for _, write := range writes {
-		if err := writePrivate(write.path, write.content); err != nil {
+		// keys and certificates: root only, whole or not at all
+		if err := atomicfile.Write(write.path, write.content, 0o600); err != nil {
 			return keys, state.Host{}, err
 		}
 	}

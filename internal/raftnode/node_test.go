@@ -229,7 +229,7 @@ func TestOnlyHostsOfTheClusterGetIn(t *testing.T) {
 	stranger := newTestCluster(t).hostCertificate(1)
 	for name, certificate := range map[string]tls.Certificate{"a user": user, "another cluster's host": stranger} {
 		connection, err := tls.Dial("tcp", address, &tls.Config{
-			Certificates: []tls.Certificate{certificate}, InsecureSkipVerify: true, //nolint:gosec // only the server's check is tested
+			Certificates: []tls.Certificate{certificate}, InsecureSkipVerify: true, // only the server's check is tested
 			MinVersion: tls.VersionTLS13,
 		})
 		if err == nil {
