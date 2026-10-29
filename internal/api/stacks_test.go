@@ -28,6 +28,27 @@ func TestOnlyStacksTheClusterNamesMayBePrivileged(t *testing.T) {
 	}
 }
 
+func TestAnExistingVolumeCannotChange(t *testing.T) {
+	stack, err := compose.Parse(context.Background(), "shop", []byte(
+		"name: shop\nservices: {db: {image: x, volumes: [\"data:/data\"]}}\n"+
+			"volumes: {data: {x-clowder: {class: fast, size: 2G, replicas: 1}}}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkVolumesUnchanged(stack, map[string]*state.Volume{}); err != nil {
+		t.Errorf("a new volume: %v", err)
+	}
+	volumes := map[string]*state.Volume{"shop/data": {ID: "shop/data", Class: "fast", SizeBytes: 2 << 30, Replicas: 1}}
+	if err := checkVolumesUnchanged(stack, volumes); err != nil {
+		t.Errorf("the same volume: %v", err)
+	}
+	volumes["shop/data"].SizeBytes = 1 << 30
+	if err := checkVolumesUnchanged(stack, volumes); err == nil ||
+		!strings.Contains(err.Error(), "volume data exists with class fast, size 1G and 1 replicas") {
+		t.Errorf("a grown volume: %v", err)
+	}
+}
+
 // clearKeys "seals" a value as it is.
 type clearKeys struct{}
 

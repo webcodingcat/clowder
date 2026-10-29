@@ -262,6 +262,21 @@ func TestAPlainVolumeHasNoDRBD(t *testing.T) {
 	}
 }
 
+func TestAForeignPlainLVIsNotFormatted(t *testing.T) {
+	// the LV is there without a file system, but this driver never made it
+	host := &fakeHost{existing: map[string]bool{"lv": true}}
+	driver := newDriver(t, host)
+	volume := replicated()
+	volume.Resource = nil
+	err := driver.Ensure(context.Background(), volume)
+	if err == nil || !strings.Contains(err.Error(), "clowder did not create LV clw-shop-pgdata-g1") {
+		t.Errorf("want a refusal, got %v", err)
+	}
+	if host.ran("mkfs.ext4") {
+		t.Error("an LV clowder did not make was formatted")
+	}
+}
+
 func TestAForeignFileSystemIsNotTouched(t *testing.T) {
 	host := &fakeHost{existing: map[string]bool{"lv": true}}
 	driver := newDriver(t, host)

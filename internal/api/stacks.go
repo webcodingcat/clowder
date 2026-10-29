@@ -17,6 +17,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/state"
+	"github.com/webcodingcat/clowder/internal/units"
 )
 
 // StackApply is clowder stack apply: the stack's Compose file as
@@ -92,7 +93,15 @@ func (s *Server) applyStack(w http.ResponseWriter, r *http.Request) {
 	}
 	var config clusterdir.Config
 	var revision int64
-	s.config.Cluster.Read(func(current *state.State) { config, revision = current.Config.Spec, current.Config.Revision })
+	var changedVolumes error
+	s.config.Cluster.Read(func(current *state.State) {
+		config, revision = current.Config.Spec, current.Config.Revision
+		changedVolumes = checkVolumesUnchanged(stack, current.Volumes)
+	})
+	if changedVolumes != nil {
+		writeError(w, http.StatusBadRequest, changedVolumes)
+		return
+	}
 	priority, err := checkAgainstCluster(stack, config)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -144,6 +153,29 @@ func (s *Server) sealStackSecrets(stack *compose.Stack, values map[string]string
 		return nil, nil
 	}
 	return sealed, nil
+}
+
+// checkVolumesUnchanged refuses another class, size or number of replicas
+// for a volume the stack has already: nothing changes an existing volume
+// yet, so such an apply would seem to work and do nothing.
+func checkVolumesUnchanged(stack *compose.Stack, volumes map[string]*state.Volume) error {
+	var problems compose.Problems
+	for _, name := range slices.Sorted(maps.Keys(stack.Volumes)) {
+		existing, ok := volumes[stack.Name+"/"+name]
+		if !ok {
+			continue
+		}
+		wanted := stack.Volumes[name]
+		if wanted.Class != existing.Class || wanted.Size != existing.SizeBytes || wanted.Replicas != existing.Replicas {
+			problems = append(problems, fmt.Sprintf(
+				"volume %s exists with class %s, size %s and %d replicas; clowder cannot change a volume yet",
+				name, existing.Class, units.FormatSize(existing.SizeBytes), existing.Replicas))
+		}
+	}
+	if len(problems) > 0 {
+		return problems
+	}
+	return nil
 }
 
 // checkAgainstCluster checks what only the cluster knows (storage classes,

@@ -82,6 +82,9 @@ type SetHostPhase struct {
 	Host  HostID    `json:"host"`
 	Phase HostPhase `json:"phase"`
 	Voter *bool     `json:"voter,omitempty"` // changes the Raft role along with the phase
+	// From, when set, is the phase the sender checked the move against; the
+	// move is refused if the host has left it since.
+	From HostPhase `json:"from,omitempty"`
 }
 
 // mover is who may make a phase change: the leader, on its own or for a
@@ -116,6 +119,9 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) error {
 	}
 	if host.Phase == Removed {
 		return fmt.Errorf("host %s is removed", host.Name)
+	}
+	if payload.From != "" && payload.From != host.Phase {
+		return fmt.Errorf("host %s is %s now, no longer %s; try again", host.Name, host.Phase, payload.From)
 	}
 	who, allowed := phaseChanges[host.Phase][payload.Phase]
 	if payload.Phase == Removed {

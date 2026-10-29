@@ -273,7 +273,8 @@ func (s *Server) hostAction(w http.ResponseWriter, r *http.Request) {
 			id, phase, action.Name, phaseList(action.From)))
 		return
 	}
-	s.write(w, r, state.KindSetHostPhase, state.SetHostPhase{Host: id, Phase: action.To})
+	// the phase checked here must still be the host's when it commits
+	s.write(w, r, state.KindSetHostPhase, state.SetHostPhase{Host: id, Phase: action.To, From: phase})
 }
 
 // phaseList reads "active", "active or draining", ...

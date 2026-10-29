@@ -88,6 +88,9 @@ type stackRunner struct {
 	// logins holds a hash of each registry's login, so the agent logs in
 	// again only when it changed
 	logins map[string][32]byte
+	// wake starts a pass at once (buffered, 1): after Docker restarted,
+	// nothing runs until the next pass
+	wake chan struct{}
 }
 
 // desiredState is what this host should run, from a copy of the state.
@@ -136,6 +139,7 @@ func (r *stackRunner) reconcile(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-changed:
+		case <-r.wake:
 		case <-time.After(reconcileInterval):
 		}
 	}
@@ -160,12 +164,17 @@ func (r *stackRunner) pass(ctx context.Context) {
 	r.removeOthers(ctx, desired)
 }
 
-// forgetApplied makes every stack come up again at the next pass; the
-// supervisor calls it when Docker's events broke off (Docker restarted).
+// forgetApplied makes every stack come up again in a pass it starts at
+// once; the supervisor calls it when Docker's events broke off (Docker
+// restarted).
 func (r *stackRunner) forgetApplied() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	clear(r.applied)
+	r.mu.Unlock()
+	select {
+	case r.wake <- struct{}{}:
+	default: // a pass is due already
+	}
 }
 
 // apply runs one stack: its volumes, its rendered Compose file, compose up
@@ -221,6 +230,7 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 	}
 	return r.report(ctx, state.KindSetStackStatus, state.SetStackStatus{
 		Name: stack.Name, Status: state.StackRunning, Host: stack.Host, Stopped: stack.Stopped,
+		Generation: stack.Generation,
 	})
 }
 

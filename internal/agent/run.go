@@ -95,7 +95,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	runner := &stackRunner{
 		files: files, host: host, version: buildinfo.Version, cluster: node,
 		docker: parts.Docker, storage: parts.Storage, open: credentials.dataKey.Open, digestKey: digestKey,
-		logger: logger, applied: map[string][32]byte{}, logins: map[string][32]byte{},
+		logger: logger, applied: map[string][32]byte{}, logins: map[string][32]byte{}, wake: make(chan struct{}, 1),
 	}
 	server := api.NewServer(api.ServerConfig{
 		Cluster: node, CA: credentials.ca, Certificate: credentials.certificate,

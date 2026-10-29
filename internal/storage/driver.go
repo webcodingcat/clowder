@@ -79,7 +79,7 @@ func (d Driver) Ensure(ctx context.Context, volume Volume) error {
 			return err
 		}
 	}
-	if err := d.ensureFilesystem(ctx, device); err != nil {
+	if err := d.ensureFilesystem(ctx, volume, device); err != nil {
 		return err
 	}
 	return d.ensureMounted(ctx, volume, device)
@@ -216,8 +216,9 @@ func (d Driver) ensurePrimary(ctx context.Context, volume Volume) error {
 }
 
 // ensureFilesystem makes ext4 on a device that has no file system, and only
-// then: blkid must say so with its exit code.
-func (d Driver) ensureFilesystem(ctx context.Context, device string) error {
+// then: blkid must say so with its exit code, and clowder must have made the
+// LV below it. A foreign LV without a file system may hold raw data.
+func (d Driver) ensureFilesystem(ctx context.Context, volume Volume, device string) error {
 	kind, err := d.Run(ctx, shortTimeout, "blkid", "--output", "value", "--match-tag", "TYPE", device)
 	code, exited := command.ExitCode(err)
 	switch {
@@ -227,6 +228,14 @@ func (d Driver) ensureFilesystem(ctx context.Context, device string) error {
 		return fmt.Errorf("%s holds %s, not ext4; clowder does not touch it", device, strings.TrimSpace(kind))
 	case !exited || code != blkidNotFound:
 		return fmt.Errorf("look for a file system on %s: %w", device, err)
+	}
+	ours, err := d.hasMarker(volume.LV, "created")
+	if err != nil {
+		return err
+	}
+	if !ours {
+		return fmt.Errorf("volume %s: clowder did not create LV %s, which has no file system; "+
+			"look at it by hand before anything formats it", volume.ID, volume.LV)
 	}
 	if _, err := d.Run(ctx, mkfsTimeout, "mkfs.ext4", "-q", device); err != nil {
 		return fmt.Errorf("make ext4 on %s: %w", device, err)

@@ -150,6 +150,16 @@ func TestAddHostChecksTheID(t *testing.T) {
 	c.refuse(KindAddHost, LeaderActor, AddHost{Host: noKey}, "WireGuard")
 }
 
+func TestAMoveCheckedAgainstAnOldPhaseIsRefused(t *testing.T) {
+	c := newCluster(t)
+	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
+	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
+	// a user drained the host after another one checked "active"
+	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 1, Phase: Draining, From: Active})
+	c.refuse(KindSetHostPhase, UserActor("bob"), SetHostPhase{Host: 1, Phase: Failed, From: Active},
+		"is draining now, no longer active")
+}
+
 func TestHostPhasesMoveOnlyAsAllowed(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -397,13 +407,16 @@ func TestStacksBelongToTheirOwner(t *testing.T) {
 	if !stack.LastMove.Equal(testTime) {
 		t.Errorf("placing a stack is a move: %v", stack.LastMove)
 	}
-	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host})
+	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host, Generation: 2})
 	// a new generation of a running stack starts until its host reports it
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec})
 	if stack.Status != StackStarting || stack.Generation != 3 || *stack.Host != host {
 		t.Errorf("after a new apply of a running stack: %+v", stack)
 	}
-	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host})
+	// the report of the generation before, sent before the host saw the apply
+	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host, Generation: 2},
+		"about generation 2, but 3 is applied")
+	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host, Generation: 3})
 	c.refuse(KindSetStackStatus, HostActor(1), SetStackStatus{Name: "shop", Status: StackStopped, Host: &host},
 		"only its host")
 	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackPending}, "only where it is")
@@ -418,7 +431,7 @@ func TestAWaitReasonChangesNothingElse(t *testing.T) {
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
 	host := HostID(0)
 	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Status: StackStarting, Host: &host})
-	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host})
+	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host, Generation: 1})
 
 	// a running stack whose new volume fits nowhere keeps running where it is
 	c.mustApply(KindSetStackWaitReason, LeaderActor, SetStackWaitReason{Name: "shop", Reason: "volume data fits no pool"})

@@ -185,6 +185,10 @@ type SetStackStatus struct {
 	Status  StackStatus `json:"status"`
 	Host    *HostID     `json:"host,omitempty"`
 	Stopped []string    `json:"stopped,omitempty"`
+	// Generation is the one the host ran when it reports; the leader leaves
+	// it 0. A report about an older generation is refused: an apply came in
+	// between, and that generation has yet to come up.
+	Generation int64 `json:"generation,omitempty"`
 }
 
 func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) error {
@@ -208,6 +212,10 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) error {
 	if IsHostActor(cmd.Actor) && (stack.Host == nil || cmd.Actor != HostActor(*stack.Host) ||
 		!samePlace(stack.Host, payload.Host)) {
 		return fmt.Errorf("stack %s: only its host reports about it, and only where it is", payload.Name)
+	}
+	if IsHostActor(cmd.Actor) && payload.Generation != stack.Generation {
+		return fmt.Errorf("stack %s: the report is about generation %d, but %d is applied",
+			payload.Name, payload.Generation, stack.Generation)
 	}
 	if !samePlace(stack.Host, payload.Host) {
 		stack.LastMove = cmd.At

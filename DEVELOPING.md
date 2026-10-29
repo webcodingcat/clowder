@@ -104,6 +104,9 @@ Known gaps to close in phase 2. They do no harm on a single host:
   That is right for a new volume on one host; after a failover it would force an outdated
   copy. Whether a volume was ever initialised must come from the state, not a local file.
 - A volume a stack no longer names stays: nothing sends `delete-volume` yet.
+- The placement does not bind a stack to the host its volumes are on. When `put-volume`
+  committed but the stack's `set-stack-status` did not (an error, a change of leader), a
+  later pass may pick another host for the stack.
 - `examples/hetzner` ignores later changes to the server's user data, so a storage class
   added later gets a volume but no thin pool on an existing host.
 
@@ -340,7 +343,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **Stacks.** `create-stack` registers a stack as `created` (no Source, `CreatedBy` from the
   actor, `Owner` the channel: cli or gitops); only `put-stack` moves it on, to `pending`, and
   nothing places a `created` stack. `put-stack` changes registered stacks only, and makes a
-  `running` stack `starting` until its host reports the new generation up. It carries
+  `running` stack `starting` until its host reports the new generation up: a host's
+  `set-stack-status` names the generation it ran, and one about an older generation is
+  refused. An apply that changes a volume the stack has (class, size, replicas) is refused
+  by the API, as nothing changes an existing volume yet. `put-stack` carries
   the stack's published ports (`udp/9987`) and HTTP routes (`shop.example.com/api`) as the
   API read them from the source: the state does not parse Compose files (that would pull
   compose-go into it), but refuses a port or route another stack has. They live on their
@@ -549,7 +555,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   secret file changes its services' digest label, which recreates them (Stacks, Labels).
 - **After a boot no container runs** (`restart: "no"`). The runner remembers only in memory
   which files came up, so its first pass runs `compose up` for every stack, and so does the
-  pass after Docker restarted (the supervisor's events broke off). The first pass waits until
+  pass that a restart of Docker starts at once (the supervisor's events broke off,
+  `forgetApplied`). The first pass waits until
   the state has caught up with the Raft log, so a host that was away does not start a stack
   that has moved on.
 - The agent also reports its version, memory, CPUs and pools (`report-host`, only when
@@ -593,7 +600,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   mount and `data/` in it. Markers in the driver's `StateDir` let it pick up after a crash at
   any point (`created`: clowder made the LV; `metadata`: DRBD metadata written; `primary`:
   the first promotion, made with `--force`, worked). It refuses an LV it did not create and
-  never wrote metadata on, and a device with another file system: those it leaves to a
+  never wrote metadata on or formatted (plain or replicated), and a device with another file
+  system: those it leaves to a
   human. A crash between `lvcreate` and its marker leaves an empty LV that a human must look
   at.
 - **It never guesses.** Only a tool's own exit code means "not there" (`lvs` 5, `blkid` 2,
