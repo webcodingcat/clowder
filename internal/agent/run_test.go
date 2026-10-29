@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/cli"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
@@ -351,6 +353,12 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 		t.Errorf("the rendered Compose file: %v", err)
 	}
 	waitForOutput(t, "running", "--cluster", dir, "stack", "ps")
+	listed, err := clowder(t, "--cluster", dir, "stack", "ps", "--output", "json")
+	var stacks []api.StackInfo
+	if err != nil || json.Unmarshal([]byte(listed), &stacks) != nil || len(stacks) != 1 ||
+		stacks[0].Name != "shop" || stacks[0].Status != "running" || stacks[0].Host != "node0" {
+		t.Errorf("stack ps --output json: %q, %v", listed, err)
+	}
 	waitForOutput(t, "Up 2 seconds", "--cluster", dir, "stack", "ps", "shop")
 	waitForOutput(t, "hello", "--cluster", dir, "stack", "logs", "shop")
 	// deleted with its volume: compose down, the LV removed

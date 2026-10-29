@@ -6,17 +6,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/webcodingcat/clowder/internal/api"
 )
 
 // What bin/dev live hands over: the work directory (OpenTofu's outputs, the
-// SSH key) and the CLI to test.
+// SSH key, the registry's files) and the CLI to test.
 var (
 	workDir       = os.Getenv("LIVE_DIR")
 	clowderBinary = os.Getenv("CLOWDER")
@@ -55,6 +59,11 @@ type host struct {
 
 // run runs a shell command on the host and returns its output.
 func (h host) run(command string) (string, error) {
+	return h.runWithInput(command, nil)
+}
+
+// runWithInput runs a shell command on the host with input on its stdin.
+func (h host) runWithInput(command string, input io.Reader) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 	ssh := exec.CommandContext(ctx, "ssh", "-i", filepath.Join(workDir, "id_ed25519"),
@@ -62,6 +71,7 @@ func (h host) run(command string) (string, error) {
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "UserKnownHostsFile="+filepath.Join(workDir, "known_hosts"),
 		"root@"+h.address, command)
+	ssh.Stdin = input
 	output, err := ssh.CombinedOutput()
 	trimmed := strings.TrimSpace(string(output))
 	if err != nil {
@@ -78,6 +88,51 @@ func (h host) must(t *testing.T, command string) string {
 		t.Fatal(err)
 	}
 	return output
+}
+
+// upload writes a local file to the host, making its directory.
+func (h host) upload(t *testing.T, local, remote string) {
+	t.Helper()
+	file, err := os.Open(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }() // read only
+	if _, err := h.runWithInput(fmt.Sprintf("mkdir -p %s && cat > %s", path.Dir(remote), remote), file); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// container is what the test reads of docker inspect.
+type container struct {
+	ID    string
+	State struct {
+		Pid        int
+		StartedAt  time.Time
+		FinishedAt time.Time
+		Health     *struct{ Status string }
+	}
+	HostConfig struct {
+		RestartPolicy struct{ Name string }
+	}
+}
+
+// inspect reads one container on the host.
+func (h host) inspect(t *testing.T, id string) container {
+	t.Helper()
+	var containers []container
+	if err := json.Unmarshal([]byte(h.must(t, "docker inspect "+id)), &containers); err != nil || len(containers) != 1 {
+		t.Fatalf("docker inspect %s: %d containers, %v", id, len(containers), err)
+	}
+	return containers[0]
+}
+
+// service is the ID of the container of a service of shop, the test's
+// stack; empty if none runs.
+func (h host) service(t *testing.T, service string) string {
+	t.Helper()
+	return h.must(t, "docker ps -q --no-trunc --filter label=com.docker.compose.project=shop"+
+		" --filter label=com.docker.compose.service="+service)
 }
 
 // clowder runs the CLI against the test's cluster directory.
@@ -107,7 +162,9 @@ func mustClowder(t *testing.T, args ...string) string {
 
 func clusterDir() string { return filepath.Join(workDir, "cluster") }
 
-func stackDir() string { return filepath.Join(workDir, "shop") }
+// stackDir is the directory of a stack: outside the cluster directory, as
+// DEVELOPING.md asks.
+func stackDir(name string) string { return filepath.Join(workDir, "stacks", name) }
 
 // eventually calls check until it succeeds, and fails the test with the last
 // error once the deadline has passed.
@@ -122,55 +179,81 @@ func eventually(t *testing.T, deadline time.Duration, what string, check func() 
 		if time.Now().After(end) {
 			t.Fatalf("%s: not within %s: %v", what, deadline, err)
 		}
-		time.Sleep(5 * time.Second)
+		time.Sleep(2 * time.Second)
 	}
 }
 
-// stackRow is a stack's line of clowder stack ps.
-type stackRow struct {
-	status     string
-	generation int
-}
-
-// findStack reads clowder stack ps; found is false when the cluster does not
-// list the stack.
-func findStack(name string) (row stackRow, found bool, err error) {
-	output, err := clowder("stack", "ps")
+// listStacks reads clowder stack ps --output json.
+func listStacks() (map[string]api.StackInfo, error) {
+	output, err := clowder("stack", "ps", "--output", "json")
 	if err != nil {
-		return stackRow{}, false, err
+		return nil, err
 	}
-	for _, line := range strings.Split(output, "\n") {
-		// NAME STATUS HOST PRIORITY GENERATION ...; a running stack has a host
-		fields := strings.Fields(line)
-		if len(fields) < 5 || fields[0] != name {
-			continue
-		}
-		row.status = fields[1]
-		if fields[1] == "running" {
-			if row.generation, err = strconv.Atoi(fields[4]); err != nil {
-				return stackRow{}, false, fmt.Errorf("read the generation in %q: %w", line, err)
-			}
-		}
-		return row, true, nil
+	var stacks []api.StackInfo
+	if err := json.Unmarshal([]byte(output), &stacks); err != nil {
+		return nil, fmt.Errorf("read stack ps: %w", err)
 	}
-	return stackRow{}, false, nil
+	listed := map[string]api.StackInfo{}
+	for _, stack := range stacks {
+		listed[stack.Name] = stack
+	}
+	return listed, nil
+}
+
+// generation is a stack's generation as the cluster lists it.
+func generation(t *testing.T, name string) int64 {
+	t.Helper()
+	stacks, err := listStacks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stacks[name].Generation
 }
 
 // waitRunning waits until the stack runs in the given generation.
-func waitRunning(t *testing.T, name string, generation int, deadline time.Duration) {
+func waitRunning(t *testing.T, name string, generation int64, deadline time.Duration) {
 	t.Helper()
 	eventually(t, deadline, fmt.Sprintf("stack %s running in generation %d", name, generation), func() error {
-		row, found, err := findStack(name)
-		switch {
-		case err != nil:
+		stacks, err := listStacks()
+		if err != nil {
 			return err
+		}
+		stack, found := stacks[name]
+		switch {
 		case !found:
 			return fmt.Errorf("not listed")
-		case row.status != "running" || row.generation != generation:
-			return fmt.Errorf("%s, generation %d", row.status, row.generation)
+		case stack.Status != "running" || stack.Generation != generation:
+			return fmt.Errorf("%s, generation %d", stack.Status, stack.Generation)
 		}
 		return nil
 	})
+}
+
+// waitGone waits until the cluster no longer lists the stacks.
+func waitGone(t *testing.T, deadline time.Duration, names ...string) {
+	t.Helper()
+	eventually(t, deadline, "stacks gone", func() error {
+		stacks, err := listStacks()
+		if err != nil {
+			return err
+		}
+		for _, name := range names {
+			if _, found := stacks[name]; found {
+				return fmt.Errorf("%s still listed", name)
+			}
+		}
+		return nil
+	})
+}
+
+// unixTime reads a time in seconds since 1970 with a fraction ("1761744507.123456").
+func unixTime(t *testing.T, text string) time.Time {
+	t.Helper()
+	seconds, err := strconv.ParseFloat(strings.TrimSpace(text), 64)
+	if err != nil {
+		t.Fatalf("read the time %q: %v", text, err)
+	}
+	return time.UnixMicro(int64(seconds * 1e6))
 }
 
 // diagnose prints what tells why the host is not where the test expected it.

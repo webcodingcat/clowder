@@ -29,17 +29,19 @@ tools reach the hosts. Point `HLAB` at its wrapper:
 
 ```bash
 export HLAB=/path/to/hlab/bin/hlab
-bin/dev live         # about 15 minutes; tears everything down if it passes
+bin/dev live         # about 20 minutes; tears everything down if it passes
 bin/dev live down    # after a failure: destroy the host, stop the lab
 ```
 
 `bin/dev live` builds the packages and starts the lab `clowder-live` (`test/live/lab.yaml`,
 ports apart from other labs). In the lab's network it serves the `clowderd` package over
-HTTP, applies `examples/hetzner` with the test hook (the package's URL and SHA-256,
+HTTP and runs a private registry on `192.0.2.2:5000` (TLS from a throw-away CA, a password),
+applies `examples/hetzner` with the test hook (the package's URL and SHA-256,
 `admin_cidrs` = `192.0.2.2/32`) and runs `go test -tags live ./test/live`. Everything a run
 keeps is in the Docker volume `clowder-live`: the OpenTofu state, a throw-away SSH key and
-`known_hosts`, the cluster and stack directories. A failed run leaves the host for a look;
-the next `bin/dev live` refuses to start until `bin/dev live down` removed it.
+`known_hosts`, the registry's files, the cluster and stack directories. A failed run leaves
+the host for a look; the next `bin/dev live` refuses to start until `bin/dev live down`
+removed it.
 
 `TestOneHost` drives the host with the real CLI and SSH, in steps that build on each other,
 each with a deadline (`steps` in `live_test.go`); on a failure it prints cloud-init's status
@@ -47,18 +49,32 @@ and the journals of `clowder-setup` and `clowderd`. The steps:
 
 1. The setup makes the first host and deletes its key file.
 2. The user bootstraps, fills in `cluster.yaml` from the module's outputs and applies it;
-   the join keys stay in `secrets.sops.yaml`.
-3. A stack runs with a replicated and a plain volume, a secret file and a secret variable.
-4. After a reboot it comes back with its data, and `clowderd check` passes. The setup's
-   marker is gone before, so the setup runs again at that boot, as after its own reboot
-   into a newer kernel, and must finish on the finished host.
-5. A changed secret recreates the container.
-6. With the agent stopped, `docker compose up` fails on a missing secret file; started
+   the join keys stay in `secrets.sops.yaml`, the registry's login joins them. The host
+   trusts the registry's CA (`/etc/docker/certs.d`), and the test pushes its image there,
+   then logs out, so only the agent's login pulls it.
+3. A stack runs from the private registry with a replicated and a plain volume, a secret
+   file and a secret variable.
+4. An agent restart leaves its containers running, unchanged.
+5. The supervisor: a crashed container (`kill -9` of its process; `docker kill` would be a
+   stop by hand) runs again within 2 s by Docker's own times, an `unhealthy` one is
+   restarted, and an update of one service recreates that one, once, and no other.
+6. After a reboot the stack comes back with its data, no container started before the
+   agent, and `clowderd check` passes. The setup's marker is gone before, so the setup runs
+   again at that boot, as after its own reboot into a newer kernel. With the agent stopped
+   and a volume unmounted, its container cannot start and nothing lands on the root file
+   system (the mount guard).
+7. A changed secret file recreates its container only.
+8. With the agent stopped, `docker compose up` fails on a missing secret file; started
    again, the agent brings the stack back.
-7. The stack goes with its volumes.
-8. The agent's memory is logged; a measurement, never a failure.
+9. A volume that fits no pool leaves its stack `pending` with the reason in `stack ps`, and
+   the running stack untouched.
+10. Twenty more stacks run.
+11. The stack goes with its volumes.
+12. The agent's memory, idle, with 21 stacks and at the end, is logged and must stay under
+    the goal of 150 MB.
 
-It parses the tables of `clowder stack ps`, as long as the CLI prints no JSON.
+It reads `clowder stack ps --output json` and `docker inspect`, and counts on values it
+reads before each step, not across steps.
 
 ## Roadmap
 
@@ -67,7 +83,7 @@ clowder is built in phases; each ends with live tests on HLab.
 | Phase | Builds | State |
 |---|---|---|
 | 0 | the spike: DRBD quorum and fencing, WireGuard, the real client IP, on three hosts | done |
-| 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | in progress |
+| 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | done |
 | 1b | ingress (Traefik, ACME), priorities, alerts, still on one host | |
 | 2 | three hosts: replication, failover with fencing | |
 | 3 | backup and restore, GitOps | |
@@ -151,8 +167,9 @@ clowder stack apply ──mTLS──▶  API: check, seal  ──▶  Raft log �
 5. `clowder stack ps|logs shop` asks the stack's host, through any agent.
 6. A later `stack apply` raises the stack's generation; a running stack is `starting` again.
    The stack keeps its host, the placement adds only volumes it newly names, and the host's
-   agent brings the new generation up, Compose recreating the containers whose configuration
-   changed, and reports `running`.
+   agent brings the new generation up, Compose recreating only the containers whose
+   configuration or secret files changed, and reports `running`. A stack or volume that finds
+   no place waits, with the reason in `stack ps`.
 
 ## Words
 
@@ -169,7 +186,7 @@ clowder stack apply ──mTLS──▶  API: check, seal  ──▶  Raft log �
 | active, passive | a host that runs stacks; a second host that waits until there are three |
 | actor | who sent a command: `leader`, `host/<id>` or `user/<name>` |
 | sealed | encrypted with the cluster's data key before it goes into the state |
-| generation | of a stack: counts its applies, a label on its containers; of a volume: grows with a restore or class move, part of its LV's name |
+| generation | of a stack: counts its applies; of a volume: grows with a restore or class move, part of its LV's name |
 
 ## The two binaries
 
@@ -241,11 +258,22 @@ Packages in *italics* do not exist yet.
   host's disk and in `docker inspect`; a file does not.
 - **Rendering.** `Render` writes the file docker compose gets on a host: `restart: "no"` (the
   agent restarts), the agent's resolver, each port on the Floating IP and the node address,
-  labels, a fixed bridge name per network (`BridgeName`), volumes bound to `<mount>/data`,
-  secrets as files in `Target.SecretsDir`. `RenderSecretEnv` writes the secret variables as a
-  second Compose file. Every `$` in a value becomes `$$` (`EscapeDollars`): the values were
-  filled in on the user's machine, and docker compose on the host would fill in variables
-  once more, from the agent's environment.
+  a fixed bridge name per network (`BridgeName`), volumes bound to `<mount>/data`, secrets as
+  files in `Target.SecretsDir`. `RenderSecretEnv` writes the secret variables as a second
+  Compose file. Every `$` in a value becomes `$$` (`EscapeDollars`): the values were filled
+  in on the user's machine, and docker compose on the host would fill in variables once
+  more, from the agent's environment.
+- **Labels, and which apply recreates what.** Every container gets `clowder.stack`; one that
+  asks for secret files also gets `clowder.secrets`, a digest of their values
+  (`Target.SecretDigests`). Nothing else: Compose recreates exactly the containers whose
+  configuration changed, and a changed secret file keeps its path, so only its digest tells
+  Compose. Secret variables are in the second Compose file, which Compose compares itself,
+  and a volume's new generation is a new volume name. The digest is an HMAC-SHA256 with a
+  key derived from the data key (`datakey.Key.Derive`), over each secret's name and value
+  with their lengths: it is on disk and in `docker inspect`, and without the key it says
+  nothing about a short password. A change to these labels changes every container's
+  configuration: an agent of a release with other labels recreates all containers once
+  after the upgrade (so did the one that dropped `clowder.generation`, after `v0.0.1`).
 - **Golden files.** `testdata/shop/rendered.golden.yaml` and `secrets.golden.yaml`. After an
   intended change: `bin/dev test ./internal/compose -update`, then review the diff.
   `bin/dev test-tools` checks both with Debian's `docker-compose`, and that it fills in
@@ -299,15 +327,20 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   another host, and about a stack only while it runs there, without moving it.
 - **In use so far:** `bootstrap` (init), `apply-config`, `add-user` (the first user),
   `set-host-phase` (host actions), `create-stack`, `put-stack` and `delete-stack` (the user),
-  `put-volume` and `set-stack-status` (placement, the stack's host), `report-host` (each
-  agent). The other kinds (`delete-volume`, hosts joining, operations, users beyond the
-  first) are there for the next steps; they are tested, but nothing sends them yet.
+  `put-volume`, `set-stack-status` and `set-stack-wait-reason` (placement, the stack's
+  host), `report-host` (each agent). The other kinds (`delete-volume`, hosts joining,
+  operations, users beyond the first) are there for the next steps; they are tested, but
+  nothing sends them yet.
 - **Stacks.** `create-stack` registers a stack as `created` (no Source, `CreatedBy` from the
   actor, `Owner` the channel: cli or gitops); only `put-stack` moves it on, to `pending`, and
   nothing places a `created` stack. `put-stack` changes registered stacks only, and makes a
   `running` stack `starting` until its host reports the new generation up.
   `delete-stack` with `WithVolumes` takes the volumes along in the same command, so the
-  placement cannot put one back in between.
+  placement cannot put one back in between. `set-stack-wait-reason` records why the
+  placement finds no place for a stack or a volume it newly names (`WaitReason`, shown by
+  `stack ps`) and changes nothing else, so it never unplaces a stack that runs. The state
+  is the placement's memory of the reason: it writes a change once, also after a change of
+  leader, and clears it when the stack no longer waits.
 - **Host phases** (`phaseChanges`; L = the leader, on its own or for a user; H = the host
   itself):
 
@@ -330,8 +363,12 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **Versions.** `CommandVersion` and `SnapshotVersion`; a release reads its own and the one
   before. Payload fields are added, not changed; unknown fields are ignored, so an agent of
   the release before drops a new field from its state. A field that later commands depend on
-  therefore needs a gate on `State.MinVersion`. The json tags of `clusterdir.Config` are part
-  of this format. No release exists yet; the rule holds from the first one on.
+  therefore needs a gate on `State.MinVersion`. A new command kind is refused by an agent of
+  the release before ("unknown command"), so its state misses that command: a kind may come
+  without a gate only if what it changes may differ between agents for a while, as the
+  display-only `set-stack-wait-reason`; anything later commands depend on needs the gate.
+  The json tags of `clusterdir.Config` are part of this format. The rule holds since the
+  first release (`v0.0.1`).
 - **Locks.** Operations hold locks (`stack/<name>`, `volume/<stack>/<volume>`); a change to a
   locked stack or volume is refused with a `LockedError`, unless the holding operation makes
   it (`Operation` in the payload). Only failover takes locks over (`TakeOver`).
@@ -429,7 +466,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   limits, and seals them.
 - **`stack delete`** refuses a stack with volumes unless `--delete-volumes` says so. `stack ps`
   and `stack logs` ask the stack's host through `/v1/internal/stacks/<name>/ps|logs`,
-  wherever the CLI came in.
+  wherever the CLI came in. The list of stacks (`stack ps` without a name) also comes as
+  JSON (`--output json`, `api.StackInfo`) for scripts and the live tests; the other commands
+  print tables only so far.
 - **Who can read a stack's secrets:** whoever can decrypt its secrets file; every host (a
   stack must start anywhere); and, until there are permissions, every user of the cluster
   through a stack named in `stacks.privileged`, as such a container reaches the secrets and
@@ -495,7 +534,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   by rename, so a running container keeps the old file until it is recreated. After a
   successful `compose up` it removes what the stack no longer asks for. The hash that decides
   about `compose up` covers the rendered file, `env.yaml` and the secret files; a changed
-  secret comes with a new generation, whose label recreates the containers.
+  secret file changes its services' digest label, which recreates them (Stacks, Labels).
 - **After a boot no container runs** (`restart: "no"`). The runner remembers only in memory
   which files came up, so its first pass runs `compose up` for every stack, and so does the
   pass after Docker restarted (the supervisor's events broke off). The first pass waits until
@@ -509,9 +548,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   notify socket, the user's bootstrap, apply and diff, the Floating IP reaching the nft
   rules, and a stack created, applied, listed and deleted. `stacks_test.go` runs single
   passes of the runner against a state in memory: a failed `compose up`, a new volume
-  generation, a stack that leaves the host, secrets written, changed and removed. That
-  docker compose fails on a missing secret file and recreates a container for a new
-  generation is for the live tests: CI has no Docker daemon.
+  generation, a stack that leaves the host, secrets written, changed and removed, the digest
+  label changing with a secret file. That docker compose fails on a missing secret file and
+  recreates exactly the containers that changed is for the live tests: CI has no Docker
+  daemon.
 
 ## Network (`internal/network`)
 

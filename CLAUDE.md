@@ -24,7 +24,7 @@ are not needed on the host.
 | `bin/dev build` | `clowderd` for Linux, `clowder` for Linux, macOS and Windows into `dist/` |
 | `bin/dev package` | build, then the Debian packages into `dist/` |
 | `bin/dev all` | lint, test, test-sops, test-tools, package – what CI runs |
-| `bin/dev live` | the live tests: a host from `examples/hetzner` in an HLab lab of their own, driven by `test/live` (about 15 minutes; `HLAB` points at HLab's `bin/hlab`, needs `/dev/kvm`); `bin/dev live down` removes what a failed run left |
+| `bin/dev live` | the live tests: a host from `examples/hetzner` in an HLab lab of their own, driven by `test/live` (about 20 minutes; `HLAB` points at HLab's `bin/hlab`, needs `/dev/kvm`); `bin/dev live down` removes what a failed run left |
 
 Run the live tests only at the end of a piece of work, on its finished state, and only while
 no one else uses the lab `clowder-live`.
@@ -44,5 +44,5 @@ DEVELOPING.md explains each one.
 
 ## State of the work
 
-Phase 1a, the foundation on one host (DEVELOPING.md, Roadmap), ends with the live tests in
-`test/live`.
+Phase 1a, the foundation on one host, is done and passes the live tests in `test/live`;
+next is phase 1b (DEVELOPING.md, Roadmap).

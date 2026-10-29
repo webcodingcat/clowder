@@ -10,8 +10,10 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/compose"
 )
 
 // The host's files, as setup.sh and the agent lay them out. They are copied,
@@ -31,33 +34,74 @@ const (
 	stackSecretsDir   = "/run/clowder-secrets/shop"
 )
 
-// shopStack is the test's stack: a container that counts its starts on a
-// replicated volume and reads a secret as a file and one as a variable.
-const shopStack = `name: shop
+// The private registry that bin/dev live runs in the lab's network, with its
+// files in the work directory.
+const (
+	registry       = "192.0.2.2:5000"
+	registryUser   = "tester"
+	privateImage   = registry + "/alpine:3.22"
+	publicImage    = "alpine:3.22"
+	registryCAFile = "registry/ca.crt"
+	registryPWFile = "registry/password"
+)
+
+// shopStack is the test's stack: app counts its starts on a replicated
+// volume and reads a secret as a file and one as a variable; with a
+// greeting, web joins it, with a healthcheck the test can fail. sleep as
+// PID 1 ignores SIGTERM: the short grace period spares 10 s at each stop.
+func shopStack(greeting string) string {
+	stack := `name: shop
 x-clowder:
   secrets_file: secrets.sops.yaml
 services:
   app:
-    image: alpine:3.22
+    image: ` + privateImage + `
     command: ["sh", "-c", "date >> /data/starts && exec sleep infinity"]
+    stop_grace_period: 1s
     volumes: [data:/data, scratch:/scratch]
     x-clowder:
       secrets: [password]
       secret_env: {API_TOKEN: api-token}
-volumes:
+`
+	if greeting != "" {
+		// the file comes back at every start: a restart keeps the
+		// container's file system
+		stack += `  web:
+    image: ` + publicImage + `
+    command: ["sh", "-c", "touch /tmp/healthy && exec sleep infinity"]
+    stop_grace_period: 1s
+    environment: {GREETING: ` + greeting + `}
+    healthcheck:
+      test: ["CMD", "test", "-e", "/tmp/healthy"]
+      interval: 2s
+      retries: 2
+      start_period: 0s
+`
+	}
+	return stack + `volumes:
   data:
     x-clowder: {class: fast, size: 1G, replicas: 2}
   scratch:
     x-clowder: {class: bulk, size: 1G, replicas: 0}
 `
+}
 
 // The deadlines of the steps. The setup installs packages, builds DRBD's
 // module and may reboot into a newer kernel: about 5 minutes without a
 // reboot, the deadline leaves room for two and a slow mirror.
 const (
-	setupDeadline  = 40 * time.Minute
-	stackDeadline  = 10 * time.Minute
-	rebootDeadline = 10 * time.Minute
+	setupDeadline     = 40 * time.Minute
+	stackDeadline     = 10 * time.Minute
+	rebootDeadline    = 10 * time.Minute
+	unhealthyDeadline = 30 * time.Second
+	// a pass of the agent after it started: the first one runs compose up
+	// for every stack
+	agentPass = 20 * time.Second
+	// crashRestart is the acceptance's limit for a crashed container
+	crashRestart = 2 * time.Second
+	// agentMemoryLimit is the acceptance's goal for the agent alone
+	agentMemoryLimit = 150_000_000
+	manyStacks       = 20
 )
 
 // TestMain gives the test its own age key: the CLI and the test read the
@@ -98,13 +142,17 @@ func TestOneHost(t *testing.T) {
 		run  func(t *testing.T)
 	}{
 		{"the setup makes the first host", func(t *testing.T) { waitForSetup(t, server) }},
-		{"the user bootstraps and applies the cluster", func(t *testing.T) { bootstrap(t, tofu) }},
-		{"a stack runs with volumes and secrets", func(t *testing.T) { runStack(t, server) }},
+		{"the user bootstraps and applies the cluster", func(t *testing.T) { bootstrap(t, server, tofu) }},
+		{"a stack runs from a private registry with volumes and secrets", func(t *testing.T) { runStack(t, server) }},
+		{"an agent restart leaves the containers alone", func(t *testing.T) { restartAgent(t, server) }},
+		{"the supervisor restarts what crashed and nothing else", func(t *testing.T) { supervise(t, server) }},
 		{"the stack comes back after a reboot", func(t *testing.T) { reboot(t, server, tofu) }},
-		{"a changed secret recreates the container", func(t *testing.T) { changeSecrets(t, server) }},
+		{"a changed secret recreates its container only", func(t *testing.T) { changeSecrets(t, server) }},
 		{"compose fails on a missing secret file", func(t *testing.T) { missingSecretFile(t, server) }},
+		{"a volume that fits nowhere waits with its reason", func(t *testing.T) { fullPool(t, server) }},
+		{"twenty stacks run", func(t *testing.T) { runManyStacks(t, server) }},
 		{"the stack is deleted with its volumes", func(t *testing.T) { deleteStack(t, server) }},
-		{"the agent's memory", func(t *testing.T) { logMemory(t, server) }},
+		{"the agent's memory", func(t *testing.T) { checkMemory(t, server, "at the end") }},
 	}
 	for _, step := range steps {
 		if !t.Run(step.name, step.run) {
@@ -124,12 +172,13 @@ func waitForSetup(t *testing.T, server host) {
 	if _, err := server.run("test -e /etc/clowder/bootstrap-key"); err == nil {
 		t.Error("the bootstrap key file is still on the host")
 	}
+	checkMemory(t, server, "idle")
 }
 
 // bootstrap makes the test the first user, fills in cluster.yaml from the
-// module's outputs and sets the hoster token in secrets.sops.yaml, keeping
-// the join keys, then applies both.
-func bootstrap(t *testing.T, tofu outputs) {
+// module's outputs, sets the hoster token and the registry's login in
+// secrets.sops.yaml, keeping the join keys, then applies both.
+func bootstrap(t *testing.T, server host, tofu outputs) {
 	keyFile := filepath.Join(workDir, "bootstrap-key")
 	if err := os.WriteFile(keyFile, []byte(tofu.BootstrapKey.Value), 0o600); err != nil {
 		t.Fatal(err)
@@ -160,9 +209,11 @@ func bootstrap(t *testing.T, tofu outputs) {
 		t.Fatal(err)
 	}
 
+	password := pushPrivateImage(t, server)
 	secretsFile := filepath.Join(clusterDir(), clusterdir.SecretsFile)
 	secrets := readSecrets(t, secretsFile)
 	secrets.Values["hcloud-token"] = os.Getenv("HCLOUD_TOKEN")
+	secrets.Registries[registry] = clusterdir.RegistryLogin{Username: registryUser, Password: password}
 	if err := clusterdir.WriteSOPS(secretsFile, secrets, recipient); err != nil {
 		t.Fatal(err)
 	}
@@ -177,6 +228,26 @@ func bootstrap(t *testing.T, tofu outputs) {
 	}
 }
 
+// pushPrivateImage makes the host trust the registry (Docker's trust per
+// registry; daemon.json stays as it is) and puts the test's image there.
+// Then it logs out and removes the image, so only the agent's own login
+// (the same /root/.docker of root) can pull it. It returns the password.
+func pushPrivateImage(t *testing.T, server host) string {
+	server.upload(t, filepath.Join(workDir, registryCAFile), "/etc/docker/certs.d/"+registry+"/ca.crt")
+	password, err := os.ReadFile(filepath.Join(workDir, registryPWFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := fmt.Sprintf("docker login --username %s --password-stdin %s", registryUser, registry)
+	server.must(t, "docker pull -q "+publicImage)
+	if _, err := server.runWithInput(login, bytes.NewReader(password)); err != nil {
+		t.Fatal(err)
+	}
+	server.must(t, fmt.Sprintf("docker tag %s %s && docker push -q %s", publicImage, privateImage, privateImage))
+	server.must(t, fmt.Sprintf("docker logout %s && docker rmi %s", registry, privateImage))
+	return strings.TrimSpace(string(password))
+}
+
 func readSecrets(t *testing.T, file string) clusterdir.Secrets {
 	t.Helper()
 	plain, err := clusterdir.ReadSOPS(file)
@@ -186,6 +257,9 @@ func readSecrets(t *testing.T, file string) clusterdir.Secrets {
 	var secrets clusterdir.Secrets
 	if err := yaml.Unmarshal(plain, &secrets); err != nil {
 		t.Fatal(err)
+	}
+	if secrets.Registries == nil {
+		secrets.Registries = map[string]clusterdir.RegistryLogin{}
 	}
 	return secrets
 }
@@ -197,20 +271,36 @@ var (
 	secondSecrets = map[string]string{"password": "second pa$$word", "api-token": "tok$en 'two'"}
 )
 
-// runStack creates the stack, applies it and checks the container: its
-// secrets, its volume, both pools.
-func runStack(t *testing.T, server host) {
-	mustClowder(t, "stack", "create", "shop", "--dir", stackDir(), "--age", recipient)
-	if err := os.WriteFile(filepath.Join(stackDir(), "clowder.yaml"), []byte(shopStack), 0o644); err != nil {
+// applyShop writes the stack's file and secrets, applies them and waits
+// until the new generation runs.
+func applyShop(t *testing.T, greeting string, secrets map[string]string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(stackDir("shop"), "clowder.yaml"), []byte(shopStack(greeting)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeStackSecrets(t, firstSecrets)
-	mustClowder(t, "stack", "apply", "shop", "--file", filepath.Join(stackDir(), "clowder.yaml"))
-	waitRunning(t, "shop", 1, stackDeadline)
+	if err := clusterdir.WriteSOPS(filepath.Join(stackDir("shop"), "secrets.sops.yaml"), secrets, recipient); err != nil {
+		t.Fatal(err)
+	}
+	next := generation(t, "shop") + 1
+	mustClowder(t, "stack", "apply", "shop", "--file", filepath.Join(stackDir("shop"), "clowder.yaml"))
+	waitRunning(t, "shop", next, stackDeadline)
+}
+
+// runStack creates the stack, applies it and checks the container: its
+// image from the private registry, its secrets, its volume, both pools.
+func runStack(t *testing.T, server host) {
+	mustClowder(t, "stack", "create", "shop", "--dir", stackDir("shop"), "--age", recipient)
+	applyShop(t, "", firstSecrets)
 	mustClowder(t, "stack", "ps", "shop")
 
+	app := server.service(t, "app")
+	if image := server.must(t, "docker inspect --format '{{.Config.Image}}' "+app); image != privateImage {
+		t.Errorf("app runs %s, want %s", image, privateImage)
+	}
 	checkSecrets(t, server, firstSecrets)
-	checkStarts(t, server, 1)
+	if got := starts(t, server); got != 1 {
+		t.Errorf("app started %d times on its volume, want 1", got)
+	}
 	// data (replicated) went to the pool of fast, scratch to the one of bulk
 	for _, pool := range []string{"vg-fast", "vg-bulk"} {
 		server.must(t, "lvs --noheadings -o lv_name "+pool+" | grep -q shop")
@@ -218,49 +308,129 @@ func runStack(t *testing.T, server host) {
 	server.must(t, "drbdsetup status | grep -q shop")
 }
 
-func writeStackSecrets(t *testing.T, values map[string]string) {
-	t.Helper()
-	if err := clusterdir.WriteSOPS(filepath.Join(stackDir(), "secrets.sops.yaml"), values, recipient); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// appContainer is the ID of the stack's container.
-func appContainer(t *testing.T, server host) string {
-	t.Helper()
-	id := server.must(t, "docker ps -q --filter label=com.docker.compose.project=shop "+
-		"--filter label=com.docker.compose.service=app")
-	if id == "" {
-		t.Fatal("the stack's container does not run")
-	}
-	return id
-}
-
 func checkSecrets(t *testing.T, server host, want map[string]string) {
 	t.Helper()
-	id := appContainer(t, server)
-	if got := server.must(t, "docker exec "+id+" cat /run/secrets/password"); got != want["password"] {
+	app := server.service(t, "app")
+	if got := server.must(t, "docker exec "+app+" cat /run/secrets/password"); got != want["password"] {
 		t.Errorf("/run/secrets/password = %q, want %q", got, want["password"])
 	}
-	if got := server.must(t, "docker exec "+id+" printenv API_TOKEN"); got != want["api-token"] {
+	if got := server.must(t, "docker exec "+app+" printenv API_TOKEN"); got != want["api-token"] {
 		t.Errorf("API_TOKEN = %q, want %q", got, want["api-token"])
 	}
 }
 
-// checkStarts checks how often the container started on its volume: the
-// data stays across reboots and new generations.
-func checkStarts(t *testing.T, server host, want int) {
+// starts is how often app started on its volume: the data stays across
+// reboots and new generations.
+func starts(t *testing.T, server host) int {
 	t.Helper()
-	got := server.must(t, "docker exec "+appContainer(t, server)+" sh -c 'wc -l < /data/starts'")
-	if got != fmt.Sprint(want) {
-		t.Errorf("the container started %s times on its volume, want %d", got, want)
+	count, err := strconv.Atoi(server.must(t, "docker exec "+server.service(t, "app")+
+		" sh -c 'wc -l < /data/starts'"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+// shopContainers are the containers of the stack by ID, with their state.
+func shopContainers(t *testing.T, server host) map[string]container {
+	t.Helper()
+	containers := map[string]container{}
+	for _, id := range strings.Fields(server.must(t, "docker ps -aq --no-trunc --filter label=com.docker.compose.project=shop")) {
+		containers[id] = server.inspect(t, id)
+	}
+	return containers
+}
+
+// restartAgent restarts clowderd: with live-restore the containers run on,
+// and its first pass, which runs compose up for every stack, changes
+// nothing that runs. Docker's RestartCount would say nothing: the
+// supervisor starts containers through the API.
+func restartAgent(t *testing.T, server host) {
+	before := shopContainers(t, server)
+	wanted := generation(t, "shop")
+	server.must(t, "systemctl restart clowderd")
+	waitRunning(t, "shop", wanted, stackDeadline)
+	time.Sleep(agentPass)
+	checkUnchanged(t, before, shopContainers(t, server))
+}
+
+// checkUnchanged fails unless the same containers run, none restarted.
+func checkUnchanged(t *testing.T, before, after map[string]container) {
+	t.Helper()
+	if len(after) != len(before) {
+		t.Fatalf("%d containers before, %d after", len(before), len(after))
+	}
+	for id, was := range before {
+		if now, ok := after[id]; !ok || !now.State.StartedAt.Equal(was.State.StartedAt) {
+			t.Errorf("container %.12s was replaced or restarted", id)
+		}
+	}
+}
+
+// supervise adds web, then crashes app, makes web unhealthy and updates
+// web alone.
+func supervise(t *testing.T, server host) {
+	appBefore := server.inspect(t, server.service(t, "app"))
+	applyShop(t, "one", firstSecrets)
+	app := server.inspect(t, server.service(t, "app"))
+	if app.ID != appBefore.ID {
+		t.Error("adding web recreated app")
+	}
+
+	// kill -9 of its process, not docker kill: the supervisor takes a
+	// docker kill with SIGKILL as a stop by hand and keeps it stopped
+	server.must(t, "kill -9 "+strconv.Itoa(app.State.Pid))
+	eventually(t, stackDeadline, "app runs again", func() error {
+		if now := server.inspect(t, app.ID); !now.State.StartedAt.After(app.State.StartedAt) || now.State.Pid == 0 {
+			return fmt.Errorf("not yet")
+		}
+		return nil
+	})
+	crashed := server.inspect(t, app.ID)
+	gap := crashed.State.StartedAt.Sub(crashed.State.FinishedAt)
+	t.Logf("app ran again %s after its crash", gap)
+	if gap > crashRestart {
+		t.Errorf("app ran again %s after its crash, want at most %s", gap, crashRestart)
+	}
+
+	web := server.inspect(t, server.service(t, "web"))
+	server.must(t, "docker exec "+web.ID+" rm /tmp/healthy")
+	eventually(t, unhealthyDeadline, "web restarted and healthy", func() error {
+		now := server.inspect(t, web.ID)
+		if !now.State.StartedAt.After(web.State.StartedAt) || now.State.Health == nil || now.State.Health.Status != "healthy" {
+			return fmt.Errorf("started %s, health %+v", now.State.StartedAt, now.State.Health)
+		}
+		return nil
+	})
+
+	// only web changes: app stays as it is, web comes up new exactly once
+	appNow := server.inspect(t, app.ID)
+	since := server.must(t, "date +%s")
+	applyShop(t, "two", firstSecrets)
+	if now := server.inspect(t, server.service(t, "app")); now.ID != app.ID ||
+		!now.State.StartedAt.Equal(appNow.State.StartedAt) {
+		t.Error("an update of web alone restarted or recreated app")
+	}
+	newWeb := server.service(t, "web")
+	if newWeb == web.ID {
+		t.Fatal("web was not recreated with its new environment")
+	}
+	// whole seconds, from before the apply to the next second (until the
+	// current one would miss a start in this second); the old web's starts
+	// are not counted, as the filter takes the new container only
+	started := server.must(t, fmt.Sprintf("docker events --since %s --until $(($(date +%%s) + 1)) "+
+		"--filter container=%s --filter event=start --format '{{.ID}}' | wc -l", since, newWeb))
+	if started != "1" {
+		t.Errorf("the new web started %s times during the update, want 1", started)
 	}
 }
 
 // reboot restarts the host: after the boot, the agent brings the stack back,
-// and the operator base (the Floating IP, the pools, the watchdog) is still
-// there.
+// no container started before the agent, the operator base (the Floating IP,
+// the pools, the watchdog) is still there, and the mount guard holds.
 func reboot(t *testing.T, server host, tofu outputs) {
+	startsBefore := starts(t, server)
+	wanted := generation(t, "shop")
 	// without its marker the setup runs again at this boot, as after its own
 	// reboot into a newer kernel: systemd must start it, and each of its
 	// steps must hold on a finished host
@@ -281,13 +451,19 @@ func reboot(t *testing.T, server host, tofu outputs) {
 	})
 	// active only if it ran in this boot (RemainAfterExit)
 	server.must(t, "systemctl is-active clowder-setup")
-	waitRunning(t, "shop", 1, stackDeadline)
-	eventually(t, stackDeadline, "the stack's container runs", func() error {
-		_, err := server.run("docker ps -q --filter label=com.docker.compose.project=shop | grep -q .")
-		return err
+	waitRunning(t, "shop", wanted, stackDeadline)
+	eventually(t, stackDeadline, "the stack's containers run", func() error {
+		if server.service(t, "app") == "" || server.service(t, "web") == "" {
+			return fmt.Errorf("not yet")
+		}
+		return nil
 	})
 	checkSecrets(t, server, firstSecrets)
-	checkStarts(t, server, 2)
+	if got := starts(t, server); got != startsBefore+1 {
+		t.Errorf("app started %d times on its volume, want %d", got, startsBefore+1)
+	}
+	checkStartOrder(t, server)
+
 	classes, ok := tofu.ClusterYAML.Value["storage_classes"].(map[string]any)
 	if !ok {
 		t.Fatalf("the module's cluster_yaml has no storage_classes")
@@ -297,26 +473,84 @@ func reboot(t *testing.T, server host, tofu outputs) {
 		pools = append(pools, "--pool vg-"+class+"/thin")
 	}
 	// the time sync comes a while after the boot; the rest must hold at once
-	check := "clowderd check " + strings.Join(pools, " ") + " --floating-ip " + tofu.FloatingIP.Value
 	eventually(t, rebootDeadline, "the time is synchronized", func() error {
 		_, err := server.run("timedatectl show --property=NTPSynchronized --value | grep -qx yes")
 		return err
 	})
-	server.must(t, check)
+	server.must(t, "clowderd check "+strings.Join(pools, " ")+" --floating-ip "+tofu.FloatingIP.Value)
+	checkMountGuard(t, server)
 }
 
-// changeSecrets applies the stack with new secrets: a new generation, whose
-// label makes compose recreate the container with the new values.
+// checkStartOrder: Docker restarts nothing itself (restart "no"), so every
+// container started after clowderd's first start in this boot. That start,
+// not ExecMainStartTimestamp, which a later restart of the agent (watchdog,
+// the setup) would move; and not ActiveEnterTimestamp: the agent runs
+// compose up before it tells systemd it is ready.
+func checkStartOrder(t *testing.T, server host) {
+	agentStart := unixTime(t, strings.Fields(server.must(t,
+		"journalctl --boot --no-pager -o short-unix -u clowderd | grep -m 1 'Starting clowderd'"))[0])
+	t.Logf("clowderd started at %s; restarts in this boot: %s", agentStart,
+		server.must(t, "systemctl show clowderd --property=NRestarts --value"))
+	for id, state := range shopContainers(t, server) {
+		if policy := state.HostConfig.RestartPolicy.Name; policy != "no" {
+			t.Errorf("container %.12s has the restart policy %q", id, policy)
+		}
+		if !state.State.StartedAt.After(agentStart) {
+			t.Errorf("container %.12s started at %s, before the agent at %s", id, state.State.StartedAt, agentStart)
+		}
+	}
+}
+
+// checkMountGuard unmounts app's replicated volume while the agent and app
+// are stopped: app must not start, and nothing may land in the empty mount
+// point on the root file system. Started again, the agent mounts the volume
+// and brings app back with its data. scratch stays mounted; one volume
+// shows the guard.
+func checkMountGuard(t *testing.T, server host) {
+	startsBefore := starts(t, server)
+	app := server.service(t, "app")
+	// generation 1: no restore or class move happened to the volume
+	device := server.must(t, "docker volume inspect --format '{{index .Options \"device\"}}' "+
+		compose.VolumeName("shop", "data", 1))
+	if path.Base(device) != "data" {
+		t.Fatalf("the volume binds %s, not the data directory of a mount", device)
+	}
+	mount := path.Dir(device)
+	server.must(t, "systemctl stop clowderd && docker stop "+app+" && umount "+mount)
+	if output, err := server.run("docker start " + app); err == nil {
+		t.Errorf("app started on its unmounted volume:\n%s", output)
+	}
+	if _, err := server.run("test -e " + device); err == nil {
+		t.Errorf("%s exists on the root file system", device)
+	}
+	server.must(t, "systemctl start clowderd")
+	eventually(t, stackDeadline, "the agent brought app back", func() error {
+		if server.service(t, "app") == "" {
+			return fmt.Errorf("app does not run")
+		}
+		return nil
+	})
+	if got := starts(t, server); got != startsBefore+1 {
+		t.Errorf("app started %d times on its volume, want %d", got, startsBefore+1)
+	}
+}
+
+// changeSecrets applies the stack with new secrets: compose recreates app,
+// whose secret file changed (its label), and leaves web, which has none.
 func changeSecrets(t *testing.T, server host) {
-	before := appContainer(t, server)
-	writeStackSecrets(t, secondSecrets)
-	mustClowder(t, "stack", "apply", "shop", "--file", filepath.Join(stackDir(), "clowder.yaml"))
-	waitRunning(t, "shop", 2, stackDeadline)
-	if after := appContainer(t, server); after == before {
-		t.Error("the container was not recreated")
+	app, web := server.service(t, "app"), server.service(t, "web")
+	startsBefore := starts(t, server)
+	applyShop(t, "two", secondSecrets)
+	if server.service(t, "app") == app {
+		t.Error("app was not recreated with its new secrets")
+	}
+	if server.service(t, "web") != web {
+		t.Error("web, which asks for no secret, was recreated")
 	}
 	checkSecrets(t, server, secondSecrets)
-	checkStarts(t, server, 3)
+	if got := starts(t, server); got != startsBefore+1 {
+		t.Errorf("app started %d times on its volume, want %d", got, startsBefore+1)
+	}
 }
 
 // missingSecretFile runs compose up with the agent's files and a secret file
@@ -336,24 +570,90 @@ func missingSecretFile(t *testing.T, server host) {
 		t.Logf("compose up without the secret file failed as it should:\n%s", output)
 	}
 	server.must(t, "systemctl start clowderd")
+	// the failed recreate leaves old containers renamed (<id>_shop-web-1);
+	// the agent's compose up replaces or starts them (Compose may keep such
+	// a name), so wait until each service has one container, running
 	eventually(t, stackDeadline, "the agent brought the stack back", func() error {
-		_, err := server.run("docker ps -q --filter label=com.docker.compose.project=shop | grep -q .")
-		return err
+		containers := strings.Fields(server.must(t, "docker ps -a --filter label=com.docker.compose.project=shop "+
+			"--format '{{.Label \"com.docker.compose.service\"}}:{{.State}}' | sort"))
+		if !slices.Equal(containers, []string{"app:running", "web:running"}) {
+			return fmt.Errorf("containers %v", containers)
+		}
+		return nil
 	})
 	checkSecrets(t, server, secondSecrets)
+}
+
+// fullPool applies a stack whose volume fits no pool: it waits, the cluster
+// says why, and the running stack is untouched.
+func fullPool(t *testing.T, server host) {
+	before := shopContainers(t, server)
+	writeSimpleStack(t, "big", "volumes:\n  huge:\n    x-clowder: {class: bulk, size: 1T, replicas: 0}\n")
+	eventually(t, stackDeadline, "big waits with a reason", func() error {
+		stacks, err := listStacks()
+		if err != nil {
+			return err
+		}
+		big := stacks["big"]
+		if big.Status != "pending" || !strings.Contains(big.WaitReason, "volume huge (1T, class bulk) fits no pool") {
+			return fmt.Errorf("%s, reason %q", big.Status, big.WaitReason)
+		}
+		return nil
+	})
+	mustClowder(t, "stack", "ps")
+	checkUnchanged(t, before, shopContainers(t, server))
+	mustClowder(t, "stack", "delete", "big")
+	waitGone(t, stackDeadline, "big")
+}
+
+// writeSimpleStack creates and applies a stack of one service on the public
+// image, with the given tail of its Compose file.
+func writeSimpleStack(t *testing.T, name, tail string) {
+	t.Helper()
+	mustClowder(t, "stack", "create", name, "--dir", stackDir(name), "--age", recipient)
+	content := "name: " + name + "\nservices:\n  app:\n    image: " + publicImage +
+		"\n    command: [sleep, infinity]\n    stop_grace_period: 1s\n" + tail
+	file := filepath.Join(stackDir(name), "clowder.yaml")
+	if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustClowder(t, "stack", "apply", name, "--file", file)
+}
+
+// runManyStacks runs twenty small stacks next to shop, measures the agent
+// and removes them again.
+func runManyStacks(t *testing.T, server host) {
+	var names []string
+	for i := 1; i <= manyStacks; i++ {
+		names = append(names, fmt.Sprintf("s%02d", i))
+	}
+	for _, name := range names {
+		writeSimpleStack(t, name, "")
+	}
+	eventually(t, stackDeadline, "all stacks run", func() error {
+		stacks, err := listStacks()
+		if err != nil {
+			return err
+		}
+		for _, name := range names {
+			if stacks[name].Status != "running" {
+				return fmt.Errorf("%s is %q", name, stacks[name].Status)
+			}
+		}
+		return nil
+	})
+	checkMemory(t, server, fmt.Sprintf("with %d stacks", manyStacks+1))
+	for _, name := range names {
+		mustClowder(t, "stack", "delete", name)
+	}
+	waitGone(t, stackDeadline, names...)
 }
 
 // deleteStack deletes the stack with its volumes: the containers, the LVs
 // and the DRBD resource go.
 func deleteStack(t *testing.T, server host) {
 	mustClowder(t, "stack", "delete", "shop", "--delete-volumes")
-	eventually(t, stackDeadline, "the stack is gone", func() error {
-		_, found, err := findStack("shop")
-		if err == nil && found {
-			return fmt.Errorf("still listed")
-		}
-		return err
-	})
+	waitGone(t, stackDeadline, "shop")
 	eventually(t, stackDeadline, "the host removed the stack", func() error {
 		output, err := server.run("docker ps -aq --filter label=com.docker.compose.project=shop; " +
 			"lvs --noheadings -o lv_name | grep shop; drbdsetup status | grep shop; true")
@@ -364,9 +664,18 @@ func deleteStack(t *testing.T, server host) {
 	})
 }
 
-// logMemory logs what the agent uses; it is a measurement, not a check.
-func logMemory(t *testing.T, server host) {
-	t.Logf("clowderd: resident %s KiB, its cgroup %s bytes",
-		server.must(t, "ps -o rss= -C clowderd"),
+// checkMemory logs what the agent uses and fails above the acceptance's
+// goal, so a regression shows.
+func checkMemory(t *testing.T, server host, when string) {
+	t.Helper()
+	resident, err := strconv.ParseInt(server.must(t,
+		"ps -o rss= -p $(systemctl show clowderd --property=MainPID --value)"), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("clowderd %s: resident %d KiB, its cgroup %s bytes", when, resident,
 		server.must(t, "systemctl show clowderd --property=MemoryCurrent --value"))
+	if resident<<10 > agentMemoryLimit {
+		t.Errorf("clowderd uses %d KiB, more than the goal of %d MB", resident, agentMemoryLimit/1_000_000)
+	}
 }

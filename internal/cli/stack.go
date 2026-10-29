@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -252,11 +253,15 @@ func newStackDelete(g *globals) *cobra.Command {
 }
 
 func newStackPs(g *globals) *cobra.Command {
-	return &cobra.Command{
+	var output string
+	command := &cobra.Command{
 		Use:   "ps [<name>]",
 		Short: "List the stacks, or the containers of one",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if output != "table" && output != "json" {
+				return fmt.Errorf("--output %q: table or json", output)
+			}
 			client, _, err := g.connect()
 			if err != nil {
 				return err
@@ -267,6 +272,11 @@ func newStackPs(g *globals) *cobra.Command {
 				if err := client.Get(cmd.Context(), "/v1/stacks", &stacks); err != nil {
 					return err
 				}
+				if output == "json" {
+					encoder := json.NewEncoder(out)
+					encoder.SetIndent("", "  ")
+					return encoder.Encode(stacks)
+				}
 				return printStacks(out, stacks)
 			}
 			var containers []api.ContainerInfo
@@ -276,14 +286,19 @@ func newStackPs(g *globals) *cobra.Command {
 			return printContainers(out, containers)
 		},
 	}
+	command.Flags().StringVarP(&output, "output", "o", "table",
+		"table, or json for scripts (the list of stacks only)")
+	return command
 }
 
 func printStacks(out io.Writer, stacks []api.StackInfo) error {
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(table, "NAME\tSTATUS\tHOST\tPRIORITY\tGENERATION\tSTOPPED\tCREATED BY") // tabwriter reports errors on Flush
+	// what the stack waits for last: it is long, and empty for most stacks;
+	// a running stack waits too when a volume it newly names finds no place
+	_, _ = fmt.Fprintln(table, "NAME\tSTATUS\tHOST\tPRIORITY\tGENERATION\tSTOPPED\tCREATED BY\tWAITING FOR") // tabwriter reports errors on Flush
 	for _, stack := range stacks {
-		_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%d\t%d\t%s\t%s\n", stack.Name, stack.Status, stack.Host,
-			stack.Priority, stack.Generation, strings.Join(stack.Stopped, ","), stack.CreatedBy)
+		_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n", stack.Name, stack.Status, stack.Host,
+			stack.Priority, stack.Generation, strings.Join(stack.Stopped, ","), stack.CreatedBy, stack.WaitReason)
 	}
 	return table.Flush()
 }

@@ -16,7 +16,7 @@
 #   package   build, then the Debian packages of clowder and clowderd into dist/
 #   all       lint, test, test-sops, test-tools, package (what CI runs)
 #   live      package, then the live tests in an HLab lab of their own:
-#             examples/hetzner makes a host, test/live drives it (about 15
+#             examples/hetzner makes a host, test/live drives it (about 20
 #             minutes; needs HLAB=<path to HLab's bin/hlab> and /dev/kvm).
 #             What a failed run leaves stays for a look.
 #   live down destroy what the live tests left and stop their lab
@@ -53,9 +53,13 @@ readonly BUSYBOX_IMAGE=busybox:1.37.0
 readonly LIVE_VOLUME=clowder-live
 # The container that serves the clowderd package to the host.
 readonly LIVE_PACKAGES=clowder-live-packages
+# The private registry the test stack pulls from (test/live: registry).
+readonly LIVE_REGISTRY=clowder-live-registry
+readonly REGISTRY_IMAGE=registry:3.0.0
 # HLab gives tools in the lab's network this address, and the hosts reach it.
 readonly LAB_ADDRESS=192.0.2.2
 readonly PACKAGE_PORT=8099
+readonly REGISTRY_PORT=5000
 
 # in_image <image> <command...>: Run a command in an image with the repository
 # mounted at /src as the working directory.
@@ -232,6 +236,37 @@ live_host_left() {
   esac
 }
 
+# start_registry: A private registry in the lab's network, with TLS from a
+# throw-away CA and a password, as test/live expects them in
+# /work/registry (ca.crt, password; the user is tester).
+# Globals:
+#   HLAB_NETWORK (read)
+start_registry() {
+  # Debian's openssl and htpasswd (bcrypt, which the registry wants), in the
+  # Debian image the tools already use, rather than one more image; outside
+  # the lab's network, where apt reaches Debian's mirror
+  docker run --rm -v "${LIVE_VOLUME}:/work" -e "ADDRESS=${LAB_ADDRESS}" "${DEBIAN_IMAGE}" sh -c '
+    set -e
+    apt-get -qq update && apt-get -qq install -y --no-install-recommends openssl apache2-utils >/dev/null
+    mkdir /work/registry && cd /work/registry
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
+      -subj /CN=clowder-live-ca -keyout ca.key -out ca.crt 2>/dev/null
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=${ADDRESS}" \
+      -keyout server.key -out server.csr 2>/dev/null
+    printf "subjectAltName=IP:%s\n" "${ADDRESS}" >server.ext
+    openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 \
+      -extfile server.ext -out server.crt 2>/dev/null
+    openssl rand -hex 16 >password
+    htpasswd -Bbn tester "$(cat password)" >htpasswd'
+  docker rm -f "${LIVE_REGISTRY}" >/dev/null 2>&1 || true
+  docker run -d --rm --name "${LIVE_REGISTRY}" --network "${HLAB_NETWORK}" \
+    -v "${LIVE_VOLUME}:/work:ro" -e "REGISTRY_HTTP_ADDR=${LAB_ADDRESS}:${REGISTRY_PORT}" \
+    -e REGISTRY_HTTP_TLS_CERTIFICATE=/work/registry/server.crt \
+    -e REGISTRY_HTTP_TLS_KEY=/work/registry/server.key \
+    -e REGISTRY_AUTH=htpasswd -e REGISTRY_AUTH_HTPASSWD_REALM=clowder-live \
+    -e REGISTRY_AUTH_HTPASSWD_PATH=/work/registry/htpasswd "${REGISTRY_IMAGE}" >/dev/null
+}
+
 # cmd_live: Run the live tests on a new host; tear it down if they pass.
 cmd_live() {
   local sha256 public_key status=0
@@ -257,12 +292,13 @@ EOF
   docker run -d --rm --name "${LIVE_PACKAGES}" --network "${HLAB_NETWORK}" \
     -v "${LIVE_VOLUME}:/work:ro" "${BUSYBOX_IMAGE}" \
     httpd -f -p "${LAB_ADDRESS}:${PACKAGE_PORT}" -h /work/www >/dev/null
+  start_registry
   live_tofu 'tofu apply -input=false -auto-approve -state=/work/terraform.tfstate \
     -var-file=/work/live.tfvars && tofu output -json -state=/work/terraform.tfstate >/work/outputs.json' \
     && in_lab "${GO_IMAGE}" env LIVE_DIR=/work CLOWDER=/src/dist/linux-amd64/clowder \
-      go test -tags live -count=1 -timeout 60m -v ./test/live \
+      go test -tags live -count=1 -timeout 90m -v ./test/live \
     || status=$?
-  docker rm -f "${LIVE_PACKAGES}" >/dev/null
+  docker rm -f "${LIVE_PACKAGES}" "${LIVE_REGISTRY}" >/dev/null
   if ((status != 0)); then
     echo "bin/dev live: failed; the host stays for a look (ssh from the lab's network with" \
       "/work/id_ed25519 in the volume ${LIVE_VOLUME}); bin/dev live down removes it" >&2
@@ -275,7 +311,7 @@ EOF
 cmd_live_down() {
   lab up
   eval "$(lab env)"
-  docker rm -f "${LIVE_PACKAGES}" >/dev/null 2>&1 || true
+  docker rm -f "${LIVE_PACKAGES}" "${LIVE_REGISTRY}" >/dev/null 2>&1 || true
   if live_host_left; then
     live_tofu 'tofu destroy -input=false -auto-approve -state=/work/terraform.tfstate \
       -var-file=/work/live.tfvars'
