@@ -261,6 +261,10 @@ func checkStarts(t *testing.T, server host, want int) {
 // and the operator base (the Floating IP, the pools, the watchdog) is still
 // there.
 func reboot(t *testing.T, server host, tofu outputs) {
+	// without its marker the setup runs again at this boot, as after its own
+	// reboot into a newer kernel: systemd must start it, and each of its
+	// steps must hold on a finished host
+	server.must(t, "rm "+setupMarker)
 	before := server.must(t, "cat /proc/sys/kernel/random/boot_id")
 	// in the background, so ssh returns before the connection goes
 	server.must(t, "nohup sh -c 'sleep 2; systemctl reboot' >/dev/null 2>&1 &")
@@ -271,6 +275,12 @@ func reboot(t *testing.T, server host, tofu outputs) {
 		}
 		return err
 	})
+	eventually(t, setupDeadline, "clowder-setup finished again", func() error {
+		_, err := server.run("test -e " + setupMarker)
+		return err
+	})
+	// active only if it ran in this boot (RemainAfterExit)
+	server.must(t, "systemctl is-active clowder-setup")
 	waitRunning(t, "shop", 1, stackDeadline)
 	eventually(t, stackDeadline, "the stack's container runs", func() error {
 		_, err := server.run("docker ps -q --filter label=com.docker.compose.project=shop | grep -q .")

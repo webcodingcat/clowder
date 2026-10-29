@@ -49,7 +49,9 @@ and the journals of `clowder-setup` and `clowderd`. The steps:
 2. The user bootstraps, fills in `cluster.yaml` from the module's outputs and applies it;
    the join keys stay in `secrets.sops.yaml`.
 3. A stack runs with a replicated and a plain volume, a secret file and a secret variable.
-4. After a reboot it comes back with its data, and `clowderd check` passes.
+4. After a reboot it comes back with its data, and `clowderd check` passes. The setup's
+   marker is gone before, so the setup runs again at that boot, as after its own reboot
+   into a newer kernel, and must finish on the finished host.
 5. A changed secret recreates the container.
 6. With the agent stopped, `docker compose up` fails on a missing secret file; started
    again, the agent brings the stack back.
