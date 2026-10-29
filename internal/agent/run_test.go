@@ -3,12 +3,14 @@ package agent
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,8 +21,11 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/cli"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/compose"
+	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/sopsage"
+	"github.com/webcodingcat/clowder/internal/storage"
 )
 
 func freePort(t *testing.T) int {
@@ -70,6 +75,116 @@ func (f *fakeNetwork) waitForRuleset(t *testing.T, want func(network.Ruleset) bo
 	t.Errorf("no such ruleset applied; the last ones: %v", f.rulesets)
 }
 
+// calls is what a fake was asked to do, one line per call.
+type calls struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (c *calls) add(format string, args ...any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lines = append(c.lines, fmt.Sprintf(format, args...))
+}
+
+// waitFor waits up to 10 s for a call.
+func (c *calls) waitFor(t *testing.T, line string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		found := slices.Contains(c.lines, line)
+		c.mu.Unlock()
+		if found {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t.Errorf("no call %q; the calls: %q", line, c.lines)
+}
+
+// fakeStorage stands in for the storage driver: every pool has 100 GiB.
+type fakeStorage struct {
+	calls
+	dir string
+}
+
+func (f *fakeStorage) Ensure(_ context.Context, volume storage.Volume) error {
+	f.add("ensure %s", volume.LV)
+	return nil
+}
+
+func (f *fakeStorage) Remove(_ context.Context, volume storage.Volume) error {
+	f.add("remove %s", volume.LV)
+	return nil
+}
+
+func (f *fakeStorage) Trim(context.Context, []storage.Volume) error { return nil }
+
+func (f *fakeStorage) PoolUsage(context.Context, string) (int64, float64, float64, error) {
+	return 100 << 30, 0, 0, nil
+}
+
+func (f *fakeStorage) MountPoint(volume storage.Volume) string {
+	return filepath.Join(f.dir, filepath.FromSlash(volume.ID))
+}
+
+// fakeDocker stands in for Docker: it sends no events and has one
+// container per stack.
+type fakeDocker struct {
+	calls
+}
+
+func (f *fakeDocker) Events(ctx context.Context, _ string) (<-chan docker.Event, <-chan error) {
+	events := make(chan docker.Event)
+	go func() {
+		<-ctx.Done()
+		close(events)
+	}()
+	return events, make(chan error)
+}
+
+func (f *fakeDocker) Start(context.Context, string) error   { return nil }
+func (f *fakeDocker) Restart(context.Context, string) error { return nil }
+
+func (f *fakeDocker) ComposeUp(_ context.Context, stack, _ string) error {
+	f.add("up %s", stack)
+	return nil
+}
+
+func (f *fakeDocker) ComposeDown(_ context.Context, stack, _ string) error {
+	f.add("down %s", stack)
+	return nil
+}
+
+func (f *fakeDocker) ComposePs(context.Context, string, string) (string, error) {
+	return `{"Service":"app","State":"running","Health":"","Status":"Up 2 seconds"}` + "\n", nil
+}
+
+func (f *fakeDocker) ComposeLogs(_ context.Context, _, _ string, _ bool, out io.Writer) error {
+	_, err := fmt.Fprintln(out, "app-1  | hello")
+	return err
+}
+
+func (f *fakeDocker) Login(context.Context, string, string, string) error { return nil }
+
+// waitForOutput runs the CLI up to 10 s until its output contains want.
+func waitForOutput(t *testing.T, want string, args ...string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var out string
+	var err error
+	for time.Now().Before(deadline) {
+		if out, err = clowder(t, args...); err == nil && strings.Contains(out, want) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Errorf("clowder %s: no %q in %q, %v", strings.Join(args, " "), want, out, err)
+}
+
 // clowder runs the CLI and returns what it printed.
 func clowder(t *testing.T, args ...string) (string, error) {
 	t.Helper()
@@ -112,7 +227,10 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 
 	ctx, stop := context.WithCancel(context.Background())
 	stopped := make(chan error, 1)
-	go func() { stopped <- Run(ctx, files, hostNetwork, logger) }()
+	hostStorage := &fakeStorage{dir: t.TempDir()}
+	hostDocker := &fakeDocker{}
+	parts := HostParts{Network: hostNetwork, Storage: hostStorage, Docker: hostDocker}
+	go func() { stopped <- Run(ctx, files, parts, logger) }()
 	defer func() {
 		stop()
 		if err := <-stopped; err != nil {
@@ -168,6 +286,31 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "nothing to apply") {
 		t.Errorf("diff after apply: %q, %v", out, err)
 	}
+
+	// a stack with a volume: placed, its volume made, compose up, running
+	composeFile := filepath.Join(t.TempDir(), "compose.yaml")
+	if err := os.WriteFile(composeFile, []byte("services:\n  app: {image: nginx, volumes: [db:/data]}\n"+
+		"volumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clowder(t, "--cluster", dir, "stack", "apply", "shop", "-f", composeFile); err != nil {
+		t.Fatal(err)
+	}
+	lv := compose.VolumeName("shop", "db", 1)
+	hostStorage.waitFor(t, "ensure "+lv)
+	hostDocker.waitFor(t, "up shop")
+	if _, err := os.Stat(filepath.Join(files.Dir, "stacks", "shop", "compose.yaml")); err != nil {
+		t.Errorf("the rendered Compose file: %v", err)
+	}
+	waitForOutput(t, "running", "--cluster", dir, "stack", "ps")
+	waitForOutput(t, "Up 2 seconds", "--cluster", dir, "stack", "ps", "shop")
+	waitForOutput(t, "hello", "--cluster", dir, "stack", "logs", "shop")
+	// deleted with its volume: compose down, the LV removed
+	if _, err := clowder(t, "--cluster", dir, "stack", "delete", "shop", "--delete-volumes"); err != nil {
+		t.Fatal(err)
+	}
+	hostDocker.waitFor(t, "down shop")
+	hostStorage.waitFor(t, "remove "+lv)
 	config := filepath.Join(dir, clusterdir.ConfigFile)
 	content, err := os.ReadFile(config)
 	if err != nil {

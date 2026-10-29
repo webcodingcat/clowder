@@ -12,9 +12,12 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/buildinfo"
+	"github.com/webcodingcat/clowder/internal/compose"
+	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/raftnode"
 	"github.com/webcodingcat/clowder/internal/state"
+	"github.com/webcodingcat/clowder/internal/supervisor"
 )
 
 const (
@@ -25,11 +28,18 @@ const (
 	catchUpTimeout = 15 * time.Second
 )
 
+// HostParts are what the agent changes on its host; tests use fakes.
+type HostParts struct {
+	Network HostNetwork
+	Storage Storage
+	Docker  Docker
+}
+
 // Run is the agent until ctx ends: clowder0, the Raft member, the API, the
-// containers' DNS resolver and the nft rules. It tells systemd when it serves
-// and keeps its watchdog fed while the state answers. Containers and storage
-// come in later steps.
-func Run(ctx context.Context, files Files, hostNetwork HostNetwork, logger *slog.Logger) error {
+// containers' DNS resolver, the nft rules, the stacks of this host with
+// their volumes and, while it leads, the placement of stacks. It tells
+// systemd when it serves and keeps its watchdog fed while the state answers.
+func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger) error {
 	host, err := files.readHost()
 	if err != nil {
 		return err
@@ -38,7 +48,7 @@ func Run(ctx context.Context, files Files, hostNetwork HostNetwork, logger *slog
 	if err != nil {
 		return err
 	}
-	if err := hostNetwork.SetUpInterface(ctx, host.NodeAddress); err != nil {
+	if err := parts.Network.SetUpInterface(ctx, host.NodeAddress); err != nil {
 		return err
 	}
 	node, err := raftnode.Open(raftnode.Config{
@@ -53,21 +63,26 @@ func Run(ctx context.Context, files Files, hostNetwork HostNetwork, logger *slog
 	// answer from the state as the log has it, not from an empty one; a host
 	// without quorum starts anyway after a while, and says so
 	catchUp, cancelCatchUp := context.WithTimeout(ctx, catchUpTimeout)
-	err = node.CatchUp(catchUp)
+	caughtUp := node.CatchUp(catchUp)
 	cancelCatchUp()
-	if err != nil {
-		logger.Warn("serving before the state caught up with the Raft log", "error", err)
+	if caughtUp != nil {
+		logger.Warn("serving before the state caught up with the Raft log", "error", caughtUp)
 	}
 
-	resolver, err := hostNetwork.StartResolver()
+	resolver, err := parts.Network.StartResolver()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resolver.Close() }() // stopping: nothing to keep
 	reconcilers, stopReconcilers := context.WithCancel(ctx)
 	defer stopReconcilers()
-	go reconcileNetwork(reconcilers, node, hostNetwork, logger)
+	go reconcileNetwork(reconcilers, node, parts.Network, logger)
 
+	hostStacks := &stacks{
+		files: files, host: host, version: buildinfo.Version, node: node,
+		docker: parts.Docker, storage: parts.Storage, open: credentials.dataKey.Open,
+		logger: logger, logins: map[string][32]byte{},
+	}
 	server := api.NewServer(api.ServerConfig{
 		Cluster: node, CA: credentials.ca, Certificate: credentials.certificate,
 		APIAddress: func(id state.HostID) string {
@@ -75,7 +90,21 @@ func Run(ctx context.Context, files Files, hostNetwork HostNetwork, logger *slog
 			return net.JoinHostPort(network.NodeAddress(id).String(), strconv.Itoa(host.APIPort))
 		},
 		Keys: credentials.dataKey, Version: buildinfo.Version, Logger: logger,
+		HostID: host.ID, Containers: hostStacks,
 	})
+	hostStacks.propose = server.Propose
+	hostStacks.supervisor = supervisor.New(parts.Docker, hostStacks.rules, supervisor.DefaultBackoff, logger)
+	go hostStacks.supervisor.Run(reconcilers, compose.LabelStack)
+	go controller.RunPlacement(reconcilers, node, server.Propose, logger)
+	go hostStacks.trim(reconcilers)
+	go func() {
+		// a state that lags may still place a stack here that has moved on,
+		// so containers start only once the state caught up
+		if caughtUp != nil && !waitForState(reconcilers, node, logger) {
+			return
+		}
+		hostStacks.reconcile(reconcilers)
+	}()
 	servers, serveErrors, err := serveAPI(server, host.apiAddresses(), logger)
 	if err != nil {
 		return err
@@ -92,6 +121,26 @@ func Run(ctx context.Context, files Files, hostNetwork HostNetwork, logger *slog
 		_ = server.Shutdown(shutdown) // stopping: open calls are cut after the timeout
 	}
 	return err
+}
+
+// waitForState tries until ctx ends to catch the state up with the Raft
+// log; it tells whether it did.
+func waitForState(ctx context.Context, node *raftnode.Node, logger *slog.Logger) bool {
+	for ctx.Err() == nil {
+		catchUp, cancel := context.WithTimeout(ctx, catchUpTimeout)
+		err := node.CatchUp(catchUp)
+		cancel()
+		if err == nil {
+			logger.Info("the state caught up; starting the stacks")
+			return true
+		}
+		// a failed barrier returns at once; do not spin
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Second):
+		}
+	}
+	return false
 }
 
 // serveAPI listens on every address and serves the API there.

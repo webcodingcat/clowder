@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -16,7 +17,9 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/command"
+	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/network"
+	"github.com/webcodingcat/clowder/internal/storage"
 )
 
 // NewRoot returns the clowderd command with all its subcommands.
@@ -78,7 +81,7 @@ func newRun() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
 			defer stop()
-			return Run(ctx, Files{Dir: DefaultDir}, hostNetwork(), slog.Default())
+			return Run(ctx, Files{Dir: DefaultDir}, hostParts(), slog.Default())
 		},
 	}
 }
@@ -86,6 +89,20 @@ func newRun() *cobra.Command {
 // hostNetwork is the host's real network.
 func hostNetwork() network.Host {
 	return network.Host{ResolvConf: "/etc/resolv.conf", Logger: slog.Default()}
+}
+
+// hostParts are the host's real network, storage and Docker.
+func hostParts() HostParts {
+	return HostParts{
+		Network: hostNetwork(),
+		Storage: storage.Driver{
+			VolumesDir:  filepath.Join(DefaultDir, "volumes"),
+			StateDir:    filepath.Join(DefaultDir, "storage"),
+			ResourceDir: "/etc/drbd.d",
+			Run:         command.Run,
+		},
+		Docker: docker.NewClient(docker.Socket),
+	}
 }
 
 func newVersion() *cobra.Command {

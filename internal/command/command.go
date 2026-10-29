@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -46,6 +47,20 @@ func ExitCode(err error) (code int, ok bool) {
 // goroutine waiting for it) behind.
 func Run(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
 	return RunWithInput(ctx, timeout, "", name, args...)
+}
+
+// Stream runs a command that writes for as long as it runs (logs that
+// follow), passing its output on as it comes. It has no timeout: ctx ends
+// it. Only for tools that touch no volume, as it waits for the process.
+func Stream(ctx context.Context, out io.Writer, name string, args ...string) error {
+	var stderr strings.Builder
+	process := exec.CommandContext(ctx, name, args...)
+	process.Stdout = out
+	process.Stderr = &stderr
+	if err := process.Run(); err != nil && ctx.Err() == nil {
+		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // RunWithInput is Run with input on the command's standard input.

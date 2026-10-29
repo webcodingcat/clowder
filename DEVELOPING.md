@@ -87,14 +87,14 @@ Packages in *italics* do not exist yet.
   `cli-portable`) refuses direct imports of the Linux-only packages in `cmd/clowder` and
   `internal/cli`; the cross build for Windows and macOS in `bin/dev build` catches indirect
   ones.
-- **Pure logic, no I/O**: *`scheduler`*, `state`. Their tests need no host, files or network.
+- **Pure logic, no I/O**: `scheduler`, `state`. Their tests need no host, files or network.
   `state` uses the types and `Check` of `clusterdir`, never its file access.
-- **Decides**: *`controller`* (the leader's loops) writes Raft commands. It talks to external
+- **Decides**: `controller` (the leader's loops) writes Raft commands. It talks to external
   services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
   changes the host.
-- **Changes the host**: `agent`, *`supervisor`*, `raftnode` (Raft over mTLS), `datakey` (the
+- **Changes the host**: `agent`, `supervisor`, `raftnode` (Raft over mTLS), `datakey` (the
   key file), `command` (host tools with a timeout) and the drivers `network`, `storage`,
-  *`docker`*, *`ingress`*.
+  `docker`, *`ingress`*.
 - **Reads the host**: `hostcheck` (for `clowderd check`). It compiles anywhere, but only the
   agent uses it, so depguard keeps it out of the CLI like the packages above.
 
@@ -154,9 +154,11 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   certificate. Which actor may send which kind is the API's check; the state checks only
   what it alone can tell: a host reports only about itself and never moves another host.
 - In use so far: `bootstrap` (init), `apply-config`, `add-user` (the first user),
-  `set-host-phase` (host actions). The other kinds (versions reported, hosts joining, stacks,
-  volumes, operations, users beyond the first) and the fields they fill are there for the
-  next steps; they are tested, but nothing sends them yet.
+  `set-host-phase` (host actions), `put-stack` and `delete-stack` (the user),
+  `put-volume`, `delete-volume` and `set-stack-status` (placement, the stack's host),
+  `report-host` (each agent). The other kinds (hosts joining, operations, users beyond the
+  first) and the fields they fill are there for the next steps; they are tested, but nothing
+  sends them yet.
 - Host phases (`phaseChanges`; L = the leader, on its own or for a user; H = the host itself):
 
   ```
@@ -245,7 +247,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - The CLI finds the cluster directory (`--cluster`, `$CLOWDER_CLUSTER`, the working directory)
   and the user (`--user`, `$CLOWDER_USER`, the only credentials file), then talks to the
   cluster with the user's certificate: `cluster status|apply|diff|schema`, `host list`,
-  `host drain|undrain|remove|enable`.
+  `host drain|undrain|remove|enable`, `stack apply|delete|ps|logs`.
+- `stack apply` loads the Compose files on the user's machine (`compose.Load`, all problems
+  at once) and sends the merged, self-contained file (`compose.Stack.Source`); the agent
+  parses it again and checks it against the cluster (storage classes). `stack delete` refuses
+  a stack with volumes unless `--delete-volumes` says so. `stack ps <name>` and `stack logs`
+  ask the stack's host through `/v1/internal/stacks/<name>/ps|logs`, wherever the CLI came
+  in.
 - `cluster apply` sends `cluster.yaml` with the secrets of `secrets.sops.yaml` in clear inside
   mutual TLS (`PUT /v1/cluster`); the agent seals them with the data key before they go into
   the state. Its hash covers both, so `cluster diff` tells changed fields of `cluster.yaml`
@@ -271,17 +279,31 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - `clowderd run` (the service): the node address on `clowder0`, the Raft member, the API on
   the underlay and the node address. It waits up to 15 s for its state to catch up with the
   Raft log (on the leader a barrier), then tells systemd `READY=1`, and feeds the watchdog
-  while the state's lock answers. Containers, the network beyond `clowder0` and storage come
-  in later steps.
+  while the state's lock answers.
+- `HostParts` are what the agent changes on its host: the network, the storage driver and
+  Docker. `clowderd run` passes the real ones, the test fakes.
 - `clowder0` is a dummy interface with the node address (`internal/network`), so the address
   exists on a host without peers; `run` creates it at every start.
 - `run` also starts the containers' DNS resolver and keeps the nft rules as the state says
   (`reconcileNetwork`): after a change of the state when the rules differ, and every 30 s to
   repair what someone changed by hand. `HostNetwork` is what the agent changes in the
   network; the test uses a fake.
+- The stacks of the host (`stacks.reconcile`, after a change of the state and every 30 s):
+  for each stack the state places here, `Ensure` its volume copies, render its Compose file
+  to `/var/lib/clowder/stacks/<name>/compose.yaml` and run `compose up` when the file
+  changed, then report `running`. Stacks that left the host get `compose down`; volume copies
+  the state no longer places here (or in an older generation) are removed. Each stack's
+  `volumes.json` records its copies before they are made, so a crash leaves nothing unknown.
+- After a boot no container runs (`restart: "no"`); the first pass runs `compose up` for
+  every stack, but only once the state has caught up with the Raft log, so a host that was
+  away does not start a stack that has moved on.
+- The agent also reports its version, memory, CPUs and pools (`report-host`, only when
+  they changed; the pools' use rounded to GiB), logs Docker in to the registries of
+  `secrets.sops.yaml`, runs the supervisor and, while it leads, the placement
+  (`controller.RunPlacement`). Once a week it trims the volumes (`storage/last-trim`).
 - The test of the package goes the whole way on 127.0.0.1: init, the agent with a notify
-  socket, the user's bootstrap (and a wrong key, a second user refused), apply and diff, and
-  the Floating IP reaching the nft rules.
+  socket, the user's bootstrap (and a wrong key, a second user refused), apply and diff, the
+  Floating IP reaching the nft rules, and a stack with a volume applied, listed and deleted.
 
 ## Network (`internal/network`)
 
@@ -318,16 +340,40 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - The mount guard: containers get `data/`, which exists only in the mounted file system, so a
   container whose volume is not mounted fails to start instead of writing to the root file
   system.
-- `Fits` is the accounting without overcommit: the volumes of a pool and a new one stay
-  within the pool less its reserve. `PoolUsage` reads how full data and metadata are.
-- `Trim` (fstrim) gives deleted blocks back to the pool. The agent does not call the driver
-  yet: it will with the containers (placing volumes, `Ensure`, `Remove`, a weekly `Trim`).
+- `PoolUsage` reads a pool's size and how full its data and metadata are.
+- `Trim` (fstrim) gives deleted blocks back to the pool.
+- A copy's LV is `compose.VolumeName(stack, volume, generation)`; its DRBD resource has the
+  same name, so a restored volume (a new generation) is a new LV next to the old one.
+
+## Placement (`internal/scheduler`, `internal/controller`)
+
+- `scheduler.Plan` reads the state and returns where pending stacks go and why the others
+  wait. So far a stack goes to the first active host where every new volume fits its pool
+  (`Fits`: without overcommit, the pool's volumes and the new one stay within the pool less
+  its reserve; a class's fallbacks included). Volumes and DRBD
+  minors are only taken for a stack that fits whole.
+- `controller.RunPlacement` runs on every agent but acts only on the leader: it writes the
+  volumes (`put-volume`), then the stack's host and `starting` (`set-stack-status`). The
+  stack's host does the rest.
+
+## Containers (`internal/docker`, `internal/supervisor`)
+
+- `docker.Client` talks to Docker's API on its socket for events, start and restart, and
+  runs `docker compose` (up, down, ps, logs) and `docker login` through `internal/command`.
+  `command.Stream` passes the logs on as they come; it has no timeout, as it touches no
+  volume.
+- Docker restarts nothing (`restart: "no"`); the supervisor follows Docker's events and
+  applies each service's restart rule with a backoff (1 s doubling to 60 s, reset after
+  10 minutes up). A container stopped by hand (kill, stop) stays stopped; `unhealthy` means
+  a restart unless the service says otherwise. While the agent runs `compose up` or `down`
+  for a stack, it `Hold`s the stack, so the supervisor does not fight it.
 
 ## Host tools (`internal/command`)
 
 Every host tool runs through `command.Run` or `command.RunWithInput`, with no exception (lvs,
-drbdadm, mkfs, mount, nft, ip, systemctl, ...): with a timeout, and left behind if it does not
-finish. A process that touches a volume can hang in state D while DRBD suspends I/O, and
+drbdadm, mkfs, mount, nft, ip, systemctl, docker, ...): with a timeout, and left behind if it
+does not finish. `command.Stream` (logs that follow) is the one without a timeout; only tools
+that touch no volume use it. A process that touches a volume can hang in state D while DRBD suspends I/O, and
 then not even SIGKILL ends it; any other tool that hangs must not stop a reconciler either.
 `command.ExitCode` tells a tool's own exit code from a timeout or a missing binary.
 

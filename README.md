@@ -7,8 +7,8 @@ through the hoster's API. First hoster: Hetzner Cloud.
 Status: under construction (phase 1a, see the roadmap in [DEVELOPING.md](DEVELOPING.md)).
 What runs: on a host `clowderd check` and `clowderd init`, which starts the agent (with the
 containers' isolation and DNS resolver); from the CLI `clowder cluster
-bootstrap|apply|diff|status|schema` and `clowder host ...`. Stacks with their volumes come
-next.
+bootstrap|apply|diff|status|schema`, `clowder host ...` and `clowder stack
+apply|delete|ps|logs`, which runs Compose stacks with their volumes on one host.
 
 | Binary | For | Platforms |
 |---|---|---|

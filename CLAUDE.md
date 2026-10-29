@@ -31,8 +31,8 @@ DEVELOPING.md explains each one.
 
 - The CLI must build on Windows: `cmd/clowder` and `internal/cli` never import a package that
   only works on Linux (Layers).
-- `scheduler` and `state` do no I/O; only `agent`, `raftnode`, the drivers (`network`,
-  `storage`) and later `supervisor` change the host (Layers).
+- `scheduler` and `state` do no I/O; only `agent`, `raftnode`, `supervisor` and the drivers
+  (`network`, `storage`, `docker`) change the host (Layers).
 - The agent never waits on a write to a volume: without quorum DRBD suspends I/O, and such a
   write hangs in the kernel where no timeout ends it (Volumes). Every host tool runs through
   `internal/command`, with a timeout (Host tools).
