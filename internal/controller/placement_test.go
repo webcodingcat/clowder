@@ -85,9 +85,9 @@ func newLeader(t *testing.T, poolSize int64) *leader {
 		Host: 0, Version: "1.0.0",
 		Pools: map[string]state.Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: poolSize}},
 	})
-	l.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Name: "shop", Owner: state.OwnerCLI})
+	l.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Namespace: "default", Name: "shop", Owner: state.OwnerCLI})
 	l.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
+		Namespace: "default", Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
 		Source: "name: shop\nservices: {app: {image: x}}\nvolumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 1}\n",
 	})
 	return l
@@ -119,8 +119,8 @@ func TestAPendingStackIsPlacedWithItsVolumes(t *testing.T) {
 	l := newLeader(t, 100<<30)
 	runPlacement(t, l)
 	waitFor(t, l, "the stack was not placed", func(current *state.State) bool {
-		stack := current.Stacks["shop"]
-		return stack.Host != nil && stack.Status == state.StackStarting && current.Volumes["shop/db"] != nil &&
+		stack := current.Stacks["default/shop"]
+		return stack.Host != nil && stack.Status == state.StackStarting && current.Volumes["default/shop/db"] != nil &&
 			stack.WaitReason == ""
 	})
 }
@@ -141,7 +141,7 @@ func TestAStackThatFitsNowhereShowsWhyUntilItFits(t *testing.T) {
 		placement.place(context.Background())
 	}
 	l.Read(func(current *state.State) {
-		if reason := current.Stacks["shop"].WaitReason; reason != "node0: volume db (1G, class fast) fits no pool" {
+		if reason := current.Stacks["default/shop"].WaitReason; reason != "node0: volume db (1G, class fast) fits no pool" {
 			t.Errorf("reason %q", reason)
 		}
 		written := 0
@@ -161,7 +161,7 @@ func TestAStackThatFitsNowhereShowsWhyUntilItFits(t *testing.T) {
 	})
 	placement.place(context.Background())
 	l.Read(func(current *state.State) {
-		if stack := current.Stacks["shop"]; stack.Host == nil || stack.WaitReason != "" || !stack.WaitingSince.IsZero() {
+		if stack := current.Stacks["default/shop"]; stack.Host == nil || stack.WaitReason != "" || !stack.WaitingSince.IsZero() {
 			t.Errorf("after the pool grew: host %v, reason %q since %v", stack.Host, stack.WaitReason, stack.WaitingSince)
 		}
 	})
@@ -177,39 +177,39 @@ func TestAServicePushedOutComesBackAfterItFitAMinute(t *testing.T) {
 	})
 	low, high := 200, 800
 	l.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
+		Namespace: "default", Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
 		Source:   "name: shop\nservices: {app: {image: x}}\n",
 		Services: map[string]state.Service{"app": {Priority: clusterdir.Priority{Value: &low}, MemoryBytes: 600 << 20}},
 	})
 	placement := newPlacer(l)
 	placement.place(context.Background())
-	l.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Name: "web", Owner: state.OwnerCLI})
+	l.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Namespace: "default", Name: "web", Owner: state.OwnerCLI})
 	l.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Name: "web", Owner: state.OwnerCLI, ConfigRevision: 1,
+		Namespace: "default", Name: "web", Owner: state.OwnerCLI, ConfigRevision: 1,
 		Source:   "name: web\nservices: {web: {image: x}}\n",
 		Services: map[string]state.Service{"web": {Priority: clusterdir.Priority{Value: &high}, MemoryBytes: 500 << 20}},
 	})
 	placement.place(context.Background())
 	l.Read(func(current *state.State) {
-		if fmt.Sprint(current.Stacks["shop"].PushedOut) != "[app]" || current.Stacks["web"].Host == nil {
-			t.Fatalf("shop pushed out %v, web on %v", current.Stacks["shop"].PushedOut, current.Stacks["web"].Host)
+		if fmt.Sprint(current.Stacks["default/shop"].PushedOut) != "[app]" || current.Stacks["default/web"].Host == nil {
+			t.Fatalf("shop pushed out %v, web on %v", current.Stacks["default/shop"].PushedOut, current.Stacks["default/web"].Host)
 		}
 	})
 
-	l.apply(state.KindDeleteStack, state.UserActor("alice"), state.DeleteStack{Name: "web"})
+	l.apply(state.KindDeleteStack, state.UserActor("alice"), state.DeleteStack{Namespace: "default", Name: "web"})
 	if again := placement.place(context.Background()); again <= 0 || again > restartAfter {
 		t.Errorf("look again in %v", again)
 	}
 	l.Read(func(current *state.State) {
-		if len(current.Stacks["shop"].PushedOut) != 1 {
+		if len(current.Stacks["default/shop"].PushedOut) != 1 {
 			t.Error("app came back before it fit a minute")
 		}
 	})
 	placement.fittingSince = time.Now().Add(-restartAfter) // a minute went by
 	placement.place(context.Background())
 	l.Read(func(current *state.State) {
-		if len(current.Stacks["shop"].PushedOut) != 0 {
-			t.Errorf("app is still pushed out: %v", current.Stacks["shop"].PushedOut)
+		if len(current.Stacks["default/shop"].PushedOut) != 0 {
+			t.Errorf("app is still pushed out: %v", current.Stacks["default/shop"].PushedOut)
 		}
 	})
 }

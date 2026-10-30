@@ -1,4 +1,4 @@
-name: shop
+name: default_shop
 services:
   app:
     deploy:
@@ -14,7 +14,7 @@ services:
       GREETING: Hello $$USER
     image: ghcr.io/example/shop:1.4
     labels:
-      clowder.stack: shop
+      clowder.stack: default_shop
     networks:
       default: null
     depends_on:
@@ -27,7 +27,7 @@ services:
       - 169.254.77.53
     image: valkey/valkey:8
     labels:
-      clowder.stack: shop
+      clowder.stack: default_shop
     networks:
       default: null
     volumes:
@@ -65,7 +65,7 @@ services:
     image: postgres:17
     labels:
       clowder.secrets: digest-of-db-password
-      clowder.stack: shop
+      clowder.stack: default_shop
     networks:
       default: null
     secrets:
@@ -87,24 +87,24 @@ services:
       interval: 10s
 networks:
   default:
-    name: shop_default
+    name: default_shop_default
     driver_opts:
-      com.docker.network.bridge.name: cbr-8d9001d32c6
+      com.docker.network.bridge.name: cbr-5be479caf0c
 volumes:
   cachedata:
-    name: clw-shop-cachedata-d5ad5a21-g2
+    name: clw-default-shop-cachedata-dff59c13-g2
     driver: local
     driver_opts:
-      device: /var/lib/clowder/volumes/shop-cachedata/data
+      device: /var/lib/clowder/volumes/clw-default-shop-cachedata-dff59c13-g2/data
       o: bind
       type: none
   pgdata:
-    name: clw-shop-pgdata-b582c809-g1
+    name: clw-default-shop-pgdata-e2128834-g1
     driver: local
     driver_opts:
-      device: /var/lib/clowder/volumes/shop-pgdata/data
+      device: /var/lib/clowder/volumes/clw-default-shop-pgdata-e2128834-g1/data
       o: bind
       type: none
 secrets:
   db-password:
-    file: /run/clowder-secrets/shop/files/db-password
+    file: /run/clowder-secrets/default_shop/files/db-password

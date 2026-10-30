@@ -138,7 +138,7 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	routes, err := t.routes(ctx, input.sources)
+	routes, err := t.routes(ctx, input.stacks)
 	if err != nil {
 		return err
 	}
@@ -182,20 +182,25 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 // sources of the stacks on this host and the certificates.
 type traefikInput struct {
 	floatingIP   string
-	sources      map[string]string // stack -> its Compose file
+	stacks       map[string]stackSource // by project
 	certificates []state.Certificate
+}
+
+// stackSource is what the routes need of a stack: its name and Compose file.
+type stackSource struct {
+	name, source string
 }
 
 // read takes what Traefik's files depend on from the state, and nothing
 // else: the runner passes at every event of Docker's, too often for a copy
 // of the whole state under the lock that Raft's Apply waits for.
 func (t *traefikRunner) read() traefikInput {
-	input := traefikInput{sources: map[string]string{}}
+	input := traefikInput{stacks: map[string]stackSource{}}
 	t.cluster.Read(func(current *state.State) {
 		input.floatingIP = current.Config.Spec.Ingress.FloatingIP
-		for name, stack := range current.Stacks {
+		for _, stack := range current.Stacks {
 			if stack.Host != nil && *stack.Host == t.host.ID {
-				input.sources[name] = stack.Source
+				input.stacks[stack.Project()] = stackSource{name: stack.Name, source: stack.Source}
 			}
 		}
 		// every certificate: the ingress host answers for the stacks of
@@ -281,19 +286,21 @@ func writeChanged(path string, content []byte, mode os.FileMode) error {
 // routes are the HTTP routes of the stacks on this host, each with the
 // containers that may take its requests: running, and healthy if they have
 // a health check.
-func (t *traefikRunner) routes(ctx context.Context, sources map[string]string) ([]ingress.Route, error) {
+func (t *traefikRunner) routes(ctx context.Context, stacks map[string]stackSource) ([]ingress.Route, error) {
 	var routes []ingress.Route
-	ports := map[string]uint16{} // "<stack>.<service>" -> the port requests go to
-	for _, name := range slices.Sorted(maps.Keys(sources)) {
-		parsed, err := compose.Parse(ctx, name, []byte(sources[name]))
+	ports := map[string]uint16{} // "<project>.<service>" -> the port requests go to
+	for _, project := range slices.Sorted(maps.Keys(stacks)) {
+		parsed, err := compose.Parse(ctx, stacks[project].name, []byte(stacks[project].source))
 		if err != nil {
-			t.logger.Warn("read the routes of a stack", "stack", name, "error", err)
+			t.logger.Warn("read the routes of a stack", "project", project, "error", err)
 			continue
 		}
 		for _, serviceName := range slices.Sorted(maps.Keys(parsed.Services)) {
 			if route := parsed.Services[serviceName].HTTP; route != nil {
-				routes = append(routes, ingress.Route{Stack: name, Service: serviceName, Host: route.Host, Path: route.Path})
-				ports[name+"."+serviceName] = route.Port
+				routes = append(routes, ingress.Route{
+					Project: project, Service: serviceName, Host: route.Host, Path: route.Path,
+				})
+				ports[project+"."+serviceName] = route.Port
 			}
 		}
 	}
@@ -325,7 +332,7 @@ func (t *traefikRunner) routes(ctx context.Context, sources map[string]string) (
 		targets[key] = append(targets[key], ingress.Target(address, port))
 	}
 	for index := range routes {
-		routes[index].Targets = targets[routes[index].Stack+"."+routes[index].Service]
+		routes[index].Targets = targets[routes[index].Project+"."+routes[index].Service]
 	}
 	return routes, nil
 }

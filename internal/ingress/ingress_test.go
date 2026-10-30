@@ -62,12 +62,15 @@ func TestTheComposeFileMatchesTheGoldenFile(t *testing.T) {
 func TestTheRoutesMatchTheGoldenFile(t *testing.T) {
 	rendered, err := RenderDynamic([]Route{
 		{
-			Stack: "shop", Service: "app", Host: "Shop.example.com",
+			Project: "default_shop", Service: "app", Host: "Shop.example.com",
 			Targets: []string{"172.18.0.3:8080", "172.18.0.2:8080"},
 		},
-		{Stack: "shop", Service: "api", Host: "shop.example.com", Path: "/api", Targets: []string{"172.18.0.4:9000"}},
+		{
+			Project: "default_shop", Service: "api", Host: "shop.example.com", Path: "/api",
+			Targets: []string{"172.18.0.4:9000"},
+		},
 		// no container may take requests: an empty list, so Traefik answers 503
-		{Stack: "blog", Service: "web", Host: "blog.example.com", Path: "/"},
+		{Project: "default_blog", Service: "web", Host: "blog.example.com", Path: "/"},
 	}, []CertificateFiles{{Domain: "shop.example.com", Chain: "shop.example.com-1a2b.crt", Key: "shop.example.com-1a2b.key"}})
 	// blog.example.com has no certificate yet: plain HTTP
 	if err != nil {

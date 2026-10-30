@@ -24,9 +24,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/cli"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
-	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/hoster"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/sopsage"
 	"github.com/webcodingcat/clowder/internal/storage"
@@ -465,10 +465,10 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	if _, err := clowder(t, "--cluster", dir, "stack", "apply", "shop", "-f", composeFile); err != nil {
 		t.Fatal(err)
 	}
-	lv := compose.VolumeName("shop", "db", 1)
+	lv := names.VolumeName("default/shop/db", 1)
 	hostStorage.waitFor(t, "ensure "+lv)
-	hostDocker.waitFor(t, "up shop")
-	if _, err := os.Stat(filepath.Join(files.Dir, "stacks", "shop", "compose.yaml")); err != nil {
+	hostDocker.waitFor(t, "up default_shop")
+	if _, err := os.Stat(filepath.Join(files.Dir, "stacks", "default_shop", "compose.yaml")); err != nil {
 		t.Errorf("the rendered Compose file: %v", err)
 	}
 	waitForOutput(t, "running", "--cluster", dir, "stack", "ps")
@@ -484,7 +484,7 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	if _, err := clowder(t, "--cluster", dir, "stack", "delete", "shop", "--delete-volumes"); err != nil {
 		t.Fatal(err)
 	}
-	hostDocker.waitFor(t, "down shop")
+	hostDocker.waitFor(t, "down default_shop")
 	hostStorage.waitFor(t, "remove "+lv)
 	config := filepath.Join(dir, clusterdir.ConfigFile)
 	content, err := os.ReadFile(config)

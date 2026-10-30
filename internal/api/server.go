@@ -108,8 +108,8 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/alerts/failures", pki.RoleUser, server.alertFailures)
 	server.handle("GET /v1/internal/alerts/failures", pki.RoleHost, server.localAlertFailures)
 	server.handle("POST /v1/internal/propose", pki.RoleHost, server.internalPropose)
-	server.handle("GET /v1/internal/stacks/{name}/ps", pki.RoleHost, server.localPs)
-	server.handle("GET /v1/internal/stacks/{name}/logs", pki.RoleHost, server.localLogs)
+	server.handle("GET /v1/internal/stacks/{project}/ps", pki.RoleHost, server.localPs)
+	server.handle("GET /v1/internal/stacks/{project}/logs", pki.RoleHost, server.localLogs)
 	server.handleOpen("GET /v1/bootstrap", server.bootstrapOffer)
 	server.handleOpen("POST /v1/bootstrap", server.bootstrap)
 	return server

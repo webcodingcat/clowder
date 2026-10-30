@@ -17,6 +17,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/supervisor"
 )
@@ -56,14 +57,25 @@ func (c *testCluster) apply(kind, actor string, payload any) {
 	}
 }
 
+// stack returns a stack of the namespace default.
 func (c *testCluster) stack(name string) state.Stack {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return *c.state.Stacks[name]
+	return *c.state.Stacks[names.ID(names.Default, name)]
 }
 
-// newTestRunner is a runner on host 0 of a cluster with the stack "shop":
-// one service and the volume "db" (generation 1), placed on host 0.
+// shopProject is the Compose project of default/shop, the name of all the
+// runner keeps of it.
+const shopProject = "default_shop"
+
+// shopLV is the LV of the volume db of default/shop in a generation.
+func shopLV(generation int64) string {
+	return names.VolumeName(names.VolumeID(names.Default, "shop", "db"), generation)
+}
+
+// newTestRunner is a runner on host 0 of a cluster with the stack "shop" of
+// the namespace default: one service and the volume "db" (generation 1),
+// placed on host 0.
 func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fakeStorage) {
 	t.Helper()
 	cluster := &testCluster{t: t, state: &state.State{}}
@@ -83,16 +95,18 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 		},
 		Secrets: map[string]state.Sealed{"token": state.Sealed("t")},
 	})
-	cluster.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Name: "shop", Owner: state.OwnerCLI})
+	cluster.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{
+		Namespace: names.Default, Name: "shop", Owner: state.OwnerCLI,
+	})
 	cluster.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
+		Namespace: names.Default, Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
 		Source: "name: shop\nservices: {app: {image: nginx, volumes: [db:/data]}}\n" +
 			"volumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n",
 	})
 	putVolume(cluster, 1)
 	host := state.HostID(0)
 	cluster.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{
-		Name: "shop", Status: state.StackStarting, Host: &host,
+		ID: "default/shop", Status: state.StackStarting, Host: &host,
 	})
 
 	docker, storage := &fakeDocker{}, &fakeStorage{dir: t.TempDir()}
@@ -114,7 +128,7 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 
 func putVolume(cluster *testCluster, generation int64) {
 	cluster.apply(state.KindPutVolume, state.LeaderActor, state.PutVolume{Volume: state.Volume{
-		ID: "shop/db", Generation: generation, Class: "fast", SizeBytes: 1 << 30,
+		ID: "default/shop/db", Generation: generation, Class: "fast", SizeBytes: 1 << 30,
 		Placements: []state.Placement{{Host: 0, Class: "fast"}}, Status: state.VolumeOK,
 	}})
 }
@@ -133,19 +147,19 @@ func TestAFailedComposeUpIsTriedAgain(t *testing.T) {
 		t.Errorf("after a failed compose up the stack is %s", status)
 	}
 	runner.pass(context.Background())
-	if ups := docker.count("up shop"); ups != 2 {
+	if ups := docker.count("up " + shopProject); ups != 2 {
 		t.Errorf("%d compose ups, want 2", ups)
 	}
 	if status := cluster.stack("shop").Status; status != state.StackRunning {
 		t.Errorf("after compose up the stack is %s", status)
 	}
 	runner.pass(context.Background()) // nothing changed: no compose up
-	if ups := docker.count("up shop"); ups != 2 {
+	if ups := docker.count("up " + shopProject); ups != 2 {
 		t.Errorf("%d compose ups without a change, want 2", ups)
 	}
 	runner.forgetApplied() // Docker restarted
 	runner.pass(context.Background())
-	if ups := docker.count("up shop"); ups != 3 {
+	if ups := docker.count("up " + shopProject); ups != 3 {
 		t.Errorf("%d compose ups after Docker restarted, want 3", ups)
 	}
 }
@@ -154,16 +168,16 @@ func TestAPushedOutServiceIsLeftOutAndNotRestarted(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
 	runner.pass(context.Background())
 	cluster.mu.Lock()
-	cluster.state.Stacks["shop"].PushedOut = []string{"app"} // as set-pushed-out writes it
+	cluster.state.Stacks["default/shop"].PushedOut = []string{"app"} // as set-pushed-out writes it
 	cluster.mu.Unlock()
 	runner.pass(context.Background())
 	docker.mu.Lock()
 	leftOut := docker.leftOut
 	docker.mu.Unlock()
-	if ups := docker.count("up shop"); ups != 2 || !slices.Equal(leftOut, []string{"app"}) {
+	if ups := docker.count("up " + shopProject); ups != 2 || !slices.Equal(leftOut, []string{"app"}) {
 		t.Errorf("%d compose ups, the last without %v; want 2, without app", ups, leftOut)
 	}
-	if rule, ok := runner.rules("shop", "app"); !ok || rule.Restart != "no" {
+	if rule, ok := runner.rules(shopProject, "app"); !ok || rule.Restart != "no" {
 		t.Errorf("the rule of a pushed-out service %+v, %v", rule, ok)
 	}
 }
@@ -173,11 +187,11 @@ func TestANewGenerationReplacesTheLV(t *testing.T) {
 	runner.pass(context.Background())
 	putVolume(cluster, 2) // a restore
 	runner.pass(context.Background())
-	old, current := compose.VolumeName("shop", "db", 1), compose.VolumeName("shop", "db", 2)
+	old, current := shopLV(1), shopLV(2)
 	if storage.count("ensure "+current) != 1 || storage.count("remove "+old) != 1 || storage.count("remove "+current) != 0 {
 		t.Errorf("storage calls %q", storage.lines)
 	}
-	if ups := docker.count("up shop"); ups != 2 {
+	if ups := docker.count("up " + shopProject); ups != 2 {
 		t.Errorf("%d compose ups, want 2 (the new volume)", ups)
 	}
 	if retired := cluster.state.Retired; len(retired) != 0 {
@@ -190,14 +204,14 @@ func TestACopyTheStateLostIsKept(t *testing.T) {
 	runner.pass(context.Background())
 	// a bug, not a command, takes the volume out of the state
 	cluster.mu.Lock()
-	delete(cluster.state.Volumes, "shop/db")
+	delete(cluster.state.Volumes, "default/shop/db")
 	cluster.mu.Unlock()
 	runner.pass(context.Background())
 	runner.pass(context.Background())
-	if storage.count("remove "+compose.VolumeName("shop", "db", 1)) != 0 {
+	if storage.count("remove "+shopLV(1)) != 0 {
 		t.Errorf("a copy that is neither placed nor retired was removed: %q", storage.lines)
 	}
-	if !runner.unexplained[compose.VolumeName("shop", "db", 1)] {
+	if !runner.unexplained[shopLV(1)] {
 		t.Error("no warning about the kept copy")
 	}
 }
@@ -207,24 +221,58 @@ func TestAStackThatLeftIsStoppedAndForgotten(t *testing.T) {
 	runner.pass(context.Background())
 
 	// moved off this host, but its volume copy stays here for now
-	cluster.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{Name: "shop", Status: state.StackPending})
+	cluster.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{ID: "default/shop", Status: state.StackPending})
 	runner.pass(context.Background())
 	runner.pass(context.Background())
-	lv := compose.VolumeName("shop", "db", 1)
-	if docker.count("down shop") != 1 || storage.count("remove "+lv) != 0 {
+	if docker.count("down "+shopProject) != 1 || storage.count("remove "+shopLV(1)) != 0 {
 		t.Errorf("docker %q, storage %q", docker.lines, storage.lines)
 	}
+	// the stack's files go with compose down, the copy's record stays
+	if _, err := os.Stat(runner.files.stackDir(shopProject)); !os.IsNotExist(err) {
+		t.Errorf("the stack's directory is left: %v", err)
+	}
+	if _, err := os.Stat(runner.files.volumeRecord("default/shop/db")); err != nil {
+		t.Errorf("the record of the copy left with the stack: %v", err)
+	}
 
-	cluster.apply(state.KindDeleteStack, state.UserActor("alice"), state.DeleteStack{Name: "shop", WithVolumes: true})
+	cluster.apply(state.KindDeleteStack, state.UserActor("alice"), state.DeleteStack{
+		Namespace: names.Default, Name: "shop", WithVolumes: true,
+	})
 	runner.pass(context.Background())
-	if storage.count("remove "+lv) != 1 {
+	if storage.count("remove "+shopLV(1)) != 1 {
 		t.Errorf("storage %q", storage.lines)
 	}
 	if retired := cluster.state.Retired; len(retired) != 0 {
 		t.Errorf("the removed copy is not forgotten: %v", retired)
 	}
-	if _, err := os.Stat(runner.files.stackDir("shop")); !os.IsNotExist(err) {
-		t.Errorf("the stack's directory is left: %v", err)
+	if _, err := os.Stat(runner.files.volumeRecord("default/shop/db")); !os.IsNotExist(err) {
+		t.Errorf("the record of the removed copy is left: %v", err)
+	}
+}
+
+func TestAStackThatLeftStopsBeforeTheOthersComeUp(t *testing.T) {
+	runner, cluster, docker, _ := newTestRunner(t)
+	runner.pass(context.Background())
+	// shop leaves this host and blog comes, in the same pass
+	cluster.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{ID: "default/shop", Status: state.StackPending})
+	cluster.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{
+		Namespace: names.Default, Name: "blog", Owner: state.OwnerCLI,
+	})
+	cluster.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
+		Namespace: names.Default, Name: "blog", Owner: state.OwnerCLI, ConfigRevision: 1,
+		Source: "name: blog\nservices: {web: {image: nginx}}\n",
+	})
+	host := state.HostID(0)
+	cluster.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{
+		ID: "default/blog", Status: state.StackStarting, Host: &host,
+	})
+	runner.pass(context.Background())
+	docker.mu.Lock()
+	defer docker.mu.Unlock()
+	down := slices.Index(docker.lines, "down "+shopProject)
+	up := slices.Index(docker.lines, "up default_blog")
+	if down < 0 || up < 0 || down > up {
+		t.Errorf("docker %q: shop must go down before blog comes up", docker.lines)
 	}
 }
 
@@ -238,15 +286,15 @@ func putShopWithSecrets(cluster *testCluster, password, apiKey string) {
 		secrets["api-key"] = state.Sealed(apiKey)
 	}
 	cluster.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Name: "shop", Owner: state.OwnerCLI, Secrets: secrets, ConfigRevision: 1,
+		Namespace: names.Default, Name: "shop", Owner: state.OwnerCLI, Secrets: secrets, ConfigRevision: 1,
 		Source: "name: shop\nservices:\n  app: " + app + "\nvolumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n",
 	})
 }
 
 func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
-	password := runner.files.secretFile("shop", "db-password")
-	env := runner.files.secretEnvFile("shop")
+	password := runner.files.secretFile(shopProject, "db-password")
+	env := runner.files.secretEnvFile(shopProject)
 
 	putShopWithSecrets(cluster, "first", "key")
 	runner.pass(context.Background())
@@ -277,13 +325,13 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 	if _, err := os.Stat(env); !os.IsNotExist(err) {
 		t.Errorf("the secret variables stayed: %v", err)
 	}
-	if ups := docker.count("up shop"); ups != 2 || len(docker.upFiles) != 1 {
+	if ups := docker.count("up " + shopProject); ups != 2 || len(docker.upFiles) != 1 {
 		t.Errorf("%d compose ups, the last with %v", ups, docker.upFiles)
 	}
 
-	cluster.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{Name: "shop", Status: state.StackPending})
+	cluster.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{ID: "default/shop", Status: state.StackPending})
 	runner.pass(context.Background())
-	if _, err := os.Stat(runner.files.secretsDir("shop")); !os.IsNotExist(err) {
+	if _, err := os.Stat(runner.files.secretsDir(shopProject)); !os.IsNotExist(err) {
 		t.Errorf("the secrets of a stack that left stayed: %v", err)
 	}
 }
@@ -291,7 +339,7 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 // secretsLabel reads the digest label of app from shop's rendered file.
 func secretsLabel(t *testing.T, runner *stackRunner) string {
 	t.Helper()
-	content, err := os.ReadFile(filepath.Join(runner.files.stackDir("shop"), "compose.yaml"))
+	content, err := os.ReadFile(filepath.Join(runner.files.stackDir(shopProject), "compose.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}

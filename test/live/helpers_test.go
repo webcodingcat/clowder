@@ -131,7 +131,7 @@ func (h host) inspect(t *testing.T, id string) container {
 // stack; empty if none runs.
 func (h host) service(t *testing.T, service string) string {
 	t.Helper()
-	return h.must(t, "docker ps -q --no-trunc --filter label=com.docker.compose.project=shop"+
+	return h.must(t, "docker ps -q --no-trunc --filter label=com.docker.compose.project="+project("shop")+
 		" --filter label=com.docker.compose.service="+service)
 }
 

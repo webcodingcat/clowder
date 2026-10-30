@@ -15,6 +15,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/datakey"
 	"github.com/webcodingcat/clowder/internal/ingress"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -48,31 +49,33 @@ func (f Files) raftDir() string         { return filepath.Join(f.Dir, "raft") }
 
 func (f Files) lastTrim() string { return filepath.Join(f.Dir, "storage", "last-trim") }
 
-// The files of the stacks on this host: per stack its rendered Compose file
-// and the record of its volume copies.
-func (f Files) stacksDir() string            { return filepath.Join(f.Dir, "stacks") }
-func (f Files) stackDir(name string) string  { return filepath.Join(f.stacksDir(), name) }
-func (f Files) stackFile(name string) string { return filepath.Join(f.stackDir(name), "compose.yaml") }
-
-func (f Files) volumesRecord(name string) string {
-	return filepath.Join(f.stackDir(name), "volumes.json")
+// The files of the stacks on this host, by their Compose project
+// (names.Project): per stack its rendered Compose file.
+func (f Files) stacksDir() string              { return filepath.Join(f.Dir, "stacks") }
+func (f Files) stackDir(project string) string { return filepath.Join(f.stacksDir(), project) }
+func (f Files) stackFile(project string) string {
+	return filepath.Join(f.stackDir(project), "compose.yaml")
+}
+func (f Files) volumeRecordsDir() string { return filepath.Join(f.Dir, "volume-records") }
+func (f Files) volumeRecord(volumeID string) string {
+	return filepath.Join(f.volumeRecordsDir(), names.FileName(volumeID)+".json")
 }
 
-// The files of a stack's secrets: a file per secret a service asks for as a
-// file (bind-mounted to /run/secrets/<name>), and the second Compose file
-// with the secret variables.
-func (f Files) secretsDir(stack string) string { return filepath.Join(f.SecretsDir, stack) }
+// The files of a stack's secrets, by its project: a file per secret a
+// service asks for as a file (bind-mounted to /run/secrets/<name>), and the
+// second Compose file with the secret variables.
+func (f Files) secretsDir(project string) string { return filepath.Join(f.SecretsDir, project) }
 
-func (f Files) secretFilesDir(stack string) string {
-	return filepath.Join(f.secretsDir(stack), "files")
+func (f Files) secretFilesDir(project string) string {
+	return filepath.Join(f.secretsDir(project), "files")
 }
 
-func (f Files) secretEnvFile(stack string) string {
-	return filepath.Join(f.secretsDir(stack), "env.yaml")
+func (f Files) secretEnvFile(project string) string {
+	return filepath.Join(f.secretsDir(project), "env.yaml")
 }
 
-func (f Files) secretFile(stack, name string) string {
-	return filepath.Join(f.secretFilesDir(stack), name)
+func (f Files) secretFile(project, name string) string {
+	return filepath.Join(f.secretFilesDir(project), name)
 }
 
 // Traefik's files sit beside stacks/, so the search for stacks that left

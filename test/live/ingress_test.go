@@ -249,7 +249,7 @@ func udpSeesClient(t *testing.T, tofu outputs) {
 // Floating IP on its own host and through Traefik back to the stack.
 func hairpin(t *testing.T, server host) {
 	server.upload(t, filepath.Join(clusterDir(), acmeCAFile), "/tmp/"+acmeCAFile)
-	web := server.must(t, "docker ps -q --filter label=com.docker.compose.project=echo"+
+	web := server.must(t, "docker ps -q --filter label=com.docker.compose.project="+project("echo")+
 		" --filter label=com.docker.compose.service=web")
 	server.must(t, "docker cp /tmp/"+acmeCAFile+" "+web+":/tmp/"+acmeCAFile)
 	status := server.must(t, "docker exec "+web+` python -c 'import ssl, urllib.request; `+

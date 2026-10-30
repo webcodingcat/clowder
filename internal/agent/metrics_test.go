@@ -45,7 +45,7 @@ func newTestMetrics(t *testing.T, leads bool) *metricsSource {
 	cluster.apply(state.KindPutAlert, state.LeaderActor, state.PutAlert{
 		Key: "root-use/node0", Kind: "root-use", Severity: "warning", Subject: "s",
 	})
-	labels := map[string]string{docker.ProjectLabel: "shop", docker.ServiceLabel: "app"}
+	labels := map[string]string{docker.ProjectLabel: shopProject, docker.ServiceLabel: "app"}
 	fake.containers = []docker.Container{
 		{ID: "a", State: "running", Labels: labels},
 		{ID: "b", State: "exited", Labels: labels},
@@ -53,7 +53,9 @@ func newTestMetrics(t *testing.T, leads bool) *metricsSource {
 	}
 	return &metricsSource{
 		host: Host{ID: 0, Name: "node0"}, cluster: leadingCluster{cluster, leads}, docker: fake,
-		restarts: func() map[supervisor.Service]int { return map[supervisor.Service]int{{Stack: "shop", Name: "app"}: 3} },
+		restarts: func() map[supervisor.Service]int {
+			return map[supervisor.Service]int{{Stack: shopProject, Name: "app"}: 3}
+		},
 		failures: func() []controller.Failure { return []controller.Failure{{Key: "root-use/node0"}} },
 		memory:   func() (int64, error) { return 41 << 20, nil },
 		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),

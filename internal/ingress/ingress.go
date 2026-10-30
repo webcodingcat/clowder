@@ -185,10 +185,10 @@ func RenderCompose(mounts Mounts) ([]byte, error) {
 }
 
 // Route is one HTTP route of a stack and the containers that take its
-// requests.
+// requests. Project is the stack's Compose project (names.Project).
 type Route struct {
-	Stack, Service string
-	Host, Path     string
+	Project, Service string
+	Host, Path       string
 	// Targets are "address:port" of the containers that may take requests:
 	// running, and healthy if they have a health check.
 	Targets []string
@@ -263,9 +263,9 @@ const (
 const challengePriority = 1_000_000
 
 // RenderDynamic writes the routes for the file provider. Per route a
-// service with its targets, named "<stack>.<service>", and routers named
-// "<entrypoint>.<stack>.<service>": stack names have no dot, so names never
-// clash. A route whose domain has one of the certificates gets a router on
+// service with its targets, named "<project>.<service>", and routers named
+// "<entrypoint>.<project>.<service>": projects and services have no dot, so
+// names never clash. A route whose domain has one of the certificates gets a router on
 // websecure and one on web that redirects to it; without one, only a plain
 // router on web, so nobody sees Traefik's self-signed default certificate.
 // The ACME challenges go to the agent on every host, whatever the domain.
@@ -297,7 +297,7 @@ func RenderDynamic(routes []Route, certificates []CertificateFiles) ([]byte, err
 		certified[certificate.Domain] = true
 	}
 	for _, route := range routes {
-		name := route.Stack + "." + route.Service
+		name := route.Project + "." + route.Service
 		if certified[strings.ToLower(route.Host)] {
 			config.HTTP.Routers["websecure."+name] = router{
 				EntryPoints: []string{"websecure"}, Rule: rule(route), Service: name, TLS: &routerTLS{},

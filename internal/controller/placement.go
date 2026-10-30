@@ -110,15 +110,15 @@ func (p *placer) writeWaitReasons(ctx context.Context, copied *state.State, wait
 	for _, wait := range waiting {
 		reasons[wait.Stack] = wait.Reason
 	}
-	for _, name := range slices.Sorted(maps.Keys(copied.Stacks)) {
-		reason := reasons[name]
-		if copied.Stacks[name].WaitReason == reason {
+	for _, id := range slices.Sorted(maps.Keys(copied.Stacks)) {
+		reason := reasons[id]
+		if copied.Stacks[id].WaitReason == reason {
 			continue
 		}
 		if reason != "" {
-			p.logger.Warn("stack waits for a place", "stack", name, "reason", reason)
+			p.logger.Warn("stack waits for a place", "stack", id, "reason", reason)
 		}
-		p.commit(ctx, state.KindSetStackWaitReason, state.SetStackWaitReason{Name: name, Reason: reason})
+		p.commit(ctx, state.KindSetStackWaitReason, state.SetStackWaitReason{ID: id, Reason: reason})
 	}
 }
 
@@ -143,7 +143,7 @@ func (p *placer) write(ctx context.Context, placement scheduler.Placement) error
 	}
 	host := placement.Host
 	return commit(ctx, p.propose, state.KindSetStackStatus, state.SetStackStatus{
-		Name: placement.Stack, Status: state.StackStarting, Host: &host,
+		ID: placement.Stack, Status: state.StackStarting, Host: &host,
 	})
 }
 

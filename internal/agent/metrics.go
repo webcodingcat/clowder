@@ -20,6 +20,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/metrics"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/scheduler"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/supervisor"
@@ -125,14 +126,26 @@ func (m *metricsSource) addContainers(ctx context.Context, set *metrics.Set) {
 		counts[[3]string{container.Labels[docker.ProjectLabel], container.Labels[docker.ServiceLabel], container.State}]++
 	}
 	for key, count := range counts {
+		namespace, stack := stackLabels(key[0])
 		set.Add("clowder_containers", "Containers of the stacks on this host, by state.", metrics.Gauge, float64(count),
-			"host", m.host.Name, "stack", key[0], "service", key[1], "state", key[2])
+			"host", m.host.Name, "namespace", namespace, "stack", stack, "service", key[1], "state", key[2])
 	}
 	for service, count := range m.restarts() {
+		namespace, stack := stackLabels(service.Stack)
 		set.Add("clowder_container_restarts_total",
 			"Restarts the supervisor began for a service's containers (crashed or unhealthy) since clowderd started.",
-			metrics.Counter, float64(count), "host", m.host.Name, "stack", service.Stack, "service", service.Name)
+			metrics.Counter, float64(count), "host", m.host.Name, "namespace", namespace, "stack", stack,
+			"service", service.Name)
 	}
+}
+
+// stackLabels are the namespace and stack of a Compose project; clowder's
+// own projects (Traefik) have no namespace and keep their project's name.
+func stackLabels(project string) (namespace, stack string) {
+	if namespace, stack, ok := names.SplitProject(project); ok {
+		return namespace, stack
+	}
+	return "", project
 }
 
 // addCluster adds what the cluster has once: the room of each host, the

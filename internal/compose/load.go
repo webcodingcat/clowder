@@ -12,6 +12,7 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"go.yaml.in/yaml/v3"
 
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
@@ -150,6 +151,10 @@ func checkNetworks(networks types.Networks) Problems {
 	}
 	for _, name := range slices.Sorted(maps.Keys(networks)) {
 		network := networks[name]
+		if !names.Valid(name) {
+			// it ends up in the network's name on the host
+			report("network %s: the name is not a network name (%s)", name, names.Rule)
+		}
 		if network.External {
 			report("network %s: external networks are not supported", name)
 		}
@@ -268,6 +273,9 @@ func checkVolume(name string, config types.VolumeConfig) (Volume, Problems) {
 	var problems Problems
 	report := func(format string, args ...any) {
 		problems = append(problems, fmt.Sprintf("volume %s: ", name)+fmt.Sprintf(format, args...))
+	}
+	if !names.Valid(name) {
+		report("the name is not a volume name (%s)", names.Rule)
 	}
 	if config.External {
 		report("external volumes are not supported")

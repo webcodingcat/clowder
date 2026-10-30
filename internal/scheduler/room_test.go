@@ -27,19 +27,20 @@ func service(priority int, memory int64, dependsOn ...string) state.Service {
 	}
 }
 
-// running puts a stack on the host, running, with these services pushed out.
+// running puts a stack of the namespace default on the host, running, with
+// these services pushed out.
 func running(current *state.State, name string, services map[string]state.Service, pushedOut ...string) {
 	host := state.HostID(0)
-	current.Stacks[name] = &state.Stack{
-		Name: name, Status: state.StackRunning, Host: &host, Services: services, PushedOut: pushedOut,
-		Source: "name: " + name + "\nservices: {app: {image: example/app}}\n",
+	current.Stacks["default/"+name] = &state.Stack{
+		Namespace: "default", Name: name, Status: state.StackRunning, Host: &host, Services: services,
+		PushedOut: pushedOut, Source: "name: " + name + "\nservices: {app: {image: example/app}}\n",
 	}
 }
 
-// pending adds the stack new, which waits for a host.
+// pending adds the stack default/new, which waits for a host.
 func pending(current *state.State, services map[string]state.Service) {
-	current.Stacks["new"] = &state.Stack{
-		Name: "new", Status: state.StackPending, Services: services,
+	current.Stacks["default/new"] = &state.Stack{
+		Namespace: "default", Name: "new", Status: state.StackPending, Services: services,
 		Source: "name: new\nservices: {app: {image: example/app}}\n",
 	}
 }
@@ -76,11 +77,11 @@ func TestANewStackPushesOutLowerPrioritiesLowestFirst(t *testing.T) {
 				t.Fatalf("decisions %+v", decisions)
 			}
 			lists := decisions.Placements[0].PushedOut
-			got := fmt.Sprint(lists["shop"])
-			if test.pushed == "[]" && lists["shop"] == nil {
+			got := fmt.Sprint(lists["default/shop"])
+			if test.pushed == "[]" && lists["default/shop"] == nil {
 				got = "[]"
 			}
-			if got != test.pushed || len(lists["new"]) != 0 {
+			if got != test.pushed || len(lists["default/new"]) != 0 {
 				t.Errorf("pushed out %v, want shop %s", lists, test.pushed)
 			}
 		})
@@ -98,7 +99,7 @@ func TestEachServiceOfANewStackPushesOutOnlyBelowItsOwnPriority(t *testing.T) {
 		t.Fatalf("decisions %+v", decisions)
 	}
 	lists := decisions.Placements[0].PushedOut
-	if fmt.Sprint(lists) != "map[base:[cache] new:[worker]]" {
+	if fmt.Sprint(lists) != "map[default/base:[cache] default/new:[worker]]" {
 		t.Errorf("pushed out %v", lists)
 	}
 }
@@ -110,7 +111,7 @@ func TestWhatDependsOnAPushedOutServiceGoesWithIt(t *testing.T) {
 	running(current, "low", map[string]state.Service{"data": service(300, 500), "view": service(600, 500, "data")})
 	pending(current, map[string]state.Service{"web": service(500, 200)})
 	decisions := Plan(context.Background(), current)
-	if len(decisions.Placements) != 1 || fmt.Sprint(decisions.Placements[0].PushedOut["low"]) != "[data view]" {
+	if len(decisions.Placements) != 1 || fmt.Sprint(decisions.Placements[0].PushedOut["default/low"]) != "[data view]" {
 		t.Errorf("decisions %+v", decisions)
 	}
 }
@@ -135,7 +136,7 @@ func TestAHostOverCapacityPushesOutBelowItsHighestPriority(t *testing.T) {
 			decisions := Plan(context.Background(), current)
 			var pushed string
 			if len(decisions.PushOuts) == 1 {
-				pushed = fmt.Sprint(decisions.PushOuts[0]["shop"])
+				pushed = fmt.Sprint(decisions.PushOuts[0]["default/shop"])
 			}
 			if pushed != test.pushed || (len(decisions.OverCapacity) == 1) != test.over {
 				t.Errorf("push-outs %v, over capacity %v", decisions.PushOuts, decisions.OverCapacity)
@@ -153,8 +154,8 @@ func TestAPushedOutServiceComesBackWhenItFitsWithAMargin(t *testing.T) {
 		capacity int64
 		want     string
 	}{
-		{"room with the margin", 1000, "shop/cache []"}, // 400M free, cache needs 315M
-		{"room without the margin", 910, "none"},        // 310M free
+		{"room with the margin", 1000, "default/shop/cache []"}, // 400M free, cache needs 315M
+		{"room without the margin", 910, "none"},                // 310M free
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			current := roomCluster(test.capacity)
@@ -193,7 +194,7 @@ func TestAWaitingStackGetsRoomBeforeAPushedOutService(t *testing.T) {
 	}
 	// shop's list is rewritten only when the new stack touches it: cache
 	// stays out, as it was
-	if lists := decisions.Placements[0].PushedOut; fmt.Sprint(lists) != "map[new:[]]" {
+	if lists := decisions.Placements[0].PushedOut; fmt.Sprint(lists) != "map[default/new:[]]" {
 		t.Errorf("pushed out %v", lists)
 	}
 }

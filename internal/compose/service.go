@@ -21,6 +21,10 @@ var routePath = regexp.MustCompile(`^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$`)
 func checkService(config types.ServiceConfig, volumes types.Volumes) (Service, Problems) {
 	service := Service{Name: config.Name, Restart: config.Restart, RestartUnhealthy: true}
 	found := checkHostTies(config)
+	if !names.Valid(config.Name) {
+		// it ends up in container names and Traefik's
+		found = append(found, "the name is not a service name ("+names.Rule+")")
+	}
 	for _, mount := range config.Volumes {
 		if problem := checkMount(mount, volumes); problem != "" {
 			found = append(found, problem)
@@ -136,8 +140,8 @@ func checkSecretRequests(config types.ServiceConfig, raw rawServiceExtension) []
 		report("secrets: Compose's secrets are not supported; use x-clowder.secrets")
 	}
 	for _, name := range raw.Secrets {
-		if !names.ValidSecret(name) {
-			report("x-clowder.secrets: %q is not a secret name (lowercase letters, digits, - and _)", name)
+		if !names.Valid(name) {
+			report("x-clowder.secrets: %q is not a secret name (%s)", name, names.Rule)
 		}
 	}
 	if len(slices.Compact(slices.Sorted(slices.Values(raw.Secrets)))) != len(raw.Secrets) {
@@ -147,7 +151,7 @@ func checkSecretRequests(config types.ServiceConfig, raw rawServiceExtension) []
 		switch {
 		case !names.ValidVariable(variable):
 			report("x-clowder.secret_env: %q is not a variable name", variable)
-		case !names.ValidSecret(raw.SecretEnv[variable]):
+		case !names.Valid(raw.SecretEnv[variable]):
 			report("x-clowder.secret_env: %q is not a secret name", raw.SecretEnv[variable])
 		}
 		if _, ok := config.Environment[variable]; ok {

@@ -18,12 +18,16 @@ func TestOnlyStacksTheClusterNamesMayBePrivileged(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := clusterdir.Config{}.WithDefaults()
-	if _, err := checkAgainstCluster(stack, config); err == nil ||
+	if _, err := checkAgainstCluster("default", stack, config); err == nil ||
 		!strings.Contains(err.Error(), "service exporter: privileged reaches beyond the container") {
 		t.Errorf("a privileged stack the cluster does not name: %v", err)
 	}
-	config.Stacks.Privileged = []string{"monitoring"}
-	if _, err := checkAgainstCluster(stack, config); err != nil {
+	config.Stacks.Privileged = []string{"other/monitoring"}
+	if _, err := checkAgainstCluster("default", stack, config); err == nil {
+		t.Error("a privileged stack of another namespace passed")
+	}
+	config.Stacks.Privileged = []string{"default/monitoring"}
+	if _, err := checkAgainstCluster("default", stack, config); err != nil {
 		t.Errorf("a privileged stack the cluster names: %v", err)
 	}
 }
@@ -35,15 +39,20 @@ func TestAnExistingVolumeCannotChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := checkVolumesUnchanged(stack, map[string]*state.Volume{}); err != nil {
+	if err := checkVolumesUnchanged("default", stack, map[string]*state.Volume{}); err != nil {
 		t.Errorf("a new volume: %v", err)
 	}
-	volumes := map[string]*state.Volume{"shop/data": {ID: "shop/data", Class: "fast", SizeBytes: 2 << 30, Replicas: 1}}
-	if err := checkVolumesUnchanged(stack, volumes); err != nil {
+	volumes := map[string]*state.Volume{
+		"default/shop/data": {ID: "default/shop/data", Class: "fast", SizeBytes: 2 << 30, Replicas: 1},
+	}
+	if err := checkVolumesUnchanged("default", stack, volumes); err != nil {
 		t.Errorf("the same volume: %v", err)
 	}
-	volumes["shop/data"].SizeBytes = 1 << 30
-	if err := checkVolumesUnchanged(stack, volumes); err == nil ||
+	volumes["default/shop/data"].SizeBytes = 1 << 30
+	if err := checkVolumesUnchanged("other", stack, volumes); err != nil {
+		t.Errorf("the volume of another namespace's stack counted: %v", err)
+	}
+	if err := checkVolumesUnchanged("default", stack, volumes); err == nil ||
 		!strings.Contains(err.Error(), "volume data exists with class fast, size 1G and 1 replicas") {
 		t.Errorf("a grown volume: %v", err)
 	}
@@ -80,10 +89,12 @@ func TestExactlyTheSecretsTheStackAsksForAreSealed(t *testing.T) {
 
 func TestClusterYAMLThatWouldBreakAStackIsRefused(t *testing.T) {
 	cluster := &fakeCluster{state: bootstrappedState(t), leader: true}
-	cluster.state.Stacks = map[string]*state.Stack{"monitoring": {Name: "monitoring", Source: privilegedSource}}
+	cluster.state.Stacks = map[string]*state.Stack{
+		"default/monitoring": {Namespace: "default", Name: "monitoring", Source: privilegedSource},
+	}
 	server := &Server{config: ServerConfig{Cluster: cluster}}
 	_, err := server.checkStacksAgainst(context.Background(), clusterdir.Config{}.WithDefaults())
-	if err == nil || !strings.Contains(err.Error(), "stack monitoring: service exporter: privileged") {
+	if err == nil || !strings.Contains(err.Error(), "stack default/monitoring: service exporter: privileged") {
 		t.Errorf("taking a running stack out of stacks.privileged: %v", err)
 	}
 }

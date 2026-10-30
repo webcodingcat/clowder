@@ -45,19 +45,20 @@ const (
 // keptFinished is how many finished operations stay for `clowder` to show.
 const keptFinished = 100
 
-func stackLock(name string) string { return "stack/" + name }
+func stackLock(id string) string { return "stack/" + id }
 
 func volumeLock(id string) string { return "volume/" + id }
 
 // validLock accepts what stackLock and volumeLock make: a lock that names
 // nothing would never conflict, and so protect nothing.
 func validLock(lock string) bool {
-	if name, ok := strings.CutPrefix(lock, "stack/"); ok {
-		return names.ValidStack(name)
+	if id, ok := strings.CutPrefix(lock, "stack/"); ok {
+		_, _, ok := names.SplitID(id)
+		return ok
 	}
 	if id, ok := strings.CutPrefix(lock, "volume/"); ok {
-		stack, volume, ok := strings.Cut(id, "/")
-		return ok && names.ValidStack(stack) && volume != ""
+		_, ok := names.StackOfVolume(id)
+		return ok
 	}
 	return false
 }
@@ -106,7 +107,7 @@ func applyStartOperation(s *State, _ Command, payload StartOperation) error {
 	}
 	for _, lock := range operation.Locks {
 		if !validLock(lock) {
-			return fmt.Errorf("operation %s: lock %q is neither stack/<name> nor volume/<stack>/<volume>",
+			return fmt.Errorf("operation %s: lock %q is neither stack/<stack ID> nor volume/<volume ID>",
 				operation.ID, lock)
 		}
 	}

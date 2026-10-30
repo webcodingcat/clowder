@@ -86,27 +86,30 @@ func (s *Server) applyCluster(w http.ResponseWriter, r *http.Request) {
 // place in stacks.privileged must not go while the stack is there. It tells
 // the stacks revision it checked, which the state compares at commit.
 func (s *Server) checkStacksAgainst(ctx context.Context, config clusterdir.Config) (int64, error) {
-	sources := map[string]string{}
+	// what the check needs of a stack, read under the state's lock
+	type stackSource struct{ namespace, name, source string }
+	stacks := map[string]stackSource{}
 	var revision int64
 	s.config.Cluster.Read(func(current *state.State) {
 		revision = current.StacksRevision
-		for name, stack := range current.Stacks {
-			sources[name] = stack.Source
+		for id, stack := range current.Stacks {
+			stacks[id] = stackSource{namespace: stack.Namespace, name: stack.Name, source: stack.Source}
 		}
 	})
 	var problems compose.Problems
-	for _, name := range slices.Sorted(maps.Keys(sources)) {
-		stack, err := compose.Parse(ctx, name, []byte(sources[name]))
+	for _, id := range slices.Sorted(maps.Keys(stacks)) {
+		stack := stacks[id]
+		parsed, err := compose.Parse(ctx, stack.name, []byte(stack.source))
 		if err != nil {
 			continue // a stack the cluster cannot read is no reason to refuse cluster.yaml
 		}
-		if _, err := checkAgainstCluster(stack, config); err != nil {
+		if _, err := checkAgainstCluster(stack.namespace, parsed, config); err != nil {
 			var stackProblems compose.Problems
 			if !errors.As(err, &stackProblems) {
 				return 0, err
 			}
 			for _, problem := range stackProblems {
-				problems = append(problems, "stack "+name+": "+problem)
+				problems = append(problems, "stack "+id+": "+problem)
 			}
 		}
 	}

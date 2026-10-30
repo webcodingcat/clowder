@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"maps"
 	"math/big"
 	"net/netip"
 	"slices"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/names"
 )
 
 var testTime = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
@@ -402,24 +404,26 @@ func TestPushedOutServicesAreTheStacksAndANewGenerationDropsGoneOnes(t *testing.
 	c.createShop()
 	services := map[string]Service{"app": {DependsOn: []string{"db"}}, "db": {}, "cache": {}}
 	c.refuse(KindPutStack, UserActor("alice"), PutStack{
-		Name: "shop", Owner: OwnerCLI, Source: "s", ConfigRevision: 1,
+		Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "s", ConfigRevision: 1,
 		Services: map[string]Service{"app": {DependsOn: []string{"db"}}},
 	}, "service app depends on db, which the stack does not have")
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{
-		Name: "shop", Owner: OwnerCLI, Source: "s", ConfigRevision: 1, Services: services,
+		Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "s", ConfigRevision: 1, Services: services,
 	})
-	c.refuse(KindSetPushedOut, LeaderActor, SetPushedOut{Stacks: map[string][]string{"shop": {"web"}}},
-		"stack shop has no service web")
-	c.refuse(KindSetPushedOut, LeaderActor, SetPushedOut{Stacks: map[string][]string{"blog": {}}}, "no stack blog")
-	c.mustApply(KindSetPushedOut, LeaderActor, SetPushedOut{Stacks: map[string][]string{"shop": {"cache", "app", "cache"}}})
-	if got := c.state.Stacks["shop"].PushedOut; !slices.Equal(got, []string{"app", "cache"}) {
+	c.refuse(KindSetPushedOut, LeaderActor, SetPushedOut{Stacks: map[string][]string{"default/shop": {"web"}}},
+		"stack default/shop has no service web")
+	c.refuse(KindSetPushedOut, LeaderActor, SetPushedOut{Stacks: map[string][]string{"default/blog": {}}},
+		"no stack default/blog")
+	c.mustApply(KindSetPushedOut, LeaderActor,
+		SetPushedOut{Stacks: map[string][]string{"default/shop": {"cache", "app", "cache"}}})
+	if got := c.state.Stacks["default/shop"].PushedOut; !slices.Equal(got, []string{"app", "cache"}) {
 		t.Errorf("pushed out %v", got)
 	}
 	delete(services, "cache")
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{
-		Name: "shop", Owner: OwnerCLI, Source: "s2", ConfigRevision: 1, Services: services,
+		Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "s2", ConfigRevision: 1, Services: services,
 	})
-	if got := c.state.Stacks["shop"].PushedOut; !slices.Equal(got, []string{"app"}) {
+	if got := c.state.Stacks["default/shop"].PushedOut; !slices.Equal(got, []string{"app"}) {
 		t.Errorf("pushed out after cache went %v", got)
 	}
 }
@@ -429,7 +433,7 @@ func TestWaitingSinceStartsWithTheFirstReasonAndEndsWithTheLast(t *testing.T) {
 	c.createShop()
 	wait := func(reason string, at time.Time) {
 		c.t.Helper()
-		cmd, err := NewCommand(KindSetStackWaitReason, at, LeaderActor, SetStackWaitReason{Name: "shop", Reason: reason})
+		cmd, err := NewCommand(KindSetStackWaitReason, at, LeaderActor, SetStackWaitReason{ID: "default/shop", Reason: reason})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -440,11 +444,11 @@ func TestWaitingSinceStartsWithTheFirstReasonAndEndsWithTheLast(t *testing.T) {
 	}
 	wait("no room", testTime)
 	wait("no room on node0", testTime.Add(time.Hour)) // the text changed, the wait did not
-	if since := c.state.Stacks["shop"].WaitingSince; !since.Equal(testTime) {
+	if since := c.state.Stacks["default/shop"].WaitingSince; !since.Equal(testTime) {
 		t.Errorf("waiting since %v", since)
 	}
 	wait("", testTime.Add(2*time.Hour))
-	if since := c.state.Stacks["shop"].WaitingSince; !since.IsZero() {
+	if since := c.state.Stacks["default/shop"].WaitingSince; !since.IsZero() {
 		t.Errorf("waiting since %v after the wait ended", since)
 	}
 }
@@ -478,42 +482,93 @@ func TestAnAlertKeepsItsKeyAndSinceWhenItGetsWorse(t *testing.T) {
 // does.
 func (c *cluster) createShop() {
 	c.t.Helper()
-	c.mustApply(KindCreateStack, UserActor("alice"), CreateStack{Name: "shop", Owner: OwnerCLI})
+	c.mustApply(KindCreateStack, UserActor("alice"), CreateStack{Namespace: "default", Name: "shop", Owner: OwnerCLI})
+}
+
+func TestTwoNamespacesHaveAStackOfTheSameName(t *testing.T) {
+	c := newCluster(t)
+	if _, ok := c.state.Namespaces[names.Default]; !ok {
+		t.Fatal("the bootstrap made no namespace default")
+	}
+	c.refuse(KindCreateStack, UserActor("alice"), CreateStack{Namespace: "other", Name: "shop", Owner: OwnerCLI},
+		`no namespace "other"`)
+	// only clowder apply makes namespaces (phase 1c); until then a test does
+	c.state.Namespaces["other"] = &Namespace{Name: "other"}
+	c.createShop()
+	c.mustApply(KindCreateStack, UserActor("alice"), CreateStack{Namespace: "other", Name: "shop", Owner: OwnerCLI})
+	for _, namespace := range []string{"default", "other"} {
+		c.mustApply(KindPutStack, UserActor("alice"), PutStack{
+			Namespace: namespace, Name: "shop", Owner: OwnerCLI, Source: "services: {}",
+		})
+		volume := Volume{
+			ID: names.VolumeID(namespace, "shop", "data"), Generation: 1, Class: "fast", SizeBytes: 1 << 30,
+			Placements: []Placement{{Host: 0, Class: "fast"}}, Status: VolumeOK,
+		}
+		c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: volume})
+	}
+	if len(c.state.Stacks) != 2 || len(c.state.Volumes) != 2 {
+		t.Fatalf("stacks %v, volumes %v", slices.Collect(maps.Keys(c.state.Stacks)), slices.Collect(maps.Keys(c.state.Volumes)))
+	}
+	if stack := c.state.Stacks["other/shop"]; stack.Project() == c.state.Stacks["default/shop"].Project() {
+		t.Error("the two stacks share their project on the host")
+	}
+	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Namespace: "other", Name: "shop", WithVolumes: true})
+	if _, ok := c.state.Volumes["default/shop/data"]; !ok {
+		t.Error("deleting other/shop took the volume of default/shop along")
+	}
+}
+
+func TestOnlyStacksNamedInClusterYAMLMayHavePrivileges(t *testing.T) {
+	c := newCluster(t)
+	config := testConfig()
+	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: testSecrets()})
+	c.createShop()
+	privileged := PutStack{
+		Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {}", ConfigRevision: 1, Privileged: true,
+	}
+	c.refuse(KindPutStack, UserActor("alice"), privileged, "only stacks named in stacks.privileged")
+	config.Stacks.Privileged = []string{"default/shop"}
+	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: testSecrets()})
+	privileged.ConfigRevision = 2
+	c.mustApply(KindPutStack, UserActor("alice"), privileged)
+	config.Stacks.Privileged = nil
+	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: testSecrets(), StacksRevision: 1},
+		"stack default/shop asks for privileges, so it must stay in stacks.privileged")
 }
 
 func TestAStackIsCreatedBeforeItIsApplied(t *testing.T) {
 	c := newCluster(t)
 	spec := "services: {}"
-	c.refuse(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec}, "register it first")
+	c.refuse(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: spec}, "register it first")
 	c.createShop()
-	c.refuse(KindCreateStack, UserActor("bob"), CreateStack{Name: "shop", Owner: OwnerCLI}, "exists already")
-	c.refuse(KindCreateStack, UserActor("alice"), CreateStack{Name: "Shop", Owner: OwnerCLI}, "stack name")
-	stack := c.state.Stacks["shop"]
+	c.refuse(KindCreateStack, UserActor("bob"), CreateStack{Namespace: "default", Name: "shop", Owner: OwnerCLI}, "exists already")
+	c.refuse(KindCreateStack, UserActor("alice"), CreateStack{Namespace: "default", Name: "Shop", Owner: OwnerCLI}, "stack name")
+	stack := c.state.Stacks["default/shop"]
 	if stack.Status != StackCreated || stack.CreatedBy != "alice" || stack.Generation != 0 {
 		t.Errorf("created stack %+v", stack)
 	}
 	host := HostID(0)
-	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Status: StackStarting, Host: &host},
+	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackStarting, Host: &host},
 		"never applied")
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: spec})
 	if stack.Status != StackPending || stack.Generation != 1 {
 		t.Errorf("applied stack %+v", stack)
 	}
-	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop"})
+	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Namespace: "default", Name: "shop"})
 }
 
 func TestChecksAgainstAnOlderClusterYAMLOrStacksAreRefused(t *testing.T) {
 	c := newCluster(t)
 	c.createShop()
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
 	// cluster.yaml checked against the stacks before that apply
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets()},
 		"stacks revision 0, but 1 came in between")
 	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets(), StacksRevision: 1})
 	// a stack checked against cluster.yaml before that apply
-	c.refuse(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"},
+	c.refuse(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {}"},
 		"cluster.yaml revision 0, but 1 came in between")
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}", ConfigRevision: 1})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {}", ConfigRevision: 1})
 }
 
 func TestAnApplyReplacesTheSecretsAsAWhole(t *testing.T) {
@@ -521,14 +576,14 @@ func TestAnApplyReplacesTheSecretsAsAWhole(t *testing.T) {
 	spec := "services: {}"
 	c.createShop()
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{
-		Name: "shop", Owner: OwnerCLI, Source: spec, Secrets: map[string]Sealed{"db-password": Sealed("sealed")},
+		Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: spec, Secrets: map[string]Sealed{"db-password": Sealed("sealed")},
 	})
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec})
-	if secrets := c.state.Stacks["shop"].Secrets; len(secrets) != 0 {
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: spec})
+	if secrets := c.state.Stacks["default/shop"].Secrets; len(secrets) != 0 {
 		t.Errorf("an apply without secrets kept %v", secrets)
 	}
 	c.refuse(KindPutStack, UserActor("alice"), PutStack{
-		Name: "shop", Owner: OwnerCLI, Source: spec, Secrets: map[string]Sealed{"../x": Sealed("s")},
+		Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: spec, Secrets: map[string]Sealed{"../x": Sealed("s")},
 	}, "not a secret name")
 }
 
@@ -536,24 +591,24 @@ func TestAPortOrRouteBelongsToOneStack(t *testing.T) {
 	c := newCluster(t)
 	spec := "services: {}"
 	c.createShop()
-	c.mustApply(KindCreateStack, UserActor("alice"), CreateStack{Name: "blog", Owner: OwnerCLI})
-	shop := PutStack{Name: "shop", Owner: OwnerCLI, Source: spec, Ports: []string{"udp/9987"}, Routes: []string{"shop.example.com/"}}
+	c.mustApply(KindCreateStack, UserActor("alice"), CreateStack{Namespace: "default", Name: "blog", Owner: OwnerCLI})
+	shop := PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: spec, Ports: []string{"udp/9987"}, Routes: []string{"shop.example.com/"}}
 	c.mustApply(KindPutStack, UserActor("alice"), shop)
 	c.mustApply(KindPutStack, UserActor("alice"), shop) // its own earlier generation does not count
 
-	c.refuse(KindPutStack, UserActor("alice"), PutStack{Name: "blog", Owner: OwnerCLI, Source: spec, Ports: []string{"udp/9987"}},
-		"port udp/9987 is published by stack shop already")
-	c.refuse(KindPutStack, UserActor("alice"), PutStack{Name: "blog", Owner: OwnerCLI, Source: spec, Routes: []string{"shop.example.com/"}},
-		"route shop.example.com/ belongs to stack shop already")
+	c.refuse(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "blog", Owner: OwnerCLI, Source: spec, Ports: []string{"udp/9987"}},
+		"port udp/9987 is published by stack default/shop already")
+	c.refuse(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "blog", Owner: OwnerCLI, Source: spec, Routes: []string{"shop.example.com/"}},
+		"route shop.example.com/ belongs to stack default/shop already")
 	// another protocol or path is another address
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{
-		Name: "blog", Owner: OwnerCLI, Source: spec, Ports: []string{"tcp/9987"}, Routes: []string{"shop.example.com/blog"},
+		Namespace: "default", Name: "blog", Owner: OwnerCLI, Source: spec, Ports: []string{"tcp/9987"}, Routes: []string{"shop.example.com/blog"},
 	})
 
 	// a deleted stack frees what it had
-	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop"})
+	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Namespace: "default", Name: "shop"})
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{
-		Name: "blog", Owner: OwnerCLI, Source: spec, Ports: []string{"udp/9987"}, Routes: []string{"shop.example.com/"},
+		Namespace: "default", Name: "blog", Owner: OwnerCLI, Source: spec, Ports: []string{"udp/9987"}, Routes: []string{"shop.example.com/"},
 	})
 }
 
@@ -561,77 +616,82 @@ func TestStacksBelongToTheirOwner(t *testing.T) {
 	c := newCluster(t)
 	spec := "services: {}"
 	c.createShop()
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec})
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec, Priority: 700})
-	stack := c.state.Stacks["shop"]
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: spec})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: spec, Priority: 700})
+	stack := c.state.Stacks["default/shop"]
 	if stack.Generation != 2 || stack.Status != StackPending || stack.Priority != 700 {
 		t.Errorf("stack %+v", stack)
 	}
-	c.refuse(KindPutStack, LeaderActor, PutStack{Name: "shop", Owner: GitOpsOwner("main"), Source: spec}, "belongs to cli")
+	c.refuse(KindPutStack, LeaderActor, PutStack{Namespace: "default", Name: "shop", Owner: GitOpsOwner("main"), Source: spec}, "belongs to cli")
 
 	host := HostID(0)
-	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host},
+	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &host},
 		"only its host")
-	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Status: StackStarting, Host: &host})
+	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackStarting, Host: &host})
 	if !stack.LastMove.Equal(testTime) {
 		t.Errorf("placing a stack is a move: %v", stack.LastMove)
 	}
-	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host, Generation: 2})
+	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &host, Generation: 2})
 	// a new generation of a running stack starts until its host reports it
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: spec})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: spec})
 	if stack.Status != StackStarting || stack.Generation != 3 || *stack.Host != host {
 		t.Errorf("after a new apply of a running stack: %+v", stack)
 	}
 	// the report of the generation before, sent before the host saw the apply
-	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host, Generation: 2},
+	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &host, Generation: 2},
 		"about generation 2, but 3 is applied")
-	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host, Generation: 3})
-	c.refuse(KindSetStackStatus, HostActor(1), SetStackStatus{Name: "shop", Status: StackStopped, Host: &host},
+	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &host, Generation: 3})
+	c.refuse(KindSetStackStatus, HostActor(1), SetStackStatus{ID: "default/shop", Status: StackStopped, Host: &host},
 		"only its host")
-	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackPending}, "only where it is")
+	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackPending}, "only where it is")
 	gone := HostID(7)
-	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Status: StackRunning, Host: &gone}, "not a member")
-	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Status: "dancing"}, "unknown status")
+	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &gone}, "not a member")
+	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: "dancing"}, "unknown status")
 }
 
 func TestAWaitReasonChangesNothingElse(t *testing.T) {
 	c := newCluster(t)
 	c.createShop()
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
 	host := HostID(0)
-	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{Name: "shop", Status: StackStarting, Host: &host})
-	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{Name: "shop", Status: StackRunning, Host: &host, Generation: 1})
+	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackStarting, Host: &host})
+	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &host, Generation: 1})
 
 	// a running stack whose new volume fits nowhere keeps running where it is
-	c.mustApply(KindSetStackWaitReason, LeaderActor, SetStackWaitReason{Name: "shop", Reason: "volume data fits no pool"})
-	stack := c.state.Stacks["shop"]
+	c.mustApply(KindSetStackWaitReason, LeaderActor, SetStackWaitReason{ID: "default/shop", Reason: "volume data fits no pool"})
+	stack := c.state.Stacks["default/shop"]
 	if stack.WaitReason != "volume data fits no pool" || stack.Status != StackRunning || *stack.Host != host {
 		t.Errorf("stack %+v", stack)
 	}
-	c.mustApply(KindSetStackWaitReason, LeaderActor, SetStackWaitReason{Name: "shop"})
+	c.mustApply(KindSetStackWaitReason, LeaderActor, SetStackWaitReason{ID: "default/shop"})
 	if stack.WaitReason != "" {
 		t.Errorf("an empty reason left %q", stack.WaitReason)
 	}
-	c.refuse(KindSetStackWaitReason, LeaderActor, SetStackWaitReason{Name: "gone", Reason: "x"}, "no stack gone")
+	c.refuse(KindSetStackWaitReason, LeaderActor, SetStackWaitReason{ID: "default/gone", Reason: "x"}, "no stack default/gone")
 }
 
 func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 	c := newCluster(t)
 	c.createShop()
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
 	minor := 5
 	volume := Volume{
-		ID: "shop/pgdata", Generation: 1, Class: "fast", SizeBytes: 1 << 30, Replicas: 1, Minor: &minor,
+		ID: "default/shop/pgdata", Generation: 1, Class: "fast", SizeBytes: 1 << 30, Replicas: 1, Minor: &minor,
 		Placements: []Placement{{Host: 0, Class: "fast"}}, Status: VolumeOK,
 	}
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: volume})
 
 	other := volume
-	other.ID = "shop/cache"
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: other}, "minor 5 belongs to shop/pgdata")
+	other.ID = "default/shop/cache"
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: other}, "minor 5 belongs to default/shop/pgdata")
 	orphan := volume
-	orphan.ID = "blog/data"
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: orphan}, "no stack blog")
+	orphan.ID = "default/blog/data"
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: orphan}, "no stack default/blog")
+	orphan.ID = "shop/data"
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: orphan}, "not namespace/stack/volume")
+	tooOld := volume
+	tooOld.Generation = names.MaxDataGeneration + 1
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: tooOld}, "generation 1000000 is not from 0 to 999999")
 	older := volume
 	older.Generation = 0
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: older}, "older")
@@ -655,8 +715,8 @@ func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 	strange.Status = "melting"
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: strange}, "unknown status")
 
-	c.refuse(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop"}, "still has volume shop/pgdata")
-	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop", WithVolumes: true})
+	c.refuse(KindDeleteStack, UserActor("alice"), DeleteStack{Namespace: "default", Name: "shop"}, "still has volume default/shop/pgdata")
+	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Namespace: "default", Name: "shop", WithVolumes: true})
 	if len(c.state.Volumes) != 0 || len(c.state.Stacks) != 0 {
 		t.Errorf("left behind: %v, %v", c.state.Volumes, c.state.Stacks)
 	}
@@ -667,10 +727,10 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
 	c.createShop()
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
 	minor := 5
 	volume := Volume{
-		ID: "shop/pgdata", Generation: 1, Class: "fast", SizeBytes: 1 << 30, Replicas: 2, Minor: &minor,
+		ID: "default/shop/pgdata", Generation: 1, Class: "fast", SizeBytes: 1 << 30, Replicas: 2, Minor: &minor,
 		Placements: []Placement{{Host: 0, Class: "fast"}, {Host: 1, Class: "fast"}}, Status: VolumeOK,
 	}
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: volume})
@@ -686,7 +746,7 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	restored := moved
 	restored.Generation = 2
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: restored})
-	want := []RetiredCopy{{Volume: "shop/pgdata", Generation: 1, Host: 1}, {Volume: "shop/pgdata", Generation: 1, Host: 0}}
+	want := []RetiredCopy{{Volume: "default/shop/pgdata", Generation: 1, Host: 1}, {Volume: "default/shop/pgdata", Generation: 1, Host: 0}}
 	if !slices.Equal(c.state.Retired, want) {
 		t.Errorf("retired %v, want %v", c.state.Retired, want)
 	}
@@ -697,14 +757,14 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	c.refuse(KindForgetCopy, HostActor(1), ForgetCopy{Copy: want[0]}, "no retired copy")
 
 	// a deleted stack retires its copies, and its name waits for them
-	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Name: "shop", WithVolumes: true})
-	c.refuse(KindCreateStack, UserActor("alice"), CreateStack{Name: "shop", Owner: OwnerCLI}, "still being removed")
+	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Namespace: "default", Name: "shop", WithVolumes: true})
+	c.refuse(KindCreateStack, UserActor("alice"), CreateStack{Namespace: "default", Name: "shop", Owner: OwnerCLI}, "still being removed")
 	c.mustApply(KindForgetCopy, HostActor(0), ForgetCopy{Copy: want[1]})
-	c.mustApply(KindForgetCopy, HostActor(0), ForgetCopy{Copy: RetiredCopy{Volume: "shop/pgdata", Generation: 2, Host: 0}})
+	c.mustApply(KindForgetCopy, HostActor(0), ForgetCopy{Copy: RetiredCopy{Volume: "default/shop/pgdata", Generation: 2, Host: 0}})
 	c.createShop()
 
 	// a removed host forgets nothing any more: its copies leave the list
-	c.state.Retired = append(c.state.Retired, RetiredCopy{Volume: "blog/data", Generation: 1, Host: 1})
+	c.state.Retired = append(c.state.Retired, RetiredCopy{Volume: "default/blog/data", Generation: 1, Host: 1})
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Removed})
 	if len(c.state.Retired) != 0 {
 		t.Errorf("retired %v after the host was removed", c.state.Retired)
@@ -714,15 +774,15 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 func TestOperationsHoldTheirLocks(t *testing.T) {
 	c := newCluster(t)
 	c.createShop()
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
-	move := Operation{ID: "01A", Kind: "move-stack", Locks: []string{"stack/shop", "volume/shop/pgdata"}}
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
+	move := Operation{ID: "01A", Kind: "move-stack", Locks: []string{"stack/default/shop", "volume/default/shop/pgdata"}}
 	c.mustApply(KindStartOperation, LeaderActor, StartOperation{Operation: move})
 
-	c.refuse(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}"},
+	c.refuse(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {}"},
 		"locked by operation 01A")
 	// the operation itself may change what it holds
-	c.mustApply(KindPutStack, LeaderActor, PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {}", Operation: "01A"})
-	backup := Operation{ID: "01B", Kind: "backup", Locks: []string{"volume/shop/pgdata"}}
+	c.mustApply(KindPutStack, LeaderActor, PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {}", Operation: "01A"})
+	backup := Operation{ID: "01B", Kind: "backup", Locks: []string{"volume/default/shop/pgdata"}}
 	before := c.encoded()
 	err := c.apply(KindStartOperation, LeaderActor, StartOperation{Operation: backup})
 	var locked *LockedError
@@ -748,7 +808,7 @@ func TestOperationsHoldTheirLocks(t *testing.T) {
 
 func TestLocksNameAStackOrAVolume(t *testing.T) {
 	c := newCluster(t)
-	for _, lock := range []string{"x", "stack/", "volume/shop", "volume/Shop/data"} {
+	for _, lock := range []string{"x", "stack/", "stack/shop", "volume/shop", "volume/shop/data", "volume/Shop/web/data"} {
 		c.refuse(KindStartOperation, LeaderActor, StartOperation{Operation: Operation{
 			ID: "01A", Kind: "backup", Locks: []string{lock},
 		}}, "neither stack")
@@ -758,18 +818,18 @@ func TestLocksNameAStackOrAVolume(t *testing.T) {
 func TestFailoverTakesOverLocks(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindStartOperation, LeaderActor, StartOperation{Operation: Operation{
-		ID: "01A", Kind: "backup", Locks: []string{"volume/shop/pgdata", "volume/shop/files"},
+		ID: "01A", Kind: "backup", Locks: []string{"volume/default/shop/pgdata", "volume/default/shop/files"},
 	}})
 	c.mustApply(KindStartOperation, LeaderActor, StartOperation{TakeOver: true, Operation: Operation{
-		ID: "01B", Kind: "failover", Locks: []string{"volume/shop/pgdata"},
+		ID: "01B", Kind: "failover", Locks: []string{"volume/default/shop/pgdata"},
 	}})
 	if op := c.state.Operations["01A"]; op.State != OpFailed || !strings.Contains(op.Error, "01B") {
 		t.Errorf("the taken-over operation: %+v", op)
 	}
-	if _, held := c.state.Locks["volume/shop/files"]; held {
+	if _, held := c.state.Locks["volume/default/shop/files"]; held {
 		t.Error("the failed operation still holds its other lock")
 	}
-	if c.state.Locks["volume/shop/pgdata"] != "01B" {
+	if c.state.Locks["volume/default/shop/pgdata"] != "01B" {
 		t.Errorf("locks %v", c.state.Locks)
 	}
 }
@@ -779,7 +839,7 @@ func TestOnlyTheLastFinishedOperationsAreKept(t *testing.T) {
 	for number := range keptFinished + 5 {
 		id := string(rune('A'+number/26)) + string(rune('A'+number%26))
 		c.mustApply(KindStartOperation, LeaderActor, StartOperation{Operation: Operation{
-			ID: id, Kind: "backup", Locks: []string{"volume/shop/pgdata"},
+			ID: id, Kind: "backup", Locks: []string{"volume/default/shop/pgdata"},
 		}})
 		c.mustApply(KindFinishOperation, LeaderActor, FinishOperation{ID: id})
 	}
@@ -810,7 +870,7 @@ func TestSnapshotsGiveTheSameState(t *testing.T) {
 	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
 	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"})
 	c.createShop()
-	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Name: "shop", Owner: OwnerCLI, Source: "services: {a: {image: x}}"})
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {a: {image: x}}"})
 
 	var buffer bytes.Buffer
 	if err := c.state.WriteSnapshot(&buffer); err != nil {

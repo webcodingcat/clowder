@@ -13,6 +13,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/names"
 )
 
 // MaxHosts is the size of a cluster: a host ID is also the DRBD node-id and
@@ -51,11 +52,13 @@ type State struct {
 	Certificates map[string]*Certificate `json:"certificates,omitempty"`
 	Users        map[string]*User        `json:"users,omitempty"`
 	Revoked      map[string]time.Time    `json:"revoked,omitempty"` // certificate serial -> when
-	Stacks       map[string]*Stack       `json:"stacks,omitempty"`
+	// Namespaces hold the stacks; the bootstrap makes names.Default.
+	Namespaces map[string]*Namespace `json:"namespaces,omitempty"`
+	Stacks     map[string]*Stack     `json:"stacks,omitempty"` // names.ID: "<namespace>/<stack>"
 	// StacksRevision counts the stacks' applies: a cluster apply checked
 	// against the stacks commits only if none came in between.
 	StacksRevision int64              `json:"stacks_revision,omitempty"`
-	Volumes        map[string]*Volume `json:"volumes,omitempty"` // "<stack>/<volume>"
+	Volumes        map[string]*Volume `json:"volumes,omitempty"` // names.VolumeID
 	// Retired are the volume copies the cluster gave up: the only ones an
 	// agent removes, so a copy that is merely missing from the state (a bug)
 	// keeps its data.
@@ -63,7 +66,7 @@ type State struct {
 	// Alerts are the open alerts by key.
 	Alerts     map[string]*Alert     `json:"alerts,omitempty"`
 	Operations map[string]*Operation `json:"operations,omitempty"`
-	Locks      map[string]string     `json:"locks,omitempty"` // "stack/<name>" or "volume/<id>" -> operation
+	Locks      map[string]string     `json:"locks,omitempty"` // "stack/<stack ID>" or "volume/<volume ID>" -> operation
 	Audit      []AuditEntry          `json:"audit,omitempty"`
 }
 
@@ -158,10 +161,17 @@ type User struct {
 	Serials []string `json:"serials,omitempty"`
 }
 
+// Namespace keeps its stacks apart from those of other namespaces: two
+// namespaces may each have a stack of the same name.
+type Namespace struct {
+	Name string `json:"name"`
+}
+
 // Stack is a registered Compose stack.
 type Stack struct {
-	Name  string `json:"name"`
-	Owner string `json:"owner"` // the channel: OwnerCLI or GitOpsOwner(source)
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Owner     string `json:"owner"` // the channel: OwnerCLI or GitOpsOwner(source)
 	// CreatedBy is the actor that registered the stack: a user's name, or
 	// the actor itself for anyone else.
 	CreatedBy string `json:"created_by,omitempty"`
@@ -180,8 +190,11 @@ type Stack struct {
 	Routes []string `json:"routes,omitempty"`
 	// Services are what the scheduler needs of each service, by name.
 	Services map[string]Service `json:"services,omitempty"`
-	Host     *HostID            `json:"host,omitempty"` // nil: not placed yet
-	Status   StackStatus        `json:"status"`
+	// Privileged is true when a service reaches beyond its container
+	// (compose.Service.Privileges): stacks.privileged must name the stack.
+	Privileged bool        `json:"privileged,omitempty"`
+	Host       *HostID     `json:"host,omitempty"` // nil: not placed yet
+	Status     StackStatus `json:"status"`
 	// PushedOut are the services stopped for services of higher priority,
 	// sorted; only the leader changes the list (set-pushed-out).
 	PushedOut []string  `json:"pushed_out,omitempty"`
@@ -194,6 +207,21 @@ type Stack struct {
 	// so how long a stack has waited survives a change of leader; the
 	// alert for a stack that waits too long reads it.
 	WaitingSince time.Time `json:"waiting_since,omitzero"`
+}
+
+// ID is the stack's key in State.Stacks.
+func (s *Stack) ID() string {
+	return names.ID(s.Namespace, s.Name)
+}
+
+// Project is the stack's Compose project on its host.
+func (s *Stack) Project() string {
+	return names.Project(s.Namespace, s.Name)
+}
+
+// VolumeID is the ID of the stack's volume of that name.
+func (s *Stack) VolumeID(volume string) string {
+	return names.VolumeID(s.Namespace, s.Name, volume)
 }
 
 // Service is what the scheduler needs of one service of a stack, as the
@@ -237,9 +265,9 @@ const (
 
 // Volume is a named volume of a stack.
 type Volume struct {
-	ID string `json:"id"` // "<stack>/<volume>"
+	ID string `json:"id"` // names.VolumeID: "<namespace>/<stack>/<volume>"
 	// Generation grows with a restore or a class move; it is part of the
-	// Docker volume's name.
+	// Docker volume's name (names.VolumeName), at most names.MaxDataGeneration.
 	Generation int64        `json:"generation"`
 	Class      string       `json:"class"`
 	SizeBytes  int64        `json:"size_bytes"`
@@ -261,7 +289,7 @@ type Placement struct {
 // stack or volume, of an older generation, or one the volume no longer
 // places there. The host forgets it once the copy is gone (forget-copy).
 type RetiredCopy struct {
-	Volume     string `json:"volume"` // "<stack>/<volume>"
+	Volume     string `json:"volume"` // the volume's ID
 	Generation int64  `json:"generation"`
 	Host       HostID `json:"host"`
 }

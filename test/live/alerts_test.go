@@ -142,7 +142,7 @@ func fillPool(t *testing.T, server host, received *receiver) {
 		"\n    command: [sleep, infinity]\n    stop_grace_period: 1s\n    volumes: [data:/data]\n"+
 		fmt.Sprintf("volumes:\n  data:\n    x-clowder: {class: small, size: %dM, replicas: 0}\n", poolBytes*90/100>>20))
 	waitRunning(t, "filler", 1)
-	app := server.must(t, "docker ps -q --filter label=com.docker.compose.project=filler")
+	app := server.must(t, "docker ps -q --filter label=com.docker.compose.project="+project("filler"))
 	// zeros take blocks of a thin pool as any data does
 	server.must(t, fmt.Sprintf("docker exec %s dd if=/dev/zero of=/data/fill bs=1M count=%d conv=fsync 2>&1 | tail -1",
 		app, poolBytes*85/100>>20))

@@ -55,8 +55,8 @@ func Check(config Config) Problems {
 	}
 	problems = append(problems, checkPriorities(config.Priorities)...)
 	for _, stack := range config.Stacks.Privileged {
-		if !names.ValidStack(stack) {
-			report("stacks.privileged: %q is not a stack name", stack)
+		if _, _, ok := names.SplitID(stack); !ok {
+			report("stacks.privileged: %q is not <namespace>/<stack> (%s)", stack, names.Rule)
 		}
 	}
 	problems = append(problems, checkResources("defaults.reservations", config.Defaults.Reservations)...)
@@ -173,6 +173,10 @@ func checkStorageClasses(classes map[string]StorageClass) Problems {
 		case class.Pool != "":
 			if vg, lv, ok := strings.Cut(class.Pool, "/"); !ok || vg == "" || lv == "" {
 				problems = append(problems, fmt.Sprintf("storage class %s: pool %q is not volume-group/thin-pool", name, class.Pool))
+			} else if len(vg) > names.MaxVolumeGroupLength {
+				// the volume group is part of each volume's device-mapper name
+				problems = append(problems, fmt.Sprintf("storage class %s: volume group %q is longer than %d characters",
+					name, vg, names.MaxVolumeGroupLength))
 			}
 			if class.Reserve != "" && !validPercent(class.Reserve) {
 				problems = append(problems, fmt.Sprintf("storage class %s: reserve %q is not a percentage from 0%% to 90%%", name, class.Reserve))

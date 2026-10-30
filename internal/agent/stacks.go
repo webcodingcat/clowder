@@ -20,6 +20,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/docker"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/storage"
@@ -88,7 +89,9 @@ type stackRunner struct {
 
 // desiredState is what this host should run, from a copy of the state.
 type desiredState struct {
-	config     clusterdir.Config
+	config clusterdir.Config
+	// stacks are by their Compose project (Stack.Project), the name of all
+	// the agent keeps per stack
 	stacks     map[string]*state.Stack
 	volumes    map[string]*state.Volume
 	hostNames  map[state.HostID]string
@@ -111,9 +114,9 @@ func readDesired(cluster stateReader, self state.HostID) (desiredState, error) {
 		config: copied.Config.Spec, stacks: map[string]*state.Stack{}, volumes: copied.Volumes,
 		hostNames: map[state.HostID]string{}, registries: copied.Registries, retired: copied.Retired,
 	}
-	for name, stack := range copied.Stacks {
+	for _, stack := range copied.Stacks {
 		if stack.Host != nil && *stack.Host == self {
-			desired.stacks[name] = stack
+			desired.stacks[stack.Project()] = stack
 		}
 	}
 	for id, host := range copied.Hosts {
@@ -139,7 +142,12 @@ func (r *stackRunner) reconcile(ctx context.Context) {
 	}
 }
 
-// pass brings this host once to what the state says.
+// pass brings this host once to what the state says. The stacks that left
+// stop first, before the others come up, so a stack that comes never
+// starts beside one that is still going. (While a volume belongs to its
+// stack, no volume passes between stacks; when volumes are resources of
+// their own, a stack whose volume a stack that failed to stop still holds
+// must wait as well.)
 func (r *stackRunner) pass(ctx context.Context) {
 	desired, err := readDesired(r.cluster, r.host.ID)
 	if err != nil {
@@ -147,12 +155,14 @@ func (r *stackRunner) pass(ctx context.Context) {
 		return
 	}
 	r.logIn(ctx, desired)
-	for _, name := range slices.Sorted(maps.Keys(desired.stacks)) {
-		if err := r.apply(ctx, desired, desired.stacks[name]); err != nil {
-			r.logger.Error("run a stack", "stack", name, "error", err)
+	r.stopLeavers(ctx, desired)
+	for _, project := range slices.Sorted(maps.Keys(desired.stacks)) {
+		if err := r.apply(ctx, desired, desired.stacks[project]); err != nil {
+			r.logger.Error("run a stack", "stack", desired.stacks[project].ID(), "error", err)
 		}
 	}
-	r.removeOthers(ctx, desired)
+	r.removeVolumes(ctx, desired)
+	r.removeSecretsOfOthers(desired)
 }
 
 // forgetApplied makes every stack come up again in a pass it starts at
@@ -179,17 +189,16 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 	if err != nil {
 		return err
 	}
+	project := stack.Project()
 	volumes := map[string]storage.Volume{}
 	mounted := map[string]compose.MountedVolume{}
 	for name := range parsed.Volumes {
-		volume, err := r.describe(desired, stack.Name+"/"+name)
+		volume, err := r.describe(desired, stack.VolumeID(name))
 		if err != nil {
 			return err
 		}
 		volumes[name] = volume
-		mounted[name] = compose.MountedVolume{
-			Dir: r.storage.MountPoint(volume), Generation: desired.volumes[volume.ID].Generation,
-		}
+		mounted[name] = compose.MountedVolume{Dir: r.storage.MountPoint(volume), Name: volume.LV}
 	}
 	// Rendered before any volume is made, so a stack that cannot run leaves
 	// nothing behind. The parse error is not needed: cluster.yaml's check
@@ -197,15 +206,16 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 	// it is empty, the zero address, which Render refuses.
 	floatingIP, _ := netip.ParseAddr(desired.config.Ingress.FloatingIP)
 	rendered, err := compose.Render(parsed, compose.Target{
-		FloatingIP: floatingIP, NodeAddress: r.host.NodeAddress, Resolver: network.Resolver,
-		Volumes: mounted, SecretsDir: r.files.secretFilesDir(stack.Name), SecretDigests: secrets.digests,
+		Namespace: stack.Namespace, FloatingIP: floatingIP, NodeAddress: r.host.NodeAddress,
+		Resolver: network.Resolver, Volumes: mounted, SecretsDir: r.files.secretFilesDir(project),
+		SecretDigests: secrets.digests,
 	})
 	if err != nil {
 		return err
 	}
 	// recorded before they exist, so a copy made by a crashed pass is still
 	// found and removed later
-	if err := r.record(stack.Name, slices.Collect(maps.Values(volumes))); err != nil {
+	if err := r.record(slices.Collect(maps.Values(volumes))); err != nil {
 		return err
 	}
 	for _, volume := range volumes {
@@ -213,46 +223,48 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 			return err
 		}
 	}
-	if err := r.up(ctx, stack.Name, rendered, secrets, stack.PushedOut); err != nil {
+	if err := r.up(ctx, project, rendered, secrets, stack.PushedOut); err != nil {
 		return err
 	}
 	if stack.Status == state.StackRunning {
 		return nil
 	}
 	return commitAsHost(ctx, r.propose, r.host.ID, state.KindSetStackStatus, state.SetStackStatus{
-		Name: stack.Name, Status: state.StackRunning, Host: stack.Host, Generation: stack.Generation,
+		ID: stack.ID(), Status: state.StackRunning, Host: stack.Host, Generation: stack.Generation,
 	})
 }
 
 // up writes a stack's Compose file and secrets and runs compose up without
 // the pushed-out services, unless all of it came up before. A failed
 // compose up is tried again at the next pass.
-func (r *stackRunner) up(ctx context.Context, name string, rendered []byte, secrets stackSecrets, pushedOut []string) error {
+func (r *stackRunner) up(ctx context.Context, project string, rendered []byte, secrets stackSecrets,
+	pushedOut []string,
+) error {
 	hash := upHash(rendered, secrets, pushedOut)
 	r.mu.Lock()
-	applied, ok := r.applied[name]
+	applied, ok := r.applied[project]
 	r.mu.Unlock()
 	if ok && applied == hash {
 		return nil
 	}
-	file := r.files.stackFile(name)
+	file := r.files.stackFile(project)
 	if err := atomicfile.Write(file, rendered, 0o600); err != nil {
 		return err
 	}
-	if err := r.writeSecrets(name, secrets); err != nil {
+	if err := r.writeSecrets(project, secrets); err != nil {
 		return err
 	}
 	files := []string{file}
 	if secrets.env != nil {
-		files = append(files, r.files.secretEnvFile(name))
+		files = append(files, r.files.secretEnvFile(project))
 	}
-	if err := composeUpHeld(ctx, r.docker, r.supervisor, name, files, pushedOut); err != nil {
+	if err := composeUpHeld(ctx, r.docker, r.supervisor, project, files, pushedOut); err != nil {
 		return err
 	}
 	r.mu.Lock()
-	r.applied[name] = hash
+	r.applied[project] = hash
 	r.mu.Unlock()
-	return r.removeStaleSecrets(name, secrets)
+	return r.removeStaleSecrets(project, secrets)
 }
 
 // composeUpHeld runs compose up for a project while the supervisor holds
@@ -293,8 +305,7 @@ func (r *stackRunner) describe(desired desiredState, id string) (storage.Volume,
 	if index < 0 {
 		return storage.Volume{}, fmt.Errorf("volume %s has no copy on this host", id)
 	}
-	stackName, name, _ := strings.Cut(id, "/")
-	lv := compose.VolumeName(stackName, name, volume.Generation)
+	lv := names.VolumeName(id, volume.Generation)
 	pool, err := poolOf(desired.config, id, volume.Placements[index].Class)
 	if err != nil {
 		return storage.Volume{}, err
@@ -331,71 +342,69 @@ func poolOf(config clusterdir.Config, volumeID, class string) (string, error) {
 	return storageClass.Pool, nil
 }
 
-// removeOthers stops the stacks that left this host and removes the volume
-// copies the state no longer places here. A stack's directory goes once
-// nothing of it is left on this host.
-//
-// The files tell how far a leaver got, so a crash at any point is picked up:
-// its compose.yaml exists until compose down worked (stop), its
-// volumes.json lists the copies still here (removeVolumes), and its
-// directory goes with the last copy. Its secrets go once compose.yaml is
-// gone (removeSecretsOfOthers).
-func (r *stackRunner) removeOthers(ctx context.Context, desired desiredState) {
+// stopLeavers stops the stacks that left this host. The files tell how far
+// a leaver got, so a crash at any point is picked up: its compose.yaml
+// exists until compose down worked (stop), then its directory goes, and its
+// secrets go once compose.yaml is gone (removeSecretsOfOthers). Its volume
+// copies have records of their own (removeVolumes).
+func (r *stackRunner) stopLeavers(ctx context.Context, desired desiredState) {
 	entries, err := os.ReadDir(r.files.stacksDir())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		r.logger.Error("list the stacks of this host", "error", err)
 		return
 	}
 	for _, entry := range entries {
-		name := entry.Name()
-		_, staying := desired.stacks[name]
-		if !staying {
-			if err := r.stop(ctx, name); err != nil {
-				r.logger.Error("stop a stack that left this host", "stack", name, "error", err)
-				continue
-			}
-		}
-		left, err := r.removeVolumes(ctx, desired, name)
-		if err != nil {
-			r.logger.Error("remove the volumes of a stack", "stack", name, "error", err)
+		project := entry.Name()
+		if _, staying := desired.stacks[project]; staying {
 			continue
 		}
-		if !staying && left == 0 {
-			if err := os.RemoveAll(r.files.stackDir(name)); err != nil {
-				r.logger.Error("forget a stack", "stack", name, "error", err)
-			}
+		if err := r.stop(ctx, project); err != nil {
+			r.logger.Error("stop a stack that left this host", "project", project, "error", err)
+			continue
+		}
+		if err := os.RemoveAll(r.files.stackDir(project)); err != nil {
+			r.logger.Error("forget a stack", "project", project, "error", err)
 		}
 	}
-	r.removeSecretsOfOthers(desired)
 }
 
 // stop runs compose down for a stack that left this host, once: its
 // Compose file goes with it.
-func (r *stackRunner) stop(ctx context.Context, name string) error {
-	file := r.files.stackFile(name)
+func (r *stackRunner) stop(ctx context.Context, project string) error {
+	file := r.files.stackFile(project)
 	if _, err := os.Stat(file); errors.Is(err, os.ErrNotExist) {
 		return nil // stopped before
 	}
-	release := r.supervisor.Hold(name)
-	err := r.docker.ComposeDown(ctx, name, file)
+	release := r.supervisor.Hold(project)
+	err := r.docker.ComposeDown(ctx, project, file)
 	release()
 	if err != nil {
 		return err
 	}
 	r.mu.Lock()
-	delete(r.applied, name)
+	delete(r.applied, project)
 	r.mu.Unlock()
 	return os.Remove(file)
 }
 
-// removeVolumes removes the recorded copies of a stack's volumes that the
-// state no longer places on this host in their generation, and tells how
-// many copies are left.
-func (r *stackRunner) removeVolumes(ctx context.Context, desired desiredState, stackName string) (int, error) {
-	recorded, err := r.readRecord(stackName)
+// removeVolumes removes the recorded copies on this host that the state
+// retired here, and forgets them in the state.
+func (r *stackRunner) removeVolumes(ctx context.Context, desired desiredState) {
+	recorded, err := r.recordedVolumes()
 	if err != nil {
-		return 0, err
+		r.logger.Error("read the volume copies of this host", "error", err)
+		return
 	}
+	for _, id := range slices.Sorted(maps.Keys(recorded)) {
+		if err := r.removeCopies(ctx, desired, id, recorded[id]); err != nil {
+			r.logger.Error("remove the copies of a volume", "volume", id, "error", err)
+		}
+	}
+}
+
+// removeCopies removes those copies of one volume that the state no longer
+// places on this host in their generation and retired here.
+func (r *stackRunner) removeCopies(ctx context.Context, desired desiredState, id string, recorded []storage.Volume) error {
 	var kept []storage.Volume
 	var errs []error
 	for _, volume := range recorded {
@@ -423,18 +432,17 @@ func (r *stackRunner) removeVolumes(ctx context.Context, desired desiredState, s
 			kept = append(kept, volume)
 		}
 	}
-	if err := r.writeRecord(stackName, kept); err != nil {
+	if err := r.writeRecord(id, kept); err != nil {
 		errs = append(errs, err)
 	}
-	return len(kept), errors.Join(errs...)
+	return errors.Join(errs...)
 }
 
 // retiredHere finds the retired copy that the recorded one on this host is.
 func (r *stackRunner) retiredHere(desired desiredState, volume storage.Volume) (state.RetiredCopy, bool) {
-	stackName, name, _ := strings.Cut(volume.ID, "/")
 	for _, retired := range desired.retired {
 		if retired.Host == r.host.ID && retired.Volume == volume.ID &&
-			compose.VolumeName(stackName, name, retired.Generation) == volume.LV {
+			names.VolumeName(volume.ID, retired.Generation) == volume.LV {
 			return retired, true
 		}
 	}
@@ -461,6 +469,5 @@ func (r *stackRunner) placedHere(desired desiredState, volume storage.Volume) bo
 	if !ok || !slices.ContainsFunc(current.Placements, func(p state.Placement) bool { return p.Host == r.host.ID }) {
 		return false
 	}
-	stackName, name, _ := strings.Cut(volume.ID, "/")
-	return compose.VolumeName(stackName, name, current.Generation) == volume.LV
+	return names.VolumeName(volume.ID, current.Generation) == volume.LV
 }

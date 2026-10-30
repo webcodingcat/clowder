@@ -27,7 +27,7 @@ import (
 // Placement is a decision for one stack: the host and the volumes that are
 // new there (all of them for a new stack, the added ones for an update).
 type Placement struct {
-	Stack string
+	Stack string // the stack's ID, as every stack in the scheduler's results
 	Host  state.HostID
 	// Place is false for a stack that keeps its host and only gets volumes.
 	Place   bool
@@ -98,7 +98,7 @@ func Plan(ctx context.Context, current *state.State) Decisions {
 	highest := func(stack *state.Stack) int {
 		value := 0
 		for service := range stack.Services {
-			value = max(value, planner.room.priority(serviceRef{stack.Name, service}))
+			value = max(value, planner.room.priority(serviceRef{stack.ID(), service}))
 		}
 		return value
 	}
@@ -131,11 +131,11 @@ func (d *Decisions) add(placement Placement, waiting *Waiting) {
 func (p *planner) decide(ctx context.Context, stack *state.Stack) (Placement, *Waiting) {
 	parsed, err := compose.Parse(ctx, stack.Name, []byte(stack.Source))
 	if err != nil {
-		return Placement{}, &Waiting{Stack: stack.Name, Reason: err.Error()}
+		return Placement{}, &Waiting{Stack: stack.ID(), Reason: err.Error()}
 	}
 	placement, reason := p.place(stack, parsed)
 	if reason != "" {
-		return Placement{}, &Waiting{Stack: stack.Name, Reason: reason}
+		return Placement{}, &Waiting{Stack: stack.ID(), Reason: reason}
 	}
 	return placement, nil
 }
@@ -181,8 +181,8 @@ func (p *planner) take(host state.HostID, pool string, size int64) {
 // fit), else to the first where its services push out others.
 func (p *planner) place(stack *state.Stack, parsed *compose.Stack) (Placement, string) {
 	if stack.Host != nil {
-		volumes, reason := p.newVolumes(stack.Name, *stack.Host, parsed)
-		return Placement{Stack: stack.Name, Host: *stack.Host, Volumes: volumes}, reason
+		volumes, reason := p.newVolumes(stack, *stack.Host, parsed)
+		return Placement{Stack: stack.ID(), Host: *stack.Host, Volumes: volumes}, reason
 	}
 	var whole, pushing []stackFit
 	reasons := map[state.HostID]string{}
@@ -190,7 +190,7 @@ func (p *planner) place(stack *state.Stack, parsed *compose.Stack) (Placement, s
 		if p.current.Hosts[id].Phase != state.Active {
 			continue
 		}
-		fit, reason := p.room.fitStack(stack.Name, id)
+		fit, reason := p.room.fitStack(stack.ID(), id)
 		switch {
 		case reason != "":
 			reasons[id] = reason
@@ -206,14 +206,14 @@ func (p *planner) place(stack *state.Stack, parsed *compose.Stack) (Placement, s
 	}
 	slices.SortStableFunc(whole, func(a, b stackFit) int { return cmp.Compare(freeMemory[a.host], freeMemory[b.host]) })
 	for _, fit := range append(whole, pushing...) {
-		volumes, reason := p.newVolumes(stack.Name, fit.host, parsed)
+		volumes, reason := p.newVolumes(stack, fit.host, parsed)
 		if reason != "" {
 			reasons[fit.host] = reason
 			continue
 		}
 		return Placement{
-			Stack: stack.Name, Host: fit.host, Place: true, Volumes: volumes,
-			PushedOut: p.room.commit(stack.Name, fit),
+			Stack: stack.ID(), Host: fit.host, Place: true, Volumes: volumes,
+			PushedOut: p.room.commit(stack.ID(), fit),
 		}, ""
 	}
 	if len(reasons) == 0 {
@@ -234,7 +234,7 @@ type allocation struct {
 
 // newVolumes places the stack's volumes that are not in the state yet on
 // host, taking their space; a reason says why one does not fit.
-func (p *planner) newVolumes(stackName string, host state.HostID, parsed *compose.Stack) ([]state.Volume, string) {
+func (p *planner) newVolumes(stack *state.Stack, host state.HostID, parsed *compose.Stack) ([]state.Volume, string) {
 	var volumes []state.Volume
 	var tentative []allocation
 	// a stack that does not fit takes nothing: neither space nor minors
@@ -245,7 +245,7 @@ func (p *planner) newVolumes(stackName string, host state.HostID, parsed *compos
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(parsed.Volumes)) {
-		id := stackName + "/" + name
+		id := stack.VolumeID(name)
 		if _, exists := p.current.Volumes[id]; exists {
 			continue
 		}

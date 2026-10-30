@@ -110,6 +110,7 @@ clowder is built in phases; each ends with live tests on HLab.
 | 0 | the spike: DRBD quorum and fencing, WireGuard, the real client IP, on three hosts | done |
 | 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | done |
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done |
+| 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | in progress: namespaces in the state and on the host |
 | 2 | three hosts: replication, failover with fencing | |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
@@ -247,8 +248,9 @@ The package layout is planned for the whole of v1; packages appear as the phases
 Packages in *italics* do not exist yet.
 
 - **Portable**: `cli`, `api`, `clusterdir`, `sopsage`, `pki`, `compose`, `units`, `names`
-  (the rules for the names users give), `buildinfo`, `logging`, `atomicfile` (files written
-  whole or not at all), `metrics` (Prometheus' text format). The CLI may import only
+  (the rules for the names users give, and the names on the host made of them),
+  `buildinfo`, `logging`, `atomicfile` (files written whole or not at all), `metrics`
+  (Prometheus' text format). The CLI may import only
   these. depguard (rule `cli-portable` in
   `.golangci.yml`) refuses direct imports of the Linux-only packages in `cmd/clowder` and
   `internal/cli`; the cross build for Windows and macOS catches indirect ones.
@@ -266,6 +268,40 @@ Packages in *italics* do not exist yet.
   `docker`, `ingress` (Traefik's files; it renders, the agent writes).
 - **Reads the host**: `hostcheck` (for `clowderd check`). It compiles anywhere, but only the
   agent uses it, so depguard keeps it out of the CLI like the packages above.
+
+## Namespaces and names (`internal/names`)
+
+- **Namespaces** keep stacks apart: two namespaces may each have a stack `shop`. The
+  bootstrap makes `default`; until `clowder apply` makes others (phase 1c), the CLI's stacks
+  are in `default`. Users and the state name a stack `<namespace>/<stack>` (`names.ID`, the
+  key of `State.Stacks`).
+- **One rule for every name** (`names.Valid`): a DNS label of at most `names.MaxLength`
+  characters, lowercase letters, digits and `-`. No `_`: on the host it joins a namespace and
+  a stack, so it separates them unambiguously. Namespaces must not start with `clowder-`,
+  the prefix of clowder's own projects (Traefik). Stacks, services, volumes and secrets all
+  follow the rule.
+- **The names on the host are built here, and only here**, from the namespace and the stack,
+  so two namespaces never share one:
+
+  | What | Name |
+  |---|---|
+  | Compose project, the agent's stack directory, the secrets' directory, the supervisor's hold, Traefik's service | `<namespace>_<stack>` (`names.Project`) |
+  | Compose network | `<namespace>_<stack>_<network>` |
+  | volume ID | `<namespace>/<stack>/<volume>` (`names.VolumeID`) |
+  | LV, DRBD resource, mount point, Docker volume | `clw-<readable>-<hash8>-g<generation>` (`names.VolumeName`) |
+  | the agent's record of a volume's copies | `volume-records/<namespace>_<stack>_<volume>.json` (`names.FileName`) |
+  | bridge | `cbr-` and 11 hex digits of a hash of the stack's ID and network (`names.BridgeName`) |
+  | locks, alert keys | `stack/<namespace>/<stack>`, `volume/<volume ID>`, `stack-waiting/<namespace>/<stack>` |
+  | metrics | the labels `namespace` and `stack` |
+
+- **The LV name has the tightest limits:** LVM and DRBD take 127 characters, device-mapper
+  128 for `<vg>-<lv>`, in which it writes every `-` twice. So `VolumeName` cuts the readable
+  part (the ID with `/` as `-`) to 24 characters and adds the first 8 hex digits of a hash of
+  the whole ID, which also keeps `a-b/c` apart from `a/b-c`; the generation has at most six
+  digits (`names.MaxDataGeneration`, the state refuses more), a pool's volume group at most
+  `names.MaxVolumeGroupLength` characters (`clusterdir` refuses more). The worst case is 107
+  of 128 characters in device-mapper (`TestVolumeNamesFitDeviceMapper`): the margin is
+  small, so a longer part needs the arithmetic again.
 
 ## Stacks (`internal/compose`)
 
@@ -287,12 +323,15 @@ Packages in *italics* do not exist yet.
   a capability outside `harmlessCapabilities`, `security_opt` other than
   `no-new-privileges`, `cgroup_parent`) is listed per service (`Service.Privileges`). Such a
   container can read the host's keys and other stacks' volumes and secrets, and change the
-  rules that keep containers apart. So the API allows it only for stacks that `cluster.yaml`
-  names in `stacks.privileged`, and `cluster apply` refuses a `cluster.yaml` that a stack of
-  the cluster would no longer pass (privileges, storage classes, priorities). Both checks
-  hold at commit: `put-stack` carries the `cluster.yaml` revision it was checked against,
-  `apply-config` the stacks revision (`State.StacksRevision`), and the state refuses either
-  when the other changed in between.
+  rules that keep containers apart. So only stacks that `cluster.yaml` names in
+  `stacks.privileged` (as `<namespace>/<stack>`) may have it: `put-stack` says whether the
+  stack asks for any (`PutStack.Privileged`), and the state refuses it unless the list names
+  the stack, and refuses an `apply-config` that takes such a stack off the list. The API
+  checks the same first, to answer with every problem at once. `cluster apply` also refuses
+  a `cluster.yaml` that a stack of the cluster would no longer pass (storage classes,
+  priorities); that check holds at commit too: `put-stack` carries the `cluster.yaml`
+  revision it was checked against, `apply-config` the stacks revision
+  (`State.StacksRevision`), and the state refuses either when the other changed in between.
 - **Variables are filled in on the user's machine.** `Source` fills in the variables and
   env files and drops the user's paths; the result is stored in the state and on the host as
   it is, not sealed. Passwords therefore belong in the stack's secrets file, never in a
@@ -304,14 +343,17 @@ Packages in *italics* do not exist yet.
   refused, and so are configs from a variable: docker compose on the host would read the
   agent's environment. A variable also ends up in Docker's container configuration on the
   host's disk and in `docker inspect`; a file does not.
-- **Rendering.** `Render` writes the file docker compose gets on a host: `restart: "no"` (the
-  agent restarts), the agent's resolver, each port on the Floating IP and the node address,
-  a fixed bridge name per network (`BridgeName`), volumes bound to `<mount>/data`, secrets as
-  files in `Target.SecretsDir`. `RenderSecretEnv` writes the secret variables as a second
-  Compose file. Every `$` in a value becomes `$$` (`EscapeDollars`): the values were filled
-  in on the user's machine, and docker compose on the host would fill in variables once
-  more, from the agent's environment.
-- **Labels, and which apply recreates what.** Every container gets `clowder.stack`; one that
+- **Rendering.** `Render` writes the file docker compose gets on a host: the stack's project
+  `<namespace>_<stack>` (`names.Project`) as its name and the networks' names, `restart: "no"`
+  (the agent restarts), the agent's resolver, each port on the Floating IP and the node
+  address, a fixed bridge name per network (`names.BridgeName`), volumes bound to
+  `<mount>/data` under the copy's LV name, secrets as files in `Target.SecretsDir`.
+  `RenderSecretEnv` writes the secret variables as a second Compose file. Every `$` in a
+  value becomes `$$` (`EscapeDollars`): the values were filled in on the user's machine, and
+  docker compose on the host would fill in variables once more, from the agent's
+  environment.
+- **Labels, and which apply recreates what.** Every container gets `clowder.stack` (its
+  project); one that
   asks for secret files also gets `clowder.secrets`, a digest of their values
   (`Target.SecretDigests`). Nothing else: Compose recreates exactly the containers whose
   configuration changed, and a changed secret file keeps its path, so only its digest tells
@@ -444,9 +486,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   `v1.0.0`**, the first release for clusters in production. Until then no such cluster
   runs, so the state, the commands and `cluster.yaml` change freely: no migrations, no
   gates, and `CommandVersion` and `SnapshotVersion` stay at 1.
-- **Locks.** Operations hold locks (`stack/<name>`, `volume/<stack>/<volume>`); a change to a
-  locked stack or volume is refused with a `LockedError`, unless the holding operation makes
-  it (`Operation` in the payload). Only failover takes locks over (`TakeOver`).
+- **Locks.** Operations hold locks (`stack/<namespace>/<stack>`, `volume/<volume ID>`); a
+  change to a locked stack or volume is refused with a `LockedError`, unless the holding
+  operation makes it (`Operation` in the payload). Only failover takes locks over
+  (`TakeOver`).
 - **Invariants** the state holds itself, as the last place to catch a wrong command: one
   first user, valid names (`internal/names`), volumes with 0 to 3 replicas and a DRBD minor
   exactly when replicated, one copy per host, a stack deleted only with its volumes, a
@@ -540,10 +583,11 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   and `sealStackSecrets` checks that exactly the secrets the stack asks for came, within the
   limits, and seals them.
 - **`stack delete`** refuses a stack with volumes unless `--delete-volumes` says so. `stack ps`
-  and `stack logs` ask the stack's host through `/v1/internal/stacks/<name>/ps|logs`,
-  wherever the CLI came in. The list of stacks (`stack ps` without a name) also comes as
-  JSON (`--output json`, `api.StackInfo`) for scripts and the live tests; the other commands
-  print tables only so far.
+  and `stack logs` ask the stack's host through `/v1/internal/stacks/<project>/ps|logs`
+  (`names.Project`), wherever the CLI came in. The stack commands name stacks of the
+  namespace `default` until `clowder apply` comes (phase 1c). The list of stacks (`stack ps`
+  without a name) also comes as JSON (`--output json`, `api.StackInfo`) for scripts and the
+  live tests; the other commands print tables only so far.
 - **Who can read a stack's secrets:** whoever can decrypt its secrets file; every host (a
   stack must start anywhere); and, until there are permissions, every user of the cluster
   through a stack named in `stacks.privileged`, as such a container reaches the secrets and
@@ -564,8 +608,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 ## The agent (`internal/agent`)
 
 - **Files.** A host's files are under `DefaultDir`: `host.json` (ID, name, addresses, ports),
-  `keys/`, `pki/`, `raft/`, `stacks/`, `storage/`, `volumes/`. init and join write
-  `host.json` last, so a host with it has everything else.
+  `keys/`, `pki/`, `raft/`, `stacks/`, `storage/`, `volume-records/`, `volumes/`. init and
+  join write `host.json` last, so a host with it has everything else.
 - **`clowderd init`** (from cloud-init) makes the first host: the CA, the data key, the
   cluster's age key, the host's certificate and WireGuard key, a Raft group with this host as
   its only voter and the bootstrap command. Then it enables and starts `clowderd.service`.
@@ -588,22 +632,25 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **Reconcilers** run after a change of the state and every `reconcileInterval`, to repair
   what someone changed by hand: `reconcileNetwork` keeps the nft rules as the state says,
   and the stack runner keeps the stacks.
-- **The stack runner** (`stackRunner`), for each stack the state places here: render its
-  Compose file, `Ensure` its volume copies, write its secrets, run `compose up` unless all of
-  it came up before, then report `running`. A failed `compose up` is tried again at the next
-  pass. Stacks that left the host get `compose down`; volume copies the state retired here
-  are removed and forgotten (State, Retired copies). A copy the state neither places nor
-  retires here stays, with a warning once per run.
-- **Crashes leave nothing unknown.** The files tell how far a stack got: `volumes.json`
-  records its copies before they are made, its `compose.yaml` exists until `compose down`
-  worked, its directory goes with the last copy, and its secrets go once `compose.yaml` is
-  gone.
+- **The stack runner** (`stackRunner`) keeps everything of a stack under its project
+  (`names.Project`). A pass first stops the stacks that left the host (`compose down`), and
+  only then, for each stack the state places here, renders its Compose file, `Ensure`s its
+  volume copies, writes its secrets, runs `compose up` unless all of it came up before, and
+  reports `running`: a volume that passes from one stack to another is never used by both
+  at once. A failed `compose up` is tried again at the next pass. Last, volume copies the
+  state retired here are removed and forgotten (State, Retired copies). A copy the state
+  neither places nor retires here stays, with a warning once per run.
+- **Crashes leave nothing unknown.** The files tell how far the runner got. A volume's
+  record (`volume-records/`, one file per volume, apart from the stacks) lists its copies
+  on this host before they are made, and loses one only after it is removed, so a copy is
+  found whatever became of its stack. A stack's `compose.yaml` exists until `compose down`
+  worked, its directory goes right after, and its secrets go once `compose.yaml` is gone.
 - **Secrets live on tmpfs only** (`Files.SecretsDir`, `DefaultSecretsDir`). The agent makes
   the directory itself; a systemd `RuntimeDirectory` would go at each stop of the agent while
   the containers still use it.
 
   ```
-  <SecretsDir>/<stack>/        root only
+  <SecretsDir>/<project>/      root only
     files/<name>               readable by all: bind-mounted to /run/secrets/<name>
     env.yaml                   root only: the secret variables, a second Compose file
   ```
@@ -663,7 +710,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   resource sits on it (`RenderResource`, golden files in `testdata/` that `bin/dev
   test-tools` checks with `drbdadm`): quorum majority with `suspend-io`, `auto-promote no`,
   node-id = host ID, port `drbdBasePort` + minor on the node address. With replicas 0 it is a
-  plain LV. A copy's LV is `compose.VolumeName(stack, volume, generation)` and its resource
+  plain LV. A copy's LV is `names.VolumeName(volume ID, generation)` and its resource
   and mount point (`volumes/<LV>`) have the same name, so a restored volume (a new
   generation) is a new LV next to the old one, mounted apart from it.
 - **`Ensure` does only what is missing:** the LV, the resource, the primary role, ext4, the
@@ -747,10 +794,11 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - Every agent runs Traefik (`ingress.Image`, pinned) as the Compose project
   `clowder-traefik` in the host network, with `restart: "no"` like every container. It is no
   stack: the state knows nothing of it, its files live in `<Dir>/traefik/` beside `stacks/`
-  (so the search for stacks that left never finds it), and `names` refuses stack names that
-  start with `clowder-`. `clowdersOwn` answers whether a project is clowder's own; every
-  place of the stack runner that treats Traefik apart asks it: the supervisor's rule
-  (restart always, also when unhealthy) and the clean-up of secrets.
+  (so the search for stacks that left never finds it), and a stack's project starts with its
+  namespace, which `names` refuses to start with `clowder-`. `clowdersOwn` answers whether a
+  project is clowder's own; every place of the stack runner that treats Traefik apart asks
+  it: the supervisor's rule (restart always, also when unhealthy) and the clean-up of
+  secrets.
 - `ingress.RenderStatic` writes `traefik.yml`: the entrypoints `web` and `websecure` on the
   Floating IP :80 and :443, `internal` on the node address :7480 (phase 2) trusting
   `X-Forwarded-For` only from the node network, and `ping` on 127.0.0.1:7446 for the health
@@ -765,10 +813,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   back at the next pass. It reads only the Floating IP, the stacks' sources and the
   certificates from the state, no copy of all of it: it passes at every event of Docker's.
 - **Routes.** `ingress.RenderDynamic` writes the file provider's `routes.yaml`: per
-  `x-clowder.http` a service `<stack>.<service>` whose servers are the containers of that
+  `x-clowder.http` a service `<project>.<service>` whose servers are the containers of that
   service on this host that run and, if they have a health check, are healthy
   (`docker.Inspect`; the address in the network whose name sorts first), and routers
-  `<entrypoint>.<stack>.<service>`. A route without such a container keeps its routers with
+  `<entrypoint>.<project>.<service>`. A route without such a container keeps its routers with
   no servers, so Traefik answers 503, not 404. Traefik watches the directory, so new routes
   need no restart.
 - **HTTPS.** A route whose domain has a certificate gets a router on `websecure` and one on
@@ -931,8 +979,8 @@ one host has no quorum to lose.
   means a restart with the same backoff unless the service says otherwise.
 - **A stop by hand is kept:** `docker stop`, or a kill with a signal that ends the container
   (`endsContainer`). A kill with another signal, such as a reload with SIGHUP, is no stop.
-  While the agent runs `compose up` or `down` for a stack, it `Hold`s the stack, so the
-  supervisor does not fight it.
+  While the agent runs `compose up` or `down` for a stack, it `Hold`s the stack's project,
+  so the supervisor does not fight it.
 - A start that fails counts as another crash; a container that is gone
   (`docker.ErrNoContainer`) is let be. `destroy` events drop what the supervisor knew about a
   container. When the events break off, what died in between went unseen (a restart of

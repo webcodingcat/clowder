@@ -2,8 +2,6 @@ package compose
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"net/netip"
 	"path"
@@ -11,10 +9,15 @@ import (
 
 	"github.com/compose-spec/compose-go/v2/types"
 	"go.yaml.in/yaml/v3"
+
+	"github.com/webcodingcat/clowder/internal/names"
 )
 
 // Target is what the agent of a host knows when it renders a stack.
 type Target struct {
+	// Namespace is the stack's namespace: with the stack's name it makes the
+	// names on the host (names.Project, names.BridgeName).
+	Namespace string
 	// FloatingIP and NodeAddress: published ports bind to both, so the
 	// Floating IP reaches the container when this host is the ingress host
 	// and the node address when another host forwards to it.
@@ -23,7 +26,7 @@ type Target struct {
 	// Resolver is the agent's DNS resolver for the containers.
 	Resolver netip.Addr
 	// Volumes per volume name: the directory where its file system is
-	// mounted, and its generation.
+	// mounted, and its name on the host.
 	Volumes map[string]MountedVolume
 	// SecretsDir holds a file per secret the services ask for as a file.
 	SecretsDir string
@@ -36,14 +39,17 @@ type Target struct {
 
 // MountedVolume is a volume as it is mounted on the host.
 type MountedVolume struct {
-	Dir        string
-	Generation int64
+	Dir string
+	// Name is the Docker volume's, the copy's LV (names.VolumeName): it has
+	// the generation, as Docker cannot change the options of an existing
+	// volume and a restore or class move makes a new one.
+	Name string
 }
 
-// Labels that the agent puts on containers: the stack on every one, the
-// digest of its secret files on those that ask for some. Nothing else, so
-// an apply recreates only the containers whose configuration or secret
-// files changed.
+// Labels that the agent puts on containers: the stack's Compose project
+// (names.Project) on every one, the digest of its secret files on those that
+// ask for some. Nothing else, so an apply recreates only the containers
+// whose configuration or secret files changed.
 const (
 	LabelStack   = "clowder.stack"
 	LabelSecrets = "clowder.secrets"
@@ -62,11 +68,15 @@ func Render(stack *Stack, target Target) ([]byte, error) {
 			return nil, fmt.Errorf("render stack %s: the target has no %s", stack.Name, required.what)
 		}
 	}
+	if !names.ValidNamespace(target.Namespace) {
+		return nil, fmt.Errorf("render stack %s: the target's namespace %q is not valid", stack.Name, target.Namespace)
+	}
 	project := *stack.Project
+	project.Name = names.Project(target.Namespace, stack.Name)
 	project.Services = types.Services{}
 	project.Secrets = types.Secrets{}
 	for name, service := range stack.Project.Services {
-		rendered := renderService(stack.Name, service, target)
+		rendered := renderService(project.Name, service, target)
 		if len(stack.Services[name].Secrets) > 0 {
 			if target.SecretsDir == "" {
 				return nil, fmt.Errorf("render stack %s: the target has no directory for secrets", stack.Name)
@@ -84,18 +94,18 @@ func Render(stack *Stack, target Target) ([]byte, error) {
 	}
 	project.Networks = types.Networks{}
 	for name, network := range stack.Project.Networks {
-		project.Networks[name] = renderNetwork(stack.Name, name, network)
+		project.Networks[name] = renderNetwork(target.Namespace, stack.Name, name, network)
 	}
 	if _, ok := project.Networks["default"]; !ok {
-		project.Networks["default"] = renderNetwork(stack.Name, "default", types.NetworkConfig{})
+		project.Networks["default"] = renderNetwork(target.Namespace, stack.Name, "default", types.NetworkConfig{})
 	}
 	project.Volumes = types.Volumes{}
 	for name, volume := range stack.Project.Volumes {
 		mounted, ok := target.Volumes[name]
-		if !ok {
+		if !ok || mounted.Name == "" {
 			return nil, fmt.Errorf("render stack %s: volume %s is not mounted", stack.Name, name)
 		}
-		project.Volumes[name] = renderVolume(stack.Name, name, volume, mounted)
+		project.Volumes[name] = renderVolume(volume, mounted)
 	}
 	marshaled, err := project.MarshalYAML()
 	if err != nil {
@@ -175,7 +185,7 @@ func escapeValues(node *yaml.Node) {
 	}
 }
 
-func renderService(stackName string, service types.ServiceConfig, target Target) types.ServiceConfig {
+func renderService(project string, service types.ServiceConfig, target Target) types.ServiceConfig {
 	service.Restart = types.RestartPolicyNo
 	service.DNS = types.StringList{target.Resolver.String()}
 	ports := []types.ServicePortConfig{}
@@ -191,7 +201,7 @@ func renderService(stackName string, service types.ServiceConfig, target Target)
 	for key, value := range service.Labels {
 		labels[key] = value
 	}
-	labels[LabelStack] = stackName
+	labels[LabelStack] = project
 	if digest := target.SecretDigests[service.Name]; digest != "" {
 		labels[LabelSecrets] = digest
 	}
@@ -199,14 +209,17 @@ func renderService(stackName string, service types.ServiceConfig, target Target)
 	return service
 }
 
-// renderNetwork gives a stack network a fixed bridge name, so nft can tell
-// which stack a packet comes from.
-func renderNetwork(stackName, name string, network types.NetworkConfig) types.NetworkConfig {
+// renderNetwork names a stack network after the project, as Compose would
+// (the loaded file has it after the stack's name alone, which two
+// namespaces share), and gives it a fixed bridge name, so nft can tell which
+// stack a packet comes from.
+func renderNetwork(namespace, stack, name string, network types.NetworkConfig) types.NetworkConfig {
+	network.Name = names.Network(namespace, stack, name)
 	options := types.Options{}
 	for key, value := range network.DriverOpts {
 		options[key] = value
 	}
-	options["com.docker.network.bridge.name"] = BridgeName(stackName, name)
+	options["com.docker.network.bridge.name"] = names.BridgeName(names.ID(namespace, stack), name)
 	network.DriverOpts = options
 	return network
 }
@@ -214,10 +227,8 @@ func renderNetwork(stackName, name string, network types.NetworkConfig) types.Ne
 // renderVolume binds a named volume to the data/ directory inside the
 // mounted file system: data/ exists only while the file system is mounted,
 // so a container cannot start on the host's root file system by mistake.
-// The generation is in the name because Docker cannot change the options of
-// an existing volume (a restore or class move makes a new one).
-func renderVolume(stackName, name string, volume types.VolumeConfig, mounted MountedVolume) types.VolumeConfig {
-	volume.Name = VolumeName(stackName, name, mounted.Generation)
+func renderVolume(volume types.VolumeConfig, mounted MountedVolume) types.VolumeConfig {
+	volume.Name = mounted.Name
 	volume.Driver = "local"
 	volume.DriverOpts = types.Options{
 		"type":   "none",
@@ -225,28 +236,4 @@ func renderVolume(stackName, name string, volume types.VolumeConfig, mounted Mou
 		"device": path.Join(mounted.Dir, "data"),
 	}
 	return volume
-}
-
-// VolumeName is the Docker volume of a stack volume. Stack and volume names
-// may contain "-", so a hash of both keeps "a-b" + "c" apart from "a" + "b-c";
-// the names stay in front for people reading docker volume ls.
-func VolumeName(stackName, volume string, generation int64) string {
-	return fmt.Sprintf("clw-%s-%s-%s-g%d", stackName, volume, shortHash(stackName+"/"+volume, 8), generation)
-}
-
-// BridgeName is the Linux bridge of a stack network: "cbr-" and the first 11
-// hex digits of a hash, within the 15 characters an interface name may have.
-// The default network hashes the stack name alone.
-func BridgeName(stackName, network string) string {
-	key := stackName
-	if network != "default" {
-		key += "/" + network
-	}
-	return "cbr-" + shortHash(key, 11)
-}
-
-// shortHash is the first hex digits of the SHA-256 of key.
-func shortHash(key string, digits int) string {
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])[:digits]
 }

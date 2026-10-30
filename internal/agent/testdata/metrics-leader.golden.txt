@@ -14,12 +14,12 @@ clowder_alerts_open{severity="warning"} 1
 clowder_certificate_expiry_seconds{domain="shop.example.com"} 1797776000
 # HELP clowder_container_restarts_total Restarts the supervisor began for a service's containers (crashed or unhealthy) since clowderd started.
 # TYPE clowder_container_restarts_total counter
-clowder_container_restarts_total{host="node0",service="app",stack="shop"} 3
+clowder_container_restarts_total{host="node0",namespace="default",service="app",stack="shop"} 3
 # HELP clowder_containers Containers of the stacks on this host, by state.
 # TYPE clowder_containers gauge
-clowder_containers{host="node0",service="app",stack="shop",state="exited"} 1
-clowder_containers{host="node0",service="app",stack="shop",state="running"} 1
-clowder_containers{host="node0",service="traefik",stack="clowder-traefik",state="running"} 1
+clowder_containers{host="node0",namespace="",service="traefik",stack="clowder-traefik",state="running"} 1
+clowder_containers{host="node0",namespace="default",service="app",stack="shop",state="exited"} 1
+clowder_containers{host="node0",namespace="default",service="app",stack="shop",state="running"} 1
 # HELP clowder_containers_listed 1 when the scrape could list the containers, so their values are complete.
 # TYPE clowder_containers_listed gauge
 clowder_containers_listed{host="node0"} 1

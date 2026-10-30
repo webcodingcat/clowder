@@ -94,9 +94,9 @@ func (r *stackRunner) openSecrets(parsed *compose.Stack, sealed map[string]state
 // writeSecrets writes the new and changed secret files and the secret
 // variables before compose up. A file is replaced by a rename, so a running
 // container keeps the old value until compose up recreates it.
-func (r *stackRunner) writeSecrets(stack string, secrets stackSecrets) error {
+func (r *stackRunner) writeSecrets(project string, secrets stackSecrets) error {
 	for _, name := range slices.Sorted(maps.Keys(secrets.files)) {
-		path, value := r.files.secretFile(stack, name), secrets.files[name]
+		path, value := r.files.secretFile(project, name), secrets.files[name]
 		if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, value) {
 			continue
 		}
@@ -107,27 +107,27 @@ func (r *stackRunner) writeSecrets(stack string, secrets stackSecrets) error {
 		}
 	}
 	if secrets.env != nil {
-		return atomicfile.Write(r.files.secretEnvFile(stack), secrets.env, 0o600)
+		return atomicfile.Write(r.files.secretEnvFile(project), secrets.env, 0o600)
 	}
 	return nil
 }
 
 // removeStaleSecrets removes, after compose up, what the stack no longer
 // asks for: until then a running container may still use it.
-func (r *stackRunner) removeStaleSecrets(stack string, secrets stackSecrets) error {
-	entries, err := os.ReadDir(r.files.secretFilesDir(stack))
+func (r *stackRunner) removeStaleSecrets(project string, secrets stackSecrets) error {
+	entries, err := os.ReadDir(r.files.secretFilesDir(project))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	for _, entry := range entries {
 		if _, asked := secrets.files[entry.Name()]; !asked {
-			if err := os.Remove(filepath.Join(r.files.secretFilesDir(stack), entry.Name())); err != nil {
+			if err := os.Remove(filepath.Join(r.files.secretFilesDir(project), entry.Name())); err != nil {
 				return err
 			}
 		}
 	}
 	if secrets.env == nil {
-		if err := os.Remove(r.files.secretEnvFile(stack)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(r.files.secretEnvFile(project)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
@@ -144,15 +144,15 @@ func (r *stackRunner) removeSecretsOfOthers(desired desiredState) {
 		return
 	}
 	for _, entry := range entries {
-		name := entry.Name()
-		if _, staying := desired.stacks[name]; staying || clowdersOwn(name) {
+		project := entry.Name()
+		if _, staying := desired.stacks[project]; staying || clowdersOwn(project) {
 			continue
 		}
-		if _, err := os.Stat(r.files.stackFile(name)); !errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Stat(r.files.stackFile(project)); !errors.Is(err, os.ErrNotExist) {
 			continue // not stopped yet
 		}
-		if err := os.RemoveAll(r.files.secretsDir(name)); err != nil {
-			r.logger.Error("remove the secrets of a stack", "stack", name, "error", err)
+		if err := os.RemoveAll(r.files.secretsDir(project)); err != nil {
+			r.logger.Error("remove the secrets of a stack", "project", project, "error", err)
 		}
 	}
 }

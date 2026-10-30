@@ -22,7 +22,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
-	"github.com/webcodingcat/clowder/internal/compose"
+	"github.com/webcodingcat/clowder/internal/names"
 )
 
 // The host's files, as setup.sh and the agent lay them out. They are copied,
@@ -30,8 +30,8 @@ import (
 // host as a user would find it.
 const (
 	setupMarker       = "/var/lib/clowder-setup/done"
-	renderedStackFile = "/var/lib/clowder/stacks/shop/compose.yaml"
-	stackSecretsDir   = "/run/clowder-secrets/shop"
+	renderedStackFile = "/var/lib/clowder/stacks/default_shop/compose.yaml"
+	stackSecretsDir   = "/run/clowder-secrets/default_shop"
 )
 
 // The private registry that bin/dev live runs in the lab's network, with its
@@ -346,7 +346,8 @@ func starts(t *testing.T, server host) int {
 func shopContainers(t *testing.T, server host) map[string]container {
 	t.Helper()
 	containers := map[string]container{}
-	for _, id := range strings.Fields(server.must(t, "docker ps -aq --no-trunc --filter label=com.docker.compose.project=shop")) {
+	for _, id := range strings.Fields(server.must(t,
+		"docker ps -aq --no-trunc --filter label=com.docker.compose.project="+project("shop"))) {
 		containers[id] = server.inspect(t, id)
 	}
 	return containers
@@ -522,7 +523,7 @@ func checkMountGuard(t *testing.T, server host) {
 	app := server.service(t, "app")
 	// generation 1: no restore or class move happened to the volume
 	device := server.must(t, "docker volume inspect --format '{{index .Options \"device\"}}' "+
-		compose.VolumeName("shop", "data", 1))
+		names.VolumeName(names.VolumeID(names.Default, "shop", "data"), 1))
 	if path.Base(device) != "data" {
 		t.Fatalf("the volume binds %s, not the data directory of a mount", device)
 	}
@@ -581,11 +582,12 @@ func missingSecretFile(t *testing.T, server host) {
 		t.Logf("compose up without the secret file failed as it should:\n%s", output)
 	}
 	server.must(t, "systemctl start clowderd")
-	// the failed recreate leaves old containers renamed (<id>_shop-web-1);
-	// the agent's compose up replaces or starts them (Compose may keep such
-	// a name), so wait until each service has one container, running
+	// the failed recreate leaves old containers renamed
+	// (<id>_default_shop-web-1); the agent's compose up replaces or starts
+	// them (Compose may keep such a name), so wait until each service has one
+	// container, running
 	eventually(t, stackDeadline, "the agent brought the stack back", func() error {
-		containers := strings.Fields(server.must(t, "docker ps -a --filter label=com.docker.compose.project=shop "+
+		containers := strings.Fields(server.must(t, "docker ps -a --filter label=com.docker.compose.project="+project("shop")+" "+
 			"--format '{{.Label \"com.docker.compose.service\"}}:{{.State}}' | sort"))
 		if !slices.Equal(containers, []string{"app:running", "web:running"}) {
 			return fmt.Errorf("containers %v", containers)
@@ -664,7 +666,7 @@ func deleteStack(t *testing.T, server host) {
 	mustClowder(t, "stack", "delete", "shop", "--delete-volumes")
 	waitGone(t, "shop")
 	eventually(t, stackDeadline, "the host removed the stack", func() error {
-		output, err := server.run("docker ps -aq --filter label=com.docker.compose.project=shop; " +
+		output, err := server.run("docker ps -aq --filter label=com.docker.compose.project=" + project("shop") + "; " +
 			"lvs --noheadings -o lv_name | grep shop; drbdsetup status | grep shop; true")
 		if err == nil && output != "" {
 			return fmt.Errorf("left on the host:\n%s", output)

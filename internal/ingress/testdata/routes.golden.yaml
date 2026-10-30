@@ -6,36 +6,36 @@ http:
       rule: PathPrefix(`/.well-known/acme-challenge/`)
       priority: 1000000
       service: acme-challenge
-    web.blog.web:
+    web.default_blog.web:
       entryPoints:
         - web
       rule: Host(`blog.example.com`)
-      service: blog.web
-    web.shop.api:
+      service: default_blog.web
+    web.default_shop.api:
       entryPoints:
         - web
       rule: Host(`shop.example.com`) && PathPrefix(`/api`)
       middlewares:
         - redirect-to-https
-      service: shop.api
-    web.shop.app:
+      service: default_shop.api
+    web.default_shop.app:
       entryPoints:
         - web
       rule: Host(`shop.example.com`)
       middlewares:
         - redirect-to-https
-      service: shop.app
-    websecure.shop.api:
+      service: default_shop.app
+    websecure.default_shop.api:
       entryPoints:
         - websecure
       rule: Host(`shop.example.com`) && PathPrefix(`/api`)
-      service: shop.api
+      service: default_shop.api
       tls: {}
-    websecure.shop.app:
+    websecure.default_shop.app:
       entryPoints:
         - websecure
       rule: Host(`shop.example.com`)
-      service: shop.app
+      service: default_shop.app
       tls: {}
   middlewares:
     redirect-to-https:
@@ -47,14 +47,14 @@ http:
       loadBalancer:
         servers:
           - url: http://127.0.0.1:7445
-    blog.web:
+    default_blog.web:
       loadBalancer:
         servers: []
-    shop.api:
+    default_shop.api:
       loadBalancer:
         servers:
           - url: http://172.18.0.4:9000
-    shop.app:
+    default_shop.app:
       loadBalancer:
         servers:
           - url: http://172.18.0.2:8080

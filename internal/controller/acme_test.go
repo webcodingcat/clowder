@@ -267,9 +267,9 @@ func newACMERunner(t *testing.T, ca *fakeCA) (*acmeRunner, *leader) {
 		Secrets: map[string]state.Sealed{"token": state.Sealed("t")},
 		Files:   map[string][]byte{"ca.pem": ca.trust()},
 	})
-	l.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Name: "shop", Owner: state.OwnerCLI})
+	l.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Namespace: "default", Name: "shop", Owner: state.OwnerCLI})
 	l.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1, Routes: []string{"shop.example.com/"},
+		Namespace: "default", Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1, Routes: []string{"shop.example.com/"},
 		Source: "name: shop\nservices: {app: {image: x, x-clowder: {http: {host: shop.example.com, port: 80}}}}\n",
 	})
 
@@ -340,7 +340,7 @@ func TestACertificateIsOrderedThroughTheChallengeTheAgentsServe(t *testing.T) {
 		t.Errorf("%d orders and %d accounts, want one each", calls.orders, calls.accounts)
 	}
 
-	l.apply(state.KindDeleteStack, state.UserActor("alice"), state.DeleteStack{Name: "shop"})
+	l.apply(state.KindDeleteStack, state.UserActor("alice"), state.DeleteStack{Namespace: "default", Name: "shop"})
 	runner.pass(context.Background())
 	l.Read(func(current *state.State) {
 		if len(current.Certificates) != 0 {

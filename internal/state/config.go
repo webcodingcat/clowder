@@ -2,6 +2,8 @@ package state
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 )
@@ -38,6 +40,11 @@ func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 	for _, name := range clusterdir.SecretNames(payload.Spec) {
 		if _, ok := payload.Secrets[name]; !ok {
 			return fmt.Errorf("secret %s is used in cluster.yaml but missing", name)
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(s.Stacks)) {
+		if s.Stacks[id].Privileged && !slices.Contains(payload.Spec.Stacks.Privileged, id) {
+			return fmt.Errorf("stack %s asks for privileges, so it must stay in stacks.privileged", id)
 		}
 	}
 	// only the files cluster.yaml names: the payload may carry no others

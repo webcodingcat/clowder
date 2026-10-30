@@ -61,7 +61,7 @@ func milli(cpus float64) int64 {
 	return int64(math.Round(cpus * 1000))
 }
 
-// serviceRef names one service of one stack.
+// serviceRef names one service of one stack, by the stack's ID.
 type serviceRef struct {
 	stack, service string
 }

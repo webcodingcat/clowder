@@ -13,6 +13,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/supervisor"
 )
@@ -45,14 +46,19 @@ func (r *stackRunner) logIn(ctx context.Context, desired desiredState) {
 // rules tells the supervisor each service's restart rule, from the stack as
 // the state has it: a pushed-out service never restarts. Clowder's own
 // Traefik has a rule of its own.
-func (r *stackRunner) rules(stackName, service string) (supervisor.Rule, bool) {
-	if clowdersOwn(stackName) {
+func (r *stackRunner) rules(project, service string) (supervisor.Rule, bool) {
+	if clowdersOwn(project) {
 		return traefikRule, true
+	}
+	namespace, stackName, ok := names.SplitProject(project)
+	if !ok {
+		return supervisor.Rule{}, false
 	}
 	var source string
 	var pushedOut bool
 	r.cluster.Read(func(current *state.State) {
-		if stack, ok := current.Stacks[stackName]; ok && stack.Host != nil && *stack.Host == r.host.ID {
+		stack, ok := current.Stacks[names.ID(namespace, stackName)]
+		if ok && stack.Host != nil && *stack.Host == r.host.ID {
 			source, pushedOut = stack.Source, slices.Contains(stack.PushedOut, service)
 		}
 	})
@@ -74,8 +80,8 @@ func (r *stackRunner) rules(stackName, service string) (supervisor.Rule, bool) {
 }
 
 // Ps lists a stack's containers on this host (api.Containers).
-func (r *stackRunner) Ps(ctx context.Context, stackName string) ([]api.ContainerInfo, error) {
-	output, err := r.docker.ComposePs(ctx, stackName, r.files.stackFile(stackName))
+func (r *stackRunner) Ps(ctx context.Context, project string) ([]api.ContainerInfo, error) {
+	output, err := r.docker.ComposePs(ctx, project, r.files.stackFile(project))
 	if err != nil {
 		return nil, err
 	}
@@ -83,8 +89,8 @@ func (r *stackRunner) Ps(ctx context.Context, stackName string) ([]api.Container
 }
 
 // Logs writes a stack's logs on this host (api.Containers).
-func (r *stackRunner) Logs(ctx context.Context, stackName string, follow bool, out io.Writer) error {
-	return r.docker.ComposeLogs(ctx, stackName, r.files.stackFile(stackName), follow, out)
+func (r *stackRunner) Logs(ctx context.Context, project string, follow bool, out io.Writer) error {
+	return r.docker.ComposeLogs(ctx, project, r.files.stackFile(project), follow, out)
 }
 
 // parsePs reads docker compose ps --format json: one object per line.

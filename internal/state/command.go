@@ -215,6 +215,9 @@ func (s *State) makeMaps() {
 	if s.Revoked == nil {
 		s.Revoked = map[string]time.Time{}
 	}
+	if s.Namespaces == nil {
+		s.Namespaces = map[string]*Namespace{}
+	}
 	if s.Stacks == nil {
 		s.Stacks = map[string]*Stack{}
 	}

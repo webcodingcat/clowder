@@ -47,8 +47,12 @@ func TestConditionsRaiseAlertsOnlyOnceTheyLasted(t *testing.T) {
 			Pools: map[string]state.Pool{"vg/thin": {SizeBytes: 1, DataPercent: 96, MetadataPercent: 10}},
 		}},
 		Stacks: map[string]*state.Stack{
-			"shop": {Name: "shop", WaitReason: "no room", WaitingSince: time.Now().Add(-6 * time.Minute)},
-			"blog": {Name: "blog", WaitReason: "no room", WaitingSince: time.Now().Add(-time.Minute)},
+			"default/shop": {
+				Namespace: "default", Name: "shop", WaitReason: "no room", WaitingSince: time.Now().Add(-6 * time.Minute),
+			},
+			"default/blog": {
+				Namespace: "default", Name: "blog", WaitReason: "no room", WaitingSince: time.Now().Add(-time.Minute),
+			},
 		},
 	}
 	conditions := NewConditions()
@@ -64,12 +68,12 @@ func TestConditionsRaiseAlertsOnlyOnceTheyLasted(t *testing.T) {
 		return keys
 	}
 	soon := fmt.Sprint(keys(time.Now()))
-	want := "[over-capacity/node0=warning pool-use/node0/vg/thin/data=critical root-use/node0=warning stack-waiting/shop=warning]"
+	want := "[over-capacity/node0=warning pool-use/node0/vg/thin/data=critical root-use/node0=warning stack-waiting/default/shop=warning]"
 	if soon != want {
 		t.Errorf("at once %s, want %s", soon, want)
 	}
 	later := keys(time.Now().Add(6 * time.Minute))
-	for _, key := range []string{"docker-down/node0=critical", "ingress-not-held=critical", "stack-waiting/blog=warning"} {
+	for _, key := range []string{"docker-down/node0=critical", "ingress-not-held=critical", "stack-waiting/default/blog=warning"} {
 		if !slices.Contains(later, key) {
 			t.Errorf("no %s after six minutes: %v", key, later)
 		}

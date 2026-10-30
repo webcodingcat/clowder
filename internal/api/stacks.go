@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
-	"strings"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
@@ -31,6 +30,7 @@ type StackApply struct {
 
 // StackInfo is one stack as the CLI shows it.
 type StackInfo struct {
+	Namespace  string `json:"namespace"`
 	Name       string `json:"name"`
 	Owner      string `json:"owner"`
 	CreatedBy  string `json:"created_by,omitempty"`
@@ -52,13 +52,17 @@ type ContainerInfo struct {
 	Status  string `json:"status"` // Docker's words: "Up 3 minutes"
 }
 
-// Containers answers for the stacks that run on this host; the agent is the
-// real one.
+// Containers answers for the stacks that run on this host, by their Compose
+// project (names.Project); the agent is the real one.
 type Containers interface {
-	Ps(ctx context.Context, stack string) ([]ContainerInfo, error)
+	Ps(ctx context.Context, project string) ([]ContainerInfo, error)
 	// Logs writes the stack's logs to out; with follow, until ctx ends.
-	Logs(ctx context.Context, stack string, follow bool, out io.Writer) error
+	Logs(ctx context.Context, project string, follow bool, out io.Writer) error
 }
+
+// stackNamespace is the namespace of the stacks the stack routes name;
+// clowder apply brings the others (phase 1c).
+const stackNamespace = names.Default
 
 // createStack registers a stack for clowder stack apply. The same user
 // creating a stack again that was never applied does nothing, so a create
@@ -68,7 +72,7 @@ func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
 	caller := identityOf(r).Name
 	var registered bool
 	s.config.Cluster.Read(func(current *state.State) {
-		stack, ok := current.Stacks[name]
+		stack, ok := current.Stacks[names.ID(stackNamespace, name)]
 		registered = ok && stack.Status == state.StackCreated && stack.Owner == state.OwnerCLI &&
 			stack.CreatedBy == caller
 	})
@@ -76,7 +80,7 @@ func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, Written{})
 		return
 	}
-	s.write(w, r, state.KindCreateStack, state.CreateStack{Name: name, Owner: state.OwnerCLI})
+	s.write(w, r, state.KindCreateStack, state.CreateStack{Namespace: stackNamespace, Name: name, Owner: state.OwnerCLI})
 }
 
 // applyStack checks a stack against the cluster and commits it.
@@ -97,13 +101,13 @@ func (s *Server) applyStack(w http.ResponseWriter, r *http.Request) {
 	var changedVolumes error
 	s.config.Cluster.Read(func(current *state.State) {
 		config, revision = current.Config.Spec, current.Config.Revision
-		changedVolumes = checkVolumesUnchanged(stack, current.Volumes)
+		changedVolumes = checkVolumesUnchanged(stackNamespace, stack, current.Volumes)
 	})
 	if changedVolumes != nil {
 		writeError(w, http.StatusBadRequest, changedVolumes)
 		return
 	}
-	priority, err := checkAgainstCluster(stack, config)
+	priority, err := checkAgainstCluster(stackNamespace, stack, config)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -114,9 +118,21 @@ func (s *Server) applyStack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.write(w, r, state.KindPutStack, state.PutStack{
-		Name: name, Owner: state.OwnerCLI, Source: apply.Source, Priority: priority, Secrets: secrets,
-		Ports: stack.PublishedPorts(), Routes: stack.Routes(), Services: services(stack), ConfigRevision: revision,
+		Namespace: stackNamespace, Name: name, Owner: state.OwnerCLI, Source: apply.Source, Priority: priority,
+		Secrets: secrets, Ports: stack.PublishedPorts(), Routes: stack.Routes(), Services: services(stack),
+		Privileged: privileged(stack), ConfigRevision: revision,
 	})
+}
+
+// privileged tells whether a service of the stack reaches beyond its
+// container.
+func privileged(stack *compose.Stack) bool {
+	for _, service := range stack.Services {
+		if len(service.Privileges) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // sealStackSecrets checks that the values sent are exactly those the stack
@@ -159,10 +175,10 @@ func (s *Server) sealStackSecrets(stack *compose.Stack, values map[string]string
 // checkVolumesUnchanged refuses another class, size or number of replicas
 // for a volume the stack has already: nothing changes an existing volume
 // yet, so such an apply would seem to work and do nothing.
-func checkVolumesUnchanged(stack *compose.Stack, volumes map[string]*state.Volume) error {
+func checkVolumesUnchanged(namespace string, stack *compose.Stack, volumes map[string]*state.Volume) error {
 	var problems compose.Problems
 	for _, name := range slices.Sorted(maps.Keys(stack.Volumes)) {
-		existing, ok := volumes[stack.Name+"/"+name]
+		existing, ok := volumes[names.VolumeID(namespace, stack.Name, name)]
 		if !ok {
 			continue
 		}
@@ -180,8 +196,9 @@ func checkVolumesUnchanged(stack *compose.Stack, volumes map[string]*state.Volum
 }
 
 // checkAgainstCluster checks what only the cluster knows (storage classes,
-// priority categories) and returns the stack's priority as a number.
-func checkAgainstCluster(stack *compose.Stack, config clusterdir.Config) (int, error) {
+// priority categories, privileges) and returns the stack's priority as a
+// number. The state checks the privileges again, at commit.
+func checkAgainstCluster(namespace string, stack *compose.Stack, config clusterdir.Config) (int, error) {
 	var problems compose.Problems
 	for _, name := range slices.Sorted(maps.Keys(stack.Volumes)) {
 		if _, ok := config.StorageClasses[stack.Volumes[name].Class]; !ok {
@@ -193,7 +210,7 @@ func checkAgainstCluster(stack *compose.Stack, config clusterdir.Config) (int, e
 	if err != nil {
 		problems = append(problems, "stack: "+err.Error())
 	}
-	privileged := slices.Contains(config.Stacks.Privileged, stack.Name)
+	privileged := slices.Contains(config.Stacks.Privileged, names.ID(namespace, stack.Name))
 	for _, name := range slices.Sorted(maps.Keys(stack.Services)) {
 		service := stack.Services[name]
 		if _, err := config.Priorities.Resolve(service.Priority); err != nil {
@@ -234,8 +251,8 @@ func services(stack *compose.Stack) map[string]state.Service {
 func (s *Server) stacks(w http.ResponseWriter, _ *http.Request) {
 	stacks := []StackInfo{}
 	s.config.Cluster.Read(func(current *state.State) {
-		for _, name := range slices.Sorted(maps.Keys(current.Stacks)) {
-			stacks = append(stacks, stackInfo(current, current.Stacks[name]))
+		for _, id := range slices.Sorted(maps.Keys(current.Stacks)) {
+			stacks = append(stacks, stackInfo(current, current.Stacks[id]))
 		}
 	})
 	writeJSON(w, http.StatusOK, stacks)
@@ -243,9 +260,9 @@ func (s *Server) stacks(w http.ResponseWriter, _ *http.Request) {
 
 func stackInfo(current *state.State, stack *state.Stack) StackInfo {
 	info := StackInfo{
-		Name: stack.Name, Owner: stack.Owner, CreatedBy: stack.CreatedBy, Generation: stack.Generation,
-		Priority: stack.Priority, Status: string(stack.Status), PushedOut: stack.PushedOut,
-		WaitReason: stack.WaitReason,
+		Namespace: stack.Namespace, Name: stack.Name, Owner: stack.Owner, CreatedBy: stack.CreatedBy,
+		Generation: stack.Generation, Priority: stack.Priority, Status: string(stack.Status),
+		PushedOut: stack.PushedOut, WaitReason: stack.WaitReason,
 	}
 	if stack.Host != nil {
 		if host, ok := current.Hosts[*stack.Host]; ok {
@@ -259,107 +276,115 @@ func stackInfo(current *state.State, stack *state.Stack) StackInfo {
 // when the caller says so (?volumes=delete).
 func (s *Server) deleteStack(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	id := names.ID(stackNamespace, name)
 	var exists bool
 	var volumes []string
 	s.config.Cluster.Read(func(current *state.State) {
-		_, exists = current.Stacks[name]
-		for _, id := range slices.Sorted(maps.Keys(current.Volumes)) {
-			if stackOf(id) == name {
-				volumes = append(volumes, id)
+		_, exists = current.Stacks[id]
+		for _, volumeID := range slices.Sorted(maps.Keys(current.Volumes)) {
+			if stackID, _ := names.StackOfVolume(volumeID); stackID == id {
+				volumes = append(volumes, volumeID)
 			}
 		}
 	})
 	switch {
 	case !exists:
-		writeError(w, http.StatusNotFound, fmt.Errorf("no stack %s", name))
+		writeError(w, http.StatusNotFound, fmt.Errorf("no stack %s", id))
 		return
 	case len(volumes) > 0 && r.URL.Query().Get("volumes") != "delete":
 		writeError(w, http.StatusConflict, fmt.Errorf(
 			"stack %s has volumes %v; their data goes with the stack only when you say so (--delete-volumes)",
-			name, volumes))
+			id, volumes))
 		return
 	}
-	s.write(w, r, state.KindDeleteStack, state.DeleteStack{Name: name, WithVolumes: len(volumes) > 0})
+	s.write(w, r, state.KindDeleteStack, state.DeleteStack{
+		Namespace: stackNamespace, Name: name, WithVolumes: len(volumes) > 0,
+	})
 }
 
-func stackOf(volumeID string) string {
-	stack, _, _ := strings.Cut(volumeID, "/")
-	return stack
-}
-
-// stackHost finds the host a stack runs on; ok is false (and the answer
-// written) when there is none.
-func (s *Server) stackHost(w http.ResponseWriter, name string) (state.HostID, bool) {
+// stackHost finds the host a stack runs on and its Compose project there;
+// ok is false (and the answer written) when there is none.
+func (s *Server) stackHost(w http.ResponseWriter, name string) (state.HostID, string, bool) {
+	id := names.ID(stackNamespace, name)
 	var host *state.HostID
 	var exists, created bool
+	var project string
 	s.config.Cluster.Read(func(current *state.State) {
-		if stack, ok := current.Stacks[name]; ok {
-			exists, created, host = true, stack.Status == state.StackCreated, stack.Host
+		if stack, ok := current.Stacks[id]; ok {
+			exists, created, host, project = true, stack.Status == state.StackCreated, stack.Host, stack.Project()
 		}
 	})
 	switch {
 	case !exists:
-		writeError(w, http.StatusNotFound, fmt.Errorf("no stack %s", name))
-		return 0, false
+		writeError(w, http.StatusNotFound, fmt.Errorf("no stack %s", id))
+		return 0, "", false
 	case created:
-		writeError(w, http.StatusConflict, fmt.Errorf("stack %s is created, but was never applied", name))
-		return 0, false
+		writeError(w, http.StatusConflict, fmt.Errorf("stack %s is created, but was never applied", id))
+		return 0, "", false
 	case host == nil:
-		writeError(w, http.StatusConflict, fmt.Errorf("stack %s is not placed on a host yet", name))
-		return 0, false
+		writeError(w, http.StatusConflict, fmt.Errorf("stack %s is not placed on a host yet", id))
+		return 0, "", false
 	}
-	return *host, true
+	return *host, project, true
 }
 
 // stackPs lists a stack's containers, asking its host.
 func (s *Server) stackPs(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	host, ok := s.stackHost(w, name)
+	host, project, ok := s.stackHost(w, r.PathValue("name"))
 	if !ok {
 		return
 	}
 	if host != s.config.HostID {
-		s.relay(w, r, s.forwarder, host, "/v1/internal/stacks/"+url.PathEscape(name)+"/ps")
+		s.relay(w, r, s.forwarder, host, "/v1/internal/stacks/"+url.PathEscape(project)+"/ps")
 		return
 	}
-	s.localPs(w, r)
+	s.ps(w, r, project)
 }
 
 // stackLogs writes a stack's logs, from its host; ?follow=1 keeps going.
 func (s *Server) stackLogs(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	host, ok := s.stackHost(w, name)
+	host, project, ok := s.stackHost(w, r.PathValue("name"))
 	if !ok {
 		return
 	}
 	if host != s.config.HostID {
-		s.relay(w, r, s.streamer, host, "/v1/internal/stacks/"+url.PathEscape(name)+"/logs?"+r.URL.RawQuery)
+		s.relay(w, r, s.streamer, host, "/v1/internal/stacks/"+url.PathEscape(project)+"/logs?"+r.URL.RawQuery)
 		return
 	}
-	s.localLogs(w, r)
+	s.logs(w, r, project)
 }
 
-// localStack is the stack name of an internal route: only hosts call
-// these, but the name becomes a path on this host, so it must be a stack's.
-func localStack(w http.ResponseWriter, r *http.Request) (string, bool) {
-	name := r.PathValue("name")
-	if !names.ValidStack(name) {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("%q is not a stack name", name))
+// localProject is the Compose project of an internal route: only hosts call
+// these, but the project becomes a path on this host, so it must be a
+// stack's.
+func localProject(w http.ResponseWriter, r *http.Request) (string, bool) {
+	project := r.PathValue("project")
+	if _, _, ok := names.SplitProject(project); !ok {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%q is not a stack's project", project))
 		return "", false
 	}
-	return name, true
+	return project, true
 }
 
 func (s *Server) localPs(w http.ResponseWriter, r *http.Request) {
-	name, ok := localStack(w, r)
-	if !ok {
-		return
+	if project, ok := localProject(w, r); ok {
+		s.ps(w, r, project)
 	}
+}
+
+func (s *Server) localLogs(w http.ResponseWriter, r *http.Request) {
+	if project, ok := localProject(w, r); ok {
+		s.logs(w, r, project)
+	}
+}
+
+// ps answers with the containers of a stack on this host.
+func (s *Server) ps(w http.ResponseWriter, r *http.Request, project string) {
 	if s.config.Containers == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("this agent runs no containers"))
 		return
 	}
-	containers, err := s.config.Containers.Ps(r.Context(), name)
+	containers, err := s.config.Containers.Ps(r.Context(), project)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
@@ -367,11 +392,8 @@ func (s *Server) localPs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, containers)
 }
 
-func (s *Server) localLogs(w http.ResponseWriter, r *http.Request) {
-	name, ok := localStack(w, r)
-	if !ok {
-		return
-	}
+// logs streams the logs of a stack on this host.
+func (s *Server) logs(w http.ResponseWriter, r *http.Request, project string) {
 	if s.config.Containers == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("this agent runs no containers"))
 		return
@@ -380,7 +402,7 @@ func (s *Server) localLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	writer := flushingWriter{w}
-	if err := s.config.Containers.Logs(r.Context(), name, follow, writer); err != nil {
+	if err := s.config.Containers.Logs(r.Context(), project, follow, writer); err != nil {
 		_, _ = fmt.Fprintf(writer, "\nclowder: the logs broke off: %v\n", err) // the status is sent already
 	}
 }

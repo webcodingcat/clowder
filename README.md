@@ -43,7 +43,11 @@ upgrade a running cluster. On one host, what runs today:
 A stack's passwords live in a SOPS file next to its `clowder.yaml`; the CLI decrypts it
 with your age key, and the cluster keeps the values sealed. Who can read them: whoever can
 decrypt that file, every host of the cluster, and, until clowder has permissions, every user
-through a stack that `cluster.yaml` allows privileges (`stacks.privileged`).
+through a stack that `cluster.yaml` allows privileges (`stacks.privileged`, as
+`<namespace>/<stack>`; the stack commands use the namespace `default` for now).
+
+Names of stacks, services, volumes and secrets are lowercase letters, digits and `-`, at most
+63 characters; `_` is not allowed.
 
 | Binary | For | Platforms |
 |---|---|---|

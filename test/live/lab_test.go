@@ -22,6 +22,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/names"
 )
 
 // labAddress is where the test and the tools of bin/dev live run in the
@@ -158,8 +159,14 @@ func stackInfo(t *testing.T, name string) api.StackInfo {
 // runs tells whether a service of a stack has a running container.
 func (h host) runs(t *testing.T, stack, service string) bool {
 	t.Helper()
-	return h.must(t, "docker ps -q --filter label=com.docker.compose.project="+stack+
+	return h.must(t, "docker ps -q --filter label=com.docker.compose.project="+project(stack)+
 		" --filter label=com.docker.compose.service="+service) != ""
+}
+
+// project is a stack's Compose project on the host: the tests' stacks are in
+// the namespace default.
+func project(stack string) string {
+	return names.Project(names.Default, stack)
 }
 
 // clusterStatus is what clowder cluster status prints.

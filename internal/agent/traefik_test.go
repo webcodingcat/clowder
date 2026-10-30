@@ -26,12 +26,12 @@ func newTestTraefik(t *testing.T) (*traefikRunner, *stackRunner, *fakeDocker) {
 	t.Helper()
 	runner, cluster, fake, _ := newTestRunner(t)
 	cluster.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
+		Namespace: "default", Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
 		Source: "name: shop\nservices:\n  app:\n    image: nginx\n    volumes: [db:/data]\n" +
 			"    x-clowder: {http: {host: shop.example.com, port: 8080}}\n" +
 			"volumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n",
 	})
-	labels := map[string]string{docker.ProjectLabel: "shop", docker.ServiceLabel: "app"}
+	labels := map[string]string{docker.ProjectLabel: shopProject, docker.ServiceLabel: "app"}
 	fake.containers = []docker.Container{
 		{ID: "healthy", State: "running", Labels: labels},
 		{ID: "unchecked", State: "running", Labels: labels},
@@ -175,7 +175,7 @@ func TestACertificateBringsHTTPSAndARenewalComesUnderNewNames(t *testing.T) {
 	if len(first) != 2 || !strings.HasPrefix(first[0], "shop.example.com-") || !strings.HasSuffix(first[0], ".crt") {
 		t.Fatalf("certificate files %v", first)
 	}
-	for _, want := range []string{"websecure.shop.app", "redirect-to-https", first[0], first[1]} {
+	for _, want := range []string{"websecure.default_shop.app", "redirect-to-https", first[0], first[1]} {
 		if !strings.Contains(string(routes), want) {
 			t.Errorf("no %s in the routes:\n%s", want, routes)
 		}

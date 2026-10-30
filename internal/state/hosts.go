@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+
+	"github.com/webcodingcat/clowder/internal/names"
 )
 
 // Bootstrap starts the cluster: the keys init made and the first host.
@@ -33,6 +35,7 @@ func applyBootstrap(s *State, _ Command, payload Bootstrap) error {
 	s.Keys = &keys
 	s.JoinKeys = []Sealed{payload.JoinKey}
 	s.Hosts[host.ID] = &host
+	s.Namespaces[names.Default] = &Namespace{Name: names.Default}
 	return nil
 }
 

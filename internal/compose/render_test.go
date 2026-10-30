@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/webcodingcat/clowder/internal/names"
 )
 
 var update = flag.Bool("update", false, "write the golden files anew")
@@ -27,15 +29,17 @@ func loadShop(t *testing.T) *Stack {
 
 // shopTarget is a host where every volume of the shop is mounted.
 func shopTarget() Target {
+	mounted := func(volume string, generation int64) MountedVolume {
+		name := names.VolumeName(names.VolumeID("default", "shop", volume), generation)
+		return MountedVolume{Dir: "/var/lib/clowder/volumes/" + name, Name: name}
+	}
 	return Target{
+		Namespace:   "default",
 		FloatingIP:  netip.MustParseAddr("203.0.113.11"),
 		NodeAddress: netip.MustParseAddr("10.77.0.3"),
 		Resolver:    netip.MustParseAddr("169.254.77.53"),
-		Volumes: map[string]MountedVolume{
-			"pgdata":    {Dir: "/var/lib/clowder/volumes/shop-pgdata", Generation: 1},
-			"cachedata": {Dir: "/var/lib/clowder/volumes/shop-cachedata", Generation: 2},
-		},
-		SecretsDir: "/run/clowder-secrets/shop/files",
+		Volumes:     map[string]MountedVolume{"pgdata": mounted("pgdata", 1), "cachedata": mounted("cachedata", 2)},
+		SecretsDir:  "/run/clowder-secrets/default_shop/files",
 		// only db asks for a secret file; app's secret is a variable
 		SecretDigests: map[string]string{"db": "digest-of-db-password"},
 	}
@@ -87,8 +91,11 @@ func TestRenderNeedsACompleteTarget(t *testing.T) {
 	noFloatingIP.FloatingIP = netip.Addr{}
 	noDigest := shopTarget()
 	noDigest.SecretDigests = nil
+	noNamespace := shopTarget()
+	noNamespace.Namespace = ""
 	for want, target := range map[string]Target{
 		"not mounted": unmounted, "no floating IP": noFloatingIP, "no digest of the secrets of service db": noDigest,
+		`namespace "" is not valid`: noNamespace,
 	} {
 		if _, err := Render(loadShop(t), target); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("want an error with %q, got %v", want, err)
@@ -96,25 +103,23 @@ func TestRenderNeedsACompleteTarget(t *testing.T) {
 	}
 }
 
-func TestBridgeNamesFitTheKernelLimit(t *testing.T) {
-	name := BridgeName("a-stack-with-a-rather-long-name", "backend")
-	if len(name) > 15 {
-		t.Errorf("%s has %d characters", name, len(name))
+func TestTwoNamespacesRenderApart(t *testing.T) {
+	other := shopTarget()
+	other.Namespace, other.SecretsDir = "other", "/run/clowder-secrets/other_shop/files"
+	rendered, err := Render(loadShop(t), other)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if BridgeName("shop", "default") == BridgeName("shop", "backend") {
-		t.Error("networks of one stack share a bridge name")
+	for _, want := range []string{"name: other_shop", "clowder.stack: other_shop", "name: other_shop_default"} {
+		if !strings.Contains(string(rendered), want) {
+			t.Errorf("the stack of namespace other lacks %q:\n%s", want, rendered)
+		}
 	}
-	// stable across releases: existing bridges keep their names
-	if got := BridgeName("shop", "default"); got != "cbr-8d9001d32c6" {
-		t.Errorf("bridge name changed: %s", got)
+	mine, err := Render(loadShop(t), shopTarget())
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestVolumeNamesOfDifferentStacksNeverMeet(t *testing.T) {
-	if VolumeName("a-b", "c", 1) == VolumeName("a", "b-c", 1) {
-		t.Error("stack a-b volume c and stack a volume b-c share a Docker volume")
-	}
-	if VolumeName("shop", "pgdata", 1) == VolumeName("shop", "pgdata", 2) {
-		t.Error("a new generation keeps the old volume")
+	if strings.Contains(string(rendered), "default_shop") || bytes.Equal(rendered, mine) {
+		t.Error("two namespaces render the same names")
 	}
 }
