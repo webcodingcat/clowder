@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+
+	"github.com/webcodingcat/clowder/internal/clusterdir"
 )
 
 // extensionKey is the Compose extension that carries clowder's fields.
@@ -74,25 +76,25 @@ func decodeExtension(extensions map[string]any, target any) error {
 // parsePriority reads a priority: a number from 0 to 1000 or a category name.
 // Whether the category exists depends on the cluster (cluster.yaml); it is
 // checked when the stack is applied.
-func parsePriority(raw any) (Priority, error) {
+func parsePriority(raw any) (clusterdir.Priority, error) {
 	switch value := raw.(type) {
 	case nil:
-		return Priority{}, nil
+		return clusterdir.Priority{}, nil
 	case float64:
 		number := int(value)
 		if float64(number) != value || number < 0 || number > 1000 {
-			return Priority{}, fmt.Errorf("priority %v is not a whole number from 0 to 1000", value)
+			return clusterdir.Priority{}, fmt.Errorf("priority %v is not a whole number from 0 to 1000", value)
 		}
-		return Priority{Value: &number}, nil
+		return clusterdir.Priority{Value: &number}, nil
 	case string:
 		if number, err := strconv.Atoi(value); err == nil {
 			return parsePriority(float64(number))
 		}
 		if value == "" {
-			return Priority{}, fmt.Errorf("priority is empty")
+			return clusterdir.Priority{}, fmt.Errorf("priority is empty")
 		}
-		return Priority{Category: value}, nil
+		return clusterdir.Priority{Category: value}, nil
 	default:
-		return Priority{}, fmt.Errorf("priority %v is neither a number nor a category", raw)
+		return clusterdir.Priority{}, fmt.Errorf("priority %v is neither a number nor a category", raw)
 	}
 }

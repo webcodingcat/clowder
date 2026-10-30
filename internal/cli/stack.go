@@ -295,10 +295,10 @@ func printStacks(out io.Writer, stacks []api.StackInfo) error {
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	// what the stack waits for last: it is long, and empty for most stacks;
 	// a running stack waits too when a volume it newly names finds no place
-	_, _ = fmt.Fprintln(table, "NAME\tSTATUS\tHOST\tPRIORITY\tGENERATION\tSTOPPED\tCREATED BY\tWAITING FOR") // tabwriter reports errors on Flush
+	_, _ = fmt.Fprintln(table, "NAME\tSTATUS\tHOST\tPRIORITY\tGENERATION\tPUSHED OUT\tCREATED BY\tWAITING FOR") // tabwriter reports errors on Flush
 	for _, stack := range stacks {
 		_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n", stack.Name, stack.Status, stack.Host,
-			stack.Priority, stack.Generation, strings.Join(stack.Stopped, ","), stack.CreatedBy, stack.WaitReason)
+			stack.Priority, stack.Generation, strings.Join(stack.PushedOut, ","), stack.CreatedBy, stack.WaitReason)
 	}
 	return table.Flush()
 }

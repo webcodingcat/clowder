@@ -392,6 +392,59 @@ func TestTheLeaderKeepsTheACMEAccountChallengesAndCertificates(t *testing.T) {
 	}
 }
 
+func TestPushedOutServicesAreTheStacksAndANewGenerationDropsGoneOnes(t *testing.T) {
+	c := newCluster(t)
+	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.createShop()
+	services := map[string]Service{"app": {DependsOn: []string{"db"}}, "db": {}, "cache": {}}
+	c.refuse(KindPutStack, UserActor("alice"), PutStack{
+		Name: "shop", Owner: OwnerCLI, Source: "s", ConfigRevision: 1,
+		Services: map[string]Service{"app": {DependsOn: []string{"db"}}},
+	}, "service app depends on db, which the stack does not have")
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{
+		Name: "shop", Owner: OwnerCLI, Source: "s", ConfigRevision: 1, Services: services,
+	})
+	c.refuse(KindSetPushedOut, LeaderActor, SetPushedOut{Stacks: map[string][]string{"shop": {"web"}}},
+		"stack shop has no service web")
+	c.refuse(KindSetPushedOut, LeaderActor, SetPushedOut{Stacks: map[string][]string{"blog": {}}}, "no stack blog")
+	c.mustApply(KindSetPushedOut, LeaderActor, SetPushedOut{Stacks: map[string][]string{"shop": {"cache", "app", "cache"}}})
+	if got := c.state.Stacks["shop"].PushedOut; !slices.Equal(got, []string{"app", "cache"}) {
+		t.Errorf("pushed out %v", got)
+	}
+	delete(services, "cache")
+	c.mustApply(KindPutStack, UserActor("alice"), PutStack{
+		Name: "shop", Owner: OwnerCLI, Source: "s2", ConfigRevision: 1, Services: services,
+	})
+	if got := c.state.Stacks["shop"].PushedOut; !slices.Equal(got, []string{"app"}) {
+		t.Errorf("pushed out after cache went %v", got)
+	}
+}
+
+func TestWaitingSinceStartsWithTheFirstReasonAndEndsWithTheLast(t *testing.T) {
+	c := newCluster(t)
+	c.createShop()
+	wait := func(reason string, at time.Time) {
+		c.t.Helper()
+		cmd, err := NewCommand(KindSetStackWaitReason, at, LeaderActor, SetStackWaitReason{Name: "shop", Reason: reason})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.index++
+		if err := c.state.Apply(c.index, cmd); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wait("no room", testTime)
+	wait("no room on node0", testTime.Add(time.Hour)) // the text changed, the wait did not
+	if since := c.state.Stacks["shop"].WaitingSince; !since.Equal(testTime) {
+		t.Errorf("waiting since %v", since)
+	}
+	wait("", testTime.Add(2*time.Hour))
+	if since := c.state.Stacks["shop"].WaitingSince; !since.IsZero() {
+		t.Errorf("waiting since %v after the wait ended", since)
+	}
+}
+
 // createShop registers the stack shop of the CLI, as clowder stack create
 // does.
 func (c *cluster) createShop() {

@@ -31,14 +31,15 @@ type StackApply struct {
 
 // StackInfo is one stack as the CLI shows it.
 type StackInfo struct {
-	Name       string   `json:"name"`
-	Owner      string   `json:"owner"`
-	CreatedBy  string   `json:"created_by,omitempty"`
-	Generation int64    `json:"generation"`
-	Priority   int      `json:"priority"`
-	Status     string   `json:"status"`
-	Host       string   `json:"host,omitempty"` // empty: not placed yet
-	Stopped    []string `json:"stopped,omitempty"`
+	Name       string `json:"name"`
+	Owner      string `json:"owner"`
+	CreatedBy  string `json:"created_by,omitempty"`
+	Generation int64  `json:"generation"`
+	Priority   int    `json:"priority"`
+	Status     string `json:"status"`
+	Host       string `json:"host,omitempty"` // empty: not placed yet
+	// PushedOut are the services stopped for others of higher priority.
+	PushedOut []string `json:"pushed_out,omitempty"`
 	// WaitReason is why the stack or a volume it newly names finds no place.
 	WaitReason string `json:"wait_reason,omitempty"`
 }
@@ -114,7 +115,7 @@ func (s *Server) applyStack(w http.ResponseWriter, r *http.Request) {
 	}
 	s.write(w, r, state.KindPutStack, state.PutStack{
 		Name: name, Owner: state.OwnerCLI, Source: apply.Source, Priority: priority, Secrets: secrets,
-		Ports: stack.PublishedPorts(), Routes: stack.Routes(), ConfigRevision: revision,
+		Ports: stack.PublishedPorts(), Routes: stack.Routes(), Services: services(stack), ConfigRevision: revision,
 	})
 }
 
@@ -188,14 +189,14 @@ func checkAgainstCluster(stack *compose.Stack, config clusterdir.Config) (int, e
 				name, stack.Volumes[name].Class))
 		}
 	}
-	priority, err := PriorityOf(stack.Priority, config.Priorities)
+	priority, err := config.Priorities.Resolve(stack.Priority)
 	if err != nil {
 		problems = append(problems, "stack: "+err.Error())
 	}
 	privileged := slices.Contains(config.Stacks.Privileged, stack.Name)
 	for _, name := range slices.Sorted(maps.Keys(stack.Services)) {
 		service := stack.Services[name]
-		if _, err := PriorityOf(service.Priority, config.Priorities); err != nil {
+		if _, err := config.Priorities.Resolve(service.Priority); err != nil {
 			problems = append(problems, fmt.Sprintf("service %s: %v", name, err))
 		}
 		for _, privilege := range service.Privileges {
@@ -212,21 +213,22 @@ func checkAgainstCluster(stack *compose.Stack, config clusterdir.Config) (int, e
 	return priority, nil
 }
 
-// PriorityOf turns a priority of x-clowder into a number with the cluster's
-// categories: a number stays, a category is looked up, none is the default.
-func PriorityOf(priority compose.Priority, priorities clusterdir.Priorities) (int, error) {
-	category := priority.Category
-	switch {
-	case priority.Value != nil:
-		return *priority.Value, nil
-	case category == "":
-		category = priorities.Default
+// services are what the scheduler needs of the stack's services: the
+// priority as written (the service's own, else the stack's), the
+// reservations (zero: the cluster's default) and what each depends on.
+func services(stack *compose.Stack) map[string]state.Service {
+	services := map[string]state.Service{}
+	for name, service := range stack.Services {
+		priority := service.Priority
+		if priority == (clusterdir.Priority{}) {
+			priority = stack.Priority
+		}
+		services[name] = state.Service{
+			Priority: priority, MemoryBytes: service.MemoryReservation, CPUs: service.CPUReservation,
+			DependsOn: service.DependsOn,
+		}
 	}
-	value, ok := priorities.Categories[category]
-	if !ok {
-		return 0, fmt.Errorf("the cluster has no priority category %q", category)
-	}
-	return value, nil
+	return services
 }
 
 func (s *Server) stacks(w http.ResponseWriter, _ *http.Request) {
@@ -242,7 +244,7 @@ func (s *Server) stacks(w http.ResponseWriter, _ *http.Request) {
 func stackInfo(current *state.State, stack *state.Stack) StackInfo {
 	info := StackInfo{
 		Name: stack.Name, Owner: stack.Owner, CreatedBy: stack.CreatedBy, Generation: stack.Generation,
-		Priority: stack.Priority, Status: string(stack.Status), Stopped: stack.Stopped,
+		Priority: stack.Priority, Status: string(stack.Status), PushedOut: stack.PushedOut,
 		WaitReason: stack.WaitReason,
 	}
 	if stack.Host != nil {

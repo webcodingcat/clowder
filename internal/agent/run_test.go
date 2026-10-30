@@ -188,8 +188,9 @@ type fakeDocker struct {
 	calls
 	// failedUps is how many compose ups fail before one works
 	failedUps int
-	// upFiles are the files of the last compose up
-	upFiles []string
+	// upFiles and leftOut are the files and the services left out of the
+	// last compose up
+	upFiles, leftOut []string
 	// containers and details are what Docker lists and inspects
 	containers []docker.Container
 	details    map[string]docker.Details
@@ -207,13 +208,11 @@ func (f *fakeDocker) Events(ctx context.Context, _ string) (<-chan docker.Event,
 func (f *fakeDocker) Start(context.Context, string) error   { return nil }
 func (f *fakeDocker) Restart(context.Context, string) error { return nil }
 
-func (f *fakeDocker) ComposeUp(_ context.Context, stack string, files []string) error {
+func (f *fakeDocker) ComposeUp(_ context.Context, stack string, files, leftOut []string) error {
 	f.add("up %s", stack)
 	f.mu.Lock()
-	f.upFiles = files
-	f.mu.Unlock()
-	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.upFiles, f.leftOut = files, leftOut
 	if f.failedUps > 0 {
 		f.failedUps--
 		return errors.New("pull access denied")

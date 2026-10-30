@@ -45,5 +45,5 @@ DEVELOPING.md explains each one.
 ## State of the work
 
 Phase 1a, the foundation on one host, is done and passes the live tests in `test/live`;
-phase 1b is under way: the hoster and the Floating IP, published ports, Traefik and ACME
-are in, priorities, alerts and metrics follow (DEVELOPING.md, Roadmap).
+phase 1b is under way: the hoster and the Floating IP, published ports, Traefik, ACME and
+priorities are in, alerts and metrics follow (DEVELOPING.md, Roadmap).

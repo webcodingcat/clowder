@@ -150,6 +150,24 @@ func TestAFailedComposeUpIsTriedAgain(t *testing.T) {
 	}
 }
 
+func TestAPushedOutServiceIsLeftOutAndNotRestarted(t *testing.T) {
+	runner, cluster, docker, _ := newTestRunner(t)
+	runner.pass(context.Background())
+	cluster.mu.Lock()
+	cluster.state.Stacks["shop"].PushedOut = []string{"app"} // as set-pushed-out writes it
+	cluster.mu.Unlock()
+	runner.pass(context.Background())
+	docker.mu.Lock()
+	leftOut := docker.leftOut
+	docker.mu.Unlock()
+	if ups := docker.count("up shop"); ups != 2 || !slices.Equal(leftOut, []string{"app"}) {
+		t.Errorf("%d compose ups, the last without %v; want 2, without app", ups, leftOut)
+	}
+	if rule, ok := runner.rules("shop", "app"); !ok || rule.Restart != "no" {
+		t.Errorf("the rule of a pushed-out service %+v, %v", rule, ok)
+	}
+}
+
 func TestANewGenerationReplacesTheLV(t *testing.T) {
 	runner, cluster, docker, storage := newTestRunner(t)
 	runner.pass(context.Background())

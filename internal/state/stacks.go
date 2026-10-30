@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/webcodingcat/clowder/internal/names"
 )
@@ -53,6 +54,8 @@ type PutStack struct {
 	// not parse Compose files, but must refuse what another stack has.
 	Ports  []string `json:"ports,omitempty"`
 	Routes []string `json:"routes,omitempty"`
+	// Services are the stack's services as the scheduler needs them.
+	Services map[string]Service `json:"services,omitempty"`
 	// Secrets replace the stack's secrets as a whole: every sender sends all
 	// the stack asks for, an operation too. So whoever cannot decrypt the
 	// stack's secrets file can only remove the secrets, never keep them for a
@@ -100,6 +103,14 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 	if err := s.checkUnclaimed(payload); err != nil {
 		return err
 	}
+	for _, name := range slices.Sorted(maps.Keys(payload.Services)) {
+		for _, dependency := range payload.Services[name].DependsOn {
+			if _, ok := payload.Services[dependency]; !ok {
+				return fmt.Errorf("stack %s: service %s depends on %s, which the stack does not have",
+					payload.Name, name, dependency)
+			}
+		}
+	}
 	stack, exists := s.Stacks[payload.Name]
 	switch {
 	case !exists:
@@ -119,6 +130,13 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 	stack.Source = payload.Source
 	stack.Priority = payload.Priority
 	stack.Ports, stack.Routes = payload.Ports, payload.Routes
+	stack.Services = payload.Services
+	// a service the new generation no longer has is pushed out no more; the
+	// scheduler looks at the stack again at its next pass
+	stack.PushedOut = slices.DeleteFunc(stack.PushedOut, func(service string) bool {
+		_, kept := payload.Services[service]
+		return !kept
+	})
 	stack.Secrets = payload.Secrets
 	s.StacksRevision++
 	return nil
@@ -187,10 +205,9 @@ func applyDeleteStack(s *State, _ Command, payload DeleteStack) error {
 
 // SetStackStatus records where a stack runs and how it is doing.
 type SetStackStatus struct {
-	Name    string      `json:"name"`
-	Status  StackStatus `json:"status"`
-	Host    *HostID     `json:"host,omitempty"`
-	Stopped []string    `json:"stopped,omitempty"`
+	Name   string      `json:"name"`
+	Status StackStatus `json:"status"`
+	Host   *HostID     `json:"host,omitempty"`
 	// Generation is the one the host ran when it reports; the leader leaves
 	// it 0. A report about an older generation is refused: an apply came in
 	// between, and that generation has yet to come up.
@@ -226,22 +243,54 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) error {
 	if !samePlace(stack.Host, payload.Host) {
 		stack.LastMove = cmd.At
 	}
-	stack.Status, stack.Host, stack.Stopped = payload.Status, payload.Host, payload.Stopped
+	stack.Status, stack.Host = payload.Status, payload.Host
+	return nil
+}
+
+// SetPushedOut is one decision of the scheduler about pushed-out services:
+// the whole new list of each stack it touches (empty: none). It either
+// pushes out, possibly in several stacks, or brings one service back.
+type SetPushedOut struct {
+	Stacks map[string][]string `json:"stacks"`
+}
+
+func applySetPushedOut(s *State, _ Command, payload SetPushedOut) error {
+	for _, name := range slices.Sorted(maps.Keys(payload.Stacks)) {
+		stack, ok := s.Stacks[name]
+		if !ok {
+			return fmt.Errorf("no stack %s", name)
+		}
+		for _, service := range payload.Stacks[name] {
+			if _, ok := stack.Services[service]; !ok {
+				return fmt.Errorf("stack %s has no service %s", name, service)
+			}
+		}
+	}
+	for name, services := range payload.Stacks {
+		s.Stacks[name].PushedOut = slices.Compact(slices.Sorted(slices.Values(services)))
+	}
 	return nil
 }
 
 // SetStackWaitReason records why the placement cannot place a stack or a
 // volume it newly names; an empty reason clears it. It changes nothing else,
-// so it never moves or stops a stack that runs.
+// so it never moves or stops a stack that runs. WaitingSince starts with the
+// first reason, at the command's time.
 type SetStackWaitReason struct {
 	Name   string `json:"name"`
 	Reason string `json:"reason,omitempty"`
 }
 
-func applySetStackWaitReason(s *State, _ Command, payload SetStackWaitReason) error {
+func applySetStackWaitReason(s *State, cmd Command, payload SetStackWaitReason) error {
 	stack, ok := s.Stacks[payload.Name]
 	if !ok {
 		return fmt.Errorf("no stack %s", payload.Name)
+	}
+	switch {
+	case payload.Reason == "":
+		stack.WaitingSince = time.Time{}
+	case stack.WaitReason == "":
+		stack.WaitingSince = cmd.At
 	}
 	stack.WaitReason = payload.Reason
 	return nil

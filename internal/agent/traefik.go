@@ -169,7 +169,7 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	if upToDate {
 		return nil
 	}
-	if err := composeUpHeld(ctx, t.docker, t.supervisor, ingress.Project, []string{t.files.traefikCompose()}); err != nil {
+	if err := composeUpHeld(ctx, t.docker, t.supervisor, ingress.Project, []string{t.files.traefikCompose()}, nil); err != nil {
 		return err
 	}
 	t.mu.Lock()

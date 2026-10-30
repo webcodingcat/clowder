@@ -1,6 +1,7 @@
 package clusterdir
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -41,6 +42,31 @@ type Priorities struct {
 	Categories map[string]int `yaml:"categories,omitempty" json:"categories,omitempty"`
 }
 
+// Priority is a priority as a stack or service writes it: a number from 0
+// to 1000 or the name of a category; the zero value means "the cluster's
+// default". The cluster's categories turn it into a number (Resolve).
+type Priority struct {
+	Value    *int   `json:"value,omitempty"`
+	Category string `json:"category,omitempty"`
+}
+
+// Resolve turns a priority into a number with the categories: a number
+// stays, a category is looked up, none is the default.
+func (p Priorities) Resolve(priority Priority) (int, error) {
+	category := priority.Category
+	switch {
+	case priority.Value != nil:
+		return *priority.Value, nil
+	case category == "":
+		category = p.Default
+	}
+	value, ok := p.Categories[category]
+	if !ok {
+		return 0, fmt.Errorf("the cluster has no priority category %q", category)
+	}
+	return value, nil
+}
+
 // DefaultPriorities are the categories when cluster.yaml names none.
 func DefaultPriorities() Priorities {
 	return Priorities{
@@ -53,7 +79,28 @@ func DefaultPriorities() Priorities {
 // in. Load does it, and so does the cluster when it applies a config.
 func (c Config) WithDefaults() Config {
 	c.Priorities = c.Priorities.withDefaults()
+	c.Defaults.Reservations = c.Defaults.Reservations.withDefaults(DefaultReservations)
+	c.SystemReserve = c.SystemReserve.withDefaults(DefaultSystemReserve)
 	return c
+}
+
+// The resources cluster.yaml may leave out: what a service reserves without
+// deploy.resources.reservations, and what a host keeps for itself (the
+// system, Docker, clowderd, Traefik).
+var (
+	DefaultReservations  = Resources{Memory: "128M", CPUs: "0.1"}
+	DefaultSystemReserve = Resources{Memory: "512M", CPUs: "0.25"}
+)
+
+// withDefaults fills in each field left out.
+func (r Resources) withDefaults(defaults Resources) Resources {
+	if r.Memory == "" {
+		r.Memory = defaults.Memory
+	}
+	if r.CPUs == "" {
+		r.CPUs = defaults.CPUs
+	}
+	return r
 }
 
 // withDefaults fills in what cluster.yaml leaves out: without categories the

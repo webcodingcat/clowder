@@ -125,7 +125,8 @@ type Host struct {
 	Version string `json:"version,omitempty"`
 }
 
-// Resources are what a host offers after the system reserve.
+// Resources are a host's memory and CPUs, as it reports them; the
+// scheduler takes system_reserve off.
 type Resources struct {
 	MemoryBytes int64   `json:"memory_bytes"`
 	CPUs        float64 `json:"cpus"`
@@ -163,16 +164,39 @@ type Stack struct {
 	Priority int               `json:"priority"`
 	// Ports ("udp/9987") and Routes ("shop.example.com/") are what the stack
 	// publishes; no other stack may have the same.
-	Ports  []string    `json:"ports,omitempty"`
-	Routes []string    `json:"routes,omitempty"`
-	Host   *HostID     `json:"host,omitempty"` // nil: not placed yet
-	Status StackStatus `json:"status"`
-	// Stopped lists services pushed out by higher priorities.
-	Stopped  []string  `json:"stopped,omitempty"`
-	LastMove time.Time `json:"last_move,omitzero"`
+	Ports  []string `json:"ports,omitempty"`
+	Routes []string `json:"routes,omitempty"`
+	// Services are what the scheduler needs of each service, by name.
+	Services map[string]Service `json:"services,omitempty"`
+	Host     *HostID            `json:"host,omitempty"` // nil: not placed yet
+	Status   StackStatus        `json:"status"`
+	// PushedOut are the services stopped for services of higher priority,
+	// sorted; only the leader changes the list (set-pushed-out).
+	PushedOut []string  `json:"pushed_out,omitempty"`
+	LastMove  time.Time `json:"last_move,omitzero"`
 	// WaitReason is why the placement cannot place the stack or a volume it
 	// newly names; empty while nothing waits. Display only.
 	WaitReason string `json:"wait_reason,omitempty"`
+	// WaitingSince is when the stack began to wait: kept while only the
+	// reason's text changes. It is in the state, not the leader's memory,
+	// so how long a stack has waited survives a change of leader; the
+	// alert for a stack that waits too long reads it.
+	WaitingSince time.Time `json:"waiting_since,omitzero"`
+}
+
+// Service is what the scheduler needs of one service of a stack, as the
+// API read it from the stack's Compose file.
+type Service struct {
+	// Priority is as written: the service's own, else the stack's; the
+	// scheduler resolves it with the current cluster.yaml, so a changed
+	// category takes effect without a new apply.
+	Priority clusterdir.Priority `json:"priority,omitzero"`
+	// MemoryBytes and CPUs are the reservations; zero means
+	// defaults.reservations.
+	MemoryBytes int64   `json:"memory_bytes,omitempty"`
+	CPUs        float64 `json:"cpus,omitempty"`
+	// DependsOn are the services of the stack it needs.
+	DependsOn []string `json:"depends_on,omitempty"`
 }
 
 // OwnerCLI owns the stacks applied with clowder stack apply.

@@ -10,13 +10,15 @@ import (
 	"strings"
 
 	"github.com/compose-spec/compose-go/v2/types"
+
+	"github.com/webcodingcat/clowder/internal/clusterdir"
 )
 
 // Stack is a Compose project that passed clowder's checks, with the
 // x-clowder fields read into typed values.
 type Stack struct {
 	Name     string
-	Priority Priority
+	Priority clusterdir.Priority
 	// Exports are services of this stack that other stacks may reach.
 	Exports []string
 	// Imports are services of other stacks ("stack/service") this one reaches.
@@ -34,17 +36,11 @@ type Stack struct {
 	source *types.Project
 }
 
-// Priority is either a number from 0 to 1000 or the name of a category from
-// cluster.yaml; the zero value means "the cluster's default".
-type Priority struct {
-	Value    *int
-	Category string
-}
-
 // Service holds what clowder needs to know about one service.
 type Service struct {
-	Name     string
-	Priority Priority
+	Name string
+	// Priority is the service's own; the zero value means the stack's.
+	Priority clusterdir.Priority
 	// HTTP is the route through Traefik, if the service has one.
 	HTTP *HTTPRoute
 	// Restart is the restart rule from Compose; the agent applies it itself.

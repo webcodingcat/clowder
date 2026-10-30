@@ -48,6 +48,7 @@ const (
 	KindDeleteStack         = "delete-stack"
 	KindSetStackStatus      = "set-stack-status"
 	KindSetStackWaitReason  = "set-stack-wait-reason"
+	KindSetPushedOut        = "set-pushed-out"
 	KindPutVolume           = "put-volume"
 	KindDeleteVolume        = "delete-volume"
 	KindForgetCopy          = "forget-copy"
@@ -119,6 +120,7 @@ var handlers = map[string]handler{
 	KindDeleteStack:         decoded(applyDeleteStack),
 	KindSetStackStatus:      decoded(applySetStackStatus),
 	KindSetStackWaitReason:  decoded(applySetStackWaitReason),
+	KindSetPushedOut:        decoded(applySetPushedOut),
 	KindPutVolume:           decoded(applyPutVolume),
 	KindDeleteVolume:        decoded(applyDeleteVolume),
 	KindForgetCopy:          decoded(applyForgetCopy),

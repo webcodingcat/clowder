@@ -60,8 +60,8 @@ func source(stack, volumes string) string {
 func TestAStackNeverAppliedIsNotPlaced(t *testing.T) {
 	current := cluster()
 	current.Stacks["shop"] = &state.Stack{Name: "shop", Status: state.StackCreated}
-	if placements, waiting := Plan(context.Background(), current); len(placements)+len(waiting) > 0 {
-		t.Errorf("placements %+v, waiting %+v", placements, waiting)
+	if decisions := Plan(context.Background(), current); len(decisions.Placements)+len(decisions.Waiting) > 0 {
+		t.Errorf("decisions %+v", decisions)
 	}
 }
 
@@ -70,7 +70,8 @@ func TestAStackGoesWhereItsVolumesFit(t *testing.T) {
 	current.Stacks["shop"] = &state.Stack{Name: "shop", Source: source("shop",
 		"  db:\n    x-clowder: {class: fast, size: 20G, replicas: 1}\n"+
 			"  cache:\n    x-clowder: {class: any, size: 12G, replicas: 0}\n")}
-	placements, waiting := Plan(context.Background(), current)
+	decisions := Plan(context.Background(), current)
+	placements, waiting := decisions.Placements, decisions.Waiting
 	if len(waiting) > 0 || len(placements) != 1 || !placements[0].Place || placements[0].Host != 0 {
 		t.Fatalf("placements %+v, waiting %+v", placements, waiting)
 	}
@@ -95,7 +96,8 @@ func TestStacksThatDoNotFitWaitAndTakeNothing(t *testing.T) {
 			"  huge:\n    x-clowder: {class: fast, size: 75G, replicas: 1}\n")}
 	current.Stacks["next"] = &state.Stack{Name: "next", Source: source("next",
 		"  data:\n    x-clowder: {class: fast, size: 80G, replicas: 1}\n")}
-	placements, waiting := Plan(context.Background(), current)
+	decisions := Plan(context.Background(), current)
+	placements, waiting := decisions.Placements, decisions.Waiting
 	// huge (first by name) fits, small after it does not
 	// the reason is shown to users: sizes in units, the hosts' reasons joined
 	if len(waiting) != 1 || waiting[0].Stack != "big" ||
@@ -120,7 +122,8 @@ func TestAPlacedStackGetsOnlyItsNewVolumes(t *testing.T) {
 		ID: "shop/db", SizeBytes: 20 * gib, Replicas: 1, Minor: &minor,
 		Placements: []state.Placement{{Host: 0, Class: "fast"}},
 	}
-	placements, waiting := Plan(context.Background(), current)
+	decisions := Plan(context.Background(), current)
+	placements, waiting := decisions.Placements, decisions.Waiting
 	if len(waiting) > 0 || len(placements) != 1 || placements[0].Place {
 		t.Fatalf("placements %+v, waiting %+v", placements, waiting)
 	}
@@ -129,7 +132,7 @@ func TestAPlacedStackGetsOnlyItsNewVolumes(t *testing.T) {
 		t.Errorf("new volumes %+v", files)
 	}
 	current.Stacks["shop"].Source = source("shop", "  db:\n    x-clowder: {class: fast, size: 20G, replicas: 1}\n")
-	if placements, _ := Plan(context.Background(), current); len(placements) != 0 {
+	if placements := Plan(context.Background(), current).Placements; len(placements) != 0 {
 		t.Errorf("a placed stack without new volumes: %+v", placements)
 	}
 }
@@ -138,7 +141,7 @@ func TestWithoutAnActiveHostEveryStackWaits(t *testing.T) {
 	current := cluster()
 	current.Hosts[0].Phase = state.Draining
 	current.Stacks["shop"] = &state.Stack{Name: "shop", Source: source("shop", "  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n")}
-	if _, waiting := Plan(context.Background(), current); len(waiting) != 1 || waiting[0].Reason != "no active host" {
+	if waiting := Plan(context.Background(), current).Waiting; len(waiting) != 1 || waiting[0].Reason != "no active host" {
 		t.Errorf("waiting %+v", waiting)
 	}
 }

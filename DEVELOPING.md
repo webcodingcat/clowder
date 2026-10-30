@@ -351,12 +351,12 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   another host, and about a stack only while it runs there, without moving it.
 - **In use so far:** `bootstrap` (init), `apply-config`, `add-user` (the first user),
   `set-host-phase` (host actions), `create-stack`, `put-stack` and `delete-stack` (the user),
-  `put-volume`, `set-stack-status` and `set-stack-wait-reason` (placement, the stack's
-  host), `set-ingress` (the ingress loop), `put-acme-account`, `put-acme-challenge`,
-  `delete-acme-challenge`, `put-certificate` and `delete-certificate` (the ACME loop),
-  `report-host` and `forget-copy` (each agent). The
-  other kinds (`delete-volume`, hosts joining, operations, users beyond the first) are there
-  for the next steps; they are tested, but nothing sends them yet.
+  `put-volume`, `set-stack-status`, `set-stack-wait-reason` and `set-pushed-out`
+  (placement, the stack's host), `set-ingress` (the ingress loop), `put-acme-account`,
+  `put-acme-challenge`, `delete-acme-challenge`, `put-certificate` and `delete-certificate`
+  (the ACME loop), `report-host` and `forget-copy` (each agent). The other kinds
+  (`delete-volume`, hosts joining, operations, users beyond the first) are there for the
+  next steps; they are tested, but nothing sends them yet.
 - **Retired copies.** A volume copy's data goes only when the state says so: `delete-stack`
   with its volumes, `delete-volume`, and a `put-volume` that changes the generation or takes
   a copy off a host each add the copies they give up to `Retired` (volume, generation,
@@ -644,15 +644,61 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 
 ## Placement (`internal/scheduler`, `internal/controller`)
 
-- `scheduler.Plan` reads the state and returns where pending stacks go and why the others
-  wait. So far a stack goes to the first active host where every new volume fits its pool
-  (`Fits`: without overcommit, the pool's volumes and the new one stay within the pool less
-  its reserve, a class's fallbacks included). Volumes and DRBD minors are taken only for a
-  stack that fits whole.
+- `scheduler.Plan` reads the state and returns its decisions: what hosts over capacity push
+  out, where pending stacks go (highest priority first), why the others wait, and which
+  pushed-out service may come back. Every new volume must fit its pool (`Fits`: without
+  overcommit, the pool's volumes and the new one stay within the pool less its reserve, a
+  class's fallbacks included). Volumes, DRBD minors and room are taken only for a stack that
+  fits.
+- **Room, one measure for everything.** A host offers what it reported (memory, CPUs) less
+  `system_reserve` (default 512M, 0.25). Each service of a stack on it that is `starting` or
+  `running` takes its reservations (`deploy.resources.reservations`, default
+  `defaults.reservations`, 128M and 0.1), unless it is pushed out. Nothing measures what
+  containers really use. `put-stack` carries what the scheduler needs of each service
+  (`PutStack.Services`: the priority as written, the reservations, `depends_on`), since the
+  state does not parse Compose files.
+- **Priorities.** A service's effective priority is the lowest of its own (else the
+  stack's) and of everything it depends on: stopping a service stops what depends on it, so
+  a running service never depends on a pushed-out one. Categories are resolved with the
+  current `cluster.yaml` at every pass (`Priorities.Resolve`), so a changed category counts
+  without a new apply; pending stacks are placed by their highest service's. Only
+  `depends_on` within a stack counts: a service another stack imports
+  (`x-clowder.imports`) may be pushed out, and that stack loses it as it would lose any
+  service it does not own.
+- **Waiting.** `Stack.WaitingSince` is set with the first wait reason and kept while only
+  its text changes; it is in the state so the alert for a stack that waits too long
+  survives a change of leader.
+- **Placing.** A new stack goes to the active host where all of it fits with the least
+  memory left, else to the first where it fits by pushing out (`fitStack`): its services,
+  highest effective priority first and at equal priority what others depend on first, each
+  take free room or push out services of any stack below their own priority, lowest first,
+  each with what depends on it. A service that finds no room even so starts pushed out, with
+  what depends on it within the stack; the stack waits only if its first service finds no
+  room. So a stack's `cache` at 200 never pushes out another stack's service at 500 because
+  the stack's `api` is at 800. The new stack's own list is written afresh at every
+  placement, so one left by an earlier leader is replaced.
+- **Over capacity** (a raised `system_reserve`, a stack whose new generation reserves more):
+  services below the host's highest effective priority go, lowest first, until the rest
+  fits; services at that priority never go for this. If that is not enough, nothing goes and
+  the leader logs the host once (an alert once clowder has alerts).
+- **Coming back.** A pushed-out service whose dependencies all run comes back once its
+  reservations and 5 % more fit its host's free room for 60 s: highest effective priority
+  first, but one that does not fit does not block a smaller one. One service per decision,
+  since its return changes the room, and only in a pass that places and pushes out nothing:
+  a waiting stack gets room before a pushed-out service does. The 60 s are kept in the
+  leader's memory and start again after a change of leader.
 - `controller.RunPlacement` runs on every agent but acts only on the leader. It plans on a
-  copy of the state (`State.Copy`), outside the lock Raft's `Apply` waits for, then writes the
-  volumes (`put-volume`), then the stack's host and `starting` (`set-stack-status`). The
-  stack's host does the rest.
+  copy of the state (`State.Copy`), outside the lock Raft's `Apply` waits for. Per placement
+  it writes what the stack pushes out (`set-pushed-out`, one command for every stack it
+  touches), then the volumes (`put-volume`), then the stack's host and `starting`
+  (`set-stack-status`). If the leader changes in between, the services stay pushed out
+  without the new stack and come back by the rule above. The stack's host does the rest.
+- **On the host** a pushed-out service is left out of `compose up` (`--scale <service>=0`,
+  which also removes its running container), and the supervisor's rule for it is "no
+  restart". Only the leader changes `Stack.PushedOut`; a host's status report no longer
+  carries it. `put-stack` drops services the new generation no longer has. Whether compose
+  up leaves the rest running is checked by the live tests: `bin/dev test-tools` has no
+  Docker daemon.
 
 ## Traefik (`internal/ingress`, `agent/traefik.go`)
 

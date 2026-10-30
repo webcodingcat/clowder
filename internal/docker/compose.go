@@ -17,13 +17,19 @@ const (
 
 // ComposeUp starts or updates a stack from its rendered Compose files (the
 // stack, and its secret variables if it has any): Docker recreates only the
-// containers whose configuration changed.
-func (c *Client) ComposeUp(ctx context.Context, stack string, files []string) error {
+// containers whose configuration changed. The services left out are scaled
+// to 0, which also removes their running containers; nothing that runs may
+// depend on them.
+func (c *Client) ComposeUp(ctx context.Context, stack string, files, leftOut []string) error {
 	args := []string{"compose", "--project-name", stack}
 	for _, file := range files {
 		args = append(args, "--file", file)
 	}
-	_, err := command.Run(ctx, upTimeout, "docker", append(args, "up", "--detach", "--remove-orphans")...)
+	args = append(args, "up", "--detach", "--remove-orphans")
+	for _, service := range leftOut {
+		args = append(args, "--scale", service+"=0")
+	}
+	_, err := command.Run(ctx, upTimeout, "docker", args...)
 	return err
 }
 

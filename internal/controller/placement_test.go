@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
@@ -124,12 +125,20 @@ func TestAPendingStackIsPlacedWithItsVolumes(t *testing.T) {
 	})
 }
 
+// newPlacer is the placement of l, for passes one by one, so a test knows
+// how many ran.
+func newPlacer(l *leader) *placer {
+	return &placer{
+		cluster: l, propose: l.propose, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		overCapacity: map[state.HostID]bool{},
+	}
+}
+
 func TestAStackThatFitsNowhereShowsWhyUntilItFits(t *testing.T) {
 	l := newLeader(t, 512<<20)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	// passes one by one, so the test knows how many ran
+	placement := newPlacer(l)
 	for range 3 {
-		place(context.Background(), l, l.propose, logger)
+		placement.place(context.Background())
 	}
 	l.Read(func(current *state.State) {
 		if reason := current.Stacks["shop"].WaitReason; reason != "node0: volume db (1G, class fast) fits no pool" {
@@ -150,10 +159,57 @@ func TestAStackThatFitsNowhereShowsWhyUntilItFits(t *testing.T) {
 		Host: 0, Version: "1.0.1",
 		Pools: map[string]state.Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: 100 << 30}},
 	})
-	place(context.Background(), l, l.propose, logger)
+	placement.place(context.Background())
 	l.Read(func(current *state.State) {
-		if stack := current.Stacks["shop"]; stack.Host == nil || stack.WaitReason != "" {
-			t.Errorf("after the pool grew: host %v, reason %q", stack.Host, stack.WaitReason)
+		if stack := current.Stacks["shop"]; stack.Host == nil || stack.WaitReason != "" || !stack.WaitingSince.IsZero() {
+			t.Errorf("after the pool grew: host %v, reason %q since %v", stack.Host, stack.WaitReason, stack.WaitingSince)
+		}
+	})
+}
+
+func TestAServicePushedOutComesBackAfterItFitAMinute(t *testing.T) {
+	l := newLeader(t, 100<<30)
+	// 1000M for services after the system reserve; shop's app takes
+	// 600M, the new stack's web 500M at a higher priority
+	l.apply(state.KindReportHost, state.HostActor(0), state.ReportHost{
+		Host: 0, Version: "1.0.0", Capacity: state.Resources{MemoryBytes: 1512 << 20, CPUs: 2.25},
+		Pools: map[string]state.Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: 100 << 30}},
+	})
+	low, high := 200, 800
+	l.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
+		Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
+		Source:   "name: shop\nservices: {app: {image: x}}\n",
+		Services: map[string]state.Service{"app": {Priority: clusterdir.Priority{Value: &low}, MemoryBytes: 600 << 20}},
+	})
+	placement := newPlacer(l)
+	placement.place(context.Background())
+	l.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Name: "web", Owner: state.OwnerCLI})
+	l.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
+		Name: "web", Owner: state.OwnerCLI, ConfigRevision: 1,
+		Source:   "name: web\nservices: {web: {image: x}}\n",
+		Services: map[string]state.Service{"web": {Priority: clusterdir.Priority{Value: &high}, MemoryBytes: 500 << 20}},
+	})
+	placement.place(context.Background())
+	l.Read(func(current *state.State) {
+		if fmt.Sprint(current.Stacks["shop"].PushedOut) != "[app]" || current.Stacks["web"].Host == nil {
+			t.Fatalf("shop pushed out %v, web on %v", current.Stacks["shop"].PushedOut, current.Stacks["web"].Host)
+		}
+	})
+
+	l.apply(state.KindDeleteStack, state.UserActor("alice"), state.DeleteStack{Name: "web"})
+	if again := placement.place(context.Background()); again <= 0 || again > restartAfter {
+		t.Errorf("look again in %v", again)
+	}
+	l.Read(func(current *state.State) {
+		if len(current.Stacks["shop"].PushedOut) != 1 {
+			t.Error("app came back before it fit a minute")
+		}
+	})
+	placement.fittingSince = time.Now().Add(-restartAfter) // a minute went by
+	placement.place(context.Background())
+	l.Read(func(current *state.State) {
+		if len(current.Stacks["shop"].PushedOut) != 0 {
+			t.Errorf("app is still pushed out: %v", current.Stacks["shop"].PushedOut)
 		}
 	})
 }

@@ -93,6 +93,31 @@ func TestPriorityDefaultsAreCheckedAndFilledIn(t *testing.T) {
 	}
 }
 
+func TestAPriorityIsANumberACategoryOrTheDefault(t *testing.T) {
+	priorities := DefaultPriorities()
+	number := 42
+	for _, test := range []struct {
+		priority Priority
+		want     int
+	}{
+		{Priority{Value: &number}, 42}, {Priority{Category: "high"}, 700}, {Priority{}, 500},
+	} {
+		if got, err := priorities.Resolve(test.priority); err != nil || got != test.want {
+			t.Errorf("%+v: %d, %v", test.priority, got, err)
+		}
+	}
+	if _, err := priorities.Resolve(Priority{Category: "urgent"}); err == nil {
+		t.Error("an unknown category resolved")
+	}
+}
+
+func TestTheReservationsAndTheSystemReserveHaveDefaults(t *testing.T) {
+	config := Config{SystemReserve: Resources{Memory: "1G"}}.WithDefaults()
+	if config.SystemReserve != (Resources{Memory: "1G", CPUs: "0.25"}) || config.Defaults.Reservations != DefaultReservations {
+		t.Errorf("system reserve %+v, reservations %+v", config.SystemReserve, config.Defaults.Reservations)
+	}
+}
+
 func TestSecretsAreDecryptedWithTheUsersAgeKey(t *testing.T) {
 	useTestKey(t)
 	directory, err := Load(filepath.Join("testdata", "prod"))

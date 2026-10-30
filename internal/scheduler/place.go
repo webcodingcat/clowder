@@ -1,13 +1,17 @@
-// Package scheduler decides where stacks and their volumes go. It is pure
-// logic: it reads the state and returns decisions, which the controller on
-// the leader writes as commands.
+// Package scheduler decides where stacks and their volumes go and which
+// services give way to others. It is pure logic: it reads the state and
+// returns decisions, which the controller on the leader writes as commands.
 //
-// So far (phase 1a, one host): a stack goes to the first active host where
-// every volume fits its pool without overcommit, its storage class's
-// fallbacks included. Reservations, priorities and pushing out come in 1b.
+// Every service reserves memory and CPUs (its own reservations, else the
+// cluster's default); a host offers what it reported less system_reserve.
+// A new stack goes to a host where all of it fits, else to one where its
+// services push out services of lower effective priority, one service
+// after the other (fitStack). Phase 2 adds moving and replicating to make
+// room.
 package scheduler
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"maps"
@@ -28,6 +32,9 @@ type Placement struct {
 	// Place is false for a stack that keeps its host and only gets volumes.
 	Place   bool
 	Volumes []state.Volume
+	// PushedOut are the new pushed-out lists of the stacks a new stack
+	// touches, its own included (set-pushed-out, before the placement).
+	PushedOut map[string][]string
 }
 
 // Waiting is a stack that finds no place, with the reason.
@@ -36,47 +43,118 @@ type Waiting struct {
 	Reason string
 }
 
-// Plan places the stacks that have no host yet and the volumes that placed
-// stacks have gained.
-func Plan(ctx context.Context, current *state.State) ([]Placement, []Waiting) {
+// Restart brings one pushed-out service back.
+type Restart struct {
+	Stack, Service string
+	// PushedOut is the stack's list without the service.
+	PushedOut []string
+}
+
+// Decisions are what one plan decides, in the order the controller writes
+// them.
+type Decisions struct {
+	// PushOuts make hosts over capacity fit again, one set-pushed-out each.
+	PushOuts []map[string][]string
+	// OverCapacity are the hosts that do not fit even so: their highest
+	// priority alone reserves more than they offer.
+	OverCapacity []state.HostID
+	Placements   []Placement
+	Waiting      []Waiting
+	// Restart is the pushed-out service that fits again first, if any; it
+	// comes only when the plan places nothing and pushes nothing out, so a
+	// waiting stack gets room before a pushed-out service does.
+	Restart *Restart
+}
+
+// Plan makes hosts over capacity fit, places the volumes that placed stacks
+// have gained and the stacks that have no host yet (highest priority
+// first), and names the pushed-out service that may come back.
+func Plan(ctx context.Context, current *state.State) Decisions {
 	planner := newPlanner(current)
-	var placements []Placement
-	var waiting []Waiting
-	for _, name := range slices.Sorted(maps.Keys(current.Stacks)) {
-		stack := current.Stacks[name]
-		if stack.Status == state.StackCreated {
-			continue // never applied: nothing to place
+	var decisions Decisions
+	for _, id := range slices.Sorted(maps.Keys(current.Hosts)) {
+		lists, over := planner.room.fitOverCapacity(id)
+		if over {
+			decisions.OverCapacity = append(decisions.OverCapacity, id)
 		}
-		parsed, err := compose.Parse(ctx, name, []byte(stack.Source))
-		if err != nil {
-			waiting = append(waiting, Waiting{Stack: name, Reason: err.Error()})
-			continue
-		}
-		placement, reason := planner.place(stack, parsed)
-		switch {
-		case reason != "":
-			waiting = append(waiting, Waiting{Stack: name, Reason: reason})
-		case placement.Place || len(placement.Volumes) > 0:
-			placements = append(placements, placement)
+		if lists != nil {
+			decisions.PushOuts = append(decisions.PushOuts, lists)
 		}
 	}
-	return placements, waiting
+	var unplaced []*state.Stack
+	for _, name := range slices.Sorted(maps.Keys(current.Stacks)) {
+		stack := current.Stacks[name]
+		switch {
+		case stack.Status == state.StackCreated:
+			// never applied: nothing to place
+		case stack.Host == nil:
+			unplaced = append(unplaced, stack)
+		default:
+			decisions.add(planner.decide(ctx, stack))
+		}
+	}
+	// by the highest effective priority of their services, from the
+	// current categories like every other priority here
+	highest := func(stack *state.Stack) int {
+		value := 0
+		for service := range stack.Services {
+			value = max(value, planner.room.priority(serviceRef{stack.Name, service}))
+		}
+		return value
+	}
+	slices.SortStableFunc(unplaced, func(a, b *state.Stack) int { return cmp.Compare(highest(b), highest(a)) })
+	for _, stack := range unplaced {
+		decisions.add(planner.decide(ctx, stack))
+	}
+	if len(decisions.PushOuts) > 0 || slices.ContainsFunc(decisions.Placements, func(p Placement) bool { return p.Place }) {
+		return decisions
+	}
+	if ref, ok := planner.room.restartable(); ok {
+		pushedOut := slices.DeleteFunc(slices.Clone(current.Stacks[ref.stack].PushedOut),
+			func(service string) bool { return service == ref.service })
+		decisions.Restart = &Restart{Stack: ref.stack, Service: ref.service, PushedOut: pushedOut}
+	}
+	return decisions
+}
+
+// add takes one stack's placement or reason to wait.
+func (d *Decisions) add(placement Placement, waiting *Waiting) {
+	switch {
+	case waiting != nil:
+		d.Waiting = append(d.Waiting, *waiting)
+	case placement.Place || len(placement.Volumes) > 0:
+		d.Placements = append(d.Placements, placement)
+	}
+}
+
+// decide places one stack; a Waiting says why it cannot.
+func (p *planner) decide(ctx context.Context, stack *state.Stack) (Placement, *Waiting) {
+	parsed, err := compose.Parse(ctx, stack.Name, []byte(stack.Source))
+	if err != nil {
+		return Placement{}, &Waiting{Stack: stack.Name, Reason: err.Error()}
+	}
+	placement, reason := p.place(stack, parsed)
+	if reason != "" {
+		return Placement{}, &Waiting{Stack: stack.Name, Reason: reason}
+	}
+	return placement, nil
 }
 
 // planner keeps what the decisions so far have taken, so two stacks in one
-// plan do not both count on the same space or minor.
+// plan do not both count on the same space, minor or room.
 type planner struct {
 	current *state.State
 	classes map[string]clusterdir.StorageClass
 	// allocated sums the volumes on each host's pools.
 	allocated map[state.HostID]map[string][]int64
 	minors    map[int]bool
+	room      *room
 }
 
 func newPlanner(current *state.State) *planner {
 	p := &planner{
 		current: current, classes: current.Config.Spec.StorageClasses,
-		allocated: map[state.HostID]map[string][]int64{}, minors: map[int]bool{},
+		allocated: map[state.HostID]map[string][]int64{}, minors: map[int]bool{}, room: newRoom(current),
 	}
 	for _, volume := range current.Volumes {
 		if volume.Minor != nil {
@@ -98,27 +176,54 @@ func (p *planner) take(host state.HostID, pool string, size int64) {
 	p.allocated[host][pool] = append(p.allocated[host][pool], size)
 }
 
-// place decides for one stack; a reason means it waits.
+// place decides for one stack; a reason means it waits. A new stack goes
+// to the active host where all of it fits with the least room left (best
+// fit), else to the first where its services push out others.
 func (p *planner) place(stack *state.Stack, parsed *compose.Stack) (Placement, string) {
 	if stack.Host != nil {
 		volumes, reason := p.newVolumes(stack.Name, *stack.Host, parsed)
 		return Placement{Stack: stack.Name, Host: *stack.Host, Volumes: volumes}, reason
 	}
-	var reasons []string
+	var whole, pushing []stackFit
+	reasons := map[state.HostID]string{}
 	for _, id := range slices.Sorted(maps.Keys(p.current.Hosts)) {
 		if p.current.Hosts[id].Phase != state.Active {
 			continue
 		}
-		volumes, reason := p.newVolumes(stack.Name, id, parsed)
-		if reason == "" {
-			return Placement{Stack: stack.Name, Host: id, Place: true, Volumes: volumes}, ""
+		fit, reason := p.room.fitStack(stack.Name, id)
+		switch {
+		case reason != "":
+			reasons[id] = reason
+		case len(fit.pushed) == 0 && len(fit.own) == 0:
+			whole = append(whole, fit)
+		default:
+			pushing = append(pushing, fit)
 		}
-		reasons = append(reasons, p.current.Hosts[id].Name+": "+reason)
+	}
+	freeMemory := map[state.HostID]int64{}
+	for _, fit := range whole {
+		freeMemory[fit.host] = p.room.free(fit.host).memory
+	}
+	slices.SortStableFunc(whole, func(a, b stackFit) int { return cmp.Compare(freeMemory[a.host], freeMemory[b.host]) })
+	for _, fit := range append(whole, pushing...) {
+		volumes, reason := p.newVolumes(stack.Name, fit.host, parsed)
+		if reason != "" {
+			reasons[fit.host] = reason
+			continue
+		}
+		return Placement{
+			Stack: stack.Name, Host: fit.host, Place: true, Volumes: volumes,
+			PushedOut: p.room.commit(stack.Name, fit),
+		}, ""
 	}
 	if len(reasons) == 0 {
 		return Placement{}, "no active host"
 	}
-	return Placement{}, strings.Join(reasons, "; ")
+	var each []string
+	for _, id := range slices.Sorted(maps.Keys(reasons)) {
+		each = append(each, p.current.Hosts[id].Name+": "+reasons[id])
+	}
+	return Placement{}, strings.Join(each, "; ")
 }
 
 // allocation is space a volume takes in a pool.

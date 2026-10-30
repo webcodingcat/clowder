@@ -28,7 +28,7 @@ import (
 // Docker is what the agent needs from Docker; docker.Client is the real one.
 type Docker interface {
 	supervisor.Docker
-	ComposeUp(ctx context.Context, stack string, files []string) error
+	ComposeUp(ctx context.Context, stack string, files, leftOut []string) error
 	ComposeDown(ctx context.Context, stack, file string) error
 	ComposePs(ctx context.Context, stack, file string) (string, error)
 	ComposeLogs(ctx context.Context, stack, file string, follow bool, out io.Writer) error
@@ -220,23 +220,22 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 			return err
 		}
 	}
-	if err := r.up(ctx, stack.Name, rendered, secrets); err != nil {
+	if err := r.up(ctx, stack.Name, rendered, secrets, stack.PushedOut); err != nil {
 		return err
 	}
 	if stack.Status == state.StackRunning {
 		return nil
 	}
 	return r.report(ctx, state.KindSetStackStatus, state.SetStackStatus{
-		Name: stack.Name, Status: state.StackRunning, Host: stack.Host, Stopped: stack.Stopped,
-		Generation: stack.Generation,
+		Name: stack.Name, Status: state.StackRunning, Host: stack.Host, Generation: stack.Generation,
 	})
 }
 
-// up writes a stack's Compose file and secrets and runs compose up, unless
-// all of it came up before. A failed compose up is tried again at the next
-// pass.
-func (r *stackRunner) up(ctx context.Context, name string, rendered []byte, secrets stackSecrets) error {
-	hash := upHash(rendered, secrets)
+// up writes a stack's Compose file and secrets and runs compose up without
+// the pushed-out services, unless all of it came up before. A failed
+// compose up is tried again at the next pass.
+func (r *stackRunner) up(ctx context.Context, name string, rendered []byte, secrets stackSecrets, pushedOut []string) error {
+	hash := upHash(rendered, secrets, pushedOut)
 	r.mu.Lock()
 	applied, ok := r.applied[name]
 	r.mu.Unlock()
@@ -254,7 +253,7 @@ func (r *stackRunner) up(ctx context.Context, name string, rendered []byte, secr
 	if secrets.env != nil {
 		files = append(files, r.files.secretEnvFile(name))
 	}
-	if err := composeUpHeld(ctx, r.docker, r.supervisor, name, files); err != nil {
+	if err := composeUpHeld(ctx, r.docker, r.supervisor, name, files, pushedOut); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -265,19 +264,25 @@ func (r *stackRunner) up(ctx context.Context, name string, rendered []byte, secr
 
 // composeUpHeld runs compose up for a project while the supervisor holds
 // it: containers that compose up stops or recreates do not crash.
-func composeUpHeld(ctx context.Context, dockerAPI Docker, holder *supervisor.Supervisor, project string, files []string) error {
+func composeUpHeld(ctx context.Context, dockerAPI Docker, holder *supervisor.Supervisor, project string,
+	files, leftOut []string,
+) error {
 	release := holder.Hold(project)
 	defer release()
-	return dockerAPI.ComposeUp(ctx, project, files)
+	return dockerAPI.ComposeUp(ctx, project, files, leftOut)
 }
 
 // upHash covers everything compose up reads: the rendered file, the secret
-// variables and the secret files.
-func upHash(rendered []byte, secrets stackSecrets) [32]byte {
+// variables, the secret files and the services left out (the state keeps
+// them sorted).
+func upHash(rendered []byte, secrets stackSecrets, pushedOut []string) [32]byte {
 	hash := sha256.New()
 	writeParts(hash, rendered, secrets.env)
 	for _, name := range slices.Sorted(maps.Keys(secrets.files)) {
 		writeParts(hash, []byte(name), secrets.files[name])
+	}
+	for _, service := range pushedOut {
+		writeParts(hash, []byte("pushed out"), []byte(service))
 	}
 	return [32]byte(hash.Sum(nil))
 }
