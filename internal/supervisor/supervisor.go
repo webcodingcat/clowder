@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,6 +69,15 @@ type Supervisor struct {
 	// crashes counts each container's restarts since it last ran stably.
 	crashes map[string]int
 	started map[string]time.Time
+	// restarts counts every restart of each service since the agent
+	// started, for /metrics; a deleted stack's count stays until then,
+	// as a counter must not go back
+	restarts map[Service]int
+}
+
+// Service names a service by its stack (the Compose project) and name.
+type Service struct {
+	Stack, Name string
 }
 
 // New makes a supervisor; missed is called after a break in Docker's
@@ -76,8 +86,16 @@ func New(dockerAPI Docker, rules Rules, backoff Backoff, missed, seen func(), lo
 	return &Supervisor{
 		docker: dockerAPI, rules: rules, backoff: backoff, missed: missed, seen: seen, logger: logger,
 		held: map[string]int{}, stopped: map[string]bool{},
-		crashes: map[string]int{}, started: map[string]time.Time{},
+		crashes: map[string]int{}, started: map[string]time.Time{}, restarts: map[Service]int{},
 	}
+}
+
+// Restarts are how often the supervisor restarted each service (crashed or
+// unhealthy) since the agent started.
+func (s *Supervisor) Restarts() map[Service]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return maps.Clone(s.restarts)
 }
 
 // Hold registers that the agent itself is about to stop or recreate a
@@ -167,6 +185,7 @@ func (s *Supervisor) crashed(ctx context.Context, stack, service, id string, exi
 	restart := known && !held && !stopped && restarts(rule.Restart, exitCode, attempt)
 	if restart {
 		s.crashes[id] = attempt + 1
+		s.restarts[Service{stack, service}]++
 	}
 	s.mu.Unlock()
 	if !restart {
@@ -216,6 +235,7 @@ func (s *Supervisor) unhealthy(ctx context.Context, stack, service, id string) {
 	restart := known && !held && rule.RestartUnhealthy
 	if restart {
 		s.crashes[id] = attempt + 1
+		s.restarts[Service{stack, service}]++
 	}
 	s.mu.Unlock()
 	if !restart {

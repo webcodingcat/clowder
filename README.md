@@ -18,6 +18,9 @@ upgrade a running cluster. On one host, what runs today:
   `cluster.yaml`), with a reminder every 6 hours and an all-clear; an optional heartbeat
   lets an outside service notice when the cluster falls silent. `clowder cluster status`
   shows the open alerts, `clowder alert test` tries every channel.
+- Every host serves `/metrics` for Prometheus on its node address, port 7444: the host's
+  phase, pools, containers and restarts, and from the leader the room of each host, the
+  certificates' expiry and the open alerts. Only the cluster's hosts reach it.
 - `clowder stack create|apply|delete|ps|logs` runs Compose stacks with their volumes and
   secrets.
 - Every service reserves memory and CPUs (`deploy.resources.reservations`, else

@@ -173,7 +173,20 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		return err
 	}
 	servers = append(servers, challenges)
-	logger.Info("serving", "host", host.Name, "api", host.apiAddresses(), "raft", host.raftAddress())
+	source := &metricsSource{
+		host: host, cluster: node, docker: parts.Docker, restarts: runner.supervisor.Restarts,
+		failures: alerts.Failures, memory: readRSS, logger: logger,
+	}
+	exporter, err := serveMetrics(source, metricsAddress(host), logger)
+	if err != nil {
+		for _, started := range servers {
+			_ = started.Close() // the listen error is the one to report
+		}
+		return err
+	}
+	servers = append(servers, exporter)
+	logger.Info("serving", "host", host.Name, "api", host.apiAddresses(), "raft", host.raftAddress(),
+		"metrics", metricsAddress(host))
 	if err := notify("READY=1"); err != nil {
 		logger.Warn("systemd", "error", err)
 	}

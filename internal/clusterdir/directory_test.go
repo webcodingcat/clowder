@@ -240,8 +240,7 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 			},
 			Heartbeat: &Heartbeat{Interval: "often"},
 		},
-		Metrics: Metrics{Listen: "everywhere"},
-		ACME:    ACME{Directory: "acme.example.com", Email: "ops", CA: "../ca.pem", RenewBefore: "soon"},
+		ACME: ACME{Directory: "acme.example.com", Email: "ops", CA: "../ca.pem", RenewBefore: "soon"},
 	}
 	want := []string{
 		`acme.directory "acme.example.com"`, `acme.email "ops"`, `"../ca.pem" is not a path`, `renew_before "soon"`,
@@ -251,7 +250,7 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 		`falls back to "slow"`, "storage class empty", "resync_rate", "top: 2000",
 		`default "medium"`, `"Monitoring" is not a stack name`, "reservations.memory", "reservations.cpus", `"borg"`,
 		"webhook: {secret", "type is not discord", `min_severity "loud"`, "url: {secret",
-		"heartbeat.url", `interval "often"`, `listen "everywhere"`, "backup.target.url", "backup.password",
+		"heartbeat.url", `interval "often"`, "backup.target.url", "backup.password",
 		"smtp needs host and port",
 	}
 	problems := Check(config)

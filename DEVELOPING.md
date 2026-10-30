@@ -84,7 +84,7 @@ clowder is built in phases; each ends with live tests on HLab.
 |---|---|---|
 | 0 | the spike: DRBD quorum and fencing, WireGuard, the real client IP, on three hosts | done |
 | 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | done |
-| 1b | ingress (Traefik, ACME), priorities, alerts, still on one host | |
+| 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | |
 | 2 | three hosts: replication, failover with fencing | |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
@@ -111,6 +111,9 @@ Known gaps to close in phase 2. They do no harm on a single host:
   later pass may pick another host for the stack.
 - The ACME self-check asks the Floating IP, which reaches the leader's own Traefik; with
   several hosts it must ask the ingress host instead (Certificates of the routes).
+- A Prometheus in a stack or outside the cluster cannot reach `/metrics` yet: only the
+  hosts reach the node address. The way in (through Traefik, or a permission for certain
+  stacks) comes when one is needed.
 - A host that falls silent raises no alert: `docker-down` and the pools come from the host's
   own report, which a dead host does not send. On one host the heartbeat covers it; with
   several, the leader needs an alert for a host whose reports stop.
@@ -220,7 +223,8 @@ Packages in *italics* do not exist yet.
 
 - **Portable**: `cli`, `api`, `clusterdir`, `sopsage`, `pki`, `compose`, `units`, `names`
   (the rules for the names users give), `buildinfo`, `logging`, `atomicfile` (files written
-  whole or not at all). The CLI may import only these. depguard (rule `cli-portable` in
+  whole or not at all), `metrics` (Prometheus' text format). The CLI may import only
+  these. depguard (rule `cli-portable` in
   `.golangci.yml`) refuses direct imports of the Linux-only packages in `cmd/clowder` and
   `internal/cli`; the cross build for Windows and macOS catches indirect ones.
 - **Pure logic, no I/O**: `scheduler`, `state`. Their tests need no host, files or network;
@@ -867,6 +871,22 @@ resolve at every report. Likewise an alert that gets better and then worse again
 severity the channels were told of, sends nothing new: only its reminder and its
 all-clear. The quorum watch (an agent without quorum alerts by itself) comes with phase 2:
 one host has no quorum to lose.
+
+## Metrics (`internal/metrics`, `agent/metrics.go`)
+
+- Every agent serves `/metrics` on its node address, port 7444 (`MetricsPort`), plain HTTP
+  without authentication: only the cluster's hosts reach the node address, through
+  WireGuard; containers do not (the nft table). Nothing in `cluster.yaml` changes that.
+- `internal/metrics` writes Prometheus' text format by hand, sorted, so it is tested
+  against golden files (`agent/testdata/metrics-*.golden.txt`); the official client
+  library would bring more into clowderd than the few dozen values need.
+- Each agent exports what is about its own host: its phase and whether it leads, the Raft
+  index, the pools' use, Docker, the root file system, the containers of its stacks by
+  state, the supervisor's restarts per service and its own resident memory. What the
+  cluster has once only the leader exports, so a Prometheus that scrapes every host
+  counts it once: each host's room as the scheduler counts it (`scheduler.Rooms`), the
+  certificates' expiry, the open alerts by severity and the failed deliveries.
+- `promtool check metrics` and a scraping Prometheus come with the live tests.
 
 ## Containers (`internal/docker`, `internal/supervisor`)
 

@@ -34,7 +34,6 @@ type Config struct {
 	Backup         *Backup                 `yaml:"backup,omitempty" json:"backup,omitempty"`
 	Alerts         *Alerts                 `yaml:"alerts,omitempty" json:"alerts,omitempty"`
 	ACME           ACME                    `yaml:"acme,omitempty" json:"acme,omitempty"`
-	Metrics        Metrics                 `yaml:"metrics,omitempty" json:"metrics,omitempty"`
 }
 
 // Priorities are the categories a stack or service may name instead of a
@@ -292,10 +291,4 @@ func (a ACME) DirectoryURL() string {
 		return DefaultACMEDirectory
 	}
 	return a.Directory
-}
-
-// Metrics configures /metrics.
-type Metrics struct {
-	// Listen is "node" (default) or "node+underlay".
-	Listen string `yaml:"listen,omitempty" json:"listen,omitempty" jsonschema:"enum=node,enum=node+underlay"`
 }

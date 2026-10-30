@@ -84,6 +84,32 @@ type room struct {
 	effective map[string]map[string]int
 }
 
+// HostRoom is what a host offers its services and what they reserve, as
+// the scheduler counts it: memory in bytes, CPUs in thousandths.
+type HostRoom struct {
+	OfferedMemory, ReservedMemory       int64
+	OfferedMilliCPUs, ReservedMilliCPUs int64
+}
+
+// Rooms is the room of each host that is not removed, as the scheduler
+// counts it for placing (/metrics shows it).
+func Rooms(current *state.State) map[state.HostID]HostRoom {
+	r := newRoom(current)
+	rooms := map[state.HostID]HostRoom{}
+	for id, host := range current.Hosts {
+		if host.Phase == state.Removed {
+			continue
+		}
+		offered, free := r.capacity(id), r.free(id)
+		reserved := offered.minus(free)
+		rooms[id] = HostRoom{
+			OfferedMemory: offered.memory, ReservedMemory: reserved.memory,
+			OfferedMilliCPUs: offered.milliCPUs, ReservedMilliCPUs: reserved.milliCPUs,
+		}
+	}
+	return rooms
+}
+
 func newRoom(current *state.State) *room {
 	config := current.Config.Spec.WithDefaults()
 	r := &room{

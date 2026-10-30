@@ -198,6 +198,19 @@ func TestAWaitingStackGetsRoomBeforeAPushedOutService(t *testing.T) {
 	}
 }
 
+func TestRoomsAreWhatTheHostsOfferAndTheirServicesReserve(t *testing.T) {
+	current := roomCluster(1000)
+	running(current, "shop", shop(), "cache") // db and app run: 600M and 0.2 CPUs
+	current.Hosts[1] = &state.Host{ID: 1, Name: "node1", Phase: state.Removed}
+	rooms := Rooms(current)
+	want := HostRoom{
+		OfferedMemory: 1000 * mib, ReservedMemory: 600 * mib, OfferedMilliCPUs: 4000, ReservedMilliCPUs: 200,
+	}
+	if len(rooms) != 1 || rooms[0] != want {
+		t.Errorf("rooms %+v, want only node0 with %+v", rooms, want)
+	}
+}
+
 func TestCategoriesComeFromTheCurrentClusterYAML(t *testing.T) {
 	current := roomCluster(1000)
 	current.Config.Spec.Priorities = clusterdir.Priorities{

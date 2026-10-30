@@ -104,6 +104,9 @@ const (
 	Removed    HostPhase = "removed"
 )
 
+// Phases are all phases of a host, in the order of a host's life.
+var Phases = []HostPhase{Joining, Passive, Active, Draining, Failed, Fenced, Recovering, Disabled, Removed}
+
 // Host is one member of the cluster.
 type Host struct {
 	ID        HostID     `json:"id"`

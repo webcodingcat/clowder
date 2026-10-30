@@ -97,9 +97,6 @@ func Check(config Config) Problems {
 	if len(files) > maxFiles {
 		report("%s names %d files; at most %d are allowed", ConfigFile, len(files), maxFiles)
 	}
-	if listen := config.Metrics.Listen; listen != "" && listen != "node" && listen != "node+underlay" {
-		report("metrics.listen %q is neither node nor node+underlay", listen)
-	}
 	return problems
 }
 

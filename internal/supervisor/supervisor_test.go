@@ -106,11 +106,14 @@ func event(action, service string, exitCode int) docker.Event {
 func settle() { time.Sleep(30 * time.Millisecond) }
 
 func TestACrashedContainerIsRestarted(t *testing.T) {
-	_, fake := running(t)
+	supervisor, fake := running(t)
 	fake.events <- event("die", "app", 137)
 	settle()
 	if started, _ := fake.counts(); started != 1 {
 		t.Errorf("%d starts, want 1", started)
+	}
+	if restarts := supervisor.Restarts(); restarts[Service{"shop", "app"}] != 1 || len(restarts) != 1 {
+		t.Errorf("restarts %v", restarts)
 	}
 }
 

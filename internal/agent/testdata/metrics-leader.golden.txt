@@ -1,0 +1,66 @@
+# HELP clowder_agent_memory_bytes Resident memory of clowderd.
+# TYPE clowder_agent_memory_bytes gauge
+clowder_agent_memory_bytes{host="node0"} 42991616
+# HELP clowder_alert_deliveries_failed Alert messages a channel has not taken yet.
+# TYPE clowder_alert_deliveries_failed gauge
+clowder_alert_deliveries_failed 1
+# HELP clowder_alerts_open Open alerts by severity.
+# TYPE clowder_alerts_open gauge
+clowder_alerts_open{severity="critical"} 0
+clowder_alerts_open{severity="info"} 0
+clowder_alerts_open{severity="warning"} 1
+# HELP clowder_certificate_expiry_seconds When a route's certificate ends, in Unix seconds.
+# TYPE clowder_certificate_expiry_seconds gauge
+clowder_certificate_expiry_seconds{domain="shop.example.com"} 1797776000
+# HELP clowder_container_restarts_total Restarts the supervisor began for a service's containers (crashed or unhealthy) since clowderd started.
+# TYPE clowder_container_restarts_total counter
+clowder_container_restarts_total{host="node0",service="app",stack="shop"} 3
+# HELP clowder_containers Containers of the stacks on this host, by state.
+# TYPE clowder_containers gauge
+clowder_containers{host="node0",service="app",stack="shop",state="exited"} 1
+clowder_containers{host="node0",service="app",stack="shop",state="running"} 1
+clowder_containers{host="node0",service="traefik",stack="clowder-traefik",state="running"} 1
+# HELP clowder_containers_listed 1 when the scrape could list the containers, so their values are complete.
+# TYPE clowder_containers_listed gauge
+clowder_containers_listed{host="node0"} 1
+# HELP clowder_docker_up 1 while Docker answers the agent's ping.
+# TYPE clowder_docker_up gauge
+clowder_docker_up{host="node0"} 1
+# HELP clowder_host_offered_cpus CPUs a host offers its services: its CPUs less what it keeps for itself.
+# TYPE clowder_host_offered_cpus gauge
+clowder_host_offered_cpus{host="node0"} 1.75
+# HELP clowder_host_offered_memory_bytes Memory a host offers its services: its memory less what it keeps for itself.
+# TYPE clowder_host_offered_memory_bytes gauge
+clowder_host_offered_memory_bytes{host="node0"} 3758096384
+# HELP clowder_host_phase The host's phase: 1 for the one it is in, 0 for the others.
+# TYPE clowder_host_phase gauge
+clowder_host_phase{host="node0",phase="active"} 1
+clowder_host_phase{host="node0",phase="disabled"} 0
+clowder_host_phase{host="node0",phase="draining"} 0
+clowder_host_phase{host="node0",phase="failed"} 0
+clowder_host_phase{host="node0",phase="fenced"} 0
+clowder_host_phase{host="node0",phase="joining"} 0
+clowder_host_phase{host="node0",phase="passive"} 0
+clowder_host_phase{host="node0",phase="recovering"} 0
+clowder_host_phase{host="node0",phase="removed"} 0
+# HELP clowder_host_reserved_cpus CPUs the services on a host reserve.
+# TYPE clowder_host_reserved_cpus gauge
+clowder_host_reserved_cpus{host="node0"} 0
+# HELP clowder_host_reserved_memory_bytes Memory the services on a host reserve.
+# TYPE clowder_host_reserved_memory_bytes gauge
+clowder_host_reserved_memory_bytes{host="node0"} 0
+# HELP clowder_leader 1 while this host leads the cluster.
+# TYPE clowder_leader gauge
+clowder_leader{host="node0"} 1
+# HELP clowder_pool_data_percent How full a thin pool's data is.
+# TYPE clowder_pool_data_percent gauge
+clowder_pool_data_percent{host="node0",pool="vg-fast/thin"} 42
+# HELP clowder_pool_metadata_percent How full a thin pool's metadata is.
+# TYPE clowder_pool_metadata_percent gauge
+clowder_pool_metadata_percent{host="node0",pool="vg-fast/thin"} 7
+# HELP clowder_raft_applied_index Raft index of the last command this host applied.
+# TYPE clowder_raft_applied_index gauge
+clowder_raft_applied_index{host="node0"} 9
+# HELP clowder_root_used_percent How full the root file system is.
+# TYPE clowder_root_used_percent gauge
+clowder_root_used_percent{host="node0"} 31
