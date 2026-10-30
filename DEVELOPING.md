@@ -111,6 +111,9 @@ Known gaps to close in phase 2. They do no harm on a single host:
   later pass may pick another host for the stack.
 - The ACME self-check asks the Floating IP, which reaches the leader's own Traefik; with
   several hosts it must ask the ingress host instead (Certificates of the routes).
+- A host that falls silent raises no alert: `docker-down` and the pools come from the host's
+  own report, which a dead host does not send. On one host the heartbeat covers it; with
+  several, the leader needs an alert for a host whose reports stop.
 - `examples/hetzner` ignores later changes to the server's user data, so a storage class
   added later gets a volume but no thin pool on an existing host.
 
@@ -227,7 +230,7 @@ Packages in *italics* do not exist yet.
 - **Decides**: `controller` (the leader's loops) writes Raft commands. It talks to external
   services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
   changes the host. Their clients sit beside it: `hoster` (with `hoster/hetzner`),
-  *`notify`*, and `x/crypto/acme`; depguard keeps them out of the CLI, the state and the
+  `notify`, and `x/crypto/acme`; depguard keeps them out of the CLI, the state and the
   scheduler.
 - **Changes the host**: `agent`, `supervisor`, `raftnode` (Raft over mTLS), `datakey` (the
   key file), `command` (host tools with a timeout) and the drivers `network`, `storage`,
@@ -354,7 +357,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   `put-volume`, `set-stack-status`, `set-stack-wait-reason` and `set-pushed-out`
   (placement, the stack's host), `set-ingress` (the ingress loop), `put-acme-account`,
   `put-acme-challenge`, `delete-acme-challenge`, `put-certificate` and `delete-certificate`
-  (the ACME loop), `report-host` and `forget-copy` (each agent). The other kinds
+  (the ACME loop), `put-alert` and `resolve-alert` (the alerts), `report-host` and
+  `forget-copy` (each agent). The other kinds
   (`delete-volume`, hosts joining, operations, users beyond the first) are there for the
   next steps; they are tested, but nothing sends them yet.
 - **Retired copies.** A volume copy's data goes only when the state says so: `delete-stack`
@@ -689,7 +693,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **Over capacity** (a raised `system_reserve`, a stack whose new generation reserves more):
   services below the host's highest effective priority go, lowest first, until the rest
   fits; services at that priority never go for this. If that is not enough, nothing goes and
-  the leader logs the host once (an alert once clowder has alerts).
+  the leader raises the alert `over-capacity`.
 - **Coming back.** A pushed-out service whose dependencies all run comes back once its
   reservations and 5 % more fit its host's free room for 60 s: highest effective priority
   first, but one that does not fit does not block a smaller one. One service per decision,
@@ -808,10 +812,61 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   state), because Let's Encrypt makes lifetimes shorter: by default when a third is left.
   `acme.renew_before` overrides that while it is shorter than the lifetime; a longer one
   would renew every new certificate at once, so the leader keeps the default for that
-  certificate and logs it (an alert once clowder has alerts). Both follow from the state alone, so no
-  setting and no change of leader can make it renew in a loop.
+  certificate and raises the alert `renew-before-ignored`. Both follow from the state
+  alone, so no setting and no change of leader can make it renew in a loop.
 - The tests run the whole order against a small ACME CA of their own
   (`controller/acme_test.go`), which validates by asking for the challenge.
+
+## Alerts (`internal/notify`, `controller/wanted.go`, `controller/alerts.go`)
+
+- **Channels** (`alerts.channels` in `cluster.yaml`, each with an optional
+  `min_severity`): Discord (an embed colored by severity), webhook (a JSON POST of
+  `notify.Message`) and email (port 465 with TLS from the start, any other port only with
+  STARTTLS; `smtp.ca` is a file next to `cluster.yaml`). URLs and passwords are secrets;
+  errors never name a URL. `http://` works, as the live test's receivers need.
+- **In the state** only the open alerts (`State.Alerts`, `put-alert`, `resolve-alert`): a
+  key of kind and subject (`pool-use/node0/vg/thin/data`), so one condition never has two
+  open alerts; a condition that gets worse keeps its key and changes its severity.
+  Subjects and messages hold no value that changes from report to report: each change is
+  a Raft write.
+- **In the leader's memory** (`controller.Alerts`): the deliveries. A message goes out when
+  an alert is raised or gets worse, every 6 h while it is open, and when it is resolved,
+  to each channel whose `min_severity` it reaches; the all-clear goes with the highest
+  severity told, so a channel for critical alerts gets it after a downgrade too. A failed
+  message is tried again after 1 minute, doubling up to an hour, and its channel gets
+  nothing more in that pass, so a dead mail server cannot hold up the loop; the heartbeat
+  goes first. Messages wait by the channel's place in `alerts.channels`, so a new
+  `cluster.yaml` drops them. `clowder cluster status` shows the failed ones: a follower
+  asks the leader (`GET /v1/internal/alerts/failures`).
+  After a change of leader the new leader reminds of each open alert once: a duplicate
+  rather than a lost alert. The heartbeat (`alerts.heartbeat`) is a GET every `interval`
+  (default 1m), in a loop of its own, so a slow channel cannot make it late.
+  `clowder alert test` sends a test alert to every channel at once, from the agent the CLI
+  asks: the one exception to "only the leader calls external services", so a channel can be
+  tried also while the cluster has no leader.
+- **Conditions** that the state does not show are held in memory (`controller.Conditions`)
+  with the time they began, by the loop that sees them: the Floating IP not held (the
+  ingress loop), a host over capacity (the placement), Docker not answering (the alerts,
+  from `report-host`). After a change of leader they start again, so a new alert comes a
+  little later rather than wrongly; one that is open stays until the loop that holds its
+  condition has looked (`Conditions.Seen`). An agent that leads no more forgets them.
+
+| Alert | Severity | Raised | Resolved |
+|---|---|---|---|
+| `pool-use` (data or metadata) | warning / critical | ≥ 80 % / ≥ 95 % | < 75 % / back to warning < 90 % |
+| `root-use` | warning | ≥ 90 % | < 85 % |
+| `docker-down` | critical | 2 min without an answer | answers |
+| `ingress-not-held` | critical | 5 min | held again |
+| `over-capacity` | warning | at once | fits again |
+| `certificate-not-renewed` | warning | less than half the renewal window left | renewed |
+| `renew-before-ignored` | warning | for any certificate | value changed |
+| `stack-waiting` | warning | 5 min (`WaitingSince`) | placed |
+
+A value is resolved below its raise threshold, so one that hovers there does not raise and
+resolve at every report. Likewise an alert that gets better and then worse again, up to the
+severity the channels were told of, sends nothing new: only its reminder and its
+all-clear. The quorum watch (an agent without quorum alerts by itself) comes with phase 2:
+one host has no quorum to lose.
 
 ## Containers (`internal/docker`, `internal/supervisor`)
 

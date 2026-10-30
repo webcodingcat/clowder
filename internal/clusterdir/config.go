@@ -2,8 +2,12 @@ package clusterdir
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/webcodingcat/clowder/internal/units"
 )
 
 // Config is cluster.yaml: everything cluster-wide. Changes take effect with
@@ -214,19 +218,55 @@ type AlertChannel struct {
 	To          []string   `yaml:"to,omitempty" json:"to,omitempty"`
 }
 
-// SMTP is the mail server of an email channel.
+// The severities of an alert, which a channel's min_severity names.
+const (
+	SeverityInfo     = "info"
+	SeverityWarning  = "warning"
+	SeverityCritical = "critical"
+)
+
+// Severities are the severities, lowest first.
+var Severities = []string{SeverityInfo, SeverityWarning, SeverityCritical}
+
+// AtLeast tells whether severity is min or above; an empty min is info.
+func AtLeast(severity, min string) bool {
+	if min == "" {
+		min = SeverityInfo
+	}
+	return slices.Index(Severities, severity) >= slices.Index(Severities, min)
+}
+
+// SMTP is the mail server of an email channel. Port 465 speaks TLS from the
+// start; any other port must offer STARTTLS.
 type SMTP struct {
 	Host     string     `yaml:"host" json:"host" jsonschema:"required"`
 	Port     int        `yaml:"port" json:"port" jsonschema:"required"`
 	User     string     `yaml:"user,omitempty" json:"user,omitempty"`
 	Password *SecretRef `yaml:"password,omitempty" json:"password,omitempty"`
+	// CA is a PEM file next to cluster.yaml, written with "/", that the
+	// leader trusts for the server besides the system's (a test CA).
+	CA string `yaml:"ca,omitempty" json:"ca,omitempty"`
 }
 
 // Heartbeat is called by the leader at an interval; an external service
 // alarms when the calls stop.
 type Heartbeat struct {
-	URL      SecretRef `yaml:"url" json:"url" jsonschema:"required"`
-	Interval string    `yaml:"interval,omitempty" json:"interval,omitempty"`
+	URL SecretRef `yaml:"url" json:"url" jsonschema:"required"`
+	// Interval is a duration like "1m" (the default).
+	Interval string `yaml:"interval,omitempty" json:"interval,omitempty"`
+}
+
+// DefaultHeartbeatInterval is how often the heartbeat is called when
+// cluster.yaml names no interval.
+const DefaultHeartbeatInterval = time.Minute
+
+// Every is how often the heartbeat is called; Check made sure Interval
+// reads.
+func (h Heartbeat) Every() time.Duration {
+	if interval, err := units.ParseDuration(h.Interval); err == nil && interval > 0 {
+		return interval
+	}
+	return DefaultHeartbeatInterval
 }
 
 // ACME is where certificates come from; empty means Let's Encrypt.

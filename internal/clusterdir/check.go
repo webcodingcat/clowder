@@ -242,9 +242,7 @@ func checkChannel(index int, channel AlertChannel) Problems {
 	report := func(problem string) {
 		problems = append(problems, fmt.Sprintf("alerts.channels[%d] (%s): %s", index, channel.Type, problem))
 	}
-	switch channel.MinSeverity {
-	case "", "info", "warning", "critical":
-	default:
+	if channel.MinSeverity != "" && !slices.Contains(Severities, channel.MinSeverity) {
 		report(fmt.Sprintf("min_severity %q is not info, warning or critical", channel.MinSeverity))
 	}
 	switch channel.Type {

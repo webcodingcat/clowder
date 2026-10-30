@@ -449,6 +449,31 @@ func TestWaitingSinceStartsWithTheFirstReasonAndEndsWithTheLast(t *testing.T) {
 	}
 }
 
+func TestAnAlertKeepsItsKeyAndSinceWhenItGetsWorse(t *testing.T) {
+	c := newCluster(t)
+	warning := PutAlert{Key: "pool-use/node0/vg/thin/data", Kind: "pool-use", Severity: "warning", Subject: "s", Message: "m"}
+	c.refuse(KindPutAlert, LeaderActor, PutAlert{Key: "k", Kind: "x", Subject: "s", Severity: "loud"}, `severity "loud"`)
+	c.refuse(KindPutAlert, LeaderActor, PutAlert{Severity: "info"}, "needs a key")
+	c.mustApply(KindPutAlert, LeaderActor, warning)
+	critical := warning
+	critical.Severity = "critical"
+	cmd, err := NewCommand(KindPutAlert, testTime.Add(time.Hour), LeaderActor, critical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.index++
+	if err := c.state.Apply(c.index, cmd); err != nil {
+		t.Fatal(err)
+	}
+	if alert := c.state.Alerts[warning.Key]; alert.Severity != "critical" || !alert.Since.Equal(testTime) || len(c.state.Alerts) != 1 {
+		t.Errorf("alerts %+v", c.state.Alerts)
+	}
+	c.mustApply(KindResolveAlert, LeaderActor, ResolveAlert{Key: warning.Key})
+	if len(c.state.Alerts) != 0 {
+		t.Errorf("alerts %+v", c.state.Alerts)
+	}
+}
+
 // createShop registers the stack shop of the CLI, as clowder stack create
 // does.
 func (c *cluster) createShop() {

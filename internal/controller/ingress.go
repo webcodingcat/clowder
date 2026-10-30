@@ -28,8 +28,11 @@ const hosterTimeout = 2 * time.Minute
 // RunIngress keeps the Floating IP on the ingress host while this agent
 // leads, until ctx ends: at a change of the state and every interval, but
 // it reads the hoster's API at most once per interval (Hetzner allows 3600
-// requests an hour; this takes about 120).
-func RunIngress(ctx context.Context, cluster Cluster, propose Propose, open Open, connect ConnectHoster, logger *slog.Logger) {
+// requests an hour; this takes about 120). While it fails, it holds the
+// condition ingressNotHeld, which the alerts turn into an alert.
+func RunIngress(ctx context.Context, cluster Cluster, propose Propose, open Open, connect ConnectHoster,
+	conditions *Conditions, logger *slog.Logger,
+) {
 	var next time.Time // when the API may be read again
 	for {
 		changed := cluster.Changed()
@@ -40,6 +43,11 @@ func RunIngress(ctx context.Context, cluster Cluster, propose Propose, open Open
 			}
 			if err != nil {
 				logger.Warn("the Floating IP is not on the ingress host", "error", err)
+			}
+			// a pass that did not ask the hoster proves nothing, unless it
+			// found no host to hold the Floating IP
+			if asked || err != nil {
+				conditions.Hold(ingressNotHeld, err != nil)
 			}
 		}
 		wait := interval

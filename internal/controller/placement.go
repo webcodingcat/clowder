@@ -26,16 +26,16 @@ type placer struct {
 	// since when
 	fitting      string
 	fittingSince time.Time
-	// overCapacity are the hosts whose highest priority alone reserves
-	// more than they offer, logged once (an alert later)
-	overCapacity map[state.HostID]bool
+	// conditions hold the hosts whose highest priority alone reserves more
+	// than they offer, for the alert
+	conditions *Conditions
 }
 
 // RunPlacement places stacks and their new volumes, pushes services out
 // and brings them back while this agent leads, until ctx ends: at every
 // change of the state and every interval.
-func RunPlacement(ctx context.Context, cluster Cluster, propose Propose, logger *slog.Logger) {
-	p := &placer{cluster: cluster, propose: propose, logger: logger, overCapacity: map[state.HostID]bool{}}
+func RunPlacement(ctx context.Context, cluster Cluster, propose Propose, conditions *Conditions, logger *slog.Logger) {
+	p := &placer{cluster: cluster, propose: propose, logger: logger, conditions: conditions}
 	for {
 		changed := cluster.Changed()
 		wait := interval
@@ -89,17 +89,14 @@ func (p *placer) commit(ctx context.Context, kind string, payload any) {
 	}
 }
 
-// noteOverCapacity logs each host that comes to be over capacity, once.
+// noteOverCapacity holds the condition of each host over capacity and logs
+// it once.
 func (p *placer) noteOverCapacity(copied *state.State, hosts []state.HostID) {
-	over := map[state.HostID]bool{}
-	for _, id := range hosts {
-		over[id] = true
-		if !p.overCapacity[id] {
-			p.logger.Warn("host over capacity: its highest priority alone reserves more than it offers",
-				"host", copied.Hosts[id].Name)
+	for id, host := range copied.Hosts {
+		if p.conditions.Hold(overCapacityKey(id), slices.Contains(hosts, id)) {
+			p.logger.Warn("host over capacity: its highest priority alone reserves more than it offers", "host", host.Name)
 		}
 	}
-	p.overCapacity = over
 }
 
 // writeWaitReasons records why stacks wait. The state remembers the last

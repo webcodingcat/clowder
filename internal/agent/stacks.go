@@ -66,8 +66,7 @@ type stackRunner struct {
 	// digestKey keys the digests of secret files (secretDigestPurpose)
 	digestKey []byte
 	logger    *slog.Logger
-	// supervisor and propose need the runner first (the supervisor its
-	// rules, the API server its containers), so Run sets them afterwards
+	// supervisor needs the runner's rules first, so Run sets it afterwards
 	supervisor *supervisor.Supervisor
 	propose    controller.Propose
 

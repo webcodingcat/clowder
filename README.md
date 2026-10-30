@@ -12,6 +12,12 @@ upgrade a running cluster. On one host, what runs today:
   the agent, which keeps the containers apart and answers their DNS.
 - `clowder cluster bootstrap|apply|diff|status|schema` sets the cluster up and changes it.
 - `clowder host ...` drains, removes and enables hosts.
+- The cluster raises alerts (a pool or the root file system filling up, Docker not
+  answering, the Floating IP not held, a host over capacity, a certificate not renewed, a
+  stack waiting) and sends them to Discord, email or a webhook (`alerts` in
+  `cluster.yaml`), with a reminder every 6 hours and an all-clear; an optional heartbeat
+  lets an outside service notice when the cluster falls silent. `clowder cluster status`
+  shows the open alerts, `clowder alert test` tries every channel.
 - `clowder stack create|apply|delete|ps|logs` runs Compose stacks with their volumes and
   secrets.
 - Every service reserves memory and CPUs (`deploy.resources.reservations`, else

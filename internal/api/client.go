@@ -53,6 +53,20 @@ func (c *Client) Post(ctx context.Context, path string, in any) (Written, error)
 	return c.write(ctx, http.MethodPost, path, in)
 }
 
+// Act posts in (nil for none) to path and reads the answer into out: an
+// action that writes nothing to the state, such as a test alert.
+func (c *Client) Act(ctx context.Context, path string, in, out any) error {
+	var body []byte
+	if in != nil {
+		encoded, err := json.Marshal(in)
+		if err != nil {
+			return fmt.Errorf("encode the request: %w", err)
+		}
+		body = encoded
+	}
+	return c.do(ctx, http.MethodPost, path, body, out)
+}
+
 // Put replaces what is at path with in. Reads after it wait for the write.
 func (c *Client) Put(ctx context.Context, path string, in any) (Written, error) {
 	return c.write(ctx, http.MethodPut, path, in)

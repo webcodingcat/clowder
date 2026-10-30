@@ -60,6 +60,34 @@ type Status struct {
 	Leader   string     `json:"leader"` // host name; empty without a leader
 	Index    uint64     `json:"index"`
 	Hosts    []HostInfo `json:"hosts"`
+	// Alerts are the open alerts, oldest first.
+	Alerts []AlertInfo `json:"alerts,omitempty"`
+}
+
+// AlertInfo is one open alert.
+type AlertInfo struct {
+	Key      string    `json:"key"`
+	Severity string    `json:"severity"`
+	Subject  string    `json:"subject"`
+	Message  string    `json:"message"`
+	Since    time.Time `json:"since"`
+}
+
+// AlertTestResult is how one channel took the test alert; Error is empty
+// if it did.
+type AlertTestResult struct {
+	Channel string `json:"channel"`
+	Error   string `json:"error,omitempty"`
+}
+
+// AlertFailure is a message of an alert that a channel has not taken yet;
+// the leader tries again.
+type AlertFailure struct {
+	Channel   string `json:"channel"`
+	Key       string `json:"key"`
+	Event     string `json:"event"`
+	Attempts  int    `json:"attempts"`
+	LastError string `json:"last_error"`
 }
 
 // HostInfo is one host as the CLI shows it.

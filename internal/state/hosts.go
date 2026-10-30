@@ -176,7 +176,7 @@ func applySetIngress(s *State, _ Command, payload SetIngress) error {
 // ReportHost is an agent telling what it is and how it is doing: the
 // version it runs, its memory and CPUs, its thin pools (by pool name, "vg/thin"),
 // whether Docker answers and how full the root file system is. The leader
-// places by it and will raise alerts from it. Agents send it when something
+// places by it and raises alerts from it. Agents send it when something
 // changed, not on every look, so every value is one that changes seldom: a
 // bool, a whole percent.
 type ReportHost struct {

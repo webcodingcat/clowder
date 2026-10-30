@@ -37,7 +37,14 @@ func newStatus(g *globals) *cobra.Command {
 			if err := client.Get(cmd.Context(), "/v1/status", &status); err != nil {
 				return err
 			}
-			return printStatus(cmd.OutOrStdout(), status)
+			if err := printStatus(cmd.OutOrStdout(), status); err != nil {
+				return err
+			}
+			// the leader keeps the failed deliveries; without a leader they
+			// are unknown, and the rest of the status still shows
+			var failures []api.AlertFailure
+			failuresErr := client.Get(cmd.Context(), "/v1/alerts/failures", &failures)
+			return printAlerts(cmd.OutOrStdout(), status.Alerts, failures, failuresErr)
 		},
 	}
 }

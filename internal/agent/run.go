@@ -100,8 +100,14 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	if err != nil {
 		return err
 	}
+	// the stack runner and the alerts loop commit through the API server,
+	// and the server answers for them (a stack's containers, the test
+	// alert, failed deliveries): they get the server's Propose through
+	// this, before the server exists
+	var server *api.Server
+	propose := func(ctx context.Context, cmd state.Command) (uint64, error) { return server.Propose(ctx, cmd) }
 	runner := &stackRunner{
-		files: files, host: host, cluster: node,
+		files: files, host: host, cluster: node, propose: propose,
 		docker: parts.Docker, storage: parts.Storage, open: credentials.dataKey.Open, digestKey: digestKey,
 		logger: logger, applied: map[string][32]byte{}, logins: map[string][32]byte{}, wake: make(chan struct{}, 1),
 		unexplained: map[string]bool{},
@@ -110,16 +116,17 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		files: files, host: host, cluster: node, docker: parts.Docker, open: credentials.dataKey.Open, logger: logger,
 		wake: make(chan struct{}, 1), unopened: map[string]bool{},
 	}
-	server := api.NewServer(api.ServerConfig{
+	conditions := controller.NewConditions()
+	alerts := controller.NewAlerts(node, propose, credentials.dataKey.Open, conditions, logger)
+	server = api.NewServer(api.ServerConfig{
 		Cluster: node, CA: credentials.ca, Certificate: credentials.certificate,
 		APIAddress: func(id state.HostID) string {
 			// every host has the same API port; tests on 127.0.0.1 have one host
 			return net.JoinHostPort(network.NodeAddress(id).String(), strconv.Itoa(host.APIPort))
 		},
 		Keys: credentials.dataKey, Version: buildinfo.Version, Logger: logger,
-		HostID: host.ID, Containers: runner,
+		HostID: host.ID, Containers: runner, Alerts: alertsAPI{alerts},
 	})
-	runner.propose = server.Propose
 	// after Docker restarted, every container is down: the stacks and
 	// Traefik come up again
 	dockerRestarted := func() {
@@ -130,10 +137,12 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		dockerRestarted, traefik.look, logger)
 	traefik.supervisor = runner.supervisor
 	loops.Go(func() { runner.supervisor.Run(reconcilers, compose.LabelStack) })
-	loops.Go(func() { controller.RunPlacement(reconcilers, node, server.Propose, logger) })
+	loops.Go(func() { controller.RunPlacement(reconcilers, node, server.Propose, conditions, logger) })
 	loops.Go(func() {
-		controller.RunIngress(reconcilers, node, server.Propose, credentials.dataKey.Open, parts.Hoster, logger)
+		controller.RunIngress(reconcilers, node, server.Propose, credentials.dataKey.Open, parts.Hoster, conditions, logger)
 	})
+	loops.Go(func() { alerts.Run(reconcilers) })
+	loops.Go(func() { alerts.RunHeartbeat(reconcilers) })
 	loops.Go(func() { controller.RunACME(reconcilers, node, server.Propose, credentials.dataKey, logger) })
 	loops.Go(func() { runner.trim(reconcilers) })
 	reporter := &hostReporter{
@@ -176,6 +185,35 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		_ = server.Shutdown(shutdown) // stopping: open calls are cut after the timeout
 	}
 	return err
+}
+
+// alertsAPI answers the API's alert routes from the alerts loop.
+type alertsAPI struct {
+	alerts *controller.Alerts
+}
+
+func (a alertsAPI) Test(ctx context.Context) ([]api.AlertTestResult, error) {
+	results, err := a.alerts.Test(ctx)
+	var answers []api.AlertTestResult
+	for _, result := range results {
+		answer := api.AlertTestResult{Channel: result.Channel}
+		if result.Err != nil {
+			answer.Error = result.Err.Error()
+		}
+		answers = append(answers, answer)
+	}
+	return answers, err
+}
+
+func (a alertsAPI) Failures() []api.AlertFailure {
+	answers := []api.AlertFailure{}
+	for _, failure := range a.alerts.Failures() {
+		answers = append(answers, api.AlertFailure{
+			Channel: failure.Channel, Key: failure.Key, Event: failure.Event, Attempts: failure.Attempts,
+			LastError: failure.LastError,
+		})
+	}
+	return answers
 }
 
 // stopLoops ends the agent's loops and waits for them, at most timeout: a

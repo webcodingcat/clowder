@@ -47,6 +47,8 @@ linters:
               desc: "agent only (clowderd): only the leader's loops call the hoster's API"
             - pkg: golang.org/x/crypto/acme
               desc: "agent only (clowderd): only the leader's loops order certificates"
+            - pkg: github.com/webcodingcat/clowder/internal/notify
+              desc: "agent only (clowderd): only the leader's loops send alerts"
             - pkg: github.com/webcodingcat/clowder/internal/network
               desc: Linux only (clowderd)
             - pkg: github.com/webcodingcat/clowder/internal/storage
@@ -86,6 +88,8 @@ linters:
             - pkg: github.com/webcodingcat/clowder/internal/hoster
               desc: only the leader's controller calls external services
             - pkg: golang.org/x/crypto/acme
+              desc: only the leader's controller calls external services
+            - pkg: github.com/webcodingcat/clowder/internal/notify
               desc: only the leader's controller calls external services
     misspell:
       locale: US

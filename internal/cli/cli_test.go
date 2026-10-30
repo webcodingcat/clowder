@@ -102,6 +102,7 @@ func startCluster(t *testing.T) string {
 		Cluster: &oneHost{state: current}, CA: ca.Certificate, Certificate: serverCertificate,
 		APIAddress: func(state.HostID) string { return server.Listener.Addr().String() },
 		Version:    buildinfo.Version, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Alerts: fakeAlerts{},
 	})
 	server.Config.Handler = agent
 	server.Config.ErrorLog = log.New(io.Discard, "", 0)
@@ -149,6 +150,39 @@ func startCluster(t *testing.T) string {
 	t.Setenv("SOPS_AGE_KEY_FILE", "")
 	t.Setenv(clusterdir.UserEnvVar, "")
 	return dir
+}
+
+// fakeAlerts has two channels, the second of which fails, and one message
+// the email channel has not taken.
+type fakeAlerts struct{}
+
+func (fakeAlerts) Test(context.Context) ([]api.AlertTestResult, error) {
+	return []api.AlertTestResult{
+		{Channel: "alerts.channels[0] (discord)"}, {Channel: "alerts.channels[1] (email)", Error: "no STARTTLS"},
+	}, nil
+}
+
+func (fakeAlerts) Failures() []api.AlertFailure {
+	return []api.AlertFailure{{
+		Channel: "alerts.channels[1] (email)", Key: "pool-use/node0/vg/thin/data", Event: "raised", Attempts: 2,
+		LastError: "no STARTTLS",
+	}}
+}
+
+func TestAlertsShowInTheStatusAndTheTestNamesEachChannel(t *testing.T) {
+	dir := startCluster(t)
+	out, err := run(t, "--cluster", dir, "cluster", "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "no open alert") || !strings.Contains(out, "pool-use/node0/vg/thin/data") {
+		t.Errorf("cluster status:\n%s", out)
+	}
+	out, err = run(t, "--cluster", dir, "alert", "test")
+	if err == nil || !strings.Contains(err.Error(), "1 of 2 channels") ||
+		!strings.Contains(out, "alerts.channels[0] (discord): sent") || !strings.Contains(out, "failed: no STARTTLS") {
+		t.Errorf("alert test: %v\n%s", err, out)
+	}
 }
 
 func writeYAML(t *testing.T, path string, value any) {

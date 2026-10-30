@@ -97,7 +97,7 @@ func newLeader(t *testing.T, poolSize int64) *leader {
 func runPlacement(t *testing.T, l *leader) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go RunPlacement(ctx, l, l.propose, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	go RunPlacement(ctx, l, l.propose, NewConditions(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 // waitFor fails the test unless the state comes to hold what check says.
@@ -130,7 +130,7 @@ func TestAPendingStackIsPlacedWithItsVolumes(t *testing.T) {
 func newPlacer(l *leader) *placer {
 	return &placer{
 		cluster: l, propose: l.propose, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		overCapacity: map[state.HostID]bool{},
+		conditions: NewConditions(),
 	}
 }
 

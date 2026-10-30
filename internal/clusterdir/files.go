@@ -17,13 +17,21 @@ const (
 	maxFileSize = 64 << 10
 )
 
-// FileNames lists the files next to cluster.yaml that it names (acme.ca),
-// sorted. cluster apply sends their contents along, so the cluster keeps
+// FileNames lists the files next to cluster.yaml that it names, sorted,
+// each once: so far all of them CAs, acme.ca and each email channel's
+// smtp.ca. cluster apply sends their contents along, so the cluster keeps
 // them with the config.
 func FileNames(config Config) []string {
 	var files []string
 	if config.ACME.CA != "" {
 		files = append(files, config.ACME.CA)
+	}
+	if config.Alerts != nil {
+		for _, channel := range config.Alerts.Channels {
+			if channel.SMTP != nil && channel.SMTP.CA != "" {
+				files = append(files, channel.SMTP.CA)
+			}
+		}
 	}
 	slices.Sort(files)
 	return slices.Compact(files)
@@ -37,7 +45,7 @@ func validFileName(name string) bool {
 }
 
 // CheckFiles returns what is wrong with the files that come with
-// cluster.yaml: one it names is missing or too large, or acme.ca holds no
+// cluster.yaml: one it names is missing or too large, or a CA file holds no
 // certificate.
 func CheckFiles(config Config, files map[string][]byte) Problems {
 	var problems Problems
@@ -50,9 +58,9 @@ func CheckFiles(config Config, files map[string][]byte) Problems {
 			problems = append(problems, fmt.Sprintf("file %s is larger than %d KiB", name, maxFileSize>>10))
 		}
 	}
-	if name := config.ACME.CA; name != "" {
+	for _, name := range FileNames(config) { // every one a CA's so far
 		if content, ok := files[name]; ok && !x509.NewCertPool().AppendCertsFromPEM(content) {
-			problems = append(problems, fmt.Sprintf("acme.ca: %s holds no PEM certificate", name))
+			problems = append(problems, fmt.Sprintf("the CA file %s holds no PEM certificate", name))
 		}
 	}
 	return problems

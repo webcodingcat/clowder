@@ -111,6 +111,13 @@ func TestAPriorityIsANumberACategoryOrTheDefault(t *testing.T) {
 	}
 }
 
+func TestSeveritiesAreOrdered(t *testing.T) {
+	if !AtLeast(SeverityCritical, SeverityWarning) || AtLeast(SeverityInfo, SeverityWarning) ||
+		!AtLeast(SeverityInfo, "") || !AtLeast(SeverityWarning, SeverityWarning) {
+		t.Error("severities out of order")
+	}
+}
+
 func TestTheReservationsAndTheSystemReserveHaveDefaults(t *testing.T) {
 	config := Config{SystemReserve: Resources{Memory: "1G"}}.WithDefaults()
 	if config.SystemReserve != (Resources{Memory: "1G", CPUs: "0.25"}) || config.Defaults.Reservations != DefaultReservations {

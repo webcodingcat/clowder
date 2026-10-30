@@ -59,7 +59,9 @@ type State struct {
 	// Retired are the volume copies the cluster gave up: the only ones an
 	// agent removes, so a copy that is merely missing from the state (a bug)
 	// keeps its data.
-	Retired    []RetiredCopy         `json:"retired,omitempty"`
+	Retired []RetiredCopy `json:"retired,omitempty"`
+	// Alerts are the open alerts by key.
+	Alerts     map[string]*Alert     `json:"alerts,omitempty"`
 	Operations map[string]*Operation `json:"operations,omitempty"`
 	Locks      map[string]string     `json:"locks,omitempty"` // "stack/<name>" or "volume/<id>" -> operation
 	Audit      []AuditEntry          `json:"audit,omitempty"`

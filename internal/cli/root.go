@@ -21,7 +21,7 @@ func NewRoot() *cobra.Command {
 	}
 	var shared globals
 	shared.register(root)
-	root.AddCommand(newVersion(), newCluster(&shared), newHost(&shared), newStack(&shared))
+	root.AddCommand(newVersion(), newCluster(&shared), newHost(&shared), newStack(&shared), newAlert(&shared))
 	return root
 }
 

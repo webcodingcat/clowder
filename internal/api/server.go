@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -52,8 +53,20 @@ type ServerConfig struct {
 	// HostID is this agent's host; Containers answers for its stacks.
 	HostID     state.HostID
 	Containers Containers
-	Version    string
-	Logger     *slog.Logger
+	// Alerts answers for the alert channels; the agent's alerts loop is the
+	// real one.
+	Alerts  Alerts
+	Version string
+	Logger  *slog.Logger
+}
+
+// Alerts is what the API asks of the agent's alerts loop.
+type Alerts interface {
+	// Test sends a test alert to every channel from this agent.
+	Test(ctx context.Context) ([]AlertTestResult, error)
+	// Failures are the messages a channel has not taken yet; only the
+	// leader has any.
+	Failures() []AlertFailure
 }
 
 // Keys is the cluster's data key as the server uses it.
@@ -91,6 +104,9 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("DELETE /v1/stacks/{name}", pki.RoleUser, server.deleteStack)
 	server.handle("GET /v1/stacks/{name}/ps", pki.RoleUser, server.stackPs)
 	server.handle("GET /v1/stacks/{name}/logs", pki.RoleUser, server.stackLogs)
+	server.handle("POST /v1/alerts/test", pki.RoleUser, server.alertTest)
+	server.handle("GET /v1/alerts/failures", pki.RoleUser, server.alertFailures)
+	server.handle("GET /v1/internal/alerts/failures", pki.RoleHost, server.localAlertFailures)
 	server.handle("POST /v1/internal/propose", pki.RoleHost, server.internalPropose)
 	server.handle("GET /v1/internal/stacks/{name}/ps", pki.RoleHost, server.localPs)
 	server.handle("GET /v1/internal/stacks/{name}/logs", pki.RoleHost, server.localLogs)
@@ -219,8 +235,44 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		if leader, ok := current.Hosts[leaderID]; hasLeader && ok {
 			status.Leader = leader.Name
 		}
+		for _, alert := range current.Alerts {
+			status.Alerts = append(status.Alerts, AlertInfo{
+				Key: alert.Key, Severity: alert.Severity, Subject: alert.Subject, Message: alert.Message, Since: alert.Since,
+			})
+		}
+	})
+	slices.SortFunc(status.Alerts, func(a, b AlertInfo) int {
+		return cmp.Or(a.Since.Compare(b.Since), cmp.Compare(a.Key, b.Key))
 	})
 	writeJSON(w, http.StatusOK, status)
+}
+
+// alertTest sends a test alert to every channel, from this agent.
+func (s *Server) alertTest(w http.ResponseWriter, r *http.Request) {
+	results, err := s.config.Alerts.Test(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+// alertFailures lists the messages the channels have not taken yet: the
+// leader keeps them, so a follower asks it.
+func (s *Server) alertFailures(w http.ResponseWriter, r *http.Request) {
+	leader, ok := s.config.Cluster.Leader()
+	switch {
+	case !ok:
+		writeError(w, http.StatusServiceUnavailable, errors.New("the cluster has no leader right now"))
+	case leader != s.config.HostID:
+		s.relay(w, r, s.forwarder, leader, "/v1/internal/alerts/failures")
+	default:
+		s.localAlertFailures(w, r)
+	}
+}
+
+func (s *Server) localAlertFailures(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.config.Alerts.Failures())
 }
 
 func (s *Server) hosts(w http.ResponseWriter, _ *http.Request) {

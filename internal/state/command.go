@@ -49,6 +49,8 @@ const (
 	KindSetStackStatus      = "set-stack-status"
 	KindSetStackWaitReason  = "set-stack-wait-reason"
 	KindSetPushedOut        = "set-pushed-out"
+	KindPutAlert            = "put-alert"
+	KindResolveAlert        = "resolve-alert"
 	KindPutVolume           = "put-volume"
 	KindDeleteVolume        = "delete-volume"
 	KindForgetCopy          = "forget-copy"
@@ -121,6 +123,8 @@ var handlers = map[string]handler{
 	KindSetStackStatus:      decoded(applySetStackStatus),
 	KindSetStackWaitReason:  decoded(applySetStackWaitReason),
 	KindSetPushedOut:        decoded(applySetPushedOut),
+	KindPutAlert:            decoded(applyPutAlert),
+	KindResolveAlert:        decoded(applyResolveAlert),
 	KindPutVolume:           decoded(applyPutVolume),
 	KindDeleteVolume:        decoded(applyDeleteVolume),
 	KindForgetCopy:          decoded(applyForgetCopy),
@@ -195,6 +199,9 @@ func (s *State) makeMaps() {
 	}
 	if s.Hosts == nil {
 		s.Hosts = map[HostID]*Host{}
+	}
+	if s.Alerts == nil {
+		s.Alerts = map[string]*Alert{}
 	}
 	if s.Challenges == nil {
 		s.Challenges = map[string]string{}
