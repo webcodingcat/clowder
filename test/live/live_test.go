@@ -37,7 +37,7 @@ const (
 // The private registry that bin/dev live runs in the lab's network, with its
 // files in the work directory.
 const (
-	registry       = "192.0.2.2:5000"
+	registry       = labAddress + ":5000"
 	registryUser   = "tester"
 	privateImage   = registry + "/alpine:3.22"
 	publicImage    = "alpine:3.22"
@@ -97,11 +97,13 @@ const (
 	// a pass of the agent after it started: the first one runs compose up
 	// for every stack
 	agentPass = 20 * time.Second
-	// crashRestart is the acceptance's limit for a crashed container
+	// crashRestart is the goal for a crashed container to run again
 	crashRestart = 2 * time.Second
-	// agentMemoryLimit is the acceptance's goal for the agent alone
-	agentMemoryLimit = 150_000_000
-	manyStacks       = 20
+	// agentMemoryLimit is the goal for the agent alone, ingressMemoryLimit
+	// the goal for the agent and Traefik together
+	agentMemoryLimit   = 150_000_000
+	ingressMemoryLimit = 300_000_000
+	manyStacks         = 20
 )
 
 // TestMain gives the test its own age key: the CLI and the test read the
@@ -152,6 +154,14 @@ func TestOneHost(t *testing.T) {
 		{"a volume that fits nowhere waits with its reason", func(t *testing.T) { fullPool(t, server) }},
 		{"twenty stacks run", func(t *testing.T) { runManyStacks(t, server) }},
 		{"the stack is deleted with its volumes", func(t *testing.T) { deleteStack(t, server) }},
+		{"the Floating IP comes back when moved by hand", func(t *testing.T) { holdFloatingIP(t, tofu) }},
+		{"HTTPS with a certificate from the ACME CA", func(t *testing.T) { serveHTTPS(t, tofu) }},
+		{"a UDP service sees the client's address", func(t *testing.T) { udpSeesClient(t, tofu) }},
+		{"a container reaches the domain through the Floating IP", func(t *testing.T) { hairpin(t, server) }},
+		{"the certificate is renewed once", func(t *testing.T) { renewCertificate(t, tofu) }},
+		{"alerts reach every channel", func(t *testing.T) { alertsReachTheChannels(t, server) }},
+		{"Prometheus scrapes /metrics", func(t *testing.T) { scrapeMetrics(t, server) }},
+		{"higher priorities push services out", func(t *testing.T) { pushOut(t, server) }},
 		{"the agent's memory", func(t *testing.T) { checkMemory(t, server, "at the end") }},
 	}
 	for _, step := range steps {
@@ -284,7 +294,7 @@ func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 	}
 	next := generation(t, "shop") + 1
 	mustClowder(t, "stack", "apply", "shop", "--file", filepath.Join(stackDir("shop"), "clowder.yaml"))
-	waitRunning(t, "shop", next, stackDeadline)
+	waitRunning(t, "shop", next)
 }
 
 // runStack creates the stack, applies it and checks the container: its
@@ -350,7 +360,7 @@ func restartAgent(t *testing.T, server host) {
 	before := shopContainers(t, server)
 	wanted := generation(t, "shop")
 	server.must(t, "systemctl restart clowderd")
-	waitRunning(t, "shop", wanted, stackDeadline)
+	waitRunning(t, "shop", wanted)
 	time.Sleep(agentPass)
 	checkUnchanged(t, before, shopContainers(t, server))
 }
@@ -452,7 +462,7 @@ func reboot(t *testing.T, server host, tofu outputs) {
 	})
 	// active only if it ran in this boot (RemainAfterExit)
 	server.must(t, "systemctl is-active clowder-setup")
-	waitRunning(t, "shop", wanted, stackDeadline)
+	waitRunning(t, "shop", wanted)
 	eventually(t, stackDeadline, "the stack's containers run", func() error {
 		if server.service(t, "app") == "" || server.service(t, "web") == "" {
 			return fmt.Errorf("not yet")
@@ -604,21 +614,19 @@ func fullPool(t *testing.T, server host) {
 	mustClowder(t, "stack", "ps")
 	checkUnchanged(t, before, shopContainers(t, server))
 	mustClowder(t, "stack", "delete", "big")
-	waitGone(t, stackDeadline, "big")
+	waitGone(t, "big")
 }
 
 // writeSimpleStack creates and applies a stack of one service on the public
-// image, with the given tail of its Compose file.
+// image, with the given tail of its Compose file. It only sleeps, so it
+// reserves little: with the default (0.1 CPUs) the host's 2 CPUs would take
+// 17 services (2 CPUs less the system reserve of 0.25, in tenths), fewer
+// than shop's two and the twenty stacks.
 func writeSimpleStack(t *testing.T, name, tail string) {
 	t.Helper()
-	mustClowder(t, "stack", "create", name, "--dir", stackDir(name), "--age", recipient)
-	content := "name: " + name + "\nservices:\n  app:\n    image: " + publicImage +
-		"\n    command: [sleep, infinity]\n    stop_grace_period: 1s\n" + tail
-	file := filepath.Join(stackDir(name), "clowder.yaml")
-	if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	mustClowder(t, "stack", "apply", name, "--file", file)
+	createAndApply(t, name, "name: "+name+"\nservices:\n  app:\n    image: "+publicImage+
+		"\n    command: [sleep, infinity]\n    stop_grace_period: 1s\n"+
+		"    deploy: {resources: {reservations: {cpus: \"0.01\", memory: 16M}}}\n"+tail)
 }
 
 // runManyStacks runs twenty small stacks next to shop, measures the agent
@@ -647,14 +655,14 @@ func runManyStacks(t *testing.T, server host) {
 	for _, name := range names {
 		mustClowder(t, "stack", "delete", name)
 	}
-	waitGone(t, stackDeadline, names...)
+	waitGone(t, names...)
 }
 
 // deleteStack deletes the stack with its volumes: the containers, the LVs
 // and the DRBD resource go.
 func deleteStack(t *testing.T, server host) {
 	mustClowder(t, "stack", "delete", "shop", "--delete-volumes")
-	waitGone(t, stackDeadline, "shop")
+	waitGone(t, "shop")
 	eventually(t, stackDeadline, "the host removed the stack", func() error {
 		output, err := server.run("docker ps -aq --filter label=com.docker.compose.project=shop; " +
 			"lvs --noheadings -o lv_name | grep shop; drbdsetup status | grep shop; true")
@@ -665,18 +673,34 @@ func deleteStack(t *testing.T, server host) {
 	})
 }
 
-// checkMemory logs what the agent uses and fails above the acceptance's
-// goal, so a regression shows.
+// checkMemory logs what the agent and Traefik use and fails above the
+// goals, so a regression shows. Before the first cluster apply Traefik does
+// not run yet.
 func checkMemory(t *testing.T, server host, when string) {
 	t.Helper()
-	resident, err := strconv.ParseInt(server.must(t,
-		"ps -o rss= -p $(systemctl show clowderd --property=MainPID --value)"), 10, 64)
+	agent := residentKiB(t, server, "$(systemctl show clowderd --property=MainPID --value)")
+	t.Logf("clowderd %s: resident %d KiB, its cgroup %s bytes", when, agent,
+		server.must(t, "systemctl show clowderd --property=MemoryCurrent --value"))
+	if agent<<10 > agentMemoryLimit {
+		t.Errorf("clowderd uses %d KiB, more than the goal of %d MB", agent, agentMemoryLimit/1_000_000)
+	}
+	traefik := server.must(t, "docker ps -q --filter label=com.docker.compose.project=clowder-traefik")
+	if traefik == "" {
+		return
+	}
+	proxy := residentKiB(t, server, "$(docker inspect --format '{{.State.Pid}}' "+traefik+")")
+	t.Logf("Traefik %s: resident %d KiB; with clowderd %d KiB", when, proxy, agent+proxy)
+	if (agent+proxy)<<10 > ingressMemoryLimit {
+		t.Errorf("clowderd and Traefik use %d KiB, more than the goal of %d MB", agent+proxy, ingressMemoryLimit/1_000_000)
+	}
+}
+
+// residentKiB is a process's resident memory; pid is a shell expression.
+func residentKiB(t *testing.T, server host, pid string) int64 {
+	t.Helper()
+	resident, err := strconv.ParseInt(server.must(t, "ps -o rss= -p "+pid), 10, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("clowderd %s: resident %d KiB, its cgroup %s bytes", when, resident,
-		server.must(t, "systemctl show clowderd --property=MemoryCurrent --value"))
-	if resident<<10 > agentMemoryLimit {
-		t.Errorf("clowderd uses %d KiB, more than the goal of %d MB", resident, agentMemoryLimit/1_000_000)
-	}
+	return resident
 }

@@ -221,7 +221,7 @@ func TestUnhealthyContainersRestartUnlessTheyMayNot(t *testing.T) {
 func TestBackoffDoublesUpToItsMaximum(t *testing.T) {
 	supervisor := New(nil, rules, DefaultBackoff, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	want := []time.Duration{
-		time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second,
+		0, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second,
 		16 * time.Second, 32 * time.Second, time.Minute, time.Minute,
 	}
 	for attempt, delay := range want {

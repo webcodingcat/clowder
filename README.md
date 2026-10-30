@@ -4,7 +4,8 @@ A small cluster orchestrator for Docker Compose stacks on hosts with about 4 GB 
 replicated volumes (DRBD 9), the real client IP behind a Floating IP, priorities, fencing
 through the hoster's API. First hoster: Hetzner Cloud.
 
-Status: under construction (phase 1b, see the roadmap in [DEVELOPING.md](DEVELOPING.md)).
+Status: under construction (phases 1a and 1b, one host, are done; see the roadmap in
+[DEVELOPING.md](DEVELOPING.md)).
 Until `v1.0.0`, the state and `cluster.yaml` may change between releases without a way to
 upgrade a running cluster. On one host, what runs today:
 
@@ -71,7 +72,9 @@ Then fill in `cluster.yaml` from `tofu output cluster_yaml`, put the hoster toke
 `secrets.sops.yaml` (`sops edit`) and run `clowder cluster apply`.
 
 - **The Cloud firewall is the only filter** in front of SSH and clowder's API (port 7443):
-  `admin_cidrs` names who reaches them. It takes no `0.0.0.0/0`.
+  `admin_cidrs` names who reaches them. It takes no `0.0.0.0/0`. HTTP and HTTPS are open to
+  everyone (Traefik, and the ACME CA's checks); a port your stacks publish opens with
+  `published_ports` (`["udp/9987"]`).
 - **The bootstrap key** lets the first user in and later hosts join. It is in the OpenTofu
   state, encrypted in `secrets.sops.yaml`, and in the server's user data: root on the host
   can read it from cloud-init's cache and the metadata service, which containers cannot

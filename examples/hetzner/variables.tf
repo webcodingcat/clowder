@@ -23,6 +23,18 @@ variable "admin_cidrs" {
   }
 }
 
+variable "published_ports" {
+  type        = list(string)
+  description = "Ports the stacks publish besides HTTP and HTTPS, as protocol/port (\"udp/9987\"); the Cloud firewall lets them in from anywhere."
+  default     = []
+  validation {
+    condition = alltrue([for port in var.published_ports :
+      can(regex("^(tcp|udp)/[0-9]{1,5}$", port)) && try(tonumber(split("/", port)[1]) >= 1 && tonumber(split("/", port)[1]) <= 65535, false)
+    ])
+    error_message = "Write each port as tcp/<port> or udp/<port>, the port from 1 to 65535."
+  }
+}
+
 variable "location" {
   type        = string
   description = "Hetzner location of the host, its volumes and the Floating IP."

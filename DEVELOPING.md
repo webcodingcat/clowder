@@ -35,10 +35,13 @@ bin/dev live down    # after a failure: destroy the host, stop the lab
 
 `bin/dev live` builds the packages and starts the lab `clowder-live` (`test/live/lab.yaml`,
 ports apart from other labs). In the lab's network it serves the `clowderd` package over
-HTTP and runs a private registry on `192.0.2.2:5000` (TLS from a throw-away CA, a password),
-applies `examples/hetzner` with the test hook (the package's URL and SHA-256,
-`admin_cidrs` = `192.0.2.2/32`) and runs `go test -tags live ./test/live`. Everything a run
-keeps is in the Docker volume `clowder-live`: the OpenTofu state, a throw-away SSH key and
+HTTP, runs a private registry on `192.0.2.2:5000` (TLS from a throw-away CA, a password)
+and a mail server for the alerts on `192.0.2.2:1025` (mailpit: STARTTLS with the
+registry's certificate, any login, its API on `:8025`), applies `examples/hetzner` with the
+test hook (the package's URL and SHA-256, `admin_cidrs` = `192.0.2.2/32`, a third storage
+class `small` of 10 GB, the published port `udp/9987`) and runs
+`go test -tags live ./test/live`, which gets HLab's ACME directory and CA from `hlab env`.
+Everything a run keeps is in the Docker volume `clowder-live`: the OpenTofu state, a throw-away SSH key and
 `known_hosts`, the registry's files, the cluster and stack directories. A failed run leaves
 the host for a look; the next `bin/dev live` refuses to start until `bin/dev live down`
 removed it.
@@ -70,11 +73,33 @@ and the journals of `clowder-setup` and `clowderd`. The steps:
    the running stack untouched.
 10. Twenty more stacks run.
 11. The stack goes with its volumes.
-12. The agent's memory, idle, with 21 stacks and at the end, is logged and must stay under
-    the goal of 150 MB.
+12. The Floating IP, moved off the host by hand through the Cloud API, comes back.
+13. HTTPS: a zone `example.com` in HLab's DNS points `shop.example.com` at the Floating IP;
+    the cluster orders its certificate at HLab's Pebble (HTTP-01), and the stack behind it
+    answers with the test's own address in `X-Forwarded-For`. HTTP redirects to HTTPS.
+14. A UDP service on a published port sees the test's own address.
+15. A container reaches `https://shop.example.com` through the Floating IP (hairpin).
+16. Renewal: the test sets `acme.renew_before` longer than the certificate's time left but
+    shorter than its lifetime. Exactly one new certificate comes. Then it sets the value
+    longer than the lifetime: no renewal, and the alert `renew-before-ignored` is open
+    until the value is removed.
+17. Alerts: `clowder alert test` reaches Discord and a webhook (both received by the test)
+    and the mail server. The heartbeat stops while the agent is stopped and comes back
+    after its start. Filling the pool of `small` beyond 80 % raises `pool-use`; deleting
+    the volume brings its all-clear. The step removes its channels at the end.
+18. `promtool check metrics` accepts `/metrics`, and a Prometheus on the host scrapes it.
+19. Pushing out: the stack `store` has db (critical, 900), app (the stack's high, 700,
+    depending on db) and cache (low, 200). `system_reserve` leaves the host 100M free
+    besides them. A stack at 800 that needs 300M pushes out cache; one that needs 500M
+    pushes out app too; db always stays. Deleted, they let both come back. A stack whose
+    second service (priority 100) finds nothing below it starts with that service pushed
+    out.
+20. The memory, idle, with 21 stacks and at the end, is logged: the agent must stay under
+    150 MB, the agent and Traefik together under 300 MB.
 
-It reads `clowder stack ps --output json` and `docker inspect`, and counts on values it
-reads before each step, not across steps.
+It reads `clowder stack ps --output json` and `docker inspect`. Values it compares it reads
+within a step; what carries over between steps is stated where it does: `shop` lives from
+step 3 to 11, `echo` from step 13 to 19.
 
 ## Roadmap
 
@@ -84,7 +109,7 @@ clowder is built in phases; each ends with live tests on HLab.
 |---|---|---|
 | 0 | the spike: DRBD quorum and fencing, WireGuard, the real client IP, on three hosts | done |
 | 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | done |
-| 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | |
+| 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done |
 | 2 | three hosts: replication, failover with fencing | |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
@@ -789,6 +814,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - Only the leader's loops call the hoster: the controller opens the token from the state
   and makes the client (`HostParts.Hoster`, a fake in the tests). depguard keeps `hoster`
   out of the CLI, the state and the scheduler.
+- **clowder's ports** lie in 7400-7499, which `compose.ReservedPort` keeps from the stacks:
+  Raft 7400 and the API 7443 (node address and underlay), `/metrics` 7444 and Traefik's
+  internal entrypoint 7480 (node address), the ACME challenges 7445 and Traefik's health
+  check 7446 (127.0.0.1). On the Floating IP, 80 and 443 are Traefik's.
 
 ## Certificates of the routes (`controller/acme.go`)
 
@@ -897,8 +926,9 @@ one host has no quorum to lose.
   bind a directory of clowder's volume, whose data stays until clowder removes the copy.
 - **Docker restarts nothing** (`restart: "no"`), so that after a boot nothing starts before
   the agent has looked at the cluster. The supervisor follows Docker's events and applies
-  each service's restart rule with `DefaultBackoff`; `unhealthy` means a restart with the
-  same backoff unless the service says otherwise.
+  each service's restart rule with `DefaultBackoff`: the first restart at once, so a
+  crashed service runs again within 2 s, then 1 s, doubling up to a minute; `unhealthy`
+  means a restart with the same backoff unless the service says otherwise.
 - **A stop by hand is kept:** `docker stop`, or a kill with a signal that ends the container
   (`endsContainer`). A kill with another signal, such as a reload with SIGHUP, is no stop.
   While the agent runs `compose up` or `down` for a stack, it `Hold`s the stack, so the

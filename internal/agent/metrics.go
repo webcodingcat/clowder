@@ -174,7 +174,7 @@ func boolValue(value bool) float64 {
 }
 
 // readRSS reads the agent's resident memory (VmRSS in /proc/self/status),
-// the measure of the agent's RAM in 1b's acceptance.
+// the measure of the agent's RAM in the live test.
 func readRSS() (int64, error) {
 	file, err := os.Open("/proc/self/status")
 	if err != nil {

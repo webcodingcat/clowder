@@ -56,10 +56,16 @@ readonly LIVE_PACKAGES=clowder-live-packages
 # The private registry the test stack pulls from (test/live: registry).
 readonly LIVE_REGISTRY=clowder-live-registry
 readonly REGISTRY_IMAGE=registry:3.0.0
+# The mail server of the alerts' email channel (test/live: mailServer):
+# STARTTLS with the registry's certificate, any login.
+readonly LIVE_MAIL=clowder-live-mail
+readonly MAILPIT_IMAGE=axllent/mailpit:v1.27.4
 # HLab gives tools in the lab's network this address, and the hosts reach it.
 readonly LAB_ADDRESS=192.0.2.2
 readonly PACKAGE_PORT=8099
 readonly REGISTRY_PORT=5000
+readonly SMTP_PORT=1025
+readonly MAIL_API_PORT=8025
 
 # in_image <image> <command...>: Run a command in an image with the repository
 # mounted at /src as the working directory.
@@ -205,7 +211,7 @@ in_lab() {
   shift
   docker run --rm -i --network "${HLAB_NETWORK}" -v "${DOCKER_ROOT}:/src" -w /src \
     -v "${CACHE_VOLUME}:/go" -v "${LIVE_VOLUME}:/work" -e HCLOUD_ENDPOINT -e HCLOUD_TOKEN \
-    -e GOFLAGS=-buildvcs=false "${image}" "$@"
+    -e HLAB_ACME_DIRECTORY -e HLAB_ACME_CA -e GOFLAGS=-buildvcs=false "${image}" "$@"
 }
 
 # live_tofu <command>: A shell command with OpenTofu on examples/hetzner in
@@ -267,6 +273,19 @@ start_registry() {
     -e REGISTRY_AUTH_HTPASSWD_PATH=/work/registry/htpasswd "${REGISTRY_IMAGE}" >/dev/null
 }
 
+# start_mail: The mail server of the alerts' email channel in the lab's
+# network: STARTTLS required, with the registry's certificate (its CA is in
+# /work/registry/ca.crt), any login; its API lets the test read the mail.
+# Globals:
+#   HLAB_NETWORK (read)
+start_mail() {
+  docker rm -f "${LIVE_MAIL}" >/dev/null 2>&1 || true
+  docker run -d --rm --name "${LIVE_MAIL}" --network "${HLAB_NETWORK}" -v "${LIVE_VOLUME}:/work:ro" \
+    "${MAILPIT_IMAGE}" --smtp "${LAB_ADDRESS}:${SMTP_PORT}" --listen "${LAB_ADDRESS}:${MAIL_API_PORT}" \
+    --smtp-tls-cert /work/registry/server.crt --smtp-tls-key /work/registry/server.key \
+    --smtp-require-starttls --smtp-auth-accept-any >/dev/null
+}
+
 # cmd_live: Run the live tests on a new host; tear it down if they pass.
 cmd_live() {
   local sha256 public_key status=0
@@ -287,18 +306,21 @@ ssh_public_key          = "${public_key}"
 admin_cidrs             = ["${LAB_ADDRESS}/32"]
 clowderd_package_url    = "http://${LAB_ADDRESS}:${PACKAGE_PORT}/clowderd.deb"
 clowderd_package_sha256 = "${sha256}"
+storage_classes         = { fast = 20, bulk = 20, small = 10 }
+published_ports         = ["udp/9987"]
 EOF
   docker rm -f "${LIVE_PACKAGES}" >/dev/null 2>&1 || true
   docker run -d --rm --name "${LIVE_PACKAGES}" --network "${HLAB_NETWORK}" \
     -v "${LIVE_VOLUME}:/work:ro" "${BUSYBOX_IMAGE}" \
     httpd -f -p "${LAB_ADDRESS}:${PACKAGE_PORT}" -h /work/www >/dev/null
   start_registry
+  start_mail
   live_tofu 'tofu apply -input=false -auto-approve -state=/work/terraform.tfstate \
     -var-file=/work/live.tfvars && tofu output -json -state=/work/terraform.tfstate >/work/outputs.json' \
     && in_lab "${GO_IMAGE}" env LIVE_DIR=/work CLOWDER=/src/dist/linux-amd64/clowder \
       go test -tags live -count=1 -timeout 90m -v ./test/live \
     || status=$?
-  docker rm -f "${LIVE_PACKAGES}" "${LIVE_REGISTRY}" >/dev/null
+  docker rm -f "${LIVE_PACKAGES}" "${LIVE_REGISTRY}" "${LIVE_MAIL}" >/dev/null
   if ((status != 0)); then
     echo "bin/dev live: failed; the host stays for a look (ssh from the lab's network with" \
       "/work/id_ed25519 in the volume ${LIVE_VOLUME}); bin/dev live down removes it" >&2
@@ -311,7 +333,7 @@ EOF
 cmd_live_down() {
   lab up
   eval "$(lab env)"
-  docker rm -f "${LIVE_PACKAGES}" "${LIVE_REGISTRY}" >/dev/null 2>&1 || true
+  docker rm -f "${LIVE_PACKAGES}" "${LIVE_REGISTRY}" "${LIVE_MAIL}" >/dev/null 2>&1 || true
   if live_host_left; then
     live_tofu 'tofu destroy -input=false -auto-approve -state=/work/terraform.tfstate \
       -var-file=/work/live.tfvars'

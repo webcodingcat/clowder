@@ -55,6 +55,35 @@ resource "hcloud_firewall" "host" {
     port        = "7443"
     source_ips  = var.admin_cidrs
   }
+
+  # Traefik on the Floating IP; the ACME CA validates its challenges over
+  # HTTP from anywhere
+  rule {
+    description = "HTTP"
+    direction   = "in"
+    protocol    = "tcp"
+    port        = "80"
+    source_ips  = ["0.0.0.0/0", "::/0"]
+  }
+
+  rule {
+    description = "HTTPS"
+    direction   = "in"
+    protocol    = "tcp"
+    port        = "443"
+    source_ips  = ["0.0.0.0/0", "::/0"]
+  }
+
+  dynamic "rule" {
+    for_each = var.published_ports
+    content {
+      description = "published ${rule.value}"
+      direction   = "in"
+      protocol    = split("/", rule.value)[0]
+      port        = split("/", rule.value)[1]
+      source_ips  = ["0.0.0.0/0", "::/0"]
+    }
+  }
 }
 
 # Created apart from the server and attached later, so the server's user data

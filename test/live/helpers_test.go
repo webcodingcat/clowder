@@ -211,9 +211,9 @@ func generation(t *testing.T, name string) int64 {
 }
 
 // waitRunning waits until the stack runs in the given generation.
-func waitRunning(t *testing.T, name string, generation int64, deadline time.Duration) {
+func waitRunning(t *testing.T, name string, generation int64) {
 	t.Helper()
-	eventually(t, deadline, fmt.Sprintf("stack %s running in generation %d", name, generation), func() error {
+	eventually(t, stackDeadline, fmt.Sprintf("stack %s running in generation %d", name, generation), func() error {
 		stacks, err := listStacks()
 		if err != nil {
 			return err
@@ -230,9 +230,9 @@ func waitRunning(t *testing.T, name string, generation int64, deadline time.Dura
 }
 
 // waitGone waits until the cluster no longer lists the stacks.
-func waitGone(t *testing.T, deadline time.Duration, names ...string) {
+func waitGone(t *testing.T, names ...string) {
 	t.Helper()
-	eventually(t, deadline, "stacks gone", func() error {
+	eventually(t, stackDeadline, "stacks gone", func() error {
 		stacks, err := listStacks()
 		if err != nil {
 			return err

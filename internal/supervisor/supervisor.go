@@ -37,13 +37,14 @@ type Rule struct {
 // ok is false for a container clowder does not know (any more).
 type Rules func(stack, service string) (rule Rule, ok bool)
 
-// Backoff is the wait before a restart: Base, doubling up to Max; after
-// Stable of running, it starts at Base again.
+// Backoff is the wait before a restart: none for the first, then Base,
+// doubling up to Max; after Stable of running, a crash is the first again.
 type Backoff struct {
 	Base, Max, Stable time.Duration
 }
 
-// DefaultBackoff is 1 s, 2 s, 4 s ... up to 60 s, reset after 10 min.
+// DefaultBackoff is at once, then 1 s, 2 s, 4 s ... up to 60 s, reset after
+// 10 min.
 var DefaultBackoff = Backoff{Base: time.Second, Max: time.Minute, Stable: 10 * time.Minute}
 
 // Supervisor watches Docker's events and restarts what crashed.
@@ -256,10 +257,16 @@ func (s *Supervisor) unhealthy(ctx context.Context, stack, service, id string) {
 	})
 }
 
-// delay is the wait before restart number attempt (from 0).
+// delay is the wait before restart number attempt (from 0). The first comes
+// at once: a service that crashed once is back within 2 s (a goal the live
+// test checks);
+// one that crashes again waits, so a crash loop does not spin.
 func (s *Supervisor) delay(attempt int) time.Duration {
+	if attempt == 0 {
+		return 0
+	}
 	delay := s.backoff.Base
-	for range attempt {
+	for range attempt - 1 {
 		delay *= 2
 		if delay >= s.backoff.Max {
 			return s.backoff.Max
