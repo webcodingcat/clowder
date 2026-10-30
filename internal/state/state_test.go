@@ -221,19 +221,23 @@ func TestEveryPhaseHasAWayOut(t *testing.T) {
 func TestOnlyAHostReportsAboutItself(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
-	pools := map[string]Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: 100 << 30, UsedBytes: 1 << 30}}
-	c.mustApply(KindReportHost, HostActor(0), ReportHost{Host: 0, Version: "1.3.0", Pools: pools})
+	pools := map[string]Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: 100 << 30, DataPercent: 81, MetadataPercent: 12}}
+	c.mustApply(KindReportHost, HostActor(0), ReportHost{
+		Host: 0, Version: "1.3.0", Pools: pools, DockerDown: true, RootUsedPercent: 91,
+	})
 	c.mustApply(KindReportHost, HostActor(1), ReportHost{Host: 1, Version: "1.2.9"})
 	c.refuse(KindReportHost, HostActor(1), ReportHost{Host: 0, Version: "9.9.9"}, "only host")
-	c.refuse(KindReportHost, HostActor(1), ReportHost{
-		Host: 1, Version: "1.2.9",
-		Pools: map[string]Pool{"vg/thin": {SizeBytes: 0}},
-	}, "pool vg/thin")
+	for _, pool := range []Pool{{SizeBytes: 0}, {SizeBytes: 1, DataPercent: 101}, {SizeBytes: 1, MetadataPercent: -1}} {
+		c.refuse(KindReportHost, HostActor(1), ReportHost{
+			Host: 1, Version: "1.2.9", Pools: map[string]Pool{"vg/thin": pool},
+		}, "pool vg/thin")
+	}
+	c.refuse(KindReportHost, HostActor(1), ReportHost{Host: 1, Version: "1.2.9", RootUsedPercent: 120}, "root file system")
 	if got := c.state.MinVersion(); got != "1.2.9" {
 		t.Errorf("MinVersion %s", got)
 	}
-	if c.state.Hosts[0].Pools["vg-fast/thin"].SizeBytes != 100<<30 {
-		t.Errorf("pools %v", c.state.Hosts[0].Pools)
+	if host := c.state.Hosts[0]; host.Pools["vg-fast/thin"].DataPercent != 81 || !host.DockerDown || host.RootUsedPercent != 91 {
+		t.Errorf("host %+v", host)
 	}
 }
 

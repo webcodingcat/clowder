@@ -123,6 +123,10 @@ type Host struct {
 	Pools map[string]Pool `json:"pools,omitempty"`
 	// Version of the agent, as it last reported it.
 	Version string `json:"version,omitempty"`
+	// DockerDown is true when Docker did not answer the host's last ping.
+	DockerDown bool `json:"docker_down,omitempty"`
+	// RootUsedPercent is how full the root file system is, in whole percent.
+	RootUsedPercent int `json:"root_used_percent,omitempty"`
 }
 
 // Resources are a host's memory and CPUs, as it reports them; the
@@ -132,11 +136,14 @@ type Resources struct {
 	CPUs        float64 `json:"cpus"`
 }
 
-// Pool is a thin pool's size and how much of it volumes have taken.
+// Pool is a thin pool's size and how full its data and metadata are. Whole
+// percent rather than bytes: the same threshold works for any pool size,
+// and a report changes only when a value moves by a percent.
 type Pool struct {
-	Name      string `json:"name"` // volume-group/thin-pool
-	SizeBytes int64  `json:"size_bytes"`
-	UsedBytes int64  `json:"used_bytes"`
+	Name            string `json:"name"` // volume-group/thin-pool
+	SizeBytes       int64  `json:"size_bytes"`
+	DataPercent     int    `json:"data_percent"`
+	MetadataPercent int    `json:"metadata_percent"`
 }
 
 // User may use the CLI with the certificates listed here.

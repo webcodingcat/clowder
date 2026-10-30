@@ -40,6 +40,9 @@ func fakeDocker(t *testing.T) (string, *[]string) {
 	mux.HandleFunc("POST /containers/{id}/restart", func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "no such container", http.StatusNotFound)
 	})
+	mux.HandleFunc("GET /_ping", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, "OK")
+	})
 	mux.HandleFunc("GET /containers/json", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprintln(w, `[{"Id":"c1","State":"exited","Labels":{"clowder.stack":"shop"}}]`)
 	})
@@ -71,6 +74,9 @@ func TestTheClientSpeaksDockersAPI(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no event")
+	}
+	if err := client.Ping(ctx); err != nil {
+		t.Error(err)
 	}
 	if err := client.Start(ctx, "c1"); err != nil {
 		t.Error(err)

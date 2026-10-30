@@ -211,6 +211,30 @@ func (c *Client) Inspect(ctx context.Context, id string) (Details, error) {
 	return details, nil
 }
 
+// pingTimeout is how long Ping waits: a Docker that takes longer to answer
+// a ping counts as down.
+const pingTimeout = 10 * time.Second
+
+// Ping asks whether Docker answers.
+func (c *Client) Ping(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, pingTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/_ping", nil)
+	if err != nil {
+		return err
+	}
+	response, err := c.http.Do(request)
+	if err != nil {
+		return fmt.Errorf("ping Docker: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }() // read to the end below
+	if response.StatusCode != http.StatusOK {
+		return answerError("ping Docker", response)
+	}
+	_, _ = io.Copy(io.Discard, response.Body) // "OK"; read so the connection is used again
+	return nil
+}
+
 func (c *Client) post(ctx context.Context, path string) error {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()

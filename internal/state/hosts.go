@@ -173,15 +173,19 @@ func applySetIngress(s *State, _ Command, payload SetIngress) error {
 	return nil
 }
 
-// ReportHost is an agent telling what it is: the version it runs, what it
-// offers after the system reserve, and its thin pools (by pool name,
-// "vg/thin"). The leader places volumes by the pools. Agents send it when
-// something changed, not on every health check.
+// ReportHost is an agent telling what it is and how it is doing: the
+// version it runs, its memory and CPUs, its thin pools (by pool name, "vg/thin"),
+// whether Docker answers and how full the root file system is. The leader
+// places by it and will raise alerts from it. Agents send it when something
+// changed, not on every look, so every value is one that changes seldom: a
+// bool, a whole percent.
 type ReportHost struct {
-	Host     HostID          `json:"host"`
-	Version  string          `json:"version"`
-	Capacity Resources       `json:"capacity"`
-	Pools    map[string]Pool `json:"pools,omitempty"`
+	Host            HostID          `json:"host"`
+	Version         string          `json:"version"`
+	Capacity        Resources       `json:"capacity"`
+	Pools           map[string]Pool `json:"pools,omitempty"`
+	DockerDown      bool            `json:"docker_down,omitempty"`
+	RootUsedPercent int             `json:"root_used_percent,omitempty"`
 }
 
 func applyReportHost(s *State, cmd Command, payload ReportHost) error {
@@ -193,12 +197,21 @@ func applyReportHost(s *State, cmd Command, payload ReportHost) error {
 		return fmt.Errorf("only host %s itself reports about itself", host.Name)
 	case payload.Version == "":
 		return errors.New("the version is empty")
+	case !percent(payload.RootUsedPercent):
+		return fmt.Errorf("host %s: the root file system is %d %% full", host.Name, payload.RootUsedPercent)
 	}
 	for name, pool := range payload.Pools {
-		if pool.SizeBytes <= 0 || pool.UsedBytes < 0 {
-			return fmt.Errorf("host %s: pool %s with size %d and use %d", host.Name, name, pool.SizeBytes, pool.UsedBytes)
+		if pool.SizeBytes <= 0 || !percent(pool.DataPercent) || !percent(pool.MetadataPercent) {
+			return fmt.Errorf("host %s: pool %s with size %d, data %d %% and metadata %d %% full",
+				host.Name, name, pool.SizeBytes, pool.DataPercent, pool.MetadataPercent)
 		}
 	}
 	host.Version, host.Capacity, host.Pools = payload.Version, payload.Capacity, payload.Pools
+	host.DockerDown, host.RootUsedPercent = payload.DockerDown, payload.RootUsedPercent
 	return nil
+}
+
+// percent tells whether a value is a whole percent, 0 to 100.
+func percent(value int) bool {
+	return value >= 0 && value <= 100
 }

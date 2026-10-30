@@ -99,7 +99,7 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	runner := &stackRunner{
 		files: Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}, host: Host{ID: 0, Name: "node0", NodeAddress: netip.MustParseAddr("10.77.0.1")},
-		version: "1.0.0", cluster: cluster, docker: docker, storage: storage, logger: logger,
+		cluster: cluster, docker: docker, storage: storage, logger: logger,
 		propose: cluster.propose, applied: map[string][32]byte{}, logins: map[string][32]byte{},
 		unexplained: map[string]bool{},
 		// the tests' sealed values are their clear text

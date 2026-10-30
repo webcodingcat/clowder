@@ -101,7 +101,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		return err
 	}
 	runner := &stackRunner{
-		files: files, host: host, version: buildinfo.Version, cluster: node,
+		files: files, host: host, cluster: node,
 		docker: parts.Docker, storage: parts.Storage, open: credentials.dataKey.Open, digestKey: digestKey,
 		logger: logger, applied: map[string][32]byte{}, logins: map[string][32]byte{}, wake: make(chan struct{}, 1),
 		unexplained: map[string]bool{},
@@ -136,13 +136,19 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	})
 	loops.Go(func() { controller.RunACME(reconcilers, node, server.Propose, credentials.dataKey, logger) })
 	loops.Go(func() { runner.trim(reconcilers) })
+	reporter := &hostReporter{
+		host: host, version: buildinfo.Version, cluster: node, docker: parts.Docker, storage: parts.Storage,
+		propose: server.Propose, logger: logger, root: "/",
+	}
 	loops.Go(func() {
 		// a state that lags may still place a stack here that has moved on,
 		// so containers start only once the state caught up: the stacks and
-		// Traefik (a loop of its own, started from here, so it waits too)
+		// Traefik. The report waits too: it compares with the state. Both
+		// are loops of their own, started from here, so they wait.
 		if caughtUp != nil && !waitForState(reconcilers, node, logger) {
 			return
 		}
+		loops.Go(func() { reporter.run(reconcilers) })
 		loops.Go(func() { traefik.run(reconcilers) })
 		runner.reconcile(reconcilers)
 	})

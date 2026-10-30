@@ -18,6 +18,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
+	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -35,6 +36,7 @@ type Docker interface {
 	Login(ctx context.Context, registry, username, password string) error
 	Containers(ctx context.Context, label string) ([]docker.Container, error)
 	Inspect(ctx context.Context, id string) (docker.Details, error)
+	Ping(ctx context.Context) error
 }
 
 // Storage is what the agent needs from the storage driver; storage.Driver is
@@ -57,7 +59,6 @@ type stateReader interface {
 type stackRunner struct {
 	files   Files
 	host    Host
-	version string
 	cluster stateReader
 	docker  Docker
 	storage Storage
@@ -68,7 +69,7 @@ type stackRunner struct {
 	// supervisor and propose need the runner first (the supervisor its
 	// rules, the API server its containers), so Run sets them afterwards
 	supervisor *supervisor.Supervisor
-	propose    func(ctx context.Context, cmd state.Command) (uint64, error)
+	propose    controller.Propose
 
 	mu sync.Mutex
 	// applied is the hash of the Compose file each stack last came up with.
@@ -93,7 +94,6 @@ type desiredState struct {
 	volumes    map[string]*state.Volume
 	hostNames  map[state.HostID]string
 	registries map[string]state.Sealed
-	self       state.Host
 	// retired are the copies the cluster gave up, on any host
 	retired []state.RetiredCopy
 }
@@ -119,9 +119,6 @@ func readDesired(cluster stateReader, self state.HostID) (desiredState, error) {
 	}
 	for id, host := range copied.Hosts {
 		desired.hostNames[id] = host.Name
-	}
-	if host, ok := copied.Hosts[self]; ok {
-		desired.self = *host
 	}
 	return desired, nil
 }
@@ -149,9 +146,6 @@ func (r *stackRunner) pass(ctx context.Context) {
 	if err != nil {
 		r.logger.Error("read the state", "error", err)
 		return
-	}
-	if err := r.reportHost(ctx, desired); err != nil {
-		r.logger.Error("report this host", "error", err)
 	}
 	r.logIn(ctx, desired)
 	for _, name := range slices.Sorted(maps.Keys(desired.stacks)) {
@@ -226,7 +220,7 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 	if stack.Status == state.StackRunning {
 		return nil
 	}
-	return r.report(ctx, state.KindSetStackStatus, state.SetStackStatus{
+	return commitAsHost(ctx, r.propose, r.host.ID, state.KindSetStackStatus, state.SetStackStatus{
 		Name: stack.Name, Status: state.StackRunning, Host: stack.Host, Generation: stack.Generation,
 	})
 }
@@ -425,7 +419,7 @@ func (r *stackRunner) removeVolumes(ctx context.Context, desired desiredState, s
 		}
 		// Remove picks up where it left, so a copy whose forgetting failed
 		// stays recorded and is tried again at the next pass
-		if err := r.report(ctx, state.KindForgetCopy, state.ForgetCopy{Copy: retired}); err != nil {
+		if err := commitAsHost(ctx, r.propose, r.host.ID, state.KindForgetCopy, state.ForgetCopy{Copy: retired}); err != nil {
 			errs = append(errs, err)
 			kept = append(kept, volume)
 		}

@@ -156,10 +156,13 @@ func (c *calls) waitFor(t *testing.T, line string) {
 	t.Errorf("no call %q; the calls: %q", line, c.lines)
 }
 
-// fakeStorage stands in for the storage driver: every pool has 100 GiB.
+// fakeStorage stands in for the storage driver: every pool has 100 GiB,
+// dataPercent full, unless reading it fails (poolFails).
 type fakeStorage struct {
 	calls
-	dir string
+	dir         string
+	dataPercent float64
+	poolFails   bool
 }
 
 func (f *fakeStorage) Ensure(_ context.Context, volume storage.Volume) error {
@@ -175,7 +178,12 @@ func (f *fakeStorage) Remove(_ context.Context, volume storage.Volume) error {
 func (f *fakeStorage) Trim(context.Context, []storage.Volume) error { return nil }
 
 func (f *fakeStorage) PoolUsage(context.Context, string) (int64, float64, float64, error) {
-	return 100 << 30, 0, 0, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.poolFails {
+		return 0, 0, 0, errors.New("lvs timed out")
+	}
+	return 100 << 30, f.dataPercent, 0, nil
 }
 
 func (f *fakeStorage) MountPoint(volume storage.Volume) string {
@@ -188,6 +196,8 @@ type fakeDocker struct {
 	calls
 	// failedUps is how many compose ups fail before one works
 	failedUps int
+	// down makes Ping fail as if refused, hangs as if it timed out
+	down, hangs bool
 	// upFiles and leftOut are the files and the services left out of the
 	// last compose up
 	upFiles, leftOut []string
@@ -203,6 +213,22 @@ func (f *fakeDocker) Events(ctx context.Context, _ string) (<-chan docker.Event,
 		close(events)
 	}()
 	return events, make(chan error)
+}
+
+func (f *fakeDocker) Ping(ctx context.Context) error {
+	f.mu.Lock()
+	down, hangs := f.down, f.hangs
+	f.mu.Unlock()
+	switch {
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case hangs:
+		// the client's own timeout ran out
+		return fmt.Errorf("ping Docker: %w", context.DeadlineExceeded)
+	case down:
+		return errors.New("connection refused")
+	}
+	return nil
 }
 
 func (f *fakeDocker) Start(context.Context, string) error   { return nil }

@@ -586,10 +586,19 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   `forgetApplied`). The first pass waits until
   the state has caught up with the Raft log, so a host that was away does not start a stack
   that has moved on.
-- The agent also reports its version, memory, CPUs and pools (`report-host`, only when
-  they changed; the pools' use rounded to `usedBytesStep`), logs Docker in to the registries
-  of `secrets.sops.yaml`, runs the supervisor and, while it leads, the placement
-  (`controller.RunPlacement`). Every `trimInterval` it trims the volumes.
+- The agent also logs Docker in to the registries of `secrets.sops.yaml`, runs the
+  supervisor and, while it leads, the placement (`controller.RunPlacement`). Every
+  `trimInterval` it trims the volumes.
+- **The host's report** (`hostReporter`, `report-host`): version, memory, CPUs, the pools'
+  data and metadata use, whether Docker answers a ping (`DockerDown`) and how full the root
+  file system is: the inputs of the alerts. It runs in a loop of its own, after the state
+  caught up, so a Docker that hangs cannot hold up the report that says so; each probe ends
+  by its driver's timeout (Docker's ping, lvs). It probes every 30 s and when a new
+  `cluster.yaml` may name a new pool, not at every change of the state: lvs on a host whose
+  DRBD hangs is slow. A probe that fails keeps the value the state has: a pool
+  whose `lvs` timed out does not vanish for the placement. The report commits only when a
+  value changed, and every value changes seldom: a bool or a whole percent, rounded up, so a
+  threshold trips early rather than late, and a small pool as early as a large one.
 - **Tests.** The package's test goes the whole way on 127.0.0.1: init, the agent with a
   notify socket, the user's bootstrap, apply and diff, the Floating IP reaching the nft
   rules, and a stack created, applied, listed and deleted. `stacks_test.go` runs single
