@@ -109,6 +109,8 @@ Known gaps to close in phase 2. They do no harm on a single host:
 - The placement does not bind a stack to the host its volumes are on. When `put-volume`
   committed but the stack's `set-stack-status` did not (an error, a change of leader), a
   later pass may pick another host for the stack.
+- The ACME self-check asks the Floating IP, which reaches the leader's own Traefik; with
+  several hosts it must ask the ingress host instead (Certificates of the routes).
 - `examples/hetzner` ignores later changes to the server's user data, so a storage class
   added later gets a volume but no thin pool on an existing host.
 
@@ -225,7 +227,8 @@ Packages in *italics* do not exist yet.
 - **Decides**: `controller` (the leader's loops) writes Raft commands. It talks to external
   services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
   changes the host. Their clients sit beside it: `hoster` (with `hoster/hetzner`),
-  *`notify`*; depguard keeps them out of the CLI.
+  *`notify`*, and `x/crypto/acme`; depguard keeps them out of the CLI, the state and the
+  scheduler.
 - **Changes the host**: `agent`, `supervisor`, `raftnode` (Raft over mTLS), `datakey` (the
   key file), `command` (host tools with a timeout) and the drivers `network`, `storage`,
   `docker`, `ingress` (Traefik's files; it renders, the agent writes).
@@ -303,6 +306,14 @@ Packages in *italics* do not exist yet.
 - `WriteSOPS` and `WriteSOPSConfig` write a SOPS file and the `.sops.yaml` beside it, for
   `cluster bootstrap` and `stack create` alike. `testdata/test-age-key.txt` is a test-only
   key for the fixtures.
+- **Files next to `cluster.yaml`** (`acme.ca`): `FileNames` lists those it names, by paths
+  relative to it and written with `/` (the CLI runs on Windows too), and `Check` refuses
+  absolute ones, `..` and more than 8. `cluster apply` reads them (`Directory.Files`) and
+  sends their contents along; `CheckFiles` refuses a missing one, one over 64 KiB and an
+  `acme.ca` without a certificate, in the CLI and again in the state, which keeps them with
+  the config (`ClusterConfig.Files`). `cluster diff` names those that differ.
+- Durations (`acme.renew_before`, `alerts.heartbeat.interval`) are read by
+  `units.ParseDuration`: Go's format, which may start with whole days (`30d`, `1d12h`).
 
 ## SOPS files (`internal/sopsage`)
 
@@ -341,7 +352,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **In use so far:** `bootstrap` (init), `apply-config`, `add-user` (the first user),
   `set-host-phase` (host actions), `create-stack`, `put-stack` and `delete-stack` (the user),
   `put-volume`, `set-stack-status` and `set-stack-wait-reason` (placement, the stack's
-  host), `set-ingress` (the ingress loop), `report-host` and `forget-copy` (each agent). The
+  host), `set-ingress` (the ingress loop), `put-acme-account`, `put-acme-challenge`,
+  `delete-acme-challenge`, `put-certificate` and `delete-certificate` (the ACME loop),
+  `report-host` and `forget-copy` (each agent). The
   other kinds (`delete-volume`, hosts joining, operations, users beyond the first) are there
   for the next steps; they are tested, but nothing sends them yet.
 - **Retired copies.** A volume copy's data goes only when the state says so: `delete-stack`
@@ -661,14 +674,26 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   `traefik.yml` differs from the one Traefik came up with: at the first pass after the agent
   started, after Docker restarted (`forget`), and after a new image pin or Floating IP. Each
   of its files is compared with what is on disk, so one removed or changed by hand comes
-  back at the next pass. It reads only the Floating IP and the stacks' sources from the
-  state, no copy of all of it: it passes at every event of Docker's.
+  back at the next pass. It reads only the Floating IP, the stacks' sources and the
+  certificates from the state, no copy of all of it: it passes at every event of Docker's.
 - **Routes.** `ingress.RenderDynamic` writes the file provider's `routes.yaml`: per
-  `x-clowder.http` a router `<stack>.<service>` on `web` and a service whose servers are the
-  containers of that service on this host that run and, if they have a health check, are
-  healthy (`docker.Inspect`; the address in the network whose name sorts first). A route
-  without such a container keeps its router with no servers, so Traefik answers 503, not
-  404. Traefik watches the directory, so new routes need no restart.
+  `x-clowder.http` a service `<stack>.<service>` whose servers are the containers of that
+  service on this host that run and, if they have a health check, are healthy
+  (`docker.Inspect`; the address in the network whose name sorts first), and routers
+  `<entrypoint>.<stack>.<service>`. A route without such a container keeps its routers with
+  no servers, so Traefik answers 503, not 404. Traefik watches the directory, so new routes
+  need no restart.
+- **HTTPS.** A route whose domain has a certificate gets a router on `websecure` and one on
+  `web` that redirects to it; before that only a plain router on `web`, so nobody sees
+  Traefik's self-signed default certificate. The runner writes every certificate of the
+  state and its opened key into `/run/clowder-secrets/clowder-traefik/` (the tmpfs of the
+  stacks' secrets, 0700; mounted read-only), before the routes that name them. Traefik
+  watches only the routes, so the files are named after a hash of the chain: a renewed
+  certificate changes the routes, and Traefik reads it; old files go after the routes.
+- **ACME challenges.** The router `acme-challenge` on `web` sends
+  `/.well-known/acme-challenge/` of every domain, before every stack's router, to the agent
+  on 127.0.0.1:7445, which answers from the state (`State.Challenges`): whichever host
+  holds the Floating IP can answer the CA.
 - The runner's passes come at every change of the state, every 30 s, and at once when the
   supervisor sees an event of Docker's (`look`: start, die, health status): a container that
   turns unhealthy leaves its route within seconds.
@@ -700,7 +725,38 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   ports, Traefik) can bind it on every host and at boot.
 - Only the leader's loops call the hoster: the controller opens the token from the state
   and makes the client (`HostParts.Hoster`, a fake in the tests). depguard keeps `hoster`
-  out of the CLI.
+  out of the CLI, the state and the scheduler.
+
+## Certificates of the routes (`controller/acme.go`)
+
+- `controller.RunACME` acts only on the leader, with `golang.org/x/crypto/acme`, at a
+  change of the state and every 30 s. It keeps one certificate per domain of an HTTP route
+  (`State.Certificates`, the key sealed) and deletes those of domains no stack names.
+- The account (`State.ACMEAccount`, the key sealed) is made at the first order and belongs
+  to its directory: a new `acme.directory` gets a new account. `acme.ca` (a file next to
+  `cluster.yaml`) is trusted besides the system's CAs: a test CA such as Pebble.
+- An order, one domain after the other: the domain must resolve to the Floating IP and
+  nothing else, or no order (retry in 10 minutes: it never reached the CA, so it does not
+  count towards the backoff, and Let's Encrypt's limit on failed validations stays
+  untouched). Then the answer to the HTTP-01 challenge goes into the state, and the leader
+  asks the Floating IP :80 for it with the domain as host until Traefik returns it (at most
+  2 minutes). The Floating IP is on every host's interface, so this reaches the leader's
+  own Traefik: on one host the ingress host. With several hosts it proves nothing about
+  the ingress host; phase 2 must ask that host, for example through its internal
+  entrypoint. Only then may the CA validate. When the order ends, the leader removes the
+  answer from the state; a new leader removes answers an old one left behind. A failed
+  account makes the pass end: Let's Encrypt allows few new accounts per address.
+- A failed order backs off per domain: 10 minutes, doubling up to 24 hours, kept in the
+  leader's memory. A new leader starts again at none, so even a leader that changes often
+  stays well below Let's Encrypt's limits.
+- **Renewal** is relative to the lifetime (`NotAfter` minus `NotBefore`, both in the
+  state), because Let's Encrypt makes lifetimes shorter: by default when a third is left.
+  `acme.renew_before` overrides that while it is shorter than the lifetime; a longer one
+  would renew every new certificate at once, so the leader keeps the default for that
+  certificate and logs it (an alert once clowder has alerts). Both follow from the state alone, so no
+  setting and no change of leader can make it renew in a loop.
+- The tests run the whole order against a small ACME CA of their own
+  (`controller/acme_test.go`), which validates by asking for the challenge.
 
 ## Containers (`internal/docker`, `internal/supervisor`)
 

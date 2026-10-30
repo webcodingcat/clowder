@@ -209,8 +209,10 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 			Heartbeat: &Heartbeat{Interval: "often"},
 		},
 		Metrics: Metrics{Listen: "everywhere"},
+		ACME:    ACME{Directory: "acme.example.com", Email: "ops", CA: "../ca.pem", RenewBefore: "soon"},
 	}
 	want := []string{
+		`acme.directory "acme.example.com"`, `acme.email "ops"`, `"../ca.pem" is not a path`, `renew_before "soon"`,
 		"name is required", `"10.0.0.1:99999"`, `hoster.type "aws"`, "hoster.token",
 		`hoster.api "api.example.com/v1" is not a full URL`,
 		`network "both"`, "not an IPv4 address", `pool "nopool"`, `reserve "95%"`,

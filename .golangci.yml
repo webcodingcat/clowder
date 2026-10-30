@@ -45,6 +45,8 @@ linters:
               desc: "agent only (clowderd): the leader's loops run inside the agent"
             - pkg: github.com/webcodingcat/clowder/internal/hoster
               desc: "agent only (clowderd): only the leader's loops call the hoster's API"
+            - pkg: golang.org/x/crypto/acme
+              desc: "agent only (clowderd): only the leader's loops order certificates"
             - pkg: github.com/webcodingcat/clowder/internal/network
               desc: Linux only (clowderd)
             - pkg: github.com/webcodingcat/clowder/internal/storage
@@ -81,6 +83,10 @@ linters:
               desc: Apply must be deterministic
             - pkg: crypto/rand
               desc: Apply must be deterministic
+            - pkg: github.com/webcodingcat/clowder/internal/hoster
+              desc: only the leader's controller calls external services
+            - pkg: golang.org/x/crypto/acme
+              desc: only the leader's controller calls external services
     misspell:
       locale: US
     revive:

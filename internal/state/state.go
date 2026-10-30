@@ -40,10 +40,18 @@ type State struct {
 	Hosts      map[HostID]*Host  `json:"hosts,omitempty"`
 	// Ingress is the host that should hold the Floating IP; the leader keeps
 	// the hoster's routing in line with it.
-	Ingress *HostID              `json:"ingress,omitempty"`
-	Users   map[string]*User     `json:"users,omitempty"`
-	Revoked map[string]time.Time `json:"revoked,omitempty"` // certificate serial -> when
-	Stacks  map[string]*Stack    `json:"stacks,omitempty"`
+	Ingress *HostID `json:"ingress,omitempty"`
+	// ACMEAccount is the cluster's account at the ACME directory; the
+	// leader makes it at its first order.
+	ACMEAccount *ACMEAccount `json:"acme_account,omitempty"`
+	// Challenges are the HTTP-01 answers of the orders in progress: token
+	// -> key authorization. Every agent serves them.
+	Challenges map[string]string `json:"challenges,omitempty"`
+	// Certificates are the HTTP routes' certificates by domain.
+	Certificates map[string]*Certificate `json:"certificates,omitempty"`
+	Users        map[string]*User        `json:"users,omitempty"`
+	Revoked      map[string]time.Time    `json:"revoked,omitempty"` // certificate serial -> when
+	Stacks       map[string]*Stack       `json:"stacks,omitempty"`
 	// StacksRevision counts the stacks' applies: a cluster apply checked
 	// against the stacks commits only if none came in between.
 	StacksRevision int64              `json:"stacks_revision,omitempty"`
@@ -74,6 +82,8 @@ type ClusterConfig struct {
 	// can tell whether anything changed.
 	Hash string            `json:"hash,omitempty"`
 	Spec clusterdir.Config `json:"spec"`
+	// Files are the files next to cluster.yaml that it names (acme.ca).
+	Files map[string][]byte `json:"files,omitempty"`
 }
 
 // HostPhase is where a host is in its life; see phaseChanges for the moves.

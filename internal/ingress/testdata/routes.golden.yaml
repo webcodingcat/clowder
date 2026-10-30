@@ -1,21 +1,52 @@
 http:
   routers:
-    blog.web:
+    acme-challenge:
+      entryPoints:
+        - web
+      rule: PathPrefix(`/.well-known/acme-challenge/`)
+      priority: 1000000
+      service: acme-challenge
+    web.blog.web:
       entryPoints:
         - web
       rule: Host(`blog.example.com`)
       service: blog.web
-    shop.api:
+    web.shop.api:
       entryPoints:
         - web
       rule: Host(`shop.example.com`) && PathPrefix(`/api`)
+      middlewares:
+        - redirect-to-https
       service: shop.api
-    shop.app:
+    web.shop.app:
       entryPoints:
         - web
       rule: Host(`shop.example.com`)
+      middlewares:
+        - redirect-to-https
       service: shop.app
+    websecure.shop.api:
+      entryPoints:
+        - websecure
+      rule: Host(`shop.example.com`) && PathPrefix(`/api`)
+      service: shop.api
+      tls: {}
+    websecure.shop.app:
+      entryPoints:
+        - websecure
+      rule: Host(`shop.example.com`)
+      service: shop.app
+      tls: {}
+  middlewares:
+    redirect-to-https:
+      redirectScheme:
+        scheme: https
+        permanent: true
   services:
+    acme-challenge:
+      loadBalancer:
+        servers:
+          - url: http://127.0.0.1:7445
     blog.web:
       loadBalancer:
         servers: []
@@ -28,3 +59,7 @@ http:
         servers:
           - url: http://172.18.0.2:8080
           - url: http://172.18.0.3:8080
+tls:
+  certificates:
+    - certFile: /etc/traefik-certificates/shop.example.com-1a2b.crt
+      keyFile: /etc/traefik-certificates/shop.example.com-1a2b.key

@@ -15,6 +15,9 @@ type ApplyConfig struct {
 	Secrets    map[string]Sealed `json:"secrets"`
 	JoinKeys   []Sealed          `json:"join_keys"`
 	Registries map[string]Sealed `json:"registries"`
+	// Files are the files next to cluster.yaml that it names, by their
+	// names in it (clusterdir.FileNames); none holds a secret.
+	Files map[string][]byte `json:"files,omitempty"`
 	// StacksRevision is the state of the stacks the new cluster.yaml was
 	// checked against: if a stack changed in between, the check no longer
 	// holds and the command is refused.
@@ -23,6 +26,9 @@ type ApplyConfig struct {
 
 func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 	if problems := clusterdir.Check(payload.Spec); len(problems) > 0 {
+		return problems
+	}
+	if problems := clusterdir.CheckFiles(payload.Spec, payload.Files); len(problems) > 0 {
 		return problems
 	}
 	if payload.StacksRevision != s.StacksRevision {
@@ -34,7 +40,14 @@ func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 			return fmt.Errorf("secret %s is used in cluster.yaml but missing", name)
 		}
 	}
-	s.Config = ClusterConfig{Revision: s.Config.Revision + 1, Hash: payload.Hash, Spec: payload.Spec.WithDefaults()}
+	// only the files cluster.yaml names: the payload may carry no others
+	files := map[string][]byte{}
+	for _, name := range clusterdir.FileNames(payload.Spec) {
+		files[name] = payload.Files[name]
+	}
+	s.Config = ClusterConfig{
+		Revision: s.Config.Revision + 1, Hash: payload.Hash, Spec: payload.Spec.WithDefaults(), Files: files,
+	}
 	s.Secrets = payload.Secrets
 	s.JoinKeys = payload.JoinKeys
 	s.Registries = payload.Registries

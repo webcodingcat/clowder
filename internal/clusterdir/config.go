@@ -184,10 +184,27 @@ type Heartbeat struct {
 
 // ACME is where certificates come from; empty means Let's Encrypt.
 type ACME struct {
+	// Directory is the full URL of the ACME directory.
 	Directory string `yaml:"directory,omitempty" json:"directory,omitempty"`
-	// CA is a PEM file next to cluster.yaml to trust for the directory (tests).
-	CA    string `yaml:"ca,omitempty" json:"ca,omitempty"`
+	// CA is a PEM file next to cluster.yaml, written with "/", that the
+	// leader trusts for the directory besides the system's (a test CA).
+	CA string `yaml:"ca,omitempty" json:"ca,omitempty"`
+	// Email is the account's contact for the CA's notices.
 	Email string `yaml:"email,omitempty" json:"email,omitempty"`
+	// RenewBefore is how long before its end a certificate is renewed, e.g.
+	// "30d"; by default when a third of its lifetime is left.
+	RenewBefore string `yaml:"renew_before,omitempty" json:"renew_before,omitempty"`
+}
+
+// DefaultACMEDirectory is Let's Encrypt's.
+const DefaultACMEDirectory = "https://acme-v02.api.letsencrypt.org/directory"
+
+// DirectoryURL is the ACME directory to use.
+func (a ACME) DirectoryURL() string {
+	if a.Directory == "" {
+		return DefaultACMEDirectory
+	}
+	return a.Directory
 }
 
 // Metrics configures /metrics.

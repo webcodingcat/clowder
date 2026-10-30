@@ -14,6 +14,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/datakey"
+	"github.com/webcodingcat/clowder/internal/ingress"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -80,6 +81,11 @@ func (f Files) secretFile(stack, name string) string {
 func (f Files) traefikCompose() string    { return filepath.Join(f.Dir, "traefik", "compose.yaml") }
 func (f Files) traefikStaticDir() string  { return filepath.Join(f.Dir, "traefik", "static") }
 func (f Files) traefikDynamicDir() string { return filepath.Join(f.Dir, "traefik", "dynamic") }
+
+// traefikCertificatesDir holds the routes' certificates and keys in clear,
+// beside the stacks' secrets on the tmpfs: the "clowder-" prefix keeps a
+// stack from taking it.
+func (f Files) traefikCertificatesDir() string { return f.secretsDir(ingress.Project) }
 
 // Host is host.json: who this host is in the cluster. init and join write it
 // last, so a host with this file has all the others.

@@ -24,6 +24,8 @@ type ClusterApply struct {
 	Secrets    map[string]string                   `json:"secrets"`
 	JoinKeys   []string                            `json:"join_keys"`
 	Registries map[string]clusterdir.RegistryLogin `json:"registries"`
+	// Files are the files next to cluster.yaml that it names.
+	Files map[string][]byte `json:"files,omitempty"`
 }
 
 // Hash identifies what is applied, secrets included, without showing them:
@@ -38,18 +40,22 @@ func (c ClusterApply) Hash() (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// ClusterInfo is the applied cluster.yaml (GET /v1/cluster), without the
-// secrets.
+// ClusterInfo is the applied cluster.yaml and its files (GET /v1/cluster),
+// without the secrets.
 type ClusterInfo struct {
 	Revision int64             `json:"revision"`
 	Hash     string            `json:"hash"`
 	Spec     clusterdir.Config `json:"spec"`
+	Files    map[string][]byte `json:"files,omitempty"`
 }
 
 func (s *Server) cluster(w http.ResponseWriter, _ *http.Request) {
 	var info ClusterInfo
 	s.config.Cluster.Read(func(current *state.State) {
-		info = ClusterInfo{Revision: current.Config.Revision, Hash: current.Config.Hash, Spec: current.Config.Spec}
+		info = ClusterInfo{
+			Revision: current.Config.Revision, Hash: current.Config.Hash, Spec: current.Config.Spec,
+			Files: current.Config.Files,
+		}
 	})
 	writeJSON(w, http.StatusOK, info)
 }
@@ -116,7 +122,7 @@ func (s *Server) sealApply(apply ClusterApply) (state.ApplyConfig, error) {
 		return state.ApplyConfig{}, err
 	}
 	payload := state.ApplyConfig{
-		Hash: hash, Spec: apply.Spec,
+		Hash: hash, Spec: apply.Spec, Files: apply.Files,
 		Secrets: map[string]state.Sealed{}, Registries: map[string]state.Sealed{},
 	}
 	for name, value := range apply.Secrets {

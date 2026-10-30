@@ -108,6 +108,9 @@ func configTemplate(directory NewDirectory) string {
 		"  fast: {pool: vg-fast/thin}",
 		"  bulk: {pool: vg-bulk/thin}",
 		"  any: {fallback: [fast, bulk]}",
+		"# the certificates of the HTTP routes come from Let's Encrypt; its notices go here",
+		"# acme:",
+		"#   email: ops@example.com",
 	}
 	return strings.Join(lines, "\n") + "\n"
 }

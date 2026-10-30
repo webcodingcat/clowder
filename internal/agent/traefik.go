@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/netip"
@@ -44,7 +46,9 @@ type traefikRunner struct {
 	host    Host
 	cluster stateReader
 	docker  Docker
-	logger  *slog.Logger
+	// open unseals the certificates' keys (datakey.Key.Open)
+	open   func(sealed state.Sealed) ([]byte, error)
+	logger *slog.Logger
 	// supervisor needs the stack runner's rules first, so Run sets it
 	// afterwards, as the stack runner's
 	supervisor *supervisor.Supervisor
@@ -57,6 +61,9 @@ type traefikRunner struct {
 
 	// wake starts a pass at once (buffered, 1)
 	wake chan struct{}
+	// unopened are the sealed keys that did not open, logged once; only
+	// the runner's loop uses it
+	unopened map[string]bool
 }
 
 // run keeps Traefik and its routes as this host needs them, until ctx ends:
@@ -98,10 +105,11 @@ func (t *traefikRunner) forget() {
 	t.look()
 }
 
-// pass writes the routes, then runs compose up when the Compose file or
-// the static configuration changed (a new image pin, a new Floating IP) or
-// Traefik has not come up since the agent started. The routes change
-// without a restart: Traefik watches their directory.
+// pass writes the certificates and the routes, then runs compose up when
+// the Compose file or the static configuration changed (a new image pin, a
+// new Floating IP) or Traefik has not come up since the agent started. The
+// routes and certificates change without a restart: Traefik watches the
+// routes' directory.
 func (t *traefikRunner) pass(ctx context.Context) error {
 	input := t.read()
 	floatingIP, err := netip.ParseAddr(input.floatingIP)
@@ -117,22 +125,33 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	file, err := ingress.RenderCompose(ingress.Mounts{Static: t.files.traefikStaticDir(), Dynamic: t.files.traefikDynamicDir()})
+	file, err := ingress.RenderCompose(ingress.Mounts{
+		Static: t.files.traefikStaticDir(), Dynamic: t.files.traefikDynamicDir(),
+		Certificates: t.files.traefikCertificatesDir(),
+	})
 	if err != nil {
 		return err
 	}
-	// the routes first, so Traefik finds them when it starts
+	// the certificates first, then the routes that name them, so Traefik
+	// finds both when it starts or reloads
+	certificates, err := t.writeCertificates(input.certificates)
+	if err != nil {
+		return err
+	}
 	routes, err := t.routes(ctx, input.sources)
 	if err != nil {
 		return err
 	}
-	rendered, err := ingress.RenderDynamic(routes)
+	rendered, err := ingress.RenderDynamic(routes, certificates)
 	if err != nil {
 		return err
 	}
 	// each file is compared with what is on disk, so one removed or changed
 	// by hand comes back at the next pass
 	if err := writeChanged(filepath.Join(t.files.traefikDynamicDir(), "routes.yaml"), rendered, 0o644); err != nil {
+		return err
+	}
+	if err := t.removeOtherCertificates(certificates); err != nil {
 		return err
 	}
 	if err := writeChanged(filepath.Join(t.files.traefikStaticDir(), "traefik.yml"), static, 0o644); err != nil {
@@ -159,11 +178,12 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	return nil
 }
 
-// traefikInput is what Traefik's files depend on: the Floating IP and the
-// sources of the stacks on this host.
+// traefikInput is what Traefik's files depend on: the Floating IP, the
+// sources of the stacks on this host and the certificates.
 type traefikInput struct {
-	floatingIP string
-	sources    map[string]string // stack -> its Compose file
+	floatingIP   string
+	sources      map[string]string // stack -> its Compose file
+	certificates []state.Certificate
 }
 
 // read takes what Traefik's files depend on from the state, and nothing
@@ -178,8 +198,76 @@ func (t *traefikRunner) read() traefikInput {
 				input.sources[name] = stack.Source
 			}
 		}
+		// every certificate: the ingress host answers for the stacks of
+		// every host (phase 2)
+		for _, domain := range slices.Sorted(maps.Keys(current.Certificates)) {
+			// a copy; Apply replaces a certificate, it never changes one
+			input.certificates = append(input.certificates, *current.Certificates[domain])
+		}
 	})
 	return input
+}
+
+// writeCertificates writes each certificate's chain and opened key into
+// the certificates' directory, under names that change with the
+// certificate (ingress.CertificateFiles). A key that does not open leaves
+// its domain on plain HTTP; the others keep theirs.
+func (t *traefikRunner) writeCertificates(certificates []state.Certificate) ([]ingress.CertificateFiles, error) {
+	// also without certificates: Traefik's Compose file mounts it, and
+	// Docker would make a missing one readable by all
+	dir := t.files.traefikCertificatesDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("make the certificates' directory: %w", err)
+	}
+	var written []ingress.CertificateFiles
+	for _, certificate := range certificates {
+		key, err := t.open(certificate.Key)
+		if err != nil {
+			// once per certificate, not at every pass: the runner passes
+			// at every event of Docker's
+			if !t.unopened[string(certificate.Key)] {
+				t.logger.Error("open the key of a certificate", "domain", certificate.Domain, "error", err)
+				t.unopened[string(certificate.Key)] = true
+			}
+			continue
+		}
+		sum := sha256.Sum256(certificate.Chain)
+		name := certificate.Domain + "-" + hex.EncodeToString(sum[:8])
+		files := ingress.CertificateFiles{Domain: certificate.Domain, Chain: name + ".crt", Key: name + ".key"}
+		if err := writeChanged(filepath.Join(dir, files.Key), key, 0o600); err != nil {
+			return nil, err
+		}
+		if err := writeChanged(filepath.Join(dir, files.Chain), certificate.Chain, 0o600); err != nil {
+			return nil, err
+		}
+		written = append(written, files)
+	}
+	return written, nil
+}
+
+// removeOtherCertificates removes, once the routes no longer name them,
+// the files of certificates that were renewed or deleted.
+func (t *traefikRunner) removeOtherCertificates(certificates []ingress.CertificateFiles) error {
+	keep := map[string]bool{}
+	for _, certificate := range certificates {
+		keep[certificate.Chain], keep[certificate.Key] = true, true
+	}
+	dir := t.files.traefikCertificatesDir()
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("list the certificates: %w", err)
+	}
+	for _, entry := range entries {
+		if !keep[entry.Name()] {
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+				return fmt.Errorf("remove an old certificate: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // writeChanged writes a file unless it holds content already.

@@ -3,9 +3,15 @@ package state
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
+	"math/big"
 	"net/netip"
 	"slices"
 	"strings"
@@ -304,6 +310,86 @@ func TestApplyConfigCountsRevisionsAndReplacesTheSecrets(t *testing.T) {
 	}
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig()}, "hcloud-token")
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Secrets: secrets}, "name is required")
+}
+
+func TestTheFilesNamedInClusterYAMLComeWithIt(t *testing.T) {
+	c := newCluster(t)
+	config := testConfig()
+	config.ACME.CA = "pebble.pem"
+	ca := testCertificatePEM(t)
+	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: testSecrets()},
+		"file pebble.pem is named in cluster.yaml but missing")
+	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{
+		Spec: config, Secrets: testSecrets(), Files: map[string][]byte{"pebble.pem": ca, "other.pem": ca},
+	})
+	files := c.state.Config.Files
+	if len(files) != 1 || !bytes.Equal(files["pebble.pem"], ca) {
+		t.Errorf("files %v: want only pebble.pem", files)
+	}
+}
+
+// testCertificatePEM is a self-signed certificate, as acme.ca holds one.
+func testCertificatePEM(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: testTime, NotAfter: testTime.Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func TestTheLeaderKeepsTheACMEAccountChallengesAndCertificates(t *testing.T) {
+	c := newCluster(t)
+	c.refuse(KindPutACMEAccount, LeaderActor, PutACMEAccount{Account: ACMEAccount{Directory: "https://acme"}},
+		"needs its directory, URL and key")
+	account := ACMEAccount{Directory: "https://acme", URL: "https://acme/acct/1", Key: Sealed("k")}
+	c.mustApply(KindPutACMEAccount, LeaderActor, PutACMEAccount{Account: account})
+	if c.state.ACMEAccount == nil || c.state.ACMEAccount.URL != account.URL {
+		t.Errorf("account %+v", c.state.ACMEAccount)
+	}
+
+	for _, refused := range []PutACMEChallenge{
+		{Token: "", KeyAuthorization: ".thumb"},
+		{Token: "a/b", KeyAuthorization: "a/b.thumb"},
+		{Token: "abc", KeyAuthorization: "abd.thumb"},
+		{Token: "abc", KeyAuthorization: "abc."},
+		{Token: "abc", KeyAuthorization: "abc.th<umb"},
+	} {
+		c.refuse(KindPutACMEChallenge, LeaderActor, refused, "is not an HTTP-01 answer")
+	}
+	c.mustApply(KindPutACMEChallenge, LeaderActor, PutACMEChallenge{Token: "abc_-1", KeyAuthorization: "abc_-1.thumb"})
+	if c.state.Challenges["abc_-1"] != "abc_-1.thumb" {
+		t.Errorf("challenges %v", c.state.Challenges)
+	}
+	c.mustApply(KindDeleteACMEChallenge, LeaderActor, DeleteACMEChallenge{Token: "abc_-1"})
+	if len(c.state.Challenges) != 0 {
+		t.Errorf("challenges %v", c.state.Challenges)
+	}
+
+	certificate := Certificate{
+		Domain: "shop.example.com", Key: Sealed("k"), Chain: []byte("chain"),
+		NotBefore: testTime, NotAfter: testTime.Add(90 * 24 * time.Hour),
+	}
+	upper, backwards, empty := certificate, certificate, certificate
+	upper.Domain = "Shop.example.com"
+	backwards.NotAfter = testTime
+	empty.Chain = nil
+	c.refuse(KindPutCertificate, LeaderActor, PutCertificate{Certificate: upper}, "not a domain in lowercase")
+	c.refuse(KindPutCertificate, LeaderActor, PutCertificate{Certificate: backwards}, "ends before it starts")
+	c.refuse(KindPutCertificate, LeaderActor, PutCertificate{Certificate: empty}, "needs its key and chain")
+	c.mustApply(KindPutCertificate, LeaderActor, PutCertificate{Certificate: certificate})
+	if got := c.state.Certificates["shop.example.com"]; got == nil || got.Lifetime() != 90*24*time.Hour {
+		t.Errorf("certificate %+v", got)
+	}
+	c.mustApply(KindDeleteCertificate, LeaderActor, DeleteCertificate{Domain: "shop.example.com"})
+	if len(c.state.Certificates) != 0 {
+		t.Errorf("certificates %v", c.state.Certificates)
+	}
 }
 
 // createShop registers the stack shop of the CLI, as clowder stack create

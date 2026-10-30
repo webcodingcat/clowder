@@ -49,7 +49,10 @@ func TestTheStaticConfigurationNeedsItsAddresses(t *testing.T) {
 }
 
 func TestTheComposeFileMatchesTheGoldenFile(t *testing.T) {
-	rendered, err := RenderCompose(Mounts{Static: "/var/lib/clowder/traefik/static", Dynamic: "/var/lib/clowder/traefik/dynamic"})
+	rendered, err := RenderCompose(Mounts{
+		Static: "/var/lib/clowder/traefik/static", Dynamic: "/var/lib/clowder/traefik/dynamic",
+		Certificates: "/run/clowder-secrets/clowder-traefik",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +68,8 @@ func TestTheRoutesMatchTheGoldenFile(t *testing.T) {
 		{Stack: "shop", Service: "api", Host: "shop.example.com", Path: "/api", Targets: []string{"172.18.0.4:9000"}},
 		// no container may take requests: an empty list, so Traefik answers 503
 		{Stack: "blog", Service: "web", Host: "blog.example.com", Path: "/"},
-	})
+	}, []CertificateFiles{{Domain: "shop.example.com", Chain: "shop.example.com-1a2b.crt", Key: "shop.example.com-1a2b.key"}})
+	// blog.example.com has no certificate yet: plain HTTP
 	if err != nil {
 		t.Fatal(err)
 	}

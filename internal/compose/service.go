@@ -13,12 +13,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/names"
 )
 
-var (
-	// routeHost is a domain name of at least two labels, in any case.
-	routeHost = regexp.MustCompile(`^(?i)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
-	// routePath is an absolute URL path of the characters RFC 3986 allows.
-	routePath = regexp.MustCompile(`^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$`)
-)
+// routePath is an absolute URL path of the characters RFC 3986 allows.
+var routePath = regexp.MustCompile(`^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$`)
 
 // checkService checks what clowder cannot run in a service and reads its
 // clowder fields.
@@ -115,7 +111,7 @@ func readServiceExtension(config types.ServiceConfig, service *Service) []string
 			problems = append(problems, "x-clowder.http needs host and port")
 		}
 		// both end up in a Traefik rule between backticks
-		if raw.HTTP.Host != "" && !routeHost.MatchString(raw.HTTP.Host) {
+		if raw.HTTP.Host != "" && !names.ValidDomain(raw.HTTP.Host) {
 			problems = append(problems, fmt.Sprintf("x-clowder.http.host %q is not a domain name", raw.HTTP.Host))
 		}
 		if raw.HTTP.Path != "" && !routePath.MatchString(raw.HTTP.Path) {

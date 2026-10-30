@@ -22,6 +22,18 @@ func TestClowdersOwnProjectNamesAreNoStacks(t *testing.T) {
 	}
 }
 
+func TestDomainsHaveTwoLabelsAtLeast(t *testing.T) {
+	for name, valid := range map[string]bool{
+		"shop.example.com": true, "Shop.Example.COM": true, "a-b.de": true, "x.y": true,
+		"": false, "localhost": false, "-a.de": false, "a-.de": false, "a..de": false, "a.de.": false,
+		"*.example.com": false, "a_b.de": false, "a.de`": false,
+	} {
+		if ValidDomain(name) != valid {
+			t.Errorf("%q: want valid %v", name, valid)
+		}
+	}
+}
+
 func TestVariableNames(t *testing.T) {
 	for name, valid := range map[string]bool{
 		"DB_PASSWORD": true, "_x": true, "a1": true, "": false, "1A": false, "A-B": false, "A=B": false,

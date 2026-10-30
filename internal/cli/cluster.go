@@ -119,8 +119,13 @@ func localApply(directory *clusterdir.Directory) (api.ClusterApply, error) {
 	if err != nil {
 		return api.ClusterApply{}, err
 	}
+	files, err := directory.Files()
+	if err != nil {
+		return api.ClusterApply{}, err
+	}
 	return api.ClusterApply{
 		Spec: directory.Config, Secrets: secrets.Values, JoinKeys: secrets.JoinKeys, Registries: secrets.Registries,
+		Files: files,
 	}, nil
 }
 
@@ -187,10 +192,15 @@ func newDiff(g *globals) *cobra.Command {
 					return err
 				}
 			}
-			// the applied cluster.yaml with the local secrets: if that hash
-			// differs too, the secrets changed
+			for _, name := range changedFiles(applied.Files, local.Files) {
+				if _, err := fmt.Fprintf(out, "the file %s differs\n", name); err != nil {
+					return err
+				}
+			}
+			// the applied cluster.yaml and files with the local secrets: if
+			// that hash differs too, the secrets changed
 			secretsOnly := local
-			secretsOnly.Spec = applied.Spec
+			secretsOnly.Spec, secretsOnly.Files = applied.Spec, applied.Files
 			secretsHash, err := secretsOnly.Hash()
 			if err != nil || secretsHash == applied.Hash {
 				return err
@@ -232,6 +242,24 @@ func changedFields(applied, local clusterdir.Config) ([]string, error) {
 		}
 	}
 	return changed, nil
+}
+
+// changedFiles lists the files next to cluster.yaml that came, went or
+// changed.
+func changedFiles(applied, local map[string][]byte) []string {
+	var changed []string
+	for name, content := range local {
+		if applies, ok := applied[name]; !ok || !bytes.Equal(applies, content) {
+			changed = append(changed, name)
+		}
+	}
+	for name := range applied {
+		if _, kept := local[name]; !kept {
+			changed = append(changed, name)
+		}
+	}
+	slices.Sort(changed)
+	return changed
 }
 
 func newSchema() *cobra.Command {

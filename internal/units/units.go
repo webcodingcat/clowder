@@ -1,5 +1,5 @@
-// Package units parses the sizes used in Compose's x-clowder and in
-// cluster.yaml, so both read "20G" the same way.
+// Package units parses the sizes and durations used in Compose's x-clowder
+// and in cluster.yaml, so every place reads "20G" and "30d" the same way.
 package units
 
 import (
@@ -7,7 +7,39 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// ParseDuration reads a duration in Go's format ("90s", "1h30m") that may
+// start with whole days ("30d", "1d12h"): certificates and heartbeats are
+// thought of in days, which Go's format lacks. Negative durations are
+// refused.
+func ParseDuration(text string) (time.Duration, error) {
+	text = strings.TrimSpace(text)
+	problem := fmt.Errorf("duration %q is not like 90s, 1h30m, 30d or 1d12h", text)
+	rest := text
+	var days time.Duration
+	if before, after, hasDays := strings.Cut(text, "d"); hasDays {
+		// 16 bits of days (179 years) cannot overflow a Duration
+		number, err := strconv.ParseUint(before, 10, 16)
+		if err != nil {
+			return 0, problem
+		}
+		days = time.Duration(number) * 24 * time.Hour
+		if after == "" {
+			return days, nil
+		}
+		rest = after
+	}
+	duration, err := time.ParseDuration(rest)
+	if err != nil || duration < 0 {
+		return 0, problem
+	}
+	if duration > math.MaxInt64-days {
+		return 0, fmt.Errorf("duration %q is too long", text)
+	}
+	return days + duration, nil
+}
 
 // ParseSize reads a size like "20G" or "512M": a positive whole number and
 // one of K, M, G, T (powers of 1024).

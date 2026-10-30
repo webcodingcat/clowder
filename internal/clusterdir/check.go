@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"net/mail"
 	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/units"
@@ -81,11 +81,21 @@ func Check(config Config) Problems {
 				report("alerts.heartbeat.url: {secret: <name>} is required")
 			}
 			if heartbeat.Interval != "" {
-				if interval, err := time.ParseDuration(heartbeat.Interval); err != nil || interval <= 0 {
-					report("alerts.heartbeat.interval %q is not a duration like 5m", heartbeat.Interval)
+				if interval, err := units.ParseDuration(heartbeat.Interval); err != nil || interval <= 0 {
+					report("alerts.heartbeat.interval %q is not a positive duration like 5m", heartbeat.Interval)
 				}
 			}
 		}
+	}
+	problems = append(problems, checkACME(config.ACME)...)
+	files := FileNames(config)
+	for _, name := range files {
+		if !validFileName(name) {
+			report("%q is not a path relative to %s, written with /", name, ConfigFile)
+		}
+	}
+	if len(files) > maxFiles {
+		report("%s names %d files; at most %d are allowed", ConfigFile, len(files), maxFiles)
 	}
 	if listen := config.Metrics.Listen; listen != "" && listen != "node" && listen != "node+underlay" {
 		report("metrics.listen %q is neither node nor node+underlay", listen)
@@ -118,10 +128,34 @@ func checkHoster(hoster Hoster) Problems {
 	if missingSecret(&hoster.Token) {
 		problems = append(problems, "hoster.token: {secret: <name>} is required")
 	}
-	if hoster.API != "" {
-		api, err := url.Parse(hoster.API)
-		if err != nil || (api.Scheme != "http" && api.Scheme != "https") || api.Host == "" {
-			problems = append(problems, fmt.Sprintf("hoster.api %q is not a full URL with http:// or https://", hoster.API))
+	if hoster.API != "" && !fullURL(hoster.API) {
+		problems = append(problems, fmt.Sprintf("hoster.api %q is not a full URL with http:// or https://", hoster.API))
+	}
+	return problems
+}
+
+// fullURL tells whether text is a URL with the scheme http or https and a
+// host: clowder sends tokens and keys there.
+func fullURL(text string) bool {
+	parsed, err := url.Parse(text)
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
+}
+
+// checkACME: a full URL for the directory, an address for the email and a
+// positive duration for renew_before.
+func checkACME(acme ACME) Problems {
+	var problems Problems
+	if acme.Directory != "" && !fullURL(acme.Directory) {
+		problems = append(problems, fmt.Sprintf("acme.directory %q is not a full URL with http:// or https://", acme.Directory))
+	}
+	if acme.Email != "" {
+		if address, err := mail.ParseAddress(acme.Email); err != nil || address.Address != acme.Email {
+			problems = append(problems, fmt.Sprintf("acme.email %q is not an email address", acme.Email))
+		}
+	}
+	if acme.RenewBefore != "" {
+		if renewBefore, err := units.ParseDuration(acme.RenewBefore); err != nil || renewBefore <= 0 {
+			problems = append(problems, fmt.Sprintf("acme.renew_before %q is not a positive duration like 30d", acme.RenewBefore))
 		}
 	}
 	return problems

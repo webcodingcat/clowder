@@ -47,9 +47,10 @@ type HostParts struct {
 
 // Run is the agent until ctx ends: clowder0, the Raft member, the API, the
 // containers' DNS resolver, the nft rules, the stacks of this host with
-// their volumes and, while it leads, the placement of stacks and the
-// Floating IP. It tells systemd when it serves and keeps its watchdog fed
-// while the state answers.
+// their volumes, Traefik with the answers to ACME's challenges and, while
+// it leads, the placement of stacks, the Floating IP and the certificates.
+// It tells systemd when it serves and keeps its watchdog fed while the
+// state answers.
 func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger) error {
 	if files.SecretsDir == "" {
 		return errors.New("run needs a directory for the stacks' secrets")
@@ -106,7 +107,8 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		unexplained: map[string]bool{},
 	}
 	traefik := &traefikRunner{
-		files: files, host: host, cluster: node, docker: parts.Docker, logger: logger, wake: make(chan struct{}, 1),
+		files: files, host: host, cluster: node, docker: parts.Docker, open: credentials.dataKey.Open, logger: logger,
+		wake: make(chan struct{}, 1), unopened: map[string]bool{},
 	}
 	server := api.NewServer(api.ServerConfig{
 		Cluster: node, CA: credentials.ca, Certificate: credentials.certificate,
@@ -132,6 +134,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	loops.Go(func() {
 		controller.RunIngress(reconcilers, node, server.Propose, credentials.dataKey.Open, parts.Hoster, logger)
 	})
+	loops.Go(func() { controller.RunACME(reconcilers, node, server.Propose, credentials.dataKey, logger) })
 	loops.Go(func() { runner.trim(reconcilers) })
 	loops.Go(func() {
 		// a state that lags may still place a stack here that has moved on,
@@ -147,6 +150,14 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	if err != nil {
 		return err
 	}
+	challenges, err := serveChallenges(node, logger)
+	if err != nil {
+		for _, started := range servers {
+			_ = started.Close() // the listen error is the one to report
+		}
+		return err
+	}
+	servers = append(servers, challenges)
 	logger.Info("serving", "host", host.Name, "api", host.apiAddresses(), "raft", host.raftAddress())
 	if err := notify("READY=1"); err != nil {
 		logger.Warn("systemd", "error", err)

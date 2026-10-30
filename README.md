@@ -14,9 +14,14 @@ upgrade a running cluster. On one host, what runs today:
 - `clowder host ...` drains, removes and enables hosts.
 - `clowder stack create|apply|delete|ps|logs` runs Compose stacks with their volumes and
   secrets.
-- A service with `x-clowder.http: {host, port}` gets HTTP requests for that host on the
-  Floating IP's port 80 through Traefik, only to containers that run and are healthy; the
-  client's address arrives in `X-Forwarded-For`. HTTPS follows with ACME.
+- A service with `x-clowder.http: {host, port}` gets requests for that host on the
+  Floating IP through Traefik, only to containers that run and are healthy; the client's
+  address arrives in `X-Forwarded-For`. The cluster gets a certificate for the host from
+  Let's Encrypt (or the CA of `acme.directory`) once its DNS points at the Floating IP, then
+  redirects HTTP to HTTPS and renews the certificate when a third of its lifetime is left
+  (`acme.renew_before` to change that). A domain whose DNS points elsewhere, such as a
+  proxying CDN, gets no certificate. The cluster accepts the CA's terms of service for you
+  when it makes its account.
 - The cluster keeps the Floating IP routed to its ingress host through the hoster's API
   (`hoster` in `cluster.yaml`), also when someone moves it by hand.
 

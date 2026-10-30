@@ -14,7 +14,15 @@ var (
 	name = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 	// variable is an environment variable's name.
 	variable = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	// domain is a domain name of at least two labels, in any case.
+	domain = regexp.MustCompile(`^(?i)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
 )
+
+// ValidDomain tells whether name is a domain name of at least two labels:
+// the host of an HTTP route, and of its certificate.
+func ValidDomain(domainName string) bool {
+	return domain.MatchString(domainName)
+}
 
 // ReservedPrefix starts the Compose projects clowder runs itself (its
 // Traefik); no stack may take such a name.

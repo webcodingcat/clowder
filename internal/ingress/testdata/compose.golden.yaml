@@ -23,3 +23,4 @@ services:
     volumes:
       - /var/lib/clowder/traefik/static:/etc/traefik:ro
       - /var/lib/clowder/traefik/dynamic:/etc/traefik-dynamic:ro
+      - /run/clowder-secrets/clowder-traefik:/etc/traefik-certificates:ro

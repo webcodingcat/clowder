@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -44,9 +46,9 @@ func newTestTraefik(t *testing.T) (*traefikRunner, *stackRunner, *fakeDocker) {
 		"unhealthy": {Running: true, Health: "unhealthy", Addresses: map[string]netip.Addr{"shop_default": netip.MustParseAddr("172.18.0.4")}},
 	}
 	traefik := &traefikRunner{
-		files: runner.files, host: runner.host, cluster: cluster, docker: fake,
+		files: runner.files, host: runner.host, cluster: cluster, docker: fake, open: runner.open,
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)), supervisor: runner.supervisor,
-		wake: make(chan struct{}, 1),
+		wake: make(chan struct{}, 1), unopened: map[string]bool{},
 	}
 	return traefik, runner, fake
 }
@@ -149,6 +151,89 @@ func TestTraefikIsNoStack(t *testing.T) {
 	runner.pass(context.Background())
 	if _, err := os.Stat(dir); err != nil {
 		t.Errorf("Traefik's secrets went: %v", err)
+	}
+}
+
+func TestACertificateBringsHTTPSAndARenewalComesUnderNewNames(t *testing.T) {
+	traefik, _, _ := newTestTraefik(t)
+	cluster := traefik.cluster.(*testCluster)
+	put := func(chain string) {
+		cluster.apply(state.KindPutCertificate, state.LeaderActor, state.PutCertificate{Certificate: state.Certificate{
+			Domain: "shop.example.com", Key: state.Sealed("key of " + chain), Chain: []byte(chain),
+			NotBefore: time.Now(), NotAfter: time.Now().Add(time.Hour),
+		}})
+	}
+	put("first chain")
+	if err := traefik.pass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	first := certificateFiles(t, traefik)
+	routes, err := os.ReadFile(filepath.Join(traefik.files.traefikDynamicDir(), "routes.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 || !strings.HasPrefix(first[0], "shop.example.com-") || !strings.HasSuffix(first[0], ".crt") {
+		t.Fatalf("certificate files %v", first)
+	}
+	for _, want := range []string{"websecure.shop.app", "redirect-to-https", first[0], first[1]} {
+		if !strings.Contains(string(routes), want) {
+			t.Errorf("no %s in the routes:\n%s", want, routes)
+		}
+	}
+	key, err := os.ReadFile(filepath.Join(traefik.files.traefikCertificatesDir(), first[1]))
+	if err != nil || string(key) != "key of first chain" {
+		t.Errorf("the key: %q, %v", key, err)
+	}
+
+	// Traefik watches only the routes: a renewed certificate comes under
+	// new names, and the old files go
+	put("second chain")
+	if err := traefik.pass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if second := certificateFiles(t, traefik); len(second) != 2 || second[0] == first[0] {
+		t.Errorf("certificate files after the renewal %v", second)
+	}
+
+	cluster.apply(state.KindDeleteCertificate, state.LeaderActor, state.DeleteCertificate{Domain: "shop.example.com"})
+	if err := traefik.pass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if files := certificateFiles(t, traefik); len(files) != 0 {
+		t.Errorf("files of a deleted certificate stayed: %v", files)
+	}
+}
+
+// certificateFiles lists the certificates' directory, sorted.
+func certificateFiles(t *testing.T, traefik *traefikRunner) []string {
+	t.Helper()
+	entries, err := os.ReadDir(traefik.files.traefikCertificatesDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names
+}
+
+func TestEveryAgentAnswersTheChallengesOfTheState(t *testing.T) {
+	_, cluster, _, _ := newTestRunner(t)
+	cluster.apply(state.KindPutACMEChallenge, state.LeaderActor, state.PutACMEChallenge{
+		Token: "abc", KeyAuthorization: "abc.thumb",
+	})
+	handler := challengeHandler(cluster)
+	for path, want := range map[string]int{
+		ingress.ChallengePath + "abc":   http.StatusOK,
+		ingress.ChallengePath + "other": http.StatusNotFound,
+		"/other/abc":                    http.StatusNotFound,
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, http.NoBody))
+		if recorder.Code != want || (want == http.StatusOK && recorder.Body.String() != "abc.thumb") {
+			t.Errorf("%s: %d %q", path, recorder.Code, recorder.Body)
+		}
 	}
 }
 
