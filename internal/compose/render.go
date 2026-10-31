@@ -60,16 +60,8 @@ const (
 // nothing may start before the agent has looked at the cluster; the agent
 // applies the stack's restart rules instead.
 func Render(stack *Stack, target Target) ([]byte, error) {
-	for _, required := range []struct {
-		what    string
-		address netip.Addr
-	}{{"floating IP", target.FloatingIP}, {"node address", target.NodeAddress}, {"resolver", target.Resolver}} {
-		if !required.address.IsValid() {
-			return nil, fmt.Errorf("render stack %s: the target has no %s", stack.Name, required.what)
-		}
-	}
-	if !names.ValidNamespace(target.Namespace) {
-		return nil, fmt.Errorf("render stack %s: the target's namespace %q is not valid", stack.Name, target.Namespace)
+	if err := checkTarget(stack.Name, target); err != nil {
+		return nil, err
 	}
 	project := *stack.Project
 	project.Name = names.Project(target.Namespace, stack.Name)
@@ -123,16 +115,26 @@ func Render(stack *Stack, target Target) ([]byte, error) {
 // from values (secret name -> value). The agent keeps it on tmpfs, apart
 // from the rendered file on disk. Nil if the stack sets none.
 func RenderSecretEnv(stack *Stack, values map[string]string) ([]byte, error) {
-	services := map[string]any{}
+	secretEnv := map[string]map[string]string{}
 	for name, service := range stack.Services {
-		if len(service.SecretEnv) == 0 {
+		secretEnv[name] = service.SecretEnv
+	}
+	return renderSecretEnv(stack.Name, secretEnv, values)
+}
+
+// renderSecretEnv writes the secret variables of each service (service ->
+// variable -> secret) with their values as a Compose file; nil without any.
+func renderSecretEnv(stackName string, secretEnv map[string]map[string]string, values map[string]string) ([]byte, error) {
+	services := map[string]any{}
+	for name, variables := range secretEnv {
+		if len(variables) == 0 {
 			continue
 		}
 		environment := map[string]string{}
-		for variable, secret := range service.SecretEnv {
+		for variable, secret := range variables {
 			value, ok := values[secret]
 			if !ok {
-				return nil, fmt.Errorf("render the secrets of stack %s: no value for %s", stack.Name, secret)
+				return nil, fmt.Errorf("render the secrets of stack %s: no value for %s", stackName, secret)
 			}
 			environment[variable] = value
 		}
@@ -143,7 +145,7 @@ func RenderSecretEnv(stack *Stack, values map[string]string) ([]byte, error) {
 	}
 	marshaled, err := yaml.Marshal(map[string]any{"services": services})
 	if err != nil {
-		return nil, fmt.Errorf("render the secrets of stack %s: %w", stack.Name, err)
+		return nil, fmt.Errorf("render the secrets of stack %s: %w", stackName, err)
 	}
 	return EscapeDollars(marshaled)
 }

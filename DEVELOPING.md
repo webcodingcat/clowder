@@ -110,7 +110,7 @@ clowder is built in phases; each ends with live tests on HLab.
 | 0 | the spike: DRBD quorum and fencing, WireGuard, the real client IP, on three hosts | done |
 | 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | done |
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done |
-| 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | in progress: namespaces in the state and on the host |
+| 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | in progress: namespaces in the state and on the host; the stack schema and its renderer |
 | 2 | three hosts: replication, failover with fencing | |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
@@ -250,14 +250,14 @@ Packages in *italics* do not exist yet.
 - **Portable**: `cli`, `api`, `clusterdir`, `sopsage`, `pki`, `compose`, `units`, `names`
   (the rules for the names users give, and the names on the host made of them),
   `buildinfo`, `logging`, `atomicfile` (files written whole or not at all), `metrics`
-  (Prometheus' text format). The CLI may import only
+  (Prometheus' text format), `stackspec` (a stack's schema). The CLI may import only
   these. depguard (rule `cli-portable` in
   `.golangci.yml`) refuses direct imports of the Linux-only packages in `cmd/clowder` and
   `internal/cli`; the cross build for Windows and macOS catches indirect ones.
-- **Pure logic, no I/O**: `scheduler`, `state`. Their tests need no host, files or network;
-  depguard (rule `state-pure`) keeps `os`, `net/http` and randomness out of both, forbidigo
-  the clock (`time.Now`, `time.Since`, `time.Until`). `state` uses
-  the types and `Check` of `clusterdir`, never its file access.
+- **Pure logic, no I/O**: `scheduler`, `state`, and `stackspec`, which the state will read.
+  Their tests need no host, files or network; depguard (rule `state-pure`) keeps `os`,
+  `net/http` and randomness out, forbidigo the clock (`time.Now`, `time.Since`,
+  `time.Until`). `state` uses the types and `Check` of `clusterdir`, never its file access.
 - **Decides**: `controller` (the leader's loops) writes Raft commands. It talks to external
   services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
   changes the host. Their clients sit beside it: `hoster` (with `hoster/hetzner`),
@@ -286,11 +286,12 @@ Packages in *italics* do not exist yet.
   | What | Name |
   |---|---|
   | Compose project, the agent's stack directory, the secrets' directory, the supervisor's hold, Traefik's service | `<namespace>_<stack>` (`names.Project`) |
-  | Compose network | `<namespace>_<stack>_<network>` |
+  | Compose network | `<namespace>_<stack>_<network>` (`names.Network`); with a stack spec the one network `<namespace>_<stack>_net` (`names.StackNetwork`) |
+  | container, with a stack spec | `<namespace>_<stack>_<service>` (`names.Container`) |
   | volume ID | `<namespace>/<stack>/<volume>` (`names.VolumeID`) |
   | LV, DRBD resource, mount point, Docker volume | `clw-<readable>-<hash8>-g<generation>` (`names.VolumeName`) |
   | the agent's record of a volume's copies | `volume-records/<namespace>_<stack>_<volume>.json` (`names.FileName`) |
-  | bridge | `cbr-` and 11 hex digits of a hash of the stack's ID and network (`names.BridgeName`) |
+  | bridge | `cbr-` and 11 hex digits of a hash of the stack's ID and network (`names.BridgeName`); a stack spec's one network takes the bridge of the network `default`, so a stack keeps its bridge when it moves to a spec |
   | locks, alert keys | `stack/<namespace>/<stack>`, `volume/<volume ID>`, `stack-waiting/<namespace>/<stack>` |
   | metrics | the labels `namespace` and `stack` |
 
@@ -302,6 +303,35 @@ Packages in *italics* do not exist yet.
   `names.MaxVolumeGroupLength` characters (`clusterdir` refuses more). The worst case is 107
   of 128 characters in device-mapper (`TestVolumeNamesFitDeviceMapper`): the margin is
   small, so a longer part needs the arithmetic again.
+
+## Stack specs (`internal/stackspec`)
+
+Phase 1c replaces the Compose file a user writes by a schema of clowder's own; Compose is
+then only how the agent runs a stack (`compose.RenderStack`). Until the `Stack` resource
+uses it (1c.5), the package is a library with its tests, next to the Compose files below.
+
+- **Only what clowder knows runs.** `Decode` reads YAML strictly: a field the schema does
+  not have is an error, where a Compose file passes what clowder does not know. `env` takes
+  any YAML scalar and keeps its text as written (`8080`, `1.0`, `yes`).
+- **`Check`** lists every problem at once (`Problems`): names, image, mounts at clean
+  absolute paths, ports that are not reserved (`ReservedPort`), routes, dependencies that
+  exist and go in no circle, durations, sizes, restart rules. What only the cluster knows
+  (priority categories, privileges, the namespace's volumes and secrets) is not its job.
+- **`Normalize`** fills in the schema's own defaults (`restart: always`, `restartUnhealthy`,
+  a port's `published` and `protocol`) and sorts the lists that are sets, so two specs that
+  mean the same are equal. Defaults of `cluster.yaml` (reservations, priority) stay out:
+  the scheduler takes them when it places, so a changed `cluster.yaml` changes no spec.
+- **No I/O, no clock**: the state will read specs, so depguard and forbidigo hold
+  `stackspec` to the state's rules.
+- **`RenderStack`** writes the Compose file from a normalized spec with its own types (no
+  compose-go): one network per stack (`names.StackNetwork`), container names without the
+  replica number (`names.Container`), a dependency on a service with a healthcheck waits
+  until it is healthy. Golden files in `internal/compose/testdata/spec`, which
+  `bin/dev test-tools` checks with Debian's docker-compose.
+- **A new field:** its type with both tags (`yaml`, `json`) and a comment in `spec.go`, its
+  check in `check.go`, its default or order in `Normalize` if it has one, its rendering in
+  `render_stack.go`, the field in `testdata/spec/stack.yaml`, then `bin/dev test
+  ./internal/compose -update` and a look at the golden file's diff.
 
 ## Stacks (`internal/compose`)
 

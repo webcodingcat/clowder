@@ -86,6 +86,18 @@ func Network(namespace, stack, network string) string {
 	return Project(namespace, stack) + "_" + network
 }
 
+// StackNetwork is the one Docker network of a stack with a spec of its own
+// (stackspec): "<project>_net".
+func StackNetwork(namespace, stack string) string {
+	return Project(namespace, stack) + "_net"
+}
+
+// Container is the Docker container of a service: "<project>_<service>",
+// without Compose's replica number, as a service has one container.
+func Container(namespace, stack, service string) string {
+	return Project(namespace, stack) + "_" + service
+}
+
 // VolumeID is the ID of a stack's volume: "<namespace>/<stack>/<volume>".
 func VolumeID(namespace, stack, volume string) string {
 	return ID(namespace, stack) + "/" + volume

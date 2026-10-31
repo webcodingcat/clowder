@@ -76,6 +76,8 @@ linters:
             - "!**/internal/state/*_test.go"
             - "**/internal/scheduler/*.go"
             - "!**/internal/scheduler/*_test.go"
+            - "**/internal/stackspec/*.go"
+            - "!**/internal/stackspec/*_test.go"
           deny:
             - pkg: os
               desc: the state does no I/O
@@ -103,10 +105,11 @@ linters:
         - name: receiver-naming
   exclusions:
     rules:
-      # forbidigo guards the determinism of the state and the scheduler only
-      - path-except: internal/(state|scheduler)/
+      # forbidigo guards the determinism of the state, the scheduler and the
+      # stack spec they read
+      - path-except: internal/(state|scheduler|stackspec)/
         linters: [forbidigo]
-      - path: internal/(state|scheduler)/.*_test\.go
+      - path: internal/(state|scheduler|stackspec)/.*_test\.go
         linters: [forbidigo]
 
 formatters:

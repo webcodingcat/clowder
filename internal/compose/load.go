@@ -30,7 +30,7 @@ type LoadOptions struct {
 }
 
 // Problems lists everything clowder cannot run in a stack, so the user sees
-// all of it at once.
+// all of it at once. It goes in 1c.5, for stackspec.Problems.
 type Problems []string
 
 func (p Problems) Error() string {

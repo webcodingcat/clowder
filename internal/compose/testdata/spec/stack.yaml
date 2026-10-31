@@ -1,0 +1,45 @@
+# A stack with a spec of its own (stackspec) that uses every field
+# RenderStack renders; rendered.golden.yaml and secrets.golden.yaml are what
+# it gives for the namespace shop.
+priority: high
+services:
+  db:
+    image: postgres:17
+    env: {POSTGRES_USER: shop, GREETING: Hello $USER}
+    secretEnv: {POSTGRES_PASSWORD: db-password}
+    volumes: [{volume: data, path: /var/lib/postgresql/data}]
+    resources:
+      reserve: {memory: 512M, cpus: 0.5}
+      limit: {memory: 1G, cpus: 2}
+    healthcheck:
+      command: [pg_isready, -U, shop]
+      interval: 10s
+      timeout: 5s
+      startPeriod: 30s
+      retries: 3
+    stopGracePeriod: 30s
+    stopSignal: SIGINT
+  app:
+    image: registry.example.com/shop:1.4
+    command: [serve, --port, "8080"]
+    entrypoint: [/bin/entry]
+    workingDir: /app
+    user: "1000"
+    dependsOn: [db]
+    secrets: [api-key]
+    volumes: [{volume: uploads, path: /app/uploads, readOnly: true}]
+    tmpfs: [{path: /tmp, size: 64M}]
+    localtime: true
+    ports: [{port: 9987, protocol: udp}, {port: 8443, published: 9443}]
+    http: {host: shop.example.com, port: 8080}
+    readOnly: true
+    init: true
+    shmSize: 128M
+    capAdd: [NET_BIND_SERVICE]
+    capDrop: [ALL]
+    securityOpt: [no-new-privileges]
+    restart: on-failure:3
+  worker:
+    image: registry.example.com/shop:1.4
+    command: [work]
+    dependsOn: [app]

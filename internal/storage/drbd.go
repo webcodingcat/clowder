@@ -9,7 +9,7 @@ import (
 )
 
 // drbdBasePort is the port of minor 0; a resource listens on 10000 + minor
-// on the node address (compose.ReservedPort keeps 10000-10999 free).
+// on the node address (stackspec.ReservedPort keeps 10000-10999 free).
 const drbdBasePort = 10000
 
 // maxPeers is how many peers each resource's metadata has room for: three

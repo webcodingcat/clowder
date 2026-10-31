@@ -3,7 +3,6 @@ package compose
 import (
 	"fmt"
 	"maps"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -11,10 +10,8 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 
 	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/stackspec"
 )
-
-// routePath is an absolute URL path of the characters RFC 3986 allows.
-var routePath = regexp.MustCompile(`^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$`)
 
 // checkService checks what clowder cannot run in a service and reads its
 // clowder fields.
@@ -118,7 +115,7 @@ func readServiceExtension(config types.ServiceConfig, service *Service) []string
 		if raw.HTTP.Host != "" && !names.ValidDomain(raw.HTTP.Host) {
 			problems = append(problems, fmt.Sprintf("x-clowder.http.host %q is not a domain name", raw.HTTP.Host))
 		}
-		if raw.HTTP.Path != "" && !routePath.MatchString(raw.HTTP.Path) {
+		if raw.HTTP.Path != "" && !stackspec.ValidRoutePath(raw.HTTP.Path) {
 			problems = append(problems, fmt.Sprintf(
 				"x-clowder.http.path %q must start with / and hold only the characters of a URL path", raw.HTTP.Path))
 		}
@@ -161,16 +158,6 @@ func checkSecretRequests(config types.ServiceConfig, raw rawServiceExtension) []
 	return problems
 }
 
-// harmlessCapabilities act only inside the container's own namespaces (its
-// network, its processes): Docker's default set, and a few that services
-// commonly add. Any other capability reaches the host.
-var harmlessCapabilities = map[string]bool{
-	"AUDIT_WRITE": true, "CHOWN": true, "DAC_OVERRIDE": true, "FOWNER": true, "FSETID": true,
-	"KILL": true, "MKNOD": true, "NET_BIND_SERVICE": true, "NET_RAW": true, "SETFCAP": true,
-	"SETGID": true, "SETPCAP": true, "SETUID": true, "SYS_CHROOT": true,
-	"NET_ADMIN": true, "NET_BROADCAST": true, "IPC_LOCK": true, "SYS_NICE": true,
-}
-
 // privileges lists what a service asks for beyond a normal container: such
 // a container can read the host's keys, other stacks' volumes and secrets,
 // and change the network rules that keep containers apart.
@@ -180,13 +167,12 @@ func privileges(config types.ServiceConfig) []string {
 		asked = append(asked, "privileged")
 	}
 	for _, capability := range config.CapAdd {
-		name := strings.TrimPrefix(strings.ToUpper(capability), "CAP_")
-		if !harmlessCapabilities[name] {
-			asked = append(asked, "cap_add "+name)
+		if !stackspec.HarmlessCapability(capability) {
+			asked = append(asked, "cap_add "+stackspec.CapabilityName(capability))
 		}
 	}
 	for _, option := range config.SecurityOpt {
-		if option != "no-new-privileges" && option != "no-new-privileges:true" {
+		if !stackspec.HarmlessSecurityOpt(option) {
 			asked = append(asked, "security_opt "+option)
 		}
 	}
@@ -197,6 +183,8 @@ func privileges(config types.ServiceConfig) []string {
 }
 
 // validRestart tells whether a Compose restart rule is one the agent applies.
+// It goes with the Compose stacks in 1c.5, like parsePriority and Problems;
+// stackspec.ValidRestart is the spec's.
 func validRestart(restart string) bool {
 	switch {
 	case restart == "", restart == "no", restart == "always", restart == "unless-stopped",
@@ -252,29 +240,10 @@ func checkPort(port types.ServicePortConfig) (PublishedPort, string) {
 		return published, fmt.Sprintf("port %d: needs exactly one published port (got %q)", port.Target, port.Published)
 	}
 	published.Published = uint16(number)
-	if ReservedPort(published.Published) {
+	if stackspec.ReservedPort(published.Published) {
 		return published, fmt.Sprintf("port %d is reserved for clowder or the host", number)
 	}
 	return published, ""
-}
-
-// ReservedPort tells whether a port is used by the host or by clowder itself
-// and may not be published by a stack.
-func ReservedPort(port uint16) bool {
-	switch {
-	case port == 22, port == 53, port == 80, port == 443: // SSH, DNS, Traefik
-		return true
-	case port >= 7400 && port <= 7499: // Raft, agent API, metrics, ACME, Traefik inside
-		return true
-	case port >= 10000 && port <= 10999: // DRBD: 10000 + minor (state.MaxMinor)
-		return true
-	case port >= 20000 && port <= 29999: // exported services
-		return true
-	case port >= 51800 && port <= 51831: // WireGuard: 51800 + host ID (state.MaxHosts)
-		return true
-	default:
-		return false
-	}
 }
 
 // checkUnique: two services of a stack cannot publish the same port or

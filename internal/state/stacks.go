@@ -347,7 +347,7 @@ func (s *State) checkLiveHost(id *HostID) error {
 }
 
 // MaxMinor is the highest DRBD minor: its port 10000 + minor stays in the
-// range compose.ReservedPort keeps for DRBD (10000-10999); both change
+// range stackspec.ReservedPort keeps for DRBD (10000-10999); both change
 // together.
 const MaxMinor = 999
 

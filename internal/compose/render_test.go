@@ -46,10 +46,10 @@ func shopTarget() Target {
 }
 
 // matchGolden compares a rendered file with its golden file in
-// testdata/shop; -update writes it anew.
-func matchGolden(t *testing.T, name string, rendered []byte) {
+// testdata/<dir>; -update writes it anew.
+func matchGolden(t *testing.T, dir, name string, rendered []byte) {
 	t.Helper()
-	golden := filepath.Join("testdata", "shop", name)
+	golden := filepath.Join("testdata", dir, name)
 	if *update {
 		if err := os.WriteFile(golden, rendered, 0o600); err != nil {
 			t.Fatal(err)
@@ -69,7 +69,7 @@ func TestRenderedShopMatchesTheGoldenFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	matchGolden(t, "rendered.golden.yaml", rendered)
+	matchGolden(t, "shop", "rendered.golden.yaml", rendered)
 }
 
 func TestTheSecretVariablesMatchTheGoldenFile(t *testing.T) {
@@ -81,7 +81,7 @@ func TestTheSecretVariablesMatchTheGoldenFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	matchGolden(t, "secrets.golden.yaml", rendered)
+	matchGolden(t, "shop", "secrets.golden.yaml", rendered)
 }
 
 func TestRenderNeedsACompleteTarget(t *testing.T) {

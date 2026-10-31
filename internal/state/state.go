@@ -18,7 +18,7 @@ import (
 
 // MaxHosts is the size of a cluster: a host ID is also the DRBD node-id and
 // the last part of the node address and the WireGuard port (51800 + ID;
-// compose.ReservedPort keeps 51800-51831 free, so both change together).
+// stackspec.ReservedPort keeps 51800-51831 free, so both change together).
 const MaxHosts = 32
 
 // HostID is a host's number, 0 to MaxHosts-1.

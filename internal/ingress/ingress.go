@@ -28,7 +28,7 @@ const Project = "clowder-traefik"
 const Image = "traefik:v3.7.16"
 
 // The ports Traefik and the agent use besides 80 and 443; all lie in the
-// range compose.ReservedPort keeps for clowder.
+// range stackspec.ReservedPort keeps for clowder.
 const (
 	// InternalPort is the entrypoint on the node address that other hosts
 	// send requests to (phase 2).

@@ -369,16 +369,3 @@ func TestAllProblemsAreReportedAtOnce(t *testing.T) {
 		t.Errorf("want 3 problems, got %v", err)
 	}
 }
-
-func TestReservedPortsCannotBePublished(t *testing.T) {
-	for _, port := range []uint16{22, 53, 80, 443, 7400, 7499, 10000, 10999, 20000, 29999, 51800, 51831} {
-		if !ReservedPort(port) {
-			t.Errorf("%d should be reserved", port)
-		}
-	}
-	for _, port := range []uint16{8080, 7399, 7500, 9987, 30000, 51832} {
-		if ReservedPort(port) {
-			t.Errorf("%d should be free", port)
-		}
-	}
-}

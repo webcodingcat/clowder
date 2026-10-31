@@ -75,7 +75,8 @@ func decodeExtension(extensions map[string]any, target any) error {
 
 // parsePriority reads a priority: a number from 0 to 1000 or a category name.
 // Whether the category exists depends on the cluster (cluster.yaml); it is
-// checked when the stack is applied.
+// checked when the stack is applied. It goes in 1c.5, for
+// stackspec.ParsePriority.
 func parsePriority(raw any) (clusterdir.Priority, error) {
 	switch value := raw.(type) {
 	case nil:
