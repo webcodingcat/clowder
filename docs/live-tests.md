@@ -49,46 +49,54 @@ cloud-init's status and the journals of `clowder-setup` and `clowderd`.
    then logs out, so only the agent's login pulls it.
 3. A stack runs from the private registry with a replicated and a plain volume, a secret
    file and a secret variable, applied as resources (`clowder apply -f`).
-4. An agent restart leaves its containers running, unchanged.
-5. The supervisor: a crashed container (`kill -9` of its process; `docker kill` would be a
+4. The same files applied again answer `unchanged` and recreate nothing.
+5. A dry run of a new namespace with its stack answers as a real apply and makes nothing.
+6. `stack restart` recreates the unchanged stack's container, and `get stacks --watch`,
+   running meanwhile, shows it `starting`, then `running`.
+7. Namespaces: a stack `shop` in the namespace `other` shares no project, container,
+   network or LV with default's. Its volume outlives it: the stack is deleted and, right
+   after, a new stack that names the volume finds the data. A second stack on that volume,
+   a delete of it while a stack names it, and a delete without `--with-data` are refused.
+8. An agent restart leaves its containers running, unchanged.
+9. The supervisor: a crashed container (`kill -9` of its process; `docker kill` would be a
    stop by hand) runs again within 2 s by Docker's own times, an `unhealthy` one is
    restarted, and an update of one service recreates that one, once, and no other.
-6. After a reboot the stack comes back with its data, no container started before the
-   agent, and `clowderd check` passes. The setup's marker is gone before, so the setup runs
-   again at that boot, as after its own reboot into a newer kernel. With the agent stopped
-   and a volume unmounted, its container cannot start and nothing lands on the root file
-   system (the mount guard).
-7. A changed secret file recreates its container only.
-8. With the agent stopped, `docker compose up` fails on a missing secret file; started
-   again, the agent brings the stack back.
-9. A volume that fits no pool leaves its stack `pending` with the reason in `get stacks`,
-   and the running stack untouched.
-10. Twenty more stacks run.
-11. The stack goes, then its volumes.
-12. The Floating IP, moved off the host by hand through the Cloud API, comes back.
-13. HTTPS: a zone `example.com` in HLab's DNS points `shop.example.com` at the Floating IP;
+10. After a reboot the stack comes back with its data, no container started before the
+    agent, and `clowderd check` passes. The setup's marker is gone before, so the setup
+    runs again at that boot, as after its own reboot into a newer kernel. With the agent
+    stopped and a volume unmounted, its container cannot start and nothing lands on the
+    root file system (the mount guard).
+11. A changed secret file recreates its container only.
+12. With the agent stopped, `docker compose up` fails on a missing secret file; started
+    again, the agent brings the stack back.
+13. A volume that fits no pool leaves its stack `pending` with the reason in `get stacks`,
+    and the running stack untouched.
+14. Twenty more stacks run.
+15. The stack goes, then its volumes.
+16. The Floating IP, moved off the host by hand through the Cloud API, comes back.
+17. HTTPS: a zone `example.com` in HLab's DNS points `shop.example.com` at the Floating IP;
     the cluster orders its certificate at HLab's Pebble (HTTP-01), and the stack behind it
     answers with the test's own address in `X-Forwarded-For`. HTTP redirects to HTTPS.
-14. A UDP service on a published port sees the test's own address.
-15. A container reaches `https://shop.example.com` through the Floating IP (hairpin).
-16. Renewal: the test sets `acme.renew_before` longer than the certificate's time left but
+18. A UDP service on a published port sees the test's own address.
+19. A container reaches `https://shop.example.com` through the Floating IP (hairpin).
+20. Renewal: the test sets `acme.renew_before` longer than the certificate's time left but
     shorter than its lifetime. Exactly one new certificate comes. Then it sets the value
     longer than the lifetime: no renewal, and the alert `renew-before-ignored` is open
     until the value is removed.
-17. Alerts: `clowder alert test` reaches Discord and a webhook (both received by the test)
+21. Alerts: `clowder alert test` reaches Discord and a webhook (both received by the test)
     and the mail server. The heartbeat stops while the agent is stopped and comes back
     after its start. Filling the pool of `small` beyond 80 % raises `pool-use`; deleting
     the volume brings its all-clear. The step removes its channels at the end.
-18. `promtool check metrics` accepts `/metrics`, and a Prometheus on the host scrapes it.
-19. Pushing out: the stack `store` has db (critical, 900), app (the stack's high, 700,
+22. `promtool check metrics` accepts `/metrics`, and a Prometheus on the host scrapes it.
+23. Pushing out: the stack `store` has db (critical, 900), app (the stack's high, 700,
     depending on db) and cache (low, 200). `system_reserve` leaves the host 100M free
     besides them. A stack at 800 that needs 300M pushes out cache; one that needs 500M
     pushes out app too; db always stays. Deleted, they let both come back. A stack whose
     second service (priority 100) finds nothing below it starts with that service pushed
     out.
-20. The memory, idle, with 21 stacks and at the end, is logged: the agent must stay under
+24. The memory, idle, with 21 stacks and at the end, is logged: the agent must stay under
     150 MB, the agent and Traefik together under 300 MB.
 
 The test reads `clowder get stacks -o json` and `docker inspect`. Values it compares it
 reads within a step. What carries over between steps is stated where it does: `shop`
-lives from step 3 to 11, `echo` from step 13 to 19.
+lives from step 3 to 15, `echo` from step 17 to 23.

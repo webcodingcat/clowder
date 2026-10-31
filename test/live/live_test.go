@@ -140,6 +140,14 @@ func TestOneHost(t *testing.T) {
 		{"the setup makes the first host", func(t *testing.T) { waitForSetup(t, server) }},
 		{"the user bootstraps and applies the cluster", func(t *testing.T) { bootstrap(t, server, tofu) }},
 		{"a stack runs from a private registry with volumes and secrets", func(t *testing.T) { runStack(t, server) }},
+		{"the same files again change nothing", func(t *testing.T) { applyAgainChangesNothing(t, server) }},
+		{"a dry run makes nothing", func(t *testing.T) { dryRunMakesNothing(t, server) }},
+		{"a restart recreates the stack, and the watch sees it", func(t *testing.T) {
+			restartRecreatesAndTheWatchSeesIt(t, server)
+		}},
+		{"namespaces keep their stacks apart, a volume outlives its stack", func(t *testing.T) {
+			namespacesKeepTheirStacksApart(t, server)
+		}},
 		{"an agent restart leaves the containers alone", func(t *testing.T) { restartAgent(t, server) }},
 		{"the supervisor restarts what crashed and nothing else", func(t *testing.T) { supervise(t, server) }},
 		{"the stack comes back after a reboot", func(t *testing.T) { reboot(t, server, tofu) }},
@@ -580,8 +588,10 @@ func changeSecrets(t *testing.T, server host) {
 		t.Error("web, which asks for no secret, was recreated")
 	}
 	checkSecrets(t, server, secondSecrets)
-	if got := starts(t, server); got != startsBefore+1 {
-		t.Errorf("app started %d times on its volume, want %d", got, startsBefore+1)
+	// the two secrets come in two applies (stdin, then the directory): a
+	// pass of the agent between them recreates app once for each
+	if got := starts(t, server); got != startsBefore+1 && got != startsBefore+2 {
+		t.Errorf("app started %d times on its volume, want %d or %d", got, startsBefore+1, startsBefore+2)
 	}
 }
 

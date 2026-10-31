@@ -180,12 +180,25 @@ func stackFile(name string) string { return filepath.Join(stackDir(name), name+"
 // document is a resource of the namespace default as a YAML document; spec
 // is the spec's YAML, which goes indented below spec:.
 func document(kind, name, spec string) string {
+	return documentIn("", kind, name, spec)
+}
+
+// documentIn is a resource of a namespace as a YAML document; "" leaves
+// the namespace out (default, or a namespace itself); spec "" is none.
+func documentIn(namespace, kind, name, spec string) string {
+	metadata := "{name: " + name + "}"
+	if namespace != "" {
+		metadata = "{namespace: " + namespace + ", name: " + name + "}"
+	}
+	written := "---\napiVersion: " + resource.APIVersion + "\nkind: " + kind + "\nmetadata: " + metadata + "\n"
+	if spec == "" {
+		return written
+	}
 	var indented strings.Builder
 	for _, line := range strings.SplitAfter(strings.TrimRight(spec, "\n"), "\n") {
 		indented.WriteString("  " + line)
 	}
-	return "---\napiVersion: " + resource.APIVersion + "\nkind: " + kind + "\nmetadata: {name: " + name + "}\n" +
-		"spec:\n" + indented.String() + "\n"
+	return written + "spec:\n" + indented.String() + "\n"
 }
 
 // volumeDocument is a Volume resource of the namespace default.
