@@ -35,7 +35,7 @@ func applyBootstrap(s *State, _ Command, payload Bootstrap) error {
 	s.Keys = &keys
 	s.JoinKeys = []Sealed{payload.JoinKey}
 	s.Hosts[host.ID] = &host
-	s.Namespaces[names.Default] = &Namespace{Name: names.Default}
+	s.Namespaces[names.Default] = &Namespace{Meta: Meta{Name: names.Default, Generation: 1}}
 	return nil
 }
 

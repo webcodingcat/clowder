@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/webcodingcat/clowder/internal/state"
 )
 
 func newKey(t *testing.T) *Key {
@@ -35,6 +37,22 @@ func TestSealedSecretsOpenOnlyWithTheirKey(t *testing.T) {
 	}
 	if _, err := key.Open(nil); err == nil {
 		t.Error("nothing sealed opened")
+	}
+}
+
+// The state works out a value's length from its sealed length without
+// importing age; this test, the one place that seals for real, holds the
+// two together.
+func TestTheStateReadsHowLongASealedValueIsInClear(t *testing.T) {
+	key := newKey(t)
+	for _, size := range []int{1, 100, 64<<10 - 1, 64 << 10, 64<<10 + 1, 200_000} {
+		sealed, err := key.Seal([]byte(strings.Repeat("x", size)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := state.ClearSize(sealed); got != size {
+			t.Errorf("%d bytes sealed: state.ClearSize says %d", size, got)
+		}
 	}
 }
 

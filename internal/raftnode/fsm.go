@@ -35,7 +35,8 @@ func (f *fsm) Apply(entry *raft.Log) any {
 	// again to swap the channel
 	defer f.wake()
 	defer f.mu.Unlock()
-	return f.state.ApplyEntry(entry.Index, entry.Data)
+	_, err := f.state.ApplyEntry(entry.Index, entry.Data)
+	return err
 }
 
 // wake tells the waiters that the state changed.

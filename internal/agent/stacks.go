@@ -305,12 +305,12 @@ func (r *stackRunner) describe(desired desiredState, id string) (storage.Volume,
 	if index < 0 {
 		return storage.Volume{}, fmt.Errorf("volume %s has no copy on this host", id)
 	}
-	lv := names.VolumeName(id, volume.Generation)
+	lv := names.VolumeName(id, volume.DataGeneration)
 	pool, err := poolOf(desired.config, id, volume.Placements[index].Class)
 	if err != nil {
 		return storage.Volume{}, err
 	}
-	described := storage.Volume{ID: id, LV: lv, Pool: pool, SizeBytes: volume.SizeBytes}
+	described := storage.Volume{ID: id, LV: lv, Pool: pool, SizeBytes: int64(volume.Spec.Size)}
 	if volume.Minor == nil {
 		return described, nil // replicas 0: a plain LV
 	}
@@ -442,7 +442,7 @@ func (r *stackRunner) removeCopies(ctx context.Context, desired desiredState, id
 func (r *stackRunner) retiredHere(desired desiredState, volume storage.Volume) (state.RetiredCopy, bool) {
 	for _, retired := range desired.retired {
 		if retired.Host == r.host.ID && retired.Volume == volume.ID &&
-			names.VolumeName(volume.ID, retired.Generation) == volume.LV {
+			names.VolumeName(volume.ID, retired.DataGeneration) == volume.LV {
 			return retired, true
 		}
 	}
@@ -463,11 +463,11 @@ func (r *stackRunner) warnUnexplained(volume storage.Volume) {
 }
 
 // placedHere tells whether the state has a copy of the volume on this host
-// in the recorded generation.
+// in the recorded data generation.
 func (r *stackRunner) placedHere(desired desiredState, volume storage.Volume) bool {
 	current, ok := desired.volumes[volume.ID]
 	if !ok || !slices.ContainsFunc(current.Placements, func(p state.Placement) bool { return p.Host == r.host.ID }) {
 		return false
 	}
-	return names.VolumeName(volume.ID, current.Generation) == volume.LV
+	return names.VolumeName(volume.ID, current.DataGeneration) == volume.LV
 }

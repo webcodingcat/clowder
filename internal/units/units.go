@@ -1,5 +1,5 @@
-// Package units parses the sizes and durations used in Compose's x-clowder
-// and in cluster.yaml, so every place reads "20G" and "30d" the same way.
+// Package units parses the sizes and durations used in specs and in
+// cluster.yaml, so every place reads "20G" and "30d" the same way.
 package units
 
 import (
@@ -79,4 +79,45 @@ func FormatSize(size int64) string {
 		}
 	}
 	return strconv.FormatInt(size, 10) + "B"
+}
+
+// Size is a size in bytes as a spec holds it: it reads with ParseSize and
+// writes itself exactly, in the largest unit that holds it whole ("1G",
+// "1536M"), so a size the user wrote as 1024M reads back as 1G and every
+// written size reads back. No size is written as "" and reads back as 0,
+// which the spec's check refuses.
+type Size int64
+
+// MarshalText writes the size in the largest unit that holds it whole;
+// ParseSize reads only whole kibibytes and more, so nothing else is a Size.
+func (s Size) MarshalText() ([]byte, error) {
+	switch {
+	case s == 0:
+		return []byte{}, nil
+	case s < 0 || s%(1<<10) != 0:
+		return nil, fmt.Errorf("size %d bytes is not a whole number of kibibytes", int64(s))
+	}
+	for _, unit := range []struct {
+		letter string
+		bytes  Size
+	}{{"T", 1 << 40}, {"G", 1 << 30}, {"M", 1 << 20}} {
+		if s%unit.bytes == 0 {
+			return []byte(strconv.FormatInt(int64(s/unit.bytes), 10) + unit.letter), nil
+		}
+	}
+	return []byte(strconv.FormatInt(int64(s>>10), 10) + "K"), nil
+}
+
+// UnmarshalText reads the size as ParseSize does.
+func (s *Size) UnmarshalText(text []byte) error {
+	if len(text) == 0 {
+		*s = 0
+		return nil
+	}
+	size, err := ParseSize(string(text))
+	if err != nil {
+		return err
+	}
+	*s = Size(size)
+	return nil
 }

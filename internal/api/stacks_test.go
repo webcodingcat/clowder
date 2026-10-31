@@ -7,6 +7,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
+	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -43,12 +44,12 @@ func TestAnExistingVolumeCannotChange(t *testing.T) {
 		t.Errorf("a new volume: %v", err)
 	}
 	volumes := map[string]*state.Volume{
-		"default/shop/data": {ID: "default/shop/data", Class: "fast", SizeBytes: 2 << 30, Replicas: 1},
+		"default/shop/data": {ID: "default/shop/data", Spec: resource.VolumeSpec{Class: "fast", Size: 2 << 30, Replicas: 1}},
 	}
 	if err := checkVolumesUnchanged("default", stack, volumes); err != nil {
 		t.Errorf("the same volume: %v", err)
 	}
-	volumes["default/shop/data"].SizeBytes = 1 << 30
+	volumes["default/shop/data"].Spec.Size = 1 << 30
 	if err := checkVolumesUnchanged("other", stack, volumes); err != nil {
 		t.Errorf("the volume of another namespace's stack counted: %v", err)
 	}
@@ -79,7 +80,7 @@ func TestExactlyTheSecretsTheStackAsksForAreSealed(t *testing.T) {
 		"asks for the secrets":    {},
 		"but [db-password other]": {"db-password": "pw", "other": "x"},
 		"is empty":                {"db-password": ""},
-		"larger than 65536 bytes": {"db-password": strings.Repeat("x", state.MaxSecretBytes+1)},
+		"larger than 65536 bytes": {"db-password": strings.Repeat("x", resource.MaxSecretBytes+1)},
 	} {
 		if _, err := server.sealStackSecrets(stack, values); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("want an error with %q, got %v", want, err)

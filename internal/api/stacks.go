@@ -15,6 +15,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/units"
 )
@@ -156,8 +157,8 @@ func (s *Server) sealStackSecrets(stack *compose.Stack, values map[string]string
 		switch {
 		case value == "":
 			return nil, fmt.Errorf("secret %s is empty", name)
-		case len(value) > state.MaxSecretBytes:
-			return nil, fmt.Errorf("secret %s is larger than %d bytes", name, state.MaxSecretBytes)
+		case len(value) > resource.MaxSecretBytes:
+			return nil, fmt.Errorf("secret %s is larger than %d bytes", name, resource.MaxSecretBytes)
 		case total > state.MaxStackSecretsBytes:
 			return nil, fmt.Errorf("the secrets of stack %s are larger than %d bytes", stack.Name, state.MaxStackSecretsBytes)
 		}
@@ -183,10 +184,9 @@ func checkVolumesUnchanged(namespace string, stack *compose.Stack, volumes map[s
 			continue
 		}
 		wanted := stack.Volumes[name]
-		if wanted.Class != existing.Class || wanted.Size != existing.SizeBytes || wanted.Replicas != existing.Replicas {
-			problems = append(problems, fmt.Sprintf(
-				"volume %s exists with class %s, size %s and %d replicas; clowder cannot change a volume yet",
-				name, existing.Class, units.FormatSize(existing.SizeBytes), existing.Replicas))
+		spec := resource.VolumeSpec{Class: wanted.Class, Size: units.Size(wanted.Size), Replicas: wanted.Replicas}
+		if err := existing.Spec.CheckUnchanged(spec); err != nil {
+			problems = append(problems, fmt.Sprintf("volume %s %v", name, err))
 		}
 	}
 	if len(problems) > 0 {

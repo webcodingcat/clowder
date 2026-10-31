@@ -38,7 +38,7 @@ func (h *oneHost) Propose(_ context.Context, cmd state.Command) (uint64, error) 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	index := h.state.Index + 1
-	if err := h.state.Apply(index, cmd); err != nil {
+	if _, err := h.state.Apply(index, cmd); err != nil {
 		return index, &state.Refused{Err: err}
 	}
 	return index, nil
@@ -87,7 +87,7 @@ func startCluster(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := current.Apply(1, cmd); err != nil {
+	if _, err := current.Apply(1, cmd); err != nil {
 		t.Fatal(err)
 	}
 	hostCertificate, hostKey := issue(func(public ed25519.PublicKey) ([]byte, error) {

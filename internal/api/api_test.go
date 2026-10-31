@@ -40,7 +40,7 @@ func (f *fakeCluster) Propose(_ context.Context, cmd state.Command) (uint64, err
 		return 0, errors.New("not the leader")
 	}
 	index := f.state.Index + 1
-	if err := f.state.Apply(index, cmd); err != nil {
+	if _, err := f.state.Apply(index, cmd); err != nil {
 		return index, &state.Refused{Err: err}
 	}
 	return index, nil
@@ -124,7 +124,7 @@ func bootstrappedState(t *testing.T) *state.State {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := current.Apply(index, cmd); err != nil {
+		if _, err := current.Apply(index, cmd); err != nil {
 			t.Fatal(err)
 		}
 	}

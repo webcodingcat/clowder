@@ -41,7 +41,7 @@ func (l *leader) propose(_ context.Context, cmd state.Command) (uint64, error) {
 	defer l.mu.Unlock()
 	cmd.At = time.Now()
 	index := l.state.Index + 1
-	if err := l.state.Apply(index, cmd); err != nil {
+	if _, err := l.state.Apply(index, cmd); err != nil {
 		l.t.Errorf("%s refused: %v", cmd.Kind, err)
 		return index, err
 	}

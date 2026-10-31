@@ -20,10 +20,10 @@ type ApplyConfig struct {
 	// Files are the files next to cluster.yaml that it names, by their
 	// names in it (clusterdir.FileNames); none holds a secret.
 	Files map[string][]byte `json:"files,omitempty"`
-	// StacksRevision is the state of the stacks the new cluster.yaml was
-	// checked against: if a stack changed in between, the check no longer
+	// ResourcesRevision is the state of the resources the new cluster.yaml
+	// was checked against: if one changed in between, the check no longer
 	// holds and the command is refused.
-	StacksRevision int64 `json:"stacks_revision"`
+	ResourcesRevision int64 `json:"resources_revision"`
 }
 
 func applyConfig(s *State, _ Command, payload ApplyConfig) error {
@@ -33,9 +33,9 @@ func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 	if problems := clusterdir.CheckFiles(payload.Spec, payload.Files); len(problems) > 0 {
 		return problems
 	}
-	if payload.StacksRevision != s.StacksRevision {
-		return fmt.Errorf("cluster.yaml was checked against stacks revision %d, but %d came in between; apply again",
-			payload.StacksRevision, s.StacksRevision)
+	if payload.ResourcesRevision != s.ResourcesRevision {
+		return fmt.Errorf("cluster.yaml was checked against resources revision %d, but %d came in between; "+
+			"apply again", payload.ResourcesRevision, s.ResourcesRevision)
 	}
 	for _, name := range clusterdir.SecretNames(payload.Spec) {
 		if _, ok := payload.Secrets[name]; !ok {
@@ -47,6 +47,12 @@ func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 			return fmt.Errorf("stack %s asks for privileges, so it must stay in stacks.privileged", id)
 		}
 	}
+	for _, id := range slices.Sorted(maps.Keys(s.Volumes)) {
+		class := s.Volumes[id].Spec.Class
+		if _, ok := payload.Spec.StorageClasses[class]; !ok {
+			return fmt.Errorf("volume %s is of storage class %s, so the class must stay", id, class)
+		}
+	}
 	// only the files cluster.yaml names: the payload may carry no others
 	files := map[string][]byte{}
 	for _, name := range clusterdir.FileNames(payload.Spec) {
@@ -55,7 +61,7 @@ func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 	s.Config = ClusterConfig{
 		Revision: s.Config.Revision + 1, Hash: payload.Hash, Spec: payload.Spec.WithDefaults(), Files: files,
 	}
-	s.Secrets = payload.Secrets
+	s.ClusterSecrets = payload.Secrets
 	s.JoinKeys = payload.JoinKeys
 	s.Registries = payload.Registries
 	return nil

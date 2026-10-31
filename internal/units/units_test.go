@@ -36,6 +36,35 @@ func TestSizesUseBinaryUnits(t *testing.T) {
 	}
 }
 
+func TestASizeInASpecReadsBackInTheLargestUnit(t *testing.T) {
+	var size Size
+	if err := size.UnmarshalText([]byte("1024M")); err != nil || size != 1<<30 {
+		t.Fatalf("1024M: %d, %v", size, err)
+	}
+	if text, err := size.MarshalText(); err != nil || string(text) != "1G" {
+		t.Errorf("1G: %q, %v", text, err)
+	}
+	for _, written := range []string{"1536M", "1025K", "3T", "7G"} {
+		var read Size
+		if err := read.UnmarshalText([]byte(written)); err != nil {
+			t.Fatal(err)
+		}
+		if text, err := read.MarshalText(); err != nil || string(text) != written {
+			t.Errorf("%s reads back as %q, %v", written, text, err)
+		}
+	}
+	if err := size.UnmarshalText([]byte("lots")); err == nil {
+		t.Error("lots is a size")
+	}
+	if _, err := Size(1000).MarshalText(); err == nil {
+		t.Error("1000 bytes were written as a size ParseSize cannot read")
+	}
+	var none Size
+	if text, err := none.MarshalText(); err != nil || len(text) != 0 {
+		t.Errorf("no size: %q, %v", text, err)
+	}
+}
+
 func TestSizesAreWrittenInTheLargestUnit(t *testing.T) {
 	cases := map[int64]string{20 << 30: "20G", 1 << 40: "1T", 3 << 29: "1.5G", 512 << 20: "512M", 100: "100B"}
 	for size, want := range cases {

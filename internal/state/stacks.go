@@ -4,11 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/resource"
 )
 
 // CreateStack registers a stack before its first apply.
@@ -96,12 +98,12 @@ type PutStack struct {
 	Operation string `json:"operation,omitempty"`
 }
 
-// The limits of a stack's secrets: every apply writes them into the Raft
-// log. The API checks the values' sizes before it seals them; the state can
-// check only the count, as it sees them sealed.
+// The limits of a stack's own secrets (each at most
+// resource.MaxSecretBytes): every apply writes them into the Raft log. The
+// API checks the values' sizes before it seals them; the state checks only
+// the count. They go with the stacks' own secrets, for Secret resources.
 const (
 	MaxStackSecrets      = 64
-	MaxSecretBytes       = 64 << 10
 	MaxStackSecretsBytes = 256 << 10
 )
 
@@ -171,7 +173,7 @@ func applyPutStack(s *State, _ Command, payload PutStack) error {
 		return !kept
 	})
 	stack.Secrets = payload.Secrets
-	s.StacksRevision++
+	s.ResourcesRevision++
 	return nil
 }
 
@@ -351,7 +353,9 @@ func (s *State) checkLiveHost(id *HostID) error {
 // together.
 const MaxMinor = 999
 
-// PutVolume creates a volume or replaces its record.
+// PutVolume creates a stack's volume or replaces a volume's record: where
+// its copies are and how they are. A volume resource keeps its Meta and its
+// spec, which only put-resource sets.
 type PutVolume struct {
 	Volume Volume `json:"volume"`
 	// Operation is set when the operation holding the lock makes the change.
@@ -360,12 +364,17 @@ type PutVolume struct {
 
 func applyPutVolume(s *State, _ Command, payload PutVolume) error {
 	volume := payload.Volume
-	stackID, ok := names.StackOfVolume(volume.ID)
-	if !ok {
-		return fmt.Errorf("volume ID %q is not namespace/stack/volume", volume.ID)
+	old, exists := s.Volumes[volume.ID]
+	if exists && old.IsResource() {
+		if volume.Spec != old.Spec {
+			return fmt.Errorf("volume %s: its spec changes only with an apply", volume.ID)
+		}
+		volume.Meta = old.Meta
+	} else if err := s.checkStackVolume(volume.ID); err != nil {
+		return err
 	}
-	if _, ok := s.Stacks[stackID]; !ok {
-		return fmt.Errorf("volume %s: no stack %s", volume.ID, stackID)
+	if exists && reflect.DeepEqual(*old, volume) {
+		return errUnchanged
 	}
 	if err := s.checkUnlocked(volumeLock(volume.ID), payload.Operation); err != nil {
 		return err
@@ -373,8 +382,9 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) error {
 	if err := checkVolume(volume); err != nil {
 		return err
 	}
-	if old, ok := s.Volumes[volume.ID]; ok && volume.Generation < old.Generation {
-		return fmt.Errorf("volume %s: generation %d is older than %d", volume.ID, volume.Generation, old.Generation)
+	if exists && volume.DataGeneration < old.DataGeneration {
+		return fmt.Errorf("volume %s: data generation %d is older than %d",
+			volume.ID, volume.DataGeneration, old.DataGeneration)
 	}
 	if volume.Minor != nil {
 		if *volume.Minor < 0 || *volume.Minor > MaxMinor {
@@ -398,22 +408,39 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) error {
 		}
 		placed[placement.Host] = true
 	}
-	if old, ok := s.Volumes[volume.ID]; ok {
+	if exists {
 		s.retire(old, &volume)
 	}
 	s.Volumes[volume.ID] = &volume
+	if volume.IsResource() {
+		s.changed(resource.KindVolume, &volume.Meta)
+	}
+	return nil
+}
+
+// checkStackVolume refuses a volume of a stack's Compose file whose ID is
+// not a stack's volume or whose stack is gone; a volume resource is made by
+// put-resource only.
+func (s *State) checkStackVolume(id string) error {
+	stackID, ok := names.StackOfVolume(id)
+	if !ok {
+		return fmt.Errorf("volume ID %q is not namespace/stack/volume, and there is no volume %s", id, id)
+	}
+	if _, ok := s.Stacks[stackID]; !ok {
+		return fmt.Errorf("volume %s: no stack %s", id, stackID)
+	}
 	return nil
 }
 
 // retire records the copies of old as retired, except those that kept,
-// the volume's new record, still has: same host, same generation.
+// the volume's new record, still has: same host, same data generation.
 func (s *State) retire(old *Volume, kept *Volume) {
 	for _, placement := range old.Placements {
-		if kept != nil && kept.Generation == old.Generation &&
+		if kept != nil && kept.DataGeneration == old.DataGeneration &&
 			slices.ContainsFunc(kept.Placements, func(p Placement) bool { return p.Host == placement.Host }) {
 			continue
 		}
-		retired := RetiredCopy{Volume: old.ID, Generation: old.Generation, Host: placement.Host}
+		retired := RetiredCopy{Volume: old.ID, DataGeneration: old.DataGeneration, Host: placement.Host}
 		if !slices.Contains(s.Retired, retired) {
 			s.Retired = append(s.Retired, retired)
 		}
@@ -431,8 +458,8 @@ func applyForgetCopy(s *State, cmd Command, payload ForgetCopy) error {
 	}
 	index := slices.Index(s.Retired, payload.Copy)
 	if index < 0 {
-		return fmt.Errorf("no retired copy of %s (generation %d) on host %d",
-			payload.Copy.Volume, payload.Copy.Generation, payload.Copy.Host)
+		return fmt.Errorf("no retired copy of %s (data generation %d) on host %d",
+			payload.Copy.Volume, payload.Copy.DataGeneration, payload.Copy.Host)
 	}
 	s.Retired = slices.Delete(s.Retired, index, index+1)
 	return nil
@@ -447,23 +474,26 @@ func checkVolume(volume Volume) error {
 			copies++
 		}
 	}
+	replicas := volume.Spec.Replicas
+	if err := volume.Spec.Check(); err != nil {
+		return fmt.Errorf("volume %s: %w", volume.ID, err)
+	}
 	switch {
-	case volume.Replicas < 0 || volume.Replicas > 3:
-		return fmt.Errorf("volume %s: %d replicas, not 0 to 3", volume.ID, volume.Replicas)
-	case volume.Class == "" || volume.SizeBytes <= 0:
-		return fmt.Errorf("volume %s needs a class and a size", volume.ID)
-	case volume.Generation < 0 || volume.Generation > names.MaxDataGeneration:
+	case volume.DataGeneration < 0 || volume.DataGeneration > names.MaxDataGeneration:
 		// the generation is part of the LV's name, whose length has a limit
-		return fmt.Errorf("volume %s: generation %d is not from 0 to %d", volume.ID, volume.Generation,
+		return fmt.Errorf("volume %s: data generation %d is not from 0 to %d", volume.ID, volume.DataGeneration,
 			names.MaxDataGeneration)
-	case copies > max(volume.Replicas, 1):
+	case copies > max(replicas, 1):
 		// replicas 0 is one plain LV on one host
-		return fmt.Errorf("volume %s: %d copies for %d replicas", volume.ID, copies, volume.Replicas)
-	case (volume.Replicas == 0) != (volume.Minor == nil):
+		return fmt.Errorf("volume %s: %d copies for %d replicas", volume.ID, copies, replicas)
+	case volume.Status == VolumePending && (len(volume.Placements) > 0 || volume.Minor != nil):
+		// the minor comes with the first copy, from the placement
+		return fmt.Errorf("volume %s: a pending volume has no copies and no DRBD minor", volume.ID)
+	case volume.Status != VolumePending && (replicas == 0) != (volume.Minor == nil):
 		return fmt.Errorf("volume %s: a DRBD minor exactly when it has replicas", volume.ID)
 	}
 	switch volume.Status {
-	case VolumeOK, VolumeDegraded, VolumeResyncing, VolumeRestorePending:
+	case VolumePending, VolumeOK, VolumeDegraded, VolumeResyncing, VolumeRestorePending:
 		return nil
 	default:
 		return fmt.Errorf("volume %s: unknown status %q", volume.ID, volume.Status)
@@ -478,8 +508,12 @@ type DeleteVolume struct {
 }
 
 func applyDeleteVolume(s *State, _ Command, payload DeleteVolume) error {
-	if _, ok := s.Volumes[payload.ID]; !ok {
+	volume, ok := s.Volumes[payload.ID]
+	switch {
+	case !ok:
 		return fmt.Errorf("no volume %s", payload.ID)
+	case volume.IsResource():
+		return fmt.Errorf("volume %s is a resource; only its owner deletes it (delete-resource)", payload.ID)
 	}
 	if err := s.checkUnlocked(volumeLock(payload.ID), payload.Operation); err != nil {
 		return err

@@ -110,7 +110,7 @@ clowder is built in phases; each ends with live tests on HLab.
 | 0 | the spike: DRBD quorum and fencing, WireGuard, the real client IP, on three hosts | done |
 | 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | done |
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done |
-| 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | in progress: namespaces in the state and on the host; the stack schema and its renderer |
+| 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | in progress: namespaces in the state and on the host; the stack schema and its renderer; namespaces, volumes and secrets as resources in the state |
 | 2 | three hosts: replication, failover with fencing | |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
@@ -250,11 +250,13 @@ Packages in *italics* do not exist yet.
 - **Portable**: `cli`, `api`, `clusterdir`, `sopsage`, `pki`, `compose`, `units`, `names`
   (the rules for the names users give, and the names on the host made of them),
   `buildinfo`, `logging`, `atomicfile` (files written whole or not at all), `metrics`
-  (Prometheus' text format), `stackspec` (a stack's schema). The CLI may import only
-  these. depguard (rule `cli-portable` in
+  (Prometheus' text format), `stackspec` (a stack's schema), `resource` (the kinds of
+  resources and their specs). The CLI may import only these. depguard (rule
+  `cli-portable` in
   `.golangci.yml`) refuses direct imports of the Linux-only packages in `cmd/clowder` and
   `internal/cli`; the cross build for Windows and macOS catches indirect ones.
-- **Pure logic, no I/O**: `scheduler`, `state`, and `stackspec`, which the state will read.
+- **Pure logic, no I/O**: `scheduler`, `state`, and what the state reads: `resource` and
+  `stackspec`.
   Their tests need no host, files or network; depguard (rule `state-pure`) keeps `os`,
   `net/http` and randomness out, forbidigo the clock (`time.Now`, `time.Since`,
   `time.Until`). `state` uses the types and `Check` of `clusterdir`, never its file access.
@@ -288,7 +290,7 @@ Packages in *italics* do not exist yet.
   | Compose project, the agent's stack directory, the secrets' directory, the supervisor's hold, Traefik's service | `<namespace>_<stack>` (`names.Project`) |
   | Compose network | `<namespace>_<stack>_<network>` (`names.Network`); with a stack spec the one network `<namespace>_<stack>_net` (`names.StackNetwork`) |
   | container, with a stack spec | `<namespace>_<stack>_<service>` (`names.Container`) |
-  | volume ID | `<namespace>/<stack>/<volume>` (`names.VolumeID`) |
+  | volume ID | `<namespace>/<volume>` for a `Volume` resource (`names.ID`); `<namespace>/<stack>/<volume>` for a volume of a stack's Compose file (`names.VolumeID`), until stacks are resources: the two never meet |
   | LV, DRBD resource, mount point, Docker volume | `clw-<readable>-<hash8>-g<generation>` (`names.VolumeName`) |
   | the agent's record of a volume's copies | `volume-records/<namespace>_<stack>_<volume>.json` (`names.FileName`) |
   | bridge | `cbr-` and 11 hex digits of a hash of the stack's ID and network (`names.BridgeName`); a stack spec's one network takes the bridge of the network `default`, so a stack keeps its bridge when it moves to a spec |
@@ -360,8 +362,9 @@ uses it (1c.5), the package is a library with its tests, next to the Compose fil
   checks the same first, to answer with every problem at once. `cluster apply` also refuses
   a `cluster.yaml` that a stack of the cluster would no longer pass (storage classes,
   priorities); that check holds at commit too: `put-stack` carries the `cluster.yaml`
-  revision it was checked against, `apply-config` the stacks revision
-  (`State.StacksRevision`), and the state refuses either when the other changed in between.
+  revision it was checked against, `apply-config` the resources revision
+  (`State.ResourcesRevision`), and the state refuses either when the other changed in
+  between.
 - **Variables are filled in on the user's machine.** `Source` fills in the variables and
   env files and drops the user's paths; the result is stored in the state and on the host as
   it is, not sealed. Passwords therefore belong in the stack's secrets file, never in a
@@ -460,15 +463,58 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   `put-acme-challenge`, `delete-acme-challenge`, `put-certificate` and `delete-certificate`
   (the ACME loop), `put-alert` and `resolve-alert` (the alerts), `report-host` and
   `forget-copy` (each agent). The other kinds
-  (`delete-volume`, hosts joining, operations, users beyond the first) are there for the
-  next steps; they are tested, but nothing sends them yet.
+  (`put-resource`, `delete-resource`, `delete-volume`, hosts joining, operations, users
+  beyond the first) are there for the next steps; they are tested, but nothing sends them
+  yet.
+- **Resources** (phase 1c): namespaces (`Namespaces`), volumes (`Volumes`, by
+  `<namespace>/<name>`; `Volume.IsResource` tells them from a stack's own) and secrets
+  (`Secrets`), each with a `Meta`. The kinds and their specs are in `internal/resource`,
+  which the CLI and the API share. Four counters, each with one job:
+
+  | Counter | Counts |
+  |---|---|
+  | `Meta.Generation` | the changes of a resource's spec |
+  | `Meta.ResourceVersion` | the index of the command that last changed the resource, spec or status |
+  | `State.ResourcesRevision` | the changes of any resource; `apply-config` names the one it checked against |
+  | `Volume.DataGeneration` | a volume's data: a restore or a class move makes a new LV (`-g<N>`) |
+
+  - `put-resource` and `delete-resource` carry the kind; `resourceKinds` holds each kind's
+    `find`, `put` and `remove`. A handler checks in a fixed order: `Authorize` (the actor,
+    the verb, the kind, the namespace; it allows everything until users get permissions,
+    and sits here so that the leader decides, not the agent that took the request), the
+    owner (another channel is refused, even for a spec that would change nothing), whether
+    anything changes, then the rest.
+  - **Unchanged is not a change.** A spec equal to the stored one (a secret's by its
+    digest, as the same value seals differently every time) changes nothing: not
+    `Generation`, not `ResourceVersion`, not `ResourcesRevision`, and leaves no audit entry,
+    so a GitOps loop that applies the same files restarts nothing and keeps the audit. A
+    `put-volume` that writes the record as it is changes nothing either. Both answer with
+    `errUnchanged`, which `Apply` takes as applied without a trace; a status command that
+    joins them does the same.
+  - `Apply` returns the resources a command changed (`[]Change`, with the command's index
+    as their `ResourceVersion`); a handler records each with `changed` or `deleted`.
+  - A namespace's owner owns only the namespace; any channel may put resources into it.
+    `default` belongs to no channel and cannot be deleted. A namespace goes only when it
+    holds nothing; nothing cascades.
+  - A volume is made `pending`, without a copy and without a DRBD minor: the placement
+    places it with the first stack that names it (once stacks are resources). Its class must be in `cluster.yaml`, and
+    `apply-config` refuses to drop a class a volume has. Its spec cannot change yet. A new
+    volume starts one `DataGeneration` above the retired copies of a deleted one of the
+    same ID, and the state refuses an LV name a volume or a retired copy has already (the
+    name holds only 32 bits of a hash). `put-volume` changes a volume resource's copies
+    and status, never its `Meta` or spec; `delete-volume` refuses a resource.
+  - A secret's value is sealed; the API computes its digest. The limits are on the values
+    in clear (`resource.MaxSecretBytes`, per namespace, in the cluster), which the state
+    reads from the sealed length (`ClearSize`: age adds a header of fixed length and a tag
+    per 64 KiB); a test in `datakey` holds that against real sealing.
 - **Retired copies.** A volume copy's data goes only when the state says so: `delete-stack`
-  with its volumes, `delete-volume`, and a `put-volume` that changes the generation or takes
-  a copy off a host each add the copies they give up to `Retired` (volume, generation,
-  host). The host removes those and forgets each with `forget-copy`; a removed host's go
-  with it. A copy that is merely missing from the state stays: a bug in the placement must
-  not cost data. A stack whose deleted volumes are still being removed cannot be created
-  again under the same name, as its new volumes would have the LVs of the old ones.
+  with its volumes, `delete-volume`, `delete-resource` of a volume, and a `put-volume` that
+  changes the data generation or takes a copy off a host each add the copies they give up to
+  `Retired` (volume, data generation, host). The host removes those and forgets each with
+  `forget-copy`; a removed host's go with it. A copy that is merely missing from the state
+  stays: a bug in the placement must not cost data. A stack whose deleted volumes are still
+  being removed cannot be created again under the same name, as its new volumes would have
+  the LVs of the old ones.
 - **Stacks.** `create-stack` registers a stack as `created` (no Source, `CreatedBy` from the
   actor, `Owner` the channel: cli or gitops); only `put-stack` moves it on, to `pending`, and
   nothing places a `created` stack. `put-stack` changes registered stacks only, and makes a
@@ -525,11 +571,11 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   exactly when replicated, one copy per host, a stack deleted only with its volumes, a
   removed host's certificate revoked.
 - **Secrets** arrive sealed (`Sealed`, age for the data key); `state` never sees them in
-  clear. A stack's secrets come with its `put-stack` and replace the old ones as a whole:
-  whoever cannot decrypt the stack's secrets file can remove its secrets with an apply, never
-  keep them for a changed stack. The limits are here (`MaxStackSecrets`, `MaxSecretBytes`,
-  `MaxStackSecretsBytes`); the state checks the count and the names, the API the sizes it sees
-  in clear.
+  clear. Those `cluster.yaml` names are `ClusterSecrets`. A stack's own secrets come with
+  its `put-stack` and replace the old ones as a whole: whoever cannot decrypt the stack's
+  secrets file can remove its secrets with an apply, never keep them for a changed stack.
+  Their limits are `MaxStackSecrets`, `MaxStackSecretsBytes` and `resource.MaxSecretBytes`;
+  the state checks the count and the names, the API the sizes it sees in clear.
 - `Copy` gives a deep copy without the audit, for work too slow for the state's lock (the
   placement parses every stack) or that keeps parts of the state (the agent's stacks).
 - Snapshots are gzip-compressed JSON (`WriteSnapshot`, `ReadSnapshot`). The audit keeps the
@@ -740,7 +786,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   resource sits on it (`RenderResource`, golden files in `testdata/` that `bin/dev
   test-tools` checks with `drbdadm`): quorum majority with `suspend-io`, `auto-promote no`,
   node-id = host ID, port `drbdBasePort` + minor on the node address. With replicas 0 it is a
-  plain LV. A copy's LV is `names.VolumeName(volume ID, generation)` and its resource
+  plain LV. A copy's LV is `names.VolumeName(volume ID, data generation)` and its resource
   and mount point (`volumes/<LV>`) have the same name, so a restored volume (a new
   generation) is a new LV next to the old one, mounted apart from it.
 - **`Ensure` does only what is missing:** the LV, the resource, the primary role, ext4, the

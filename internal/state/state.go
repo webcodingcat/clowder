@@ -14,6 +14,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/resource"
 )
 
 // MaxHosts is the size of a cluster: a host ID is also the DRBD node-id and
@@ -32,13 +33,15 @@ type Sealed []byte
 type State struct {
 	// Index is the Raft index of the last applied command; reads that need
 	// a write to be visible wait for it.
-	Index      uint64            `json:"index"`
-	Keys       *ClusterKeys      `json:"keys,omitempty"`
-	Config     ClusterConfig     `json:"config"`
-	Secrets    map[string]Sealed `json:"secrets,omitempty"`
-	JoinKeys   []Sealed          `json:"join_keys,omitempty"`
-	Registries map[string]Sealed `json:"registries,omitempty"`
-	Hosts      map[HostID]*Host  `json:"hosts,omitempty"`
+	Index  uint64        `json:"index"`
+	Keys   *ClusterKeys  `json:"keys,omitempty"`
+	Config ClusterConfig `json:"config"`
+	// ClusterSecrets are the secrets cluster.yaml names (the hoster's
+	// token, the alert channels'), by name.
+	ClusterSecrets map[string]Sealed `json:"cluster_secrets,omitempty"`
+	JoinKeys       []Sealed          `json:"join_keys,omitempty"`
+	Registries     map[string]Sealed `json:"registries,omitempty"`
+	Hosts          map[HostID]*Host  `json:"hosts,omitempty"`
 	// Ingress is the host that should hold the Floating IP; the leader keeps
 	// the hoster's routing in line with it.
 	Ingress *HostID `json:"ingress,omitempty"`
@@ -52,13 +55,14 @@ type State struct {
 	Certificates map[string]*Certificate `json:"certificates,omitempty"`
 	Users        map[string]*User        `json:"users,omitempty"`
 	Revoked      map[string]time.Time    `json:"revoked,omitempty"` // certificate serial -> when
-	// Namespaces hold the stacks; the bootstrap makes names.Default.
+	// Namespaces hold the other resources; the bootstrap makes names.Default.
 	Namespaces map[string]*Namespace `json:"namespaces,omitempty"`
-	Stacks     map[string]*Stack     `json:"stacks,omitempty"` // names.ID: "<namespace>/<stack>"
-	// StacksRevision counts the stacks' applies: a cluster apply checked
-	// against the stacks commits only if none came in between.
-	StacksRevision int64              `json:"stacks_revision,omitempty"`
-	Volumes        map[string]*Volume `json:"volumes,omitempty"` // names.VolumeID
+	Stacks     map[string]*Stack     `json:"stacks,omitempty"`  // names.ID: "<namespace>/<stack>"
+	Secrets    map[string]*Secret    `json:"secrets,omitempty"` // names.ID: "<namespace>/<secret>"
+	// ResourcesRevision counts the changes of resources: a cluster apply
+	// checked against them commits only if none came in between.
+	ResourcesRevision int64              `json:"resources_revision,omitempty"`
+	Volumes           map[string]*Volume `json:"volumes,omitempty"` // Volume.ID
 	// Retired are the volume copies the cluster gave up: the only ones an
 	// agent removes, so a copy that is merely missing from the state (a bug)
 	// keeps its data.
@@ -68,6 +72,9 @@ type State struct {
 	Operations map[string]*Operation `json:"operations,omitempty"`
 	Locks      map[string]string     `json:"locks,omitempty"` // "stack/<stack ID>" or "volume/<volume ID>" -> operation
 	Audit      []AuditEntry          `json:"audit,omitempty"`
+	// changes are the resources the command being applied changed (Apply
+	// returns them); not part of the state.
+	changes []Change
 }
 
 // ClusterKeys are the keys init creates. The CA certificate is public; its
@@ -161,10 +168,43 @@ type User struct {
 	Serials []string `json:"serials,omitempty"`
 }
 
-// Namespace keeps its stacks apart from those of other namespaces: two
-// namespaces may each have a stack of the same name.
+// Meta is what every resource has besides its spec and status.
+type Meta struct {
+	// Namespace is empty for a namespace, which lives in none.
+	Namespace string `json:"namespace,omitempty"`
+	Name      string `json:"name"`
+	// Owner is the channel that applied the resource (OwnerCLI or
+	// GitOpsOwner): only it changes or deletes the resource. names.Default
+	// belongs to no channel.
+	Owner string `json:"owner,omitempty"`
+	// Generation counts the changes of the spec.
+	Generation int64 `json:"generation"`
+	// ResourceVersion is the Raft index of the command that last changed the
+	// resource, its spec or its status.
+	ResourceVersion uint64 `json:"resource_version"`
+}
+
+// Namespace keeps its resources apart from those of other namespaces: two
+// namespaces may each have a stack, volume or secret of the same name.
 type Namespace struct {
-	Name string `json:"name"`
+	Meta
+}
+
+// Secret is a secret of a namespace, by names.ID in State.Secrets.
+type Secret struct {
+	Meta
+	Spec SealedSecret `json:"spec"`
+}
+
+// SealedSecret is a secret's spec as the state keeps it: the value sealed,
+// so the state never sees it in clear, and its digest, by which an apply of
+// the same value is told from a change (sealing the same value twice gives
+// two different results).
+type SealedSecret struct {
+	Value Sealed `json:"value"`
+	// Digest is an HMAC over the secret's ID and value, which the API
+	// computes with a key derived from the data key.
+	Digest string `json:"digest"`
 }
 
 // Stack is a registered Compose stack.
@@ -263,18 +303,26 @@ const (
 	StackStopped        StackStatus = "stopped"
 )
 
-// Volume is a named volume of a stack.
+// Volume is a volume and where its copies are. It is a resource of a
+// namespace (ID "<namespace>/<name>"), or, until stacks are resources, a
+// volume of a stack's Compose file (ID "<namespace>/<stack>/<volume>",
+// names.VolumeID), which has no Meta.
 type Volume struct {
-	ID string `json:"id"` // names.VolumeID: "<namespace>/<stack>/<volume>"
-	// Generation grows with a restore or a class move; it is part of the
-	// Docker volume's name (names.VolumeName), at most names.MaxDataGeneration.
-	Generation int64        `json:"generation"`
-	Class      string       `json:"class"`
-	SizeBytes  int64        `json:"size_bytes"`
-	Replicas   int          `json:"replicas"`
-	Minor      *int         `json:"minor,omitempty"` // DRBD minor; nil with replicas 0
-	Placements []Placement  `json:"placements,omitempty"`
-	Status     VolumeStatus `json:"status"`
+	Meta
+	ID   string              `json:"id"`
+	Spec resource.VolumeSpec `json:"spec"`
+	// DataGeneration grows with a restore or a class move; it is part of
+	// the LV's name (names.VolumeName), at most names.MaxDataGeneration.
+	DataGeneration int64        `json:"data_generation"`
+	Minor          *int         `json:"minor,omitempty"` // DRBD minor; nil with replicas 0
+	Placements     []Placement  `json:"placements,omitempty"`
+	Status         VolumeStatus `json:"status"`
+}
+
+// IsResource tells a volume resource from a volume of a stack's Compose
+// file, which has no Meta.
+func (v *Volume) IsResource() bool {
+	return v.Name != ""
 }
 
 // Placement is one copy of a volume.
@@ -289,9 +337,9 @@ type Placement struct {
 // stack or volume, of an older generation, or one the volume no longer
 // places there. The host forgets it once the copy is gone (forget-copy).
 type RetiredCopy struct {
-	Volume     string `json:"volume"` // the volume's ID
-	Generation int64  `json:"generation"`
-	Host       HostID `json:"host"`
+	Volume         string `json:"volume"` // the volume's ID
+	DataGeneration int64  `json:"data_generation"`
+	Host           HostID `json:"host"`
 }
 
 // VolumeStatus says how healthy a volume's copies are.
@@ -299,6 +347,9 @@ type VolumeStatus string
 
 // The states of a volume.
 const (
+	// VolumePending has no copy yet: a volume is placed together with the
+	// first stack that names it.
+	VolumePending        VolumeStatus = "pending"
 	VolumeOK             VolumeStatus = "ok"
 	VolumeDegraded       VolumeStatus = "degraded"
 	VolumeResyncing      VolumeStatus = "resyncing"

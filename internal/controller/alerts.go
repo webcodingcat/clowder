@@ -353,7 +353,7 @@ func (a *Alerts) send(ctx context.Context, copied *state.State, notifiers map[in
 // secrets opens the secrets of cluster.yaml from the state.
 func (a *Alerts) secrets(copied *state.State) notify.Secrets {
 	return func(name string) (string, error) {
-		sealed, ok := copied.Secrets[name]
+		sealed, ok := copied.ClusterSecrets[name]
 		if !ok {
 			return "", fmt.Errorf("secret %s is not among the cluster's secrets", name)
 		}

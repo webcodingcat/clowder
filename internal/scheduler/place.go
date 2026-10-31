@@ -20,6 +20,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
+	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/units"
 )
@@ -162,7 +163,7 @@ func newPlanner(current *state.State) *planner {
 		}
 		for _, placement := range volume.Placements {
 			if !placement.Tiebreaker {
-				p.take(placement.Host, p.classes[placement.Class].Pool, volume.SizeBytes)
+				p.take(placement.Host, p.classes[placement.Class].Pool, int64(volume.Spec.Size))
 			}
 		}
 	}
@@ -256,7 +257,8 @@ func (p *planner) newVolumes(stack *state.Stack, host state.HostID, parsed *comp
 			return nil, fmt.Sprintf("volume %s (%s, class %s) fits no pool", name, units.FormatSize(wanted.Size), wanted.Class)
 		}
 		volume := state.Volume{
-			ID: id, Generation: 1, Class: wanted.Class, SizeBytes: wanted.Size, Replicas: wanted.Replicas,
+			ID: id, DataGeneration: 1,
+			Spec:       resource.VolumeSpec{Class: wanted.Class, Size: units.Size(wanted.Size), Replicas: wanted.Replicas},
 			Placements: []state.Placement{{Host: host, Class: class}}, Status: state.VolumeOK,
 		}
 		if wanted.Replicas > 0 {

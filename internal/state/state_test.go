@@ -21,6 +21,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/resource"
 )
 
 var testTime = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
@@ -54,8 +55,8 @@ func testHost(id HostID) Host {
 	}
 }
 
-// apply applies a command and returns Apply's error.
-func (c *cluster) apply(kind, actor string, payload any) error {
+// changes applies a command and returns what Apply returns.
+func (c *cluster) changes(kind, actor string, payload any) ([]Change, error) {
 	c.t.Helper()
 	cmd, err := NewCommand(kind, testTime, actor, payload)
 	if err != nil {
@@ -63,6 +64,13 @@ func (c *cluster) apply(kind, actor string, payload any) error {
 	}
 	c.index++
 	return c.state.Apply(c.index, cmd)
+}
+
+// apply applies a command and returns Apply's error.
+func (c *cluster) apply(kind, actor string, payload any) error {
+	c.t.Helper()
+	_, err := c.changes(kind, actor, payload)
+	return err
 }
 
 func (c *cluster) mustApply(kind, actor string, payload any) {
@@ -116,7 +124,7 @@ func TestNothingButTheBootstrapRunsOnAnEmptyState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := state.Apply(1, cmd); !errors.Is(err, ErrNotBootstrapped) {
+	if _, err := state.Apply(1, cmd); !errors.Is(err, ErrNotBootstrapped) {
 		t.Errorf("want ErrNotBootstrapped, got %v", err)
 	}
 	if state.Index != 1 {
@@ -137,7 +145,7 @@ func TestCommandsOfUnknownVersionsOrKindsAreRefused(t *testing.T) {
 		{CommandVersion, "make-coffee", "unknown command"},
 	} {
 		cmd := Command{Version: test.version, Kind: test.kind, At: testTime, Actor: LeaderActor, Payload: []byte("{}")}
-		if err := c.state.Apply(99, cmd); err == nil || !strings.Contains(err.Error(), test.want) {
+		if _, err := c.state.Apply(99, cmd); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Errorf("%d %s: want %q, got %v", test.version, test.kind, test.want, err)
 		}
 	}
@@ -297,6 +305,11 @@ func testConfig() clusterdir.Config {
 	}
 }
 
+// testVolumeSpec is a volume of testConfig's class.
+func testVolumeSpec() resource.VolumeSpec {
+	return resource.VolumeSpec{Class: "fast", Size: 1 << 30, Replicas: 1}
+}
+
 // testSecrets are the secrets testConfig needs.
 func testSecrets() map[string]Sealed {
 	return map[string]Sealed{"hcloud-token": Sealed("sealed")}
@@ -438,7 +451,7 @@ func TestWaitingSinceStartsWithTheFirstReasonAndEndsWithTheLast(t *testing.T) {
 			t.Fatal(err)
 		}
 		c.index++
-		if err := c.state.Apply(c.index, cmd); err != nil {
+		if _, err := c.state.Apply(c.index, cmd); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -466,7 +479,7 @@ func TestAnAlertKeepsItsKeyAndSinceWhenItGetsWorse(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.index++
-	if err := c.state.Apply(c.index, cmd); err != nil {
+	if _, err := c.state.Apply(c.index, cmd); err != nil {
 		t.Fatal(err)
 	}
 	if alert := c.state.Alerts[warning.Key]; alert.Severity != "critical" || !alert.Since.Equal(testTime) || len(c.state.Alerts) != 1 {
@@ -492,16 +505,17 @@ func TestTwoNamespacesHaveAStackOfTheSameName(t *testing.T) {
 	}
 	c.refuse(KindCreateStack, UserActor("alice"), CreateStack{Namespace: "other", Name: "shop", Owner: OwnerCLI},
 		`no namespace "other"`)
-	// only clowder apply makes namespaces (phase 1c); until then a test does
-	c.state.Namespaces["other"] = &Namespace{Name: "other"}
+	c.mustApply(KindPutResource, UserActor("alice"), PutResource{Kind: resource.KindNamespace, Name: "other", Owner: OwnerCLI})
 	c.createShop()
 	c.mustApply(KindCreateStack, UserActor("alice"), CreateStack{Namespace: "other", Name: "shop", Owner: OwnerCLI})
 	for _, namespace := range []string{"default", "other"} {
 		c.mustApply(KindPutStack, UserActor("alice"), PutStack{
 			Namespace: namespace, Name: "shop", Owner: OwnerCLI, Source: "services: {}",
 		})
+		plain := testVolumeSpec()
+		plain.Replicas = 0
 		volume := Volume{
-			ID: names.VolumeID(namespace, "shop", "data"), Generation: 1, Class: "fast", SizeBytes: 1 << 30,
+			ID: names.VolumeID(namespace, "shop", "data"), DataGeneration: 1, Spec: plain,
 			Placements: []Placement{{Host: 0, Class: "fast"}}, Status: VolumeOK,
 		}
 		c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: volume})
@@ -532,7 +546,7 @@ func TestOnlyStacksNamedInClusterYAMLMayHavePrivileges(t *testing.T) {
 	privileged.ConfigRevision = 2
 	c.mustApply(KindPutStack, UserActor("alice"), privileged)
 	config.Stacks.Privileged = nil
-	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: testSecrets(), StacksRevision: 1},
+	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: testSecrets(), ResourcesRevision: 1},
 		"stack default/shop asks for privileges, so it must stay in stacks.privileged")
 }
 
@@ -563,8 +577,8 @@ func TestChecksAgainstAnOlderClusterYAMLOrStacksAreRefused(t *testing.T) {
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
 	// cluster.yaml checked against the stacks before that apply
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets()},
-		"stacks revision 0, but 1 came in between")
-	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets(), StacksRevision: 1})
+		"resources revision 0, but 1 came in between")
+	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets(), ResourcesRevision: 1})
 	// a stack checked against cluster.yaml before that apply
 	c.refuse(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {}"},
 		"cluster.yaml revision 0, but 1 came in between")
@@ -676,7 +690,7 @@ func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
 	minor := 5
 	volume := Volume{
-		ID: "default/shop/pgdata", Generation: 1, Class: "fast", SizeBytes: 1 << 30, Replicas: 1, Minor: &minor,
+		ID: "default/shop/pgdata", DataGeneration: 1, Spec: testVolumeSpec(), Minor: &minor,
 		Placements: []Placement{{Host: 0, Class: "fast"}}, Status: VolumeOK,
 	}
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: volume})
@@ -688,28 +702,28 @@ func TestVolumesNeedTheirStackAndOwnMinors(t *testing.T) {
 	orphan.ID = "default/blog/data"
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: orphan}, "no stack default/blog")
 	orphan.ID = "shop/data"
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: orphan}, "not namespace/stack/volume")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: orphan}, "there is no volume shop/data")
 	tooOld := volume
-	tooOld.Generation = names.MaxDataGeneration + 1
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: tooOld}, "generation 1000000 is not from 0 to 999999")
+	tooOld.DataGeneration = names.MaxDataGeneration + 1
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: tooOld}, "data generation 1000000 is not from 0 to 999999")
 	older := volume
-	older.Generation = 0
+	older.DataGeneration = 0
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: older}, "older")
 	tooHigh := 1000
 	other.Minor = &tooHigh
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: other}, "not from 0 to 999")
 	twice := volume
-	twice.Replicas = 2
+	twice.Spec.Replicas = 2
 	twice.Placements = []Placement{{Host: 0, Class: "fast"}, {Host: 0, Class: "fast"}}
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: twice}, "two copies on host 0")
 	tooMany := volume
-	tooMany.Replicas = 4
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: tooMany}, "not 0 to 3")
+	tooMany.Spec.Replicas = 4
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: tooMany}, "replicas 4 is not from 0 to 3")
 	noSize := volume
-	noSize.SizeBytes = 0
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: noSize}, "needs a class and a size")
+	noSize.Spec.Size = 0
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: noSize}, "size is required")
 	plain := volume
-	plain.Replicas = 0
+	plain.Spec.Replicas = 0
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: plain}, "a DRBD minor exactly when")
 	strange := volume
 	strange.Status = "melting"
@@ -729,8 +743,10 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	c.createShop()
 	c.mustApply(KindPutStack, UserActor("alice"), PutStack{Namespace: "default", Name: "shop", Owner: OwnerCLI, Source: "services: {}"})
 	minor := 5
+	spec := testVolumeSpec()
+	spec.Replicas = 2
 	volume := Volume{
-		ID: "default/shop/pgdata", Generation: 1, Class: "fast", SizeBytes: 1 << 30, Replicas: 2, Minor: &minor,
+		ID: "default/shop/pgdata", DataGeneration: 1, Spec: spec, Minor: &minor,
 		Placements: []Placement{{Host: 0, Class: "fast"}, {Host: 1, Class: "fast"}}, Status: VolumeOK,
 	}
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: volume})
@@ -744,9 +760,12 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: moved})
 	// a new generation retires the copies of the old one
 	restored := moved
-	restored.Generation = 2
+	restored.DataGeneration = 2
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: restored})
-	want := []RetiredCopy{{Volume: "default/shop/pgdata", Generation: 1, Host: 1}, {Volume: "default/shop/pgdata", Generation: 1, Host: 0}}
+	want := []RetiredCopy{
+		{Volume: "default/shop/pgdata", DataGeneration: 1, Host: 1},
+		{Volume: "default/shop/pgdata", DataGeneration: 1, Host: 0},
+	}
 	if !slices.Equal(c.state.Retired, want) {
 		t.Errorf("retired %v, want %v", c.state.Retired, want)
 	}
@@ -760,11 +779,11 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	c.mustApply(KindDeleteStack, UserActor("alice"), DeleteStack{Namespace: "default", Name: "shop", WithVolumes: true})
 	c.refuse(KindCreateStack, UserActor("alice"), CreateStack{Namespace: "default", Name: "shop", Owner: OwnerCLI}, "still being removed")
 	c.mustApply(KindForgetCopy, HostActor(0), ForgetCopy{Copy: want[1]})
-	c.mustApply(KindForgetCopy, HostActor(0), ForgetCopy{Copy: RetiredCopy{Volume: "default/shop/pgdata", Generation: 2, Host: 0}})
+	c.mustApply(KindForgetCopy, HostActor(0), ForgetCopy{Copy: RetiredCopy{Volume: "default/shop/pgdata", DataGeneration: 2, Host: 0}})
 	c.createShop()
 
 	// a removed host forgets nothing any more: its copies leave the list
-	c.state.Retired = append(c.state.Retired, RetiredCopy{Volume: "default/blog/data", Generation: 1, Host: 1})
+	c.state.Retired = append(c.state.Retired, RetiredCopy{Volume: "default/blog/data", DataGeneration: 1, Host: 1})
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Removed})
 	if len(c.state.Retired) != 0 {
 		t.Errorf("retired %v after the host was removed", c.state.Retired)

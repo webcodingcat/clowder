@@ -43,6 +43,8 @@ const (
 	KindAddUser             = "add-user"
 	KindRemoveUser          = "remove-user"
 	KindRevoke              = "revoke"
+	KindPutResource         = "put-resource"
+	KindDeleteResource      = "delete-resource"
 	KindCreateStack         = "create-stack"
 	KindPutStack            = "put-stack"
 	KindDeleteStack         = "delete-stack"
@@ -117,6 +119,8 @@ var handlers = map[string]handler{
 	KindAddUser:             decoded(applyAddUser),
 	KindRemoveUser:          decoded(applyRemoveUser),
 	KindRevoke:              decoded(applyRevoke),
+	KindPutResource:         decoded(applyPutResource),
+	KindDeleteResource:      decoded(applyDeleteResource),
 	KindCreateStack:         decoded(applyCreateStack),
 	KindPutStack:            decoded(applyPutStack),
 	KindDeleteStack:         decoded(applyDeleteStack),
@@ -152,47 +156,66 @@ var ErrNotBootstrapped = errors.New("the cluster is not bootstrapped yet")
 
 // ApplyEntry applies a Raft log entry: a command as JSON. An entry that does
 // not read as one is refused like any other wrong command.
-func (s *State) ApplyEntry(index uint64, data []byte) error {
+func (s *State) ApplyEntry(index uint64, data []byte) ([]Change, error) {
 	var cmd Command
 	if err := json.Unmarshal(data, &cmd); err != nil {
 		s.Index = index
-		return fmt.Errorf("read the command at index %d: %w", index, err)
+		return nil, fmt.Errorf("read the command at index %d: %w", index, err)
 	}
 	return s.Apply(index, cmd)
 }
 
-// Apply applies the command at the given Raft index. A refused command
-// returns an error and leaves the state as it was, apart from the index:
-// the log entry is applied either way.
-func (s *State) Apply(index uint64, cmd Command) error {
+// Apply applies the command at the given Raft index and returns the
+// resources it changed, each with the index as its ResourceVersion. A
+// refused command returns an error and leaves the state as it was, apart
+// from the index: the log entry is applied either way.
+func (s *State) Apply(index uint64, cmd Command) ([]Change, error) {
 	s.Index = index
+	s.changes = nil
 	if cmd.Version < max(1, CommandVersion-1) || cmd.Version > CommandVersion {
-		return fmt.Errorf("%s: command version %d is not readable by this agent (%d)",
+		return nil, fmt.Errorf("%s: command version %d is not readable by this agent (%d)",
 			cmd.Kind, cmd.Version, CommandVersion)
 	}
 	apply, ok := handlers[cmd.Kind]
 	if !ok {
-		return fmt.Errorf("unknown command %q", cmd.Kind)
+		return nil, fmt.Errorf("unknown command %q", cmd.Kind)
 	}
 	if s.Keys == nil && cmd.Kind != KindBootstrap {
-		return fmt.Errorf("%s: %w", cmd.Kind, ErrNotBootstrapped)
+		return nil, fmt.Errorf("%s: %w", cmd.Kind, ErrNotBootstrapped)
 	}
 	s.makeMaps()
-	if err := apply(s, cmd); err != nil {
-		return fmt.Errorf("%s: %w", cmd.Kind, err)
+	err := apply(s, cmd)
+	switch {
+	case errors.Is(err, errUnchanged):
+		// no audit entry: a GitOps loop applies the same files every few
+		// minutes, and would push the real changes out
+		return nil, nil
+	case err != nil:
+		s.changes = nil
+		return nil, fmt.Errorf("%s: %w", cmd.Kind, err)
 	}
 	s.Audit = append(s.Audit, AuditEntry{Index: index, At: cmd.At, Actor: cmd.Actor, Kind: cmd.Kind})
 	if extra := len(s.Audit) - auditSize; extra > 0 {
 		s.Audit = slices.Delete(s.Audit, 0, extra)
 	}
-	return nil
+	changes := s.changes
+	s.changes = nil
+	return changes, nil
 }
+
+// errUnchanged is a handler's answer to a command that would write what is
+// there already: Apply takes it as applied, and the command leaves no trace,
+// not even in the audit. A handler returns it before it changes anything.
+var errUnchanged = errors.New("unchanged")
 
 // makeMaps creates the maps that are still nil (a fresh state, or one read
 // from a snapshot that left empty maps out), so handlers can write to them.
 func (s *State) makeMaps() {
+	if s.ClusterSecrets == nil {
+		s.ClusterSecrets = map[string]Sealed{}
+	}
 	if s.Secrets == nil {
-		s.Secrets = map[string]Sealed{}
+		s.Secrets = map[string]*Secret{}
 	}
 	if s.Registries == nil {
 		s.Registries = map[string]Sealed{}

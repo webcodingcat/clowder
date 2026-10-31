@@ -78,6 +78,8 @@ linters:
             - "!**/internal/scheduler/*_test.go"
             - "**/internal/stackspec/*.go"
             - "!**/internal/stackspec/*_test.go"
+            - "**/internal/resource/*.go"
+            - "!**/internal/resource/*_test.go"
           deny:
             - pkg: os
               desc: the state does no I/O
@@ -107,9 +109,9 @@ linters:
     rules:
       # forbidigo guards the determinism of the state, the scheduler and the
       # stack spec they read
-      - path-except: internal/(state|scheduler|stackspec)/
+      - path-except: internal/(state|scheduler|stackspec|resource)/
         linters: [forbidigo]
-      - path: internal/(state|scheduler|stackspec)/.*_test\.go
+      - path: internal/(state|scheduler|stackspec|resource)/.*_test\.go
         linters: [forbidigo]
 
 formatters:

@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
+	"github.com/webcodingcat/clowder/internal/units"
 )
 
 const gib = int64(1) << 30
@@ -124,7 +126,7 @@ func TestAPlacedStackGetsOnlyItsNewVolumes(t *testing.T) {
 		"  files:\n    x-clowder: {class: fast, size: 50G, replicas: 1}\n")
 	shop.Host = &host
 	current.Volumes["default/shop/db"] = &state.Volume{
-		ID: "default/shop/db", SizeBytes: 20 * gib, Replicas: 1, Minor: &minor,
+		ID: "default/shop/db", Spec: resource.VolumeSpec{Class: "fast", Size: units.Size(20 * gib), Replicas: 1}, Minor: &minor,
 		Placements: []state.Placement{{Host: 0, Class: "fast"}},
 	}
 	decisions := Plan(context.Background(), current)

@@ -18,6 +18,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/supervisor"
 )
@@ -42,7 +43,9 @@ func (c *testCluster) propose(_ context.Context, cmd state.Command) (uint64, err
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cmd.At = time.Now()
-	return c.state.Index + 1, c.state.Apply(c.state.Index+1, cmd)
+	index := c.state.Index + 1
+	_, err := c.state.Apply(index, cmd)
+	return index, err
 }
 
 // apply commits a command and fails the test if the state refuses it.
@@ -128,7 +131,7 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 
 func putVolume(cluster *testCluster, generation int64) {
 	cluster.apply(state.KindPutVolume, state.LeaderActor, state.PutVolume{Volume: state.Volume{
-		ID: "default/shop/db", Generation: generation, Class: "fast", SizeBytes: 1 << 30,
+		ID: "default/shop/db", DataGeneration: generation, Spec: resource.VolumeSpec{Class: "fast", Size: 1 << 30},
 		Placements: []state.Placement{{Host: 0, Class: "fast"}}, Status: state.VolumeOK,
 	}})
 }

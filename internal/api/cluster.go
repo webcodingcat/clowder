@@ -67,7 +67,7 @@ func (s *Server) applyCluster(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("read the request: %w", err))
 		return
 	}
-	stacksRevision, err := s.checkStacksAgainst(r.Context(), apply.Spec.WithDefaults())
+	resourcesRevision, err := s.checkStacksAgainst(r.Context(), apply.Spec.WithDefaults())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -77,21 +77,22 @@ func (s *Server) applyCluster(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	payload.StacksRevision = stacksRevision
+	payload.ResourcesRevision = resourcesRevision
 	s.write(w, r, state.KindApplyConfig, payload)
 }
 
 // checkStacksAgainst refuses a cluster.yaml that a stack of the cluster
 // would not pass: a storage class it uses, a priority category it names, its
 // place in stacks.privileged must not go while the stack is there. It tells
-// the stacks revision it checked, which the state compares at commit.
+// the resources revision it checked, which the state compares at commit;
+// the state checks the volume resources itself.
 func (s *Server) checkStacksAgainst(ctx context.Context, config clusterdir.Config) (int64, error) {
 	// what the check needs of a stack, read under the state's lock
 	type stackSource struct{ namespace, name, source string }
 	stacks := map[string]stackSource{}
 	var revision int64
 	s.config.Cluster.Read(func(current *state.State) {
-		revision = current.StacksRevision
+		revision = current.ResourcesRevision
 		for id, stack := range current.Stacks {
 			stacks[id] = stackSource{namespace: stack.Namespace, name: stack.Name, source: stack.Source}
 		}
