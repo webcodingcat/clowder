@@ -19,6 +19,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/compose"
+	"github.com/webcodingcat/clowder/internal/digest"
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/ingress"
 	"github.com/webcodingcat/clowder/internal/names"
@@ -160,9 +161,9 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	if err := writeChanged(t.files.traefikCompose(), file, 0o600); err != nil {
 		return err
 	}
-	digest := sha256.New()
-	writeParts(digest, file, static)
-	hash := [32]byte(digest.Sum(nil))
+	sum := sha256.New()
+	digest.WriteParts(sum, file, static)
+	hash := [32]byte(sum.Sum(nil))
 	t.mu.Lock()
 	upToDate := t.cameUp == hash
 	t.mu.Unlock()

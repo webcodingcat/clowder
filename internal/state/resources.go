@@ -37,16 +37,19 @@ func (s *State) deleted(kind string, meta Meta) {
 	})
 }
 
-// The verbs Authorize knows so far; restart and read come with the commands
-// that need them.
+// The verbs Authorize knows so far: put and delete change resources in the
+// state, read is for what never passes Raft (the API's lists). Restart
+// comes with the command that needs it.
 const (
 	VerbPut    = "put"
 	VerbDelete = "delete"
+	VerbRead   = "read"
 )
 
 // Authorize tells whether an actor may do a verb to the resources of a kind
 // in a namespace. It decides on the leader, in the state, so no agent that
-// took a request decides for it; the API will ask it too, to answer early.
+// took a request decides for it; the API asks it too, for its reads and to
+// answer early (it applies a request to a copy of its state first).
 // Until users get permissions every user may do everything.
 func Authorize(actor, verb, kind, namespace string) error {
 	_, _, _, _ = actor, verb, kind, namespace // read once users get permissions

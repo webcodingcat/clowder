@@ -65,6 +65,8 @@ type clearKeys struct{}
 func (clearKeys) Seal(plaintext []byte) (state.Sealed, error) { return state.Sealed(plaintext), nil }
 func (clearKeys) Open(sealed state.Sealed) ([]byte, error)    { return []byte(sealed), nil }
 
+func (clearKeys) Derive(purpose string) ([]byte, error) { return []byte(purpose), nil }
+
 func TestExactlyTheSecretsTheStackAsksForAreSealed(t *testing.T) {
 	stack, err := compose.Parse(context.Background(), "shop", []byte(
 		"name: shop\nservices: {app: {image: x, x-clowder: {secrets: [db-password]}}}\n"))

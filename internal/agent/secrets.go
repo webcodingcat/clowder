@@ -2,13 +2,8 @@ package agent
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -16,6 +11,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/compose"
+	"github.com/webcodingcat/clowder/internal/digest"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -45,20 +41,11 @@ const secretDigestPurpose = "clowder secrets label"
 // order, each name and value preceded by its length, so no two sets of
 // secrets give the same input.
 func secretDigest(key []byte, values map[string]string, names []string) string {
-	mac := hmac.New(sha256.New, key)
+	var parts [][]byte
 	for _, name := range slices.Sorted(slices.Values(names)) {
-		writeParts(mac, []byte(name), []byte(values[name]))
+		parts = append(parts, []byte(name), []byte(values[name]))
 	}
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-// writeParts writes each part to a hash after its length, so no two lists
-// of parts give the hash the same input.
-func writeParts(hash io.Writer, parts ...[]byte) {
-	for _, part := range parts {
-		_, _ = hash.Write(binary.BigEndian.AppendUint64(nil, uint64(len(part)))) // a hash never fails to write
-		_, _ = hash.Write(part)
-	}
+	return digest.HMAC(key, parts...)
 }
 
 // openSecrets opens the sealed values of the secrets the stack asks for.

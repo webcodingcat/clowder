@@ -67,6 +67,35 @@ func (c *Client) Act(ctx context.Context, path string, in, out any) error {
 	return c.do(ctx, http.MethodPost, path, body, out)
 }
 
+// ApplyResources puts resources in order and reads what became of each;
+// a dry run commits nothing. Reads after it wait for what it committed.
+func (c *Client) ApplyResources(ctx context.Context, request ApplyRequest, dryRun bool) (ChangeResult, error) {
+	return c.change(ctx, "/v1/apply", request, dryRun)
+}
+
+// DeleteResources deletes resources in order and reads what became of
+// each; a dry run commits nothing. Reads after it wait for what it
+// committed.
+func (c *Client) DeleteResources(ctx context.Context, request DeleteRequest, dryRun bool) (ChangeResult, error) {
+	return c.change(ctx, "/v1/delete", request, dryRun)
+}
+
+func (c *Client) change(ctx context.Context, path string, request any, dryRun bool) (ChangeResult, error) {
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return ChangeResult{}, fmt.Errorf("encode the request: %w", err)
+	}
+	if dryRun {
+		path += "?dryRun=true"
+	}
+	var result ChangeResult
+	if err := c.do(ctx, http.MethodPost, path, encoded, &result); err != nil {
+		return result, err
+	}
+	c.written = max(c.written, result.Index)
+	return result, nil
+}
+
 // Put replaces what is at path with in. Reads after it wait for the write.
 func (c *Client) Put(ctx context.Context, path string, in any) (Written, error) {
 	return c.write(ctx, http.MethodPut, path, in)

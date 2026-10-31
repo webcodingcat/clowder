@@ -1,0 +1,253 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/state"
+)
+
+// object is a resource as a user writes it.
+func object(kind, namespace, name, spec string) resource.Object {
+	written := resource.Object{
+		APIVersion: resource.APIVersion, Kind: kind,
+		Metadata: resource.Metadata{Namespace: namespace, Name: name},
+	}
+	if spec != "" {
+		written.Spec = json.RawMessage(spec)
+	}
+	return written
+}
+
+// withStorageClass gives every agent's state the storage class fast.
+func withStorageClass(cluster *testCluster) {
+	for _, each := range cluster.clusters {
+		each.mu.Lock()
+		each.state.Config.Spec.StorageClasses = map[string]clusterdir.StorageClass{"fast": {Pool: "vg-fast/thin"}}
+		each.mu.Unlock()
+	}
+}
+
+func outcomes(result ChangeResult) []string {
+	var each []string
+	for _, one := range result.Results {
+		each = append(each, one.Outcome)
+	}
+	return each
+}
+
+func TestAnApplyGoesInOrderAndStopsAtTheFirstRefusal(t *testing.T) {
+	cluster := newTestCluster(t)
+	withStorageClass(cluster)
+	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	ctx := context.Background()
+	shop := ApplyRequest{Resources: []resource.Object{
+		object(resource.KindNamespace, "", "shop", ""),
+		object(resource.KindVolume, "shop", "data", `{"class": "fast", "size": "1024M", "replicas": 1}`),
+		object(resource.KindSecret, "shop", "token", `{"value": "s3cret"}`),
+	}}
+	refused := shop
+	refused.Resources = append(slices.Clone(shop.Resources),
+		object(resource.KindVolume, "shop", "logs", `{"class": "slow", "size": "1G", "replicas": 1}`),
+		object(resource.KindSecret, "shop", "later", `{"value": "x"}`))
+	result, err := client.ApplyResources(ctx, refused, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{Applied, Applied, Applied, Refused, NotTried}
+	if !slices.Equal(outcomes(result), want) || result.Index == 0 ||
+		!strings.Contains(result.Results[3].Message, `no storage class "slow"`) {
+		t.Fatalf("results %+v, want %v", result, want)
+	}
+	// the same files again change nothing and commit nothing
+	again, err := client.ApplyResources(ctx, shop, false)
+	if err != nil || !slices.Equal(outcomes(again), []string{Unchanged, Unchanged, Unchanged}) || again.Index != 0 {
+		t.Errorf("again: %+v, %v", again, err)
+	}
+}
+
+func TestADryRunChecksEverythingAndWritesNothing(t *testing.T) {
+	cluster := newTestCluster(t)
+	withStorageClass(cluster)
+	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	var before uint64
+	cluster.clusters[0].Read(func(current *state.State) { before = current.Index })
+	// the volume's namespace comes with the same request
+	result, err := client.ApplyResources(context.Background(), ApplyRequest{Resources: []resource.Object{
+		object(resource.KindNamespace, "", "blog", ""),
+		object(resource.KindVolume, "blog", "data", `{"class": "fast", "size": "1G", "replicas": 0}`),
+	}}, true)
+	if err != nil || !slices.Equal(outcomes(result), []string{Applied, Applied}) || result.Index != 0 {
+		t.Errorf("dry run: %+v, %v", result, err)
+	}
+	cluster.clusters[0].Read(func(current *state.State) {
+		if _, ok := current.Namespaces["blog"]; ok || current.Index != before {
+			t.Error("the dry run wrote to the state")
+		}
+	})
+}
+
+func TestASpecIsReadStrictly(t *testing.T) {
+	cluster := newTestCluster(t)
+	withStorageClass(cluster)
+	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	for spec, want := range map[string]string{
+		`{"class": "fast", "size": "1G"}`:                              "replicas is required",
+		`{"class": "fast", "size": "1G", "replicas": 1, "fast": true}`: "unknown field",
+		`{"class": "fast", "size": "1.5G", "replicas": 1}`:             "not a positive whole number",
+	} {
+		result, err := client.ApplyResources(context.Background(), ApplyRequest{Resources: []resource.Object{
+			object(resource.KindVolume, "default", "data", spec),
+		}}, false)
+		if err != nil || result.Results[0].Outcome != Refused || !strings.Contains(result.Results[0].Message, want) {
+			t.Errorf("%s: %+v, %v", spec, result, err)
+		}
+	}
+	wrongVersion := object(resource.KindNamespace, "", "shop", "")
+	wrongVersion.APIVersion = "v1"
+	result, err := client.ApplyResources(context.Background(), ApplyRequest{Resources: []resource.Object{wrongVersion}}, false)
+	if err != nil || !strings.Contains(result.Results[0].Message, `apiVersion "v1"`) {
+		t.Errorf("another apiVersion: %+v, %v", result, err)
+	}
+	// a typo in the request is no empty request
+	err = client.Act(context.Background(), "/v1/apply", map[string]any{"resorces": []any{}}, &result)
+	if statusOf(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "unknown field") {
+		t.Errorf("a request with a typo: %v", err)
+	}
+}
+
+func TestResourcesReadBackAsTheyApplyAndSecretsWithoutTheirValue(t *testing.T) {
+	cluster := newTestCluster(t)
+	withStorageClass(cluster)
+	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	ctx := context.Background()
+	if _, err := client.ApplyResources(ctx, ApplyRequest{Resources: []resource.Object{
+		object(resource.KindNamespace, "", "shop", ""),
+		object(resource.KindVolume, "shop", "data", `{"class": "fast", "size": "1024M", "replicas": 1}`),
+		object(resource.KindSecret, "shop", "token", `{"value": "s3cret"}`),
+		object(resource.KindSecret, "default", "token", `{"value": "s3cret"}`),
+	}}, false); err != nil {
+		t.Fatal(err)
+	}
+	var volumes ResourceList
+	if err := client.Get(ctx, "/v1/resources/volume?namespace=shop", &volumes); err != nil {
+		t.Fatal(err)
+	}
+	if len(volumes.Items) != 1 || volumes.Index == 0 || string(volumes.Items[0].Spec) != `{"class":"fast","size":"1G","replicas":1}` {
+		t.Fatalf("volumes %+v", volumes)
+	}
+	// what a read answers applies again as it is (a secret's value never
+	// leaves the cluster, so a secret is the exception)
+	result, err := client.ApplyResources(ctx, ApplyRequest{Resources: volumes.Items}, false)
+	if err != nil || result.Results[0].Outcome != Unchanged {
+		t.Errorf("the answer applied again: %+v, %v", result, err)
+	}
+	var secrets ResourceList
+	if err := client.Get(ctx, "/v1/resources/secret?allNamespaces=true", &secrets); err != nil {
+		t.Fatal(err)
+	}
+	if len(secrets.Items) != 2 || secrets.Items[0].Spec != nil || strings.Contains(string(secrets.Items[0].Status), "s3cret") {
+		t.Fatalf("secrets %+v", secrets)
+	}
+	// the same value in another secret has another digest
+	if string(secrets.Items[0].Status) == string(secrets.Items[1].Status) {
+		t.Error("two secrets of the same value share their digest")
+	}
+	var namespace resource.Object
+	if err := client.Get(ctx, "/v1/resources/namespace/shop", &namespace); err != nil || namespace.Metadata.Owner != state.OwnerCLI {
+		t.Errorf("namespace %+v, %v", namespace, err)
+	}
+	for path, status := range map[string]int{
+		"/v1/resources/volume":                 http.StatusBadRequest, // no namespace named
+		"/v1/resources/namespace?namespace=x":  http.StatusBadRequest,
+		"/v1/resources/pod?namespace=shop":     http.StatusNotFound,
+		"/v1/resources/volume/shop/nothing":    http.StatusNotFound,
+		"/v1/resources/namespace/shop/nothing": http.StatusNotFound,
+	} {
+		if err := client.Get(ctx, path, &namespace); statusOf(err) != status {
+			t.Errorf("%s: want %d, got %v", path, status, err)
+		}
+	}
+}
+
+func TestTheLeaderDecidesNotAFollowerThatIsBehind(t *testing.T) {
+	cluster := newTestCluster(t)
+	// host 1 still has a namespace shop that the leader has not: it would
+	// answer unchanged and propose nothing
+	cluster.clusters[1].mu.Lock()
+	cluster.clusters[1].state.Namespaces["shop"] = &state.Namespace{Meta: state.Meta{Name: "shop", Owner: state.OwnerCLI}}
+	cluster.clusters[1].mu.Unlock()
+	client := cluster.client(cluster.userCertificate("alice"), testVersion, 1)
+	ctx := context.Background()
+	shop := ApplyRequest{Resources: []resource.Object{object(resource.KindNamespace, "", "shop", "")}}
+	result, err := client.ApplyResources(ctx, shop, false)
+	if err != nil || result.Results[0].Outcome != Applied || result.Index == 0 {
+		t.Fatalf("apply: %+v, %v", result, err)
+	}
+	cluster.clusters[0].Read(func(current *state.State) {
+		if _, ok := current.Namespaces["shop"]; !ok {
+			t.Error("the leader has no namespace shop")
+		}
+	})
+	result, err = client.DeleteResources(ctx, DeleteRequest{Resources: []resource.Ref{
+		{Kind: resource.KindNamespace, Name: "shop"},
+		{Kind: resource.KindNamespace, Name: "default"},
+		{Kind: resource.KindNamespace, Name: "shop"},
+	}}, false)
+	if want := []string{Applied, Refused, NotTried}; err != nil || !slices.Equal(outcomes(result), want) {
+		t.Errorf("delete: %+v, %v; want %v", result, err, want)
+	}
+}
+
+func TestABatchCarriesOnlyUsersResourceCommands(t *testing.T) {
+	cluster := newTestCluster(t)
+	host1 := cluster.client(cluster.hostCertificate(1), testVersion, 0)
+	cmd, err := state.NewCommand(state.KindAddUser, time.Time{}, state.UserActor("alice"),
+		state.AddUser{Name: "mallory", Serial: "m1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result ChangeResult
+	err = host1.Act(context.Background(), "/v1/internal/changes",
+		changeBatch{Changes: []batchChange{{Ref: resource.Ref{Kind: "User", Name: "mallory"}, Command: &cmd}}}, &result)
+	if statusOf(err) != http.StatusForbidden {
+		t.Errorf("an add-user in a batch: %v", err)
+	}
+}
+
+func TestAChangeThatDidNotCommitIsAFailureNotARefusal(t *testing.T) {
+	cluster := newTestCluster(t)
+	// the server checked that it leads, then Raft lost the lead: nothing
+	// commits, though the state would have taken the command
+	cluster.clusters[0].leader = false
+	server := &Server{config: ServerConfig{Cluster: alwaysLeader{cluster.clusters[0]}}}
+	result := server.runChanges(context.Background(), changeBatch{Changes: []batchChange{
+		{Ref: resource.Ref{Kind: resource.KindNamespace, Name: "shop"}, Command: mustCommand(t, "shop")},
+		{Ref: resource.Ref{Kind: resource.KindNamespace, Name: "blog"}, Command: mustCommand(t, "blog")},
+	}})
+	if want := []string{Failed, NotTried}; !slices.Equal(outcomes(result), want) {
+		t.Errorf("results %+v, want %v", result, want)
+	}
+}
+
+// alwaysLeader says it leads whatever its Raft member does.
+type alwaysLeader struct{ *fakeCluster }
+
+func (alwaysLeader) IsLeader() bool { return true }
+
+func mustCommand(t *testing.T, namespace string) *state.Command {
+	t.Helper()
+	cmd, err := state.NewCommand(state.KindPutResource, time.Time{}, state.UserActor("alice"),
+		state.PutResource{Kind: resource.KindNamespace, Name: namespace, Owner: state.OwnerCLI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &cmd
+}

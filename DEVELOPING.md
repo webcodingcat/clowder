@@ -110,7 +110,7 @@ clowder is built in phases; each ends with live tests on HLab.
 | 0 | the spike: DRBD quorum and fencing, WireGuard, the real client IP, on three hosts | done |
 | 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | done |
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done |
-| 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | in progress: namespaces in the state and on the host; the stack schema and its renderer; namespaces, volumes and secrets as resources in the state |
+| 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | in progress: namespaces in the state and on the host; the stack schema and its renderer; namespaces, volumes and secrets as resources in the state and the API |
 | 2 | three hosts: replication, failover with fencing | |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
@@ -251,7 +251,8 @@ Packages in *italics* do not exist yet.
   (the rules for the names users give, and the names on the host made of them),
   `buildinfo`, `logging`, `atomicfile` (files written whole or not at all), `metrics`
   (Prometheus' text format), `stackspec` (a stack's schema), `resource` (the kinds of
-  resources and their specs). The CLI may import only these. depguard (rule
+  resources and their specs), `digest` (hashes of lists of parts: the secrets' digests,
+  what an agent applied). The CLI may import only these. depguard (rule
   `cli-portable` in
   `.golangci.yml`) refuses direct imports of the Linux-only packages in `cmd/clowder` and
   `internal/cli`; the cross build for Windows and macOS catches indirect ones.
@@ -463,9 +464,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   `put-acme-challenge`, `delete-acme-challenge`, `put-certificate` and `delete-certificate`
   (the ACME loop), `put-alert` and `resolve-alert` (the alerts), `report-host` and
   `forget-copy` (each agent). The other kinds
-  (`put-resource`, `delete-resource`, `delete-volume`, hosts joining, operations, users
-  beyond the first) are there for the next steps; they are tested, but nothing sends them
-  yet.
+  (`delete-volume`, hosts joining, operations, users beyond the first) are there for the
+  next steps; they are tested, but nothing sends them yet. `put-resource` and
+  `delete-resource` come from the API's `/v1/apply` and `/v1/delete`, decided on the
+  leader.
 - **Resources** (phase 1c): namespaces (`Namespaces`), volumes (`Volumes`, by
   `<namespace>/<name>`; `Volume.IsResource` tells them from a stack's own) and secrets
   (`Secrets`), each with a `Meta`. The kinds and their specs are in `internal/resource`,
@@ -626,10 +628,41 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **Who speaks.** The actor of a command is the caller of the first agent; its time (`At`) is
   the leader's clock. `/v1/internal/propose` takes two things only: a user's command that a
   follower forwards (`userKinds`, exactly the kinds the user routes and the bootstrap make),
-  and a host's report about itself (`hostKinds`). The leader's own commands (operations,
+  and a host's report about itself (`hostKinds`); `/v1/internal/changes` takes a user's
+  resource commands only (Resources). The leader's own commands (operations,
   placements, new hosts) are made on the leader and never come in from outside; a host never
   speaks for another host or for the leader.
 - A refusal of the state is HTTP 409 with its reason; a write that did not commit is 503.
+- **Resources** (`resources.go`; the CLI's `apply`, `get` and `delete` come next):
+  - `POST /v1/apply` (`ApplyRequest`) and `POST /v1/delete` (`DeleteRequest`) take
+    resources in order and answer per resource (`ChangeResult`): `applied`, `unchanged`,
+    `refused` (the state's no), `failed` (did not commit: no leader, no quorum; try again),
+    and `not-tried` after a refusal or failure, since what follows usually needs it. No
+    transaction: a repeat converges. They are the only way to change resources; every
+    user's change is the channel `cli`. Requests are read strictly, so a typo is an error,
+    not an empty request.
+  - The agent that took the request turns each resource into its `put-resource`
+    (`putCommand`): the spec read strictly (`resource.DecodeVolumeSpec`, a field the kind
+    does not have is an error; `replicas` has no default), a secret's value sealed and its
+    digest computed (`sealSecret`: `digest.HMAC` over the ID and the value, with a key
+    `Keys.Derive` gives for "clowder secret resource digest", apart from the containers'
+    labels).
+  - **The leader decides** (`decide`): a follower hands the commands on as a batch to
+    `/v1/internal/changes`, since its own state may be behind and would answer
+    `unchanged` or `refused` for what has changed since. `runChanges` applies each command
+    to a copy of the leader's state first (`State.Copy`), with every check of the state: a
+    refusal answers at once, an unchanged resource is not proposed (no Raft entry), and
+    `?dryRun=true` ends there and answers what a real apply would, with index 0, so a
+    volume in a namespace the same request makes passes too. Only a change is proposed;
+    the state checks it once more as it commits.
+  - `GET /v1/resources/{kind}` lists the resources of `?namespace=` or of
+    `?allNamespaces=true` (no default, so no reader gets the wrong namespace by
+    accident), with the state's index it read at (for the watch); `GET
+    /v1/resources/{kind}/{namespace}/{name}` and `/v1/resources/namespace/{name}` read one.
+    The kind is written in lower case. A secret shows its digest, never its value; any
+    other resource a read answers applies again as it is (`resource.Metadata`'s owner,
+    generation and resource version and the status are the cluster's, an apply ignores
+    them).
 - `api.HostActions` lists the user's host actions with the phases they start from; the server
   checks them and the CLI makes its subcommands from them.
 - CLI and agent refuse each other more than one minor version apart (`X-Clowder-Version`,

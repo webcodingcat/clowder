@@ -19,6 +19,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/controller"
+	"github.com/webcodingcat/clowder/internal/digest"
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
@@ -282,12 +283,12 @@ func composeUpHeld(ctx context.Context, dockerAPI Docker, holder *supervisor.Sup
 // them sorted).
 func upHash(rendered []byte, secrets stackSecrets, pushedOut []string) [32]byte {
 	hash := sha256.New()
-	writeParts(hash, rendered, secrets.env)
+	digest.WriteParts(hash, rendered, secrets.env)
 	for _, name := range slices.Sorted(maps.Keys(secrets.files)) {
-		writeParts(hash, []byte(name), secrets.files[name])
+		digest.WriteParts(hash, []byte(name), secrets.files[name])
 	}
 	for _, service := range pushedOut {
-		writeParts(hash, []byte("pushed out"), []byte(service))
+		digest.WriteParts(hash, []byte("pushed out"), []byte(service))
 	}
 	return [32]byte(hash.Sum(nil))
 }

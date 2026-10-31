@@ -27,7 +27,8 @@ import (
 const waitTimeout = 10 * time.Second
 
 // maxRequestBytes bounds every request body: a stack with all its secrets
-// (state.MaxStackSecretsBytes) fits with room to spare.
+// (state.MaxStackSecretsBytes), or an apply with all the secrets a namespace
+// may have (resource.MaxNamespaceSecretBytes), fits with room to spare.
 const maxRequestBytes = 1 << 20
 
 // Cluster is what the server needs from the agent's Raft member.
@@ -73,6 +74,8 @@ type Alerts interface {
 type Keys interface {
 	Seal(plaintext []byte) (state.Sealed, error)
 	Open(sealed state.Sealed) ([]byte, error)
+	// Derive gives a key of its own for one purpose (the secrets' digests).
+	Derive(purpose string) ([]byte, error)
 }
 
 // Server is an agent's API.
@@ -98,6 +101,11 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/audit", pki.RoleUser, server.audit)
 	server.handle("GET /v1/cluster", pki.RoleUser, server.cluster)
 	server.handle("PUT /v1/cluster", pki.RoleUser, server.applyCluster)
+	server.handle("POST /v1/apply", pki.RoleUser, server.applyResources)
+	server.handle("POST /v1/delete", pki.RoleUser, server.deleteResources)
+	server.handle("GET /v1/resources/{kind}", pki.RoleUser, server.listResources)
+	server.handle("GET /v1/resources/{kind}/{namespace}/{name}", pki.RoleUser, server.getResource)
+	server.handle("GET /v1/resources/namespace/{name}", pki.RoleUser, server.getNamespace)
 	server.handle("GET /v1/stacks", pki.RoleUser, server.stacks)
 	server.handle("POST /v1/stacks/{name}", pki.RoleUser, server.createStack)
 	server.handle("PUT /v1/stacks/{name}", pki.RoleUser, server.applyStack)
@@ -108,6 +116,7 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/alerts/failures", pki.RoleUser, server.alertFailures)
 	server.handle("GET /v1/internal/alerts/failures", pki.RoleHost, server.localAlertFailures)
 	server.handle("POST /v1/internal/propose", pki.RoleHost, server.internalPropose)
+	server.handle("POST /v1/internal/changes", pki.RoleHost, server.internalChanges)
 	server.handle("GET /v1/internal/stacks/{project}/ps", pki.RoleHost, server.localPs)
 	server.handle("GET /v1/internal/stacks/{project}/logs", pki.RoleHost, server.localLogs)
 	server.handleOpen("GET /v1/bootstrap", server.bootstrapOffer)

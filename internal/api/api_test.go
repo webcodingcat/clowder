@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/datakey"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -95,6 +96,11 @@ func newTestCluster(t *testing.T) *testCluster {
 		t.Fatal(err)
 	}
 	c := &testCluster{t: t, ca: ca}
+	// a real data key: the state reads the sealed length of secrets
+	keys, err := datakey.New()
+	if err != nil {
+		t.Fatal(err)
+	}
 	addresses := map[state.HostID]string{}
 	for id := range state.HostID(2) {
 		cluster := &fakeCluster{state: bootstrappedState(t), leader: id == 0, leaderID: 0}
@@ -103,6 +109,7 @@ func newTestCluster(t *testing.T) *testCluster {
 			Cluster: cluster, CA: ca.Certificate, Certificate: c.hostCertificate(id),
 			APIAddress: func(id state.HostID) string { return addresses[id] },
 			Version:    testVersion,
+			Keys:       keys,
 			Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		})
 		server.Config.Handler = api

@@ -46,5 +46,6 @@ DEVELOPING.md explains each one.
 
 Phase 1a, the foundation on one host, is done and passes the live tests in `test/live`;
 phase 1b (the hoster and the Floating IP, published ports, Traefik, ACME, priorities,
-alerts, metrics) is done and passes them too. Phase 2, three hosts, comes next
-(DEVELOPING.md, Roadmap).
+alerts, metrics) is done and passes them too. Phase 1c (namespaces and resources,
+`clowder apply`) is in progress; phase 2, three hosts, comes after it (DEVELOPING.md,
+Roadmap).
