@@ -18,6 +18,9 @@ import (
 type fsm struct {
 	mu    sync.RWMutex
 	state *state.State
+	// changes are what the applied entries changed, for the watch; only
+	// the log fills it, so a dry run never does
+	changes state.ChangeRing
 	// changed is closed and replaced after every applied entry, to wake up
 	// those waiting for an index.
 	changed chan struct{}
@@ -35,7 +38,8 @@ func (f *fsm) Apply(entry *raft.Log) any {
 	// again to swap the channel
 	defer f.wake()
 	defer f.mu.Unlock()
-	_, err := f.state.ApplyEntry(entry.Index, entry.Data)
+	changes, err := f.state.ApplyEntry(entry.Index, entry.Data)
+	f.changes.Add(changes)
 	return err
 }
 
@@ -68,9 +72,19 @@ func (f *fsm) Restore(snapshotFile io.ReadCloser) error {
 	}
 	f.mu.Lock()
 	f.state = restored
+	// what came before the snapshot is in it, not in the ring
+	f.changes.Reset(restored.Index)
 	f.mu.Unlock()
 	f.wake()
 	return nil
+}
+
+// changesSince returns the changes after index and the state's index.
+func (f *fsm) changesSince(index uint64) ([]state.Change, uint64, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	changes, err := f.changes.Since(index)
+	return changes, f.state.Index, err
 }
 
 // read runs a function on the state under the read lock.

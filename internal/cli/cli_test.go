@@ -31,18 +31,37 @@ import (
 
 // oneHost is a leader that applies commands at once.
 type oneHost struct {
-	mu    sync.Mutex
-	state *state.State
+	mu      sync.Mutex
+	state   *state.State
+	changes state.ChangeRing
+	changed chan struct{}
 }
 
 func (h *oneHost) Propose(_ context.Context, cmd state.Command) (uint64, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	index := h.state.Index + 1
-	if _, err := h.state.Apply(index, cmd); err != nil {
+	changes, err := h.state.Apply(index, cmd)
+	h.changes.Add(changes)
+	close(h.changed)
+	h.changed = make(chan struct{})
+	if err != nil {
 		return index, &state.Refused{Err: err}
 	}
 	return index, nil
+}
+
+func (h *oneHost) Changes(since uint64) ([]state.Change, uint64, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	changes, err := h.changes.Since(since)
+	return changes, h.state.Index, err
+}
+
+func (h *oneHost) Changed() <-chan struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.changed
 }
 
 func (h *oneHost) Read(use func(current *state.State)) {
@@ -104,8 +123,10 @@ func startCluster(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	host := &oneHost{state: current, changed: make(chan struct{})}
+	host.changes.Reset(current.Index)
 	agent := api.NewServer(api.ServerConfig{
-		Cluster: &oneHost{state: current}, CA: ca.Certificate, Certificate: serverCertificate,
+		Cluster: host, CA: ca.Certificate, Certificate: serverCertificate,
 		APIAddress: func(state.HostID) string { return server.Listener.Addr().String() },
 		Version:    buildinfo.Version, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Alerts: fakeAlerts{}, Keys: ageKeys{dataKey},

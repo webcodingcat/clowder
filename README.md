@@ -24,7 +24,8 @@ without a way to upgrade a running cluster. On one host, what runs today:
 - `clowder apply -f <file|directory|->`, `clowder get <kind>` and `clowder delete <kind>
   <name>` manage resources as kubectl does: namespaces, stacks, volumes and secrets. A
   namespace comes with `-n` or in the name (`shop/web`), else it is `default`; `-A` lists
-  all. Applying the same files again changes nothing. `clowder stack ps|logs
+  all. Applying the same files again changes nothing; `clowder get --watch` goes on to
+  show each resource that changes. `clowder stack ps|logs
   [<namespace>/]<stack>` show a stack's containers and logs; `clowder stack restart
   [<namespace>/]<stack> [<service>...]` recreates services (all, or those named, with
   what depends on them) with their images pulled again.

@@ -150,7 +150,9 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request, project string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	writer := flushingWriter{w}
-	if err := s.config.Containers.Logs(r.Context(), project, follow, writer); err != nil {
+	ctx, cancel := s.streamContext(r)
+	defer cancel()
+	if err := s.config.Containers.Logs(ctx, project, follow, writer); err != nil {
 		_, _ = fmt.Fprintf(writer, "\nclowder: the logs broke off: %v\n", err) // the status is sent already
 	}
 }

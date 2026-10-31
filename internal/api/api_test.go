@@ -32,6 +32,17 @@ type fakeCluster struct {
 	state    *state.State
 	leader   bool
 	leaderID state.HostID
+	changes  state.ChangeRing
+	changed  chan struct{}
+}
+
+// newFakeCluster is a member with a bootstrapped state, its ring complete
+// from there.
+func newFakeCluster(t *testing.T, leader bool) *fakeCluster {
+	t.Helper()
+	f := &fakeCluster{state: bootstrappedState(t), leader: leader, changed: make(chan struct{})}
+	f.changes.Reset(f.state.Index)
+	return f
 }
 
 func (f *fakeCluster) Propose(_ context.Context, cmd state.Command) (uint64, error) {
@@ -41,10 +52,27 @@ func (f *fakeCluster) Propose(_ context.Context, cmd state.Command) (uint64, err
 		return 0, errors.New("not the leader")
 	}
 	index := f.state.Index + 1
-	if _, err := f.state.Apply(index, cmd); err != nil {
+	changes, err := f.state.Apply(index, cmd)
+	f.changes.Add(changes)
+	close(f.changed)
+	f.changed = make(chan struct{})
+	if err != nil {
 		return index, &state.Refused{Err: err}
 	}
 	return index, nil
+}
+
+func (f *fakeCluster) Changes(since uint64) ([]state.Change, uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	changes, err := f.changes.Since(since)
+	return changes, f.state.Index, err
+}
+
+func (f *fakeCluster) Changed() <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.changed
 }
 
 func (f *fakeCluster) Read(use func(current *state.State)) {
@@ -87,6 +115,7 @@ type testCluster struct {
 	ca       *pki.CA
 	clusters []*fakeCluster
 	servers  []*httptest.Server
+	apis     []*Server
 }
 
 func newTestCluster(t *testing.T) *testCluster {
@@ -103,7 +132,7 @@ func newTestCluster(t *testing.T) *testCluster {
 	}
 	addresses := map[state.HostID]string{}
 	for id := range state.HostID(2) {
-		cluster := &fakeCluster{state: bootstrappedState(t), leader: id == 0, leaderID: 0}
+		cluster := newFakeCluster(t, id == 0)
 		server := httptest.NewUnstartedServer(nil)
 		api := NewServer(ServerConfig{
 			Cluster: cluster, CA: ca.Certificate, Certificate: c.hostCertificate(id),
@@ -118,7 +147,7 @@ func newTestCluster(t *testing.T) *testCluster {
 		server.StartTLS()
 		t.Cleanup(server.Close)
 		addresses[id] = server.Listener.Addr().String()
-		c.clusters, c.servers = append(c.clusters, cluster), append(c.servers, server)
+		c.clusters, c.servers, c.apis = append(c.clusters, cluster), append(c.servers, server), append(c.apis, api)
 	}
 	return c
 }

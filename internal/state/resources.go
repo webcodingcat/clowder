@@ -214,15 +214,15 @@ func findNamespace(s *State, id string) *Meta {
 // unchanged. Its owner owns only the namespace: any channel may put
 // resources into it.
 func putNamespace(s *State, id string, payload PutResource) (*Meta, error) {
-	if _, ok := s.Namespaces[id]; ok {
-		return nil, errUnchanged
-	}
 	spec, err := decodeSpec[map[string]json.RawMessage](payload.Kind, id, payload.Spec)
 	if err != nil {
 		return nil, err
 	}
 	if len(spec) > 0 {
 		return nil, fmt.Errorf("namespace %s: a namespace has no spec", id)
+	}
+	if _, ok := s.Namespaces[id]; ok {
+		return nil, errUnchanged
 	}
 	namespace := &Namespace{Meta: Meta{Name: id, Owner: payload.Owner}}
 	s.Namespaces[id] = namespace

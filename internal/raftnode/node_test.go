@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/pki"
+	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -169,6 +170,60 @@ func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
 	}
 	if got := users(reopened); len(got) != 2 {
 		t.Errorf("users after the restart: %v", got)
+	}
+}
+
+func TestTheWatchSeesWhatTheLogChangedAfterItsSnapshot(t *testing.T) {
+	cluster := newTestCluster(t)
+	dir, address := t.TempDir(), freeAddress(t)
+	node := cluster.open(0, dir, address)
+	if err := node.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	waitForLeader(t, node)
+	ctx := context.Background()
+	namespace := func(on *Node, name string) uint64 {
+		t.Helper()
+		index, err := on.Propose(ctx, command(t, state.KindPutResource, state.PutResource{
+			Kind: resource.KindNamespace, Name: name, Owner: state.OwnerCLI,
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return index
+	}
+	if _, err := node.Propose(ctx, bootstrapCommand(t)); err != nil {
+		t.Fatal(err)
+	}
+	shop := namespace(node, "shop")
+	changes, _, err := node.Changes(0)
+	if err != nil || len(changes) == 0 || changes[len(changes)-1].Name != "shop" {
+		t.Fatalf("changes since 0: %v, %v", changes, err)
+	}
+	if err := node.raft.Snapshot().Error(); err != nil {
+		t.Fatal(err)
+	}
+	blog := namespace(node, "blog")
+	if err := node.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// restarted from the snapshot, the ring holds what the log replayed
+	// after it, and says so for what came before
+	reopened := cluster.open(0, dir, address)
+	defer func() { _ = reopened.Close() }()
+	waitForLeader(t, reopened)
+	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := reopened.WaitIndex(waitCtx, blog); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := reopened.Changes(shop - 1); !errors.Is(err, state.ErrChangesGone) {
+		t.Errorf("since before the snapshot: %v", err)
+	}
+	changes, index, err := reopened.Changes(shop)
+	if err != nil || len(changes) != 1 || changes[0].Name != "blog" || index < blog {
+		t.Errorf("since the snapshot: %v, index %d, %v", changes, index, err)
 	}
 }
 

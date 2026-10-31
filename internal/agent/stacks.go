@@ -232,6 +232,8 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 	if err := r.up(ctx, project, rendered, secrets, stack.PushedOut, stack.Restarted); err != nil {
 		return err
 	}
+	// a new generation or a restart made the stack starting, so running
+	// with the same secrets means nothing new to report
 	if stack.Status == state.StackRunning && maps.Equal(stack.AppliedSecrets, secrets.digests) {
 		return nil
 	}

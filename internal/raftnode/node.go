@@ -201,8 +201,15 @@ func (n *Node) WaitIndex(ctx context.Context, index uint64) error {
 	return n.fsm.waitFor(ctx, index)
 }
 
+// Changes returns what the log changed after index, oldest first, and the
+// state's index; state.ErrChangesGone if this member no longer keeps all of
+// it (state.ChangeRing).
+func (n *Node) Changes(since uint64) ([]state.Change, uint64, error) {
+	return n.fsm.changesSince(since)
+}
+
 // Changed returns a channel that closes when the next entry is applied: the
-// agent's reconcilers wait on it.
+// agent's reconcilers and the watch wait on it.
 func (n *Node) Changed() <-chan struct{} {
 	n.fsm.mu.RLock()
 	defer n.fsm.mu.RUnlock()

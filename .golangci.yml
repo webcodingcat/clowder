@@ -18,9 +18,9 @@ linters:
     - unconvert
     - unparam
   settings:
-    # Only for internal/state and internal/scheduler (see exclusions): Apply
-    # takes the time from the command, never from the clock, and the
-    # scheduler decides from the state alone.
+    # Only for the state, the scheduler and the specs they read (see
+    # exclusions): Apply takes the time from the command, never from the
+    # clock, and the scheduler decides from the state alone.
     forbidigo:
       forbid:
         - pattern: ^time\.(Now|Since|Until)$

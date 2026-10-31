@@ -338,8 +338,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   `/v1/apply` and `/v1/delete`, decided on the leader), `restart-stack` (`stack restart`),
   `put-volume`, `set-stack-status`, `set-stack-wait-reason` and `set-pushed-out`
   (placement, the stack's host), `set-ingress` (the ingress loop), `put-acme-account`,
-  `put-acme-challenge`, `delete-acme-challenge`, `put-certificate` and `delete-certificate` (the ACME loop), `put-alert` and
-  `resolve-alert` (the alerts), `report-host` and `forget-copy` (each agent). The other
+  `put-acme-challenge`, `delete-acme-challenge`, `put-certificate` and
+  `delete-certificate` (the ACME loop), `put-alert` and `resolve-alert` (the alerts), `report-host` and `forget-copy` (each agent). The other
   kinds (hosts joining, operations, users beyond the first) are there for the next steps;
   they are tested, but nothing sends them yet.
 - **Resources** (phase 1c): namespaces (`Namespaces`), and by `<namespace>/<name>` stacks
@@ -489,6 +489,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - `Propose` commits a command through the leader and returns its index, or the state's
   refusal. `Read` gives the current state under a lock; nothing may keep it, as `Apply`
   changes it in place. `WaitIndex` lets a read follow a write made through another member.
+  `Changes` answers the watch from the member's ring of changes (API, The watch).
 - `Bootstrap` makes the first host a cluster of its own; on a member with a log it does
   nothing. `AddMember` is for joins.
 - The data key is an age identity in a file only root reads. `Seal` and `Open` turn secrets
@@ -546,6 +547,25 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
     other resource a read answers applies again as it is (`resource.Metadata`'s owner,
     generation and resource version and the status are the cluster's, an apply ignores
     them).
+  - **The watch** (`watch.go`): `GET /v1/watch?kind=&namespace=|allNamespaces=true&since=`
+    streams the changes of a kind after `since`, the index of the client's list, one JSON
+    object per line (`WatchEvent`: the resource, its resource version, whether it is gone).
+    Spec and status changes are both events. The client reads a resource itself when it
+    needs it.
+    - Every agent keeps the last `state.ChangeRingSize` changes (`state.ChangeRing`),
+      filled only from the Raft log (`raftnode`'s `fsm.Apply`), so a dry run never reaches
+      it. Hosts' reports about themselves are no change, so on a quiet cluster the ring
+      covers hours.
+    - The ring knows the index it is complete from: the snapshot the agent started from or
+      installed, or the oldest change it dropped. A `since` before that answers 410, and
+      the client lists afresh, as with Kubernetes. So a client that listed on one agent
+      can watch on another.
+    - A `since` this agent has not applied yet waits at most `watchWaitTimeout`, then
+      answers 504: a follower cut off from the leader would wait forever.
+    - The stream runs until the client stops. It ends early when the ring dropped changes
+      the client has not read yet; the client lists afresh then too, and says so. The
+      agent's stop ends it (`Server.EndStreams`, as for logs that follow): `Shutdown`
+      would wait for it.
 - **JSON names.** What users write and read as resources (`resource.Object`, the specs and
   the statuses `get` shows) is camelCase, as in the files users apply; everything else
   (commands, the state, snapshots, the other bodies of the API, `cluster.yaml`) is
@@ -588,7 +608,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   (`shop/data`), else `default`; `-A` lists every namespace. Where both name one, they must
   agree; a namespace takes neither (`selectFlags.resolve`, with a table test of every
   combination). `get` prints a table, or `-o yaml` (documents in the API's field order,
-  which `apply` takes again; a secret shows only its digest) or `-o json`. `delete -f`
+  which `apply` takes again; a secret shows only its digest) or `-o json`. `get --watch`
+  (`watch.go`) lists, then shows each resource that changes, until Ctrl+C: a table's rows
+  without the header again, or one document each; a name filters on the client. After a
+  410, or when the agent ends the stream, it lists afresh and goes on. `delete -f`
   deletes the resources of files in the reverse order of an apply, with the namespaces the
   files name (no `-n`). A volume goes with its data, so a delete that names one needs
   `--with-data` (`DeleteRequest.WithData`). The API refuses the whole request without it,

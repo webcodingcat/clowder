@@ -226,7 +226,10 @@ type Stack struct {
 	// Restarted is when a user last restarted each service (restart-stack),
 	// by name: its host recreates a service whose time changed.
 	Restarted map[string]time.Time `json:"restarted,omitempty"`
-	LastMove  time.Time            `json:"last_move,omitzero"`
+	// LastMove is when the stack last got another host. Nothing reads it
+	// yet: failover (phase 2) uses it to keep a stack from moving back and
+	// forth.
+	LastMove time.Time `json:"last_move,omitzero"`
 	// WaitReason is why the placement cannot place the stack or a volume it
 	// newly names; empty while nothing waits. Display only.
 	WaitReason string `json:"wait_reason,omitempty"`
@@ -275,9 +278,11 @@ type StackStatus string
 
 // The states of a stack.
 const (
-	StackPending        StackStatus = "pending"
-	StackStarting       StackStatus = "starting"
-	StackRunning        StackStatus = "running"
+	StackPending  StackStatus = "pending"
+	StackStarting StackStatus = "starting"
+	StackRunning  StackStatus = "running"
+	// not set yet: failover (phase 2) waits for a host to come back, and a
+	// stack is stopped by hand with operations to come
 	StackWaitingForHost StackStatus = "waiting-for-host"
 	StackStopped        StackStatus = "stopped"
 )
@@ -323,8 +328,10 @@ type VolumeStatus string
 const (
 	// VolumePending has no copy yet: a volume is placed together with the
 	// first stack that names it.
-	VolumePending        VolumeStatus = "pending"
-	VolumeOK             VolumeStatus = "ok"
+	VolumePending VolumeStatus = "pending"
+	VolumeOK      VolumeStatus = "ok"
+	// not set yet: replicas on several hosts come with phase 2, restores
+	// with phase 3
 	VolumeDegraded       VolumeStatus = "degraded"
 	VolumeResyncing      VolumeStatus = "resyncing"
 	VolumeRestorePending VolumeStatus = "restore-pending"

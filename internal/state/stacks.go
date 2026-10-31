@@ -260,21 +260,11 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) error {
 	if err := s.checkLiveHost(payload.Host); err != nil {
 		return err
 	}
-	// a host reports only about a stack it runs, and never moves it: the
-	// leader may have moved it since the host read the state
-	if IsHostActor(cmd.Actor) && (stack.Host == nil || cmd.Actor != HostActor(*stack.Host) ||
-		!samePlace(stack.Host, payload.Host)) {
-		return fmt.Errorf("stack %s: only its host reports about it, and only where it is", payload.ID)
-	}
-	if IsHostActor(cmd.Actor) && payload.Generation != stack.Generation {
-		return fmt.Errorf("stack %s: the report is about generation %d, but %d is applied",
-			payload.ID, payload.Generation, stack.Generation)
-	}
-	if IsHostActor(cmd.Actor) && !maps.EqualFunc(payload.Restarted, stack.Restarted, time.Time.Equal) {
-		return fmt.Errorf("stack %s: the report is about an older restart", payload.ID)
-	}
 	applied := stack.AppliedSecrets
 	if IsHostActor(cmd.Actor) {
+		if err := checkHostReport(stack, cmd.Actor, payload); err != nil {
+			return err
+		}
 		applied = payload.AppliedSecrets
 	}
 	if stack.Status == payload.Status && samePlace(stack.Host, payload.Host) && maps.Equal(stack.AppliedSecrets, applied) {
@@ -285,6 +275,25 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) error {
 	}
 	stack.Status, stack.Host, stack.AppliedSecrets = payload.Status, payload.Host, applied
 	s.changed(resource.KindStack, &stack.Meta)
+	return nil
+}
+
+// checkHostReport refuses a host's report that is not about the stack as
+// the state has it now. A host reports only about a stack it runs, and
+// never moves it: the leader may have moved it since the host read the
+// state. And it reports about the generation and the restarts applied: one
+// about older ones came before an apply or a restart, whose containers
+// have yet to come up.
+func checkHostReport(stack *Stack, actor string, payload SetStackStatus) error {
+	switch {
+	case stack.Host == nil || actor != HostActor(*stack.Host) || !samePlace(stack.Host, payload.Host):
+		return fmt.Errorf("stack %s: only its host reports about it, and only where it is", payload.ID)
+	case payload.Generation != stack.Generation:
+		return fmt.Errorf("stack %s: the report is about generation %d, but %d is applied",
+			payload.ID, payload.Generation, stack.Generation)
+	case !maps.EqualFunc(payload.Restarted, stack.Restarted, time.Time.Equal):
+		return fmt.Errorf("stack %s: the report is about an older restart", payload.ID)
+	}
 	return nil
 }
 

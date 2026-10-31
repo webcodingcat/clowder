@@ -432,30 +432,54 @@ func (s *Server) listResources(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Errorf("no kind of resource %q", r.PathValue("kind")))
 		return
 	}
-	namespace := r.URL.Query().Get("namespace")
-	all := r.URL.Query().Get("allNamespaces") == "true"
-	switch {
-	case !resource.Namespaced(kind) && (namespace != "" || all):
-		writeError(w, http.StatusBadRequest, fmt.Errorf("a %s lives in no namespace", kind))
-		return
-	case resource.Namespaced(kind) && (namespace == "") == !all:
-		writeError(w, http.StatusBadRequest, errors.New("name either namespace= or allNamespaces=true"))
-		return
-	}
-	if err := state.Authorize(actorOf(identityOf(r)), state.VerbRead, kind, namespace); err != nil {
-		writeError(w, http.StatusForbidden, err)
+	selected, ok := selectNamespace(w, r, kind)
+	if !ok {
 		return
 	}
 	list := ResourceList{Items: []resource.Object{}}
 	s.config.Cluster.Read(func(current *state.State) {
 		list.Index = current.Index
 		for _, object := range objects(current, kind) {
-			if all || object.Metadata.Namespace == namespace {
+			if selected.holds(object.Metadata.Namespace) {
 				list.Items = append(list.Items, object)
 			}
 		}
 	})
 	writeJSON(w, http.StatusOK, list)
+}
+
+// namespaceSelection is what a list or a watch reads: one namespace, every
+// namespace, or none for the kinds that live in none.
+type namespaceSelection struct {
+	namespace string
+	all       bool
+}
+
+func (n namespaceSelection) holds(namespace string) bool {
+	return n.all || namespace == n.namespace
+}
+
+// selectNamespace reads ?namespace= or ?allNamespaces=true for a kind and
+// asks Authorize whether the caller may read it. There is no default, so no
+// reader gets the wrong namespace by accident. ok is false (and the answer
+// written) when the request does not fit.
+func selectNamespace(w http.ResponseWriter, r *http.Request, kind string) (namespaceSelection, bool) {
+	selected := namespaceSelection{
+		namespace: r.URL.Query().Get("namespace"), all: r.URL.Query().Get("allNamespaces") == "true",
+	}
+	switch {
+	case !resource.Namespaced(kind) && (selected.namespace != "" || selected.all):
+		writeError(w, http.StatusBadRequest, fmt.Errorf("a %s lives in no namespace", kind))
+		return selected, false
+	case resource.Namespaced(kind) && (selected.namespace == "") == !selected.all:
+		writeError(w, http.StatusBadRequest, errors.New("name either namespace= or allNamespaces=true"))
+		return selected, false
+	}
+	if err := state.Authorize(actorOf(identityOf(r)), state.VerbRead, kind, selected.namespace); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return selected, false
+	}
+	return selected, true
 }
 
 // getResource answers one resource of a namespace:

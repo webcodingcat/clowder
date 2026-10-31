@@ -14,8 +14,8 @@ clowder is built in phases; each ends with live tests on HLab
 | 4 | comfort and operations | |
 
 Phase 1c so far: namespaces, volumes, secrets and stacks are resources in the state, the
-API, the agent and the CLI (`apply`, `get`, `delete`, `stack restart`). Next come the
-watch (`get --watch`), then the live tests.
+API, the agent and the CLI (`apply`, `get` with `--watch`, `delete`, `stack restart`).
+Next come the live tests.
 
 Until `v1.0.0`, the state and `cluster.yaml` may change between releases without a way
 to upgrade a running cluster.

@@ -109,11 +109,54 @@ func (c *Client) Delete(ctx context.Context, path string) (Written, error) {
 // Stream copies what path answers to out as it comes (logs that follow);
 // it has no timeout of its own, ctx ends it.
 func (c *Client) Stream(ctx context.Context, path string, out io.Writer) error {
+	body, err := c.openStream(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = body.Close() }() // copied to the end below
+	_, err = io.Copy(out, body)
+	if ctx.Err() != nil {
+		return nil // the caller stopped following
+	}
+	return err
+}
+
+// Watch hands each event of a watch (GET /v1/watch) to each, until ctx
+// ends (nil) or the agent ends the stream (io.EOF: its ring dropped what
+// the client had not read yet, so the client lists afresh).
+func (c *Client) Watch(ctx context.Context, path string, each func(event WatchEvent) error) error {
+	body, err := c.openStream(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = body.Close() }() // read to the end below
+	decoder := json.NewDecoder(body)
+	for {
+		var event WatchEvent
+		err := decoder.Decode(&event)
+		switch {
+		case ctx.Err() != nil:
+			return nil // the caller stopped watching
+		case errors.Is(err, io.EOF):
+			return io.EOF
+		case err != nil:
+			return fmt.Errorf("read the watch: %w", err)
+		}
+		if err := each(event); err != nil {
+			return err
+		}
+	}
+}
+
+// openStream asks the first seed that answers for path, without a timeout:
+// the answer streams until ctx ends. An answer other than 2xx becomes a
+// StatusError.
+func (c *Client) openStream(ctx context.Context, path string) (io.ReadCloser, error) {
 	var unreachable []string
 	for _, seed := range c.seeds {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+Address(seed)+path, nil)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		request.Header.Set(VersionHeader, c.version)
 		response, err := c.streaming.Do(request)
@@ -121,17 +164,13 @@ func (c *Client) Stream(ctx context.Context, path string, out io.Writer) error {
 			unreachable = append(unreachable, fmt.Sprintf("%s: %v", seed, err))
 			continue
 		}
-		defer func() { _ = response.Body.Close() }() // copied to the end below
 		if response.StatusCode >= 300 {
-			return statusError(response)
+			defer func() { _ = response.Body.Close() }() // read for the message
+			return nil, statusError(response)
 		}
-		_, err = io.Copy(out, response.Body)
-		if ctx.Err() != nil {
-			return nil // the caller stopped following
-		}
-		return err
+		return response.Body, nil
 	}
-	return fmt.Errorf("no agent answered:\n  %s", strings.Join(unreachable, "\n  "))
+	return nil, fmt.Errorf("no agent answered:\n  %s", strings.Join(unreachable, "\n  "))
 }
 
 func (c *Client) write(ctx context.Context, method, path string, in any) (Written, error) {

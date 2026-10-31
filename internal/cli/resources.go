@@ -75,12 +75,14 @@ func applyRank(kind string) int {
 func newGet(g *globals) *cobra.Command {
 	var selected selectFlags
 	var output string
+	var watch bool
 	command := &cobra.Command{
 		Use:   "get <kind> [[<namespace>/]<name>]",
 		Short: "List resources of a kind, or show one",
 		Long: "Kinds: " + kindWords() + ", each singular or plural. The namespace comes with -n or in the\n" +
 			"name (shop/data), else it is default; -A lists every namespace.\n" +
-			"-o yaml shows what apply takes again (a secret shows its digest, never its value).",
+			"-o yaml shows what apply takes again (a secret shows its digest, never its value).\n" +
+			"--watch goes on to show each resource that changes, until Ctrl+C.",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if output != "table" && output != "yaml" && output != "json" {
@@ -97,6 +99,9 @@ func newGet(g *globals) *cobra.Command {
 			client, _, err := g.connect()
 			if err != nil {
 				return err
+			}
+			if watch {
+				return watchObjects(cmd.Context(), client, cmd.OutOrStdout(), cmd.ErrOrStderr(), selection, output)
 			}
 			var objects []resource.Object
 			if selection.name == "" {
@@ -117,6 +122,7 @@ func newGet(g *globals) *cobra.Command {
 	}
 	selected.register(command, true)
 	command.Flags().StringVarP(&output, "output", "o", "table", "table, yaml (applies again) or json")
+	command.Flags().BoolVarP(&watch, "watch", "w", false, "after the list, show each resource that changes")
 	return command
 }
 
@@ -313,21 +319,27 @@ func printObjects(out io.Writer, selected selection, objects []resource.Object, 
 		}
 		return encoder.Encode(objects)
 	case "yaml":
-		for index, object := range objects {
-			document, err := yamlOf(object)
-			if err != nil {
-				return err
-			}
-			if index > 0 {
-				document = append([]byte("---\n"), document...)
-			}
-			if _, err := out.Write(document); err != nil {
-				return err
-			}
-		}
-		return nil
+		return printYAML(out, objects)
 	}
-	return printTable(out, selected.kind, objects)
+	return printTable(out, selected.kind, objects, true)
+}
+
+// printYAML prints resources as YAML documents, each after "---" but the
+// first.
+func printYAML(out io.Writer, objects []resource.Object) error {
+	for index, object := range objects {
+		document, err := yamlOf(object)
+		if err != nil {
+			return err
+		}
+		if index > 0 {
+			document = append([]byte("---\n"), document...)
+		}
+		if _, err := out.Write(document); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // yamlOf writes a resource as YAML, its fields in the order the API wrote
@@ -359,17 +371,24 @@ func blockStyle(node *yaml.Node) {
 // a change.
 const digestShown = 12
 
-func printTable(out io.Writer, kind string, objects []resource.Object) error {
+// printTable prints resources as a table; the watch prints its rows without
+// the header again (withHeader).
+func printTable(out io.Writer, kind string, objects []resource.Object, withHeader bool) error {
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	// tabwriter reports errors on Flush
+	header := func(columns string) {
+		if withHeader {
+			_, _ = fmt.Fprintln(table, columns)
+		}
+	}
 	switch kind {
 	case resource.KindNamespace:
-		_, _ = fmt.Fprintln(table, "NAME\tOWNER\tGENERATION")
+		header("NAME\tOWNER\tGENERATION")
 		for _, object := range objects {
 			_, _ = fmt.Fprintf(table, "%s\t%s\t%d\n", object.Metadata.Name, object.Metadata.Owner, object.Metadata.Generation)
 		}
 	case resource.KindVolume:
-		_, _ = fmt.Fprintln(table, "NAMESPACE\tNAME\tCLASS\tSIZE\tREPLICAS\tSTATUS\tCOPIES")
+		header("NAMESPACE\tNAME\tCLASS\tSIZE\tREPLICAS\tSTATUS\tCOPIES")
 		for _, object := range objects {
 			var spec resource.VolumeSpec
 			var status api.VolumeStatus
@@ -384,7 +403,7 @@ func printTable(out io.Writer, kind string, objects []resource.Object) error {
 				spec.Class, units.FormatSize(int64(spec.Size)), spec.Replicas, status.Status, strings.Join(copies, ","))
 		}
 	case resource.KindSecret:
-		_, _ = fmt.Fprintln(table, "NAMESPACE\tNAME\tGENERATION\tDIGEST")
+		header("NAMESPACE\tNAME\tGENERATION\tDIGEST")
 		for _, object := range objects {
 			var status api.SecretStatus
 			if err := decodeParts(object, nil, &status); err != nil {
@@ -397,7 +416,7 @@ func printTable(out io.Writer, kind string, objects []resource.Object) error {
 		// what the stack waits for last: it is long, and empty for most
 		// stacks; a running stack waits too when a volume it names finds no
 		// place
-		_, _ = fmt.Fprintln(table, "NAMESPACE\tNAME\tSTATUS\tHOST\tPRIORITY\tGENERATION\tPUSHED OUT\tWAITING FOR")
+		header("NAMESPACE\tNAME\tSTATUS\tHOST\tPRIORITY\tGENERATION\tPUSHED OUT\tWAITING FOR")
 		for _, object := range objects {
 			var status api.StackStatus
 			if err := decodeParts(object, nil, &status); err != nil {

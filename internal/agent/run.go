@@ -98,6 +98,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	}
 
 	err = watch(ctx, node, serveErrors, logger)
+	running.server.EndStreams() // Shutdown would wait for them
 	shutdown, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	for _, server := range servers {

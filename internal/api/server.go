@@ -36,6 +36,11 @@ type Cluster interface {
 	Propose(ctx context.Context, cmd state.Command) (uint64, error)
 	Read(use func(current *state.State))
 	WaitIndex(ctx context.Context, index uint64) error
+	// Changes returns what the log changed after an index, and the state's
+	// index; state.ErrChangesGone if the member no longer keeps all of it.
+	Changes(since uint64) ([]state.Change, uint64, error)
+	// Changed closes when the next entry is applied.
+	Changed() <-chan struct{}
 	IsLeader() bool
 	// Leader returns the leading host; ok is false while there is none.
 	Leader() (id state.HostID, ok bool)
@@ -86,11 +91,17 @@ type Server struct {
 	// other hosts that may take long (logs that follow), so it has no timeout.
 	forwarder *http.Client
 	streamer  *http.Client
+	// streams ends with EndStreams: answers that run until the client
+	// stops (a watch, logs that follow) end with it, so the agent's stop
+	// does not wait for them
+	streams    context.Context
+	endStreams context.CancelFunc
 }
 
 // NewServer sets up the routes.
 func NewServer(config ServerConfig) *Server {
 	server := &Server{config: config, mux: http.NewServeMux()}
+	server.streams, server.endStreams = context.WithCancel(context.Background())
 	transport := &http.Transport{TLSClientConfig: pki.ClientTLSToHosts(config.Certificate, config.CA, server.revoked)}
 	server.forwarder = &http.Client{Timeout: waitTimeout, Transport: transport}
 	server.streamer = &http.Client{Transport: transport}
@@ -106,6 +117,7 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/resources/{kind}", pki.RoleUser, server.listResources)
 	server.handle("GET /v1/resources/{kind}/{namespace}/{name}", pki.RoleUser, server.getResource)
 	server.handle("GET /v1/resources/namespace/{name}", pki.RoleUser, server.getNamespace)
+	server.handle("GET /v1/watch", pki.RoleUser, server.watch)
 	server.handle("GET /v1/stacks/{namespace}/{name}/ps", pki.RoleUser, server.stackPs)
 	server.handle("GET /v1/stacks/{namespace}/{name}/logs", pki.RoleUser, server.stackLogs)
 	server.handle("POST /v1/stacks/{namespace}/{name}/restart", pki.RoleUser, server.restartStack)
@@ -119,6 +131,22 @@ func NewServer(config ServerConfig) *Server {
 	server.handleOpen("GET /v1/bootstrap", server.bootstrapOffer)
 	server.handleOpen("POST /v1/bootstrap", server.bootstrap)
 	return server
+}
+
+// EndStreams ends the answers that run until the client stops: http.Server's
+// Shutdown waits for them otherwise. The agent calls it as it stops.
+func (s *Server) EndStreams() {
+	s.endStreams()
+}
+
+// streamContext is a request's context that also ends with EndStreams.
+func (s *Server) streamContext(r *http.Request) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(r.Context())
+	stop := context.AfterFunc(s.streams, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}
 }
 
 // TLSConfig is the server's side of mutual TLS. A client certificate is
