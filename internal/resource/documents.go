@@ -27,27 +27,37 @@ func ParseDocuments(data []byte) ([]Object, error) {
 	var objects []Object
 	others := 0
 	for index := 1; ; index++ {
-		var content any
-		err := decoder.Decode(&content)
+		var document yaml.Node
+		err := decoder.Decode(&document)
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
 			return nil, fmt.Errorf("document %d: %w", index, err)
 		}
-		fields, isMap := content.(map[string]any)
-		version, _ := fields["apiVersion"].(string)
-		switch {
-		case content == nil:
+		if len(document.Content) == 0 || document.Content[0].Tag == "!!null" {
 			continue // an empty document, as after a trailing ---
-		case !isMap || !strings.HasPrefix(version, clowderVersions):
+		}
+		encoded, err := jsonOf(&document)
+		if err != nil {
+			return nil, fmt.Errorf("document %d: %w", index, err)
+		}
+		var head struct {
+			APIVersion any `json:"apiVersion"`
+		}
+		version := ""
+		if json.Unmarshal(encoded, &head) == nil {
+			version, _ = head.APIVersion.(string)
+		}
+		switch {
+		case !strings.HasPrefix(version, clowderVersions):
 			others++
 			continue
 		case version != APIVersion:
 			return nil, fmt.Errorf("document %d: apiVersion %s is not %s, the one this clowder reads",
 				index, version, APIVersion)
 		}
-		object, err := decodeObject(fields)
+		object, err := decodeObject(encoded)
 		if err != nil {
 			return nil, fmt.Errorf("document %d: %w", index, err)
 		}
@@ -59,12 +69,8 @@ func ParseDocuments(data []byte) ([]Object, error) {
 	return objects, nil
 }
 
-// decodeObject turns a document read from YAML into a resource, strictly.
-func decodeObject(fields map[string]any) (Object, error) {
-	encoded, err := json.Marshal(fields)
-	if err != nil {
-		return Object{}, fmt.Errorf("read the resource: %w", err)
-	}
+// decodeObject reads a resource from JSON, strictly.
+func decodeObject(encoded []byte) (Object, error) {
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.DisallowUnknownFields()
 	var object Object
@@ -78,4 +84,72 @@ func decodeObject(fields map[string]any) (Object, error) {
 		return Object{}, fmt.Errorf("%s: metadata.name is required", object.Kind)
 	}
 	return object, nil
+}
+
+// jsonOf writes a YAML node as JSON and keeps each number as written: a
+// field that takes text (a stack's env) gets "1.0", not "1".
+func jsonOf(node *yaml.Node) ([]byte, error) {
+	switch node.Kind {
+	case yaml.DocumentNode:
+		return jsonOf(node.Content[0])
+	case yaml.AliasNode:
+		return jsonOf(node.Alias)
+	case yaml.MappingNode:
+		var object bytes.Buffer
+		object.WriteByte('{')
+		for index := 0; index+1 < len(node.Content); index += 2 { // key, value, key, value, ...
+			key := node.Content[index]
+			if key.Kind != yaml.ScalarNode {
+				return nil, fmt.Errorf("line %d: a key must be text", key.Line)
+			}
+			value, err := jsonOf(node.Content[index+1])
+			if err != nil {
+				return nil, err
+			}
+			if index > 0 {
+				object.WriteByte(',')
+			}
+			name, _ := json.Marshal(key.Value) // a string always encodes
+			object.Write(name)
+			object.WriteByte(':')
+			object.Write(value)
+		}
+		object.WriteByte('}')
+		return object.Bytes(), nil
+	case yaml.SequenceNode:
+		var array bytes.Buffer
+		array.WriteByte('[')
+		for index, item := range node.Content {
+			value, err := jsonOf(item)
+			if err != nil {
+				return nil, err
+			}
+			if index > 0 {
+				array.WriteByte(',')
+			}
+			array.Write(value)
+		}
+		array.WriteByte(']')
+		return array.Bytes(), nil
+	}
+	switch node.ShortTag() {
+	case "!!null":
+		return []byte("null"), nil
+	case "!!bool", "!!int", "!!float":
+		if node.ShortTag() != "!!bool" && json.Valid([]byte(node.Value)) {
+			return []byte(node.Value), nil // as written: 1.0, 8080
+		}
+		var value any // true, 0x10, 1e3 as YAML reads them
+		if err := node.Decode(&value); err != nil {
+			return nil, fmt.Errorf("line %d: %w", node.Line, err)
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %q is no number JSON can hold", node.Line, node.Value)
+		}
+		return encoded, nil
+	default:
+		encoded, _ := json.Marshal(node.Value) // a string always encodes
+		return encoded, nil
+	}
 }

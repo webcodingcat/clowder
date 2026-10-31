@@ -112,7 +112,8 @@ metadata: {name: shop}
 		t.Fatal(err)
 	}
 	write("token.sops.yaml", string(sealed))
-	// a stack's secrets file, sealed for someone else: skipped, not opened
+	// another SOPS file, such as the cluster's secrets, sealed for someone
+	// else: skipped, not opened
 	other, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
@@ -193,6 +194,37 @@ func TestResourcesApplyFromADirectoryReadBackAndGo(t *testing.T) {
 	if err != nil || !strings.Contains(out, "Namespace shop: deleted") ||
 		strings.Index(out, "Volume shop/data: deleted") > strings.Index(out, "Namespace shop: deleted") {
 		t.Errorf("delete -f: %v\n%s", err, out)
+	}
+}
+
+func TestAStackIsListedAndAskedForInItsNamespace(t *testing.T) {
+	cluster := startCluster(t)
+	out, err := runWithInput(t, `
+apiVersion: clowder/v1
+kind: Stack
+metadata: {namespace: shop, name: web}
+spec: {services: {app: {image: example/app}}}
+---
+apiVersion: clowder/v1
+kind: Namespace
+metadata: {name: shop}
+`, "--cluster", cluster, "apply", "-f", "-")
+	if err != nil || strings.Index(out, "Namespace shop") > strings.Index(out, "Stack shop/web: applied") {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	out, err = run(t, "--cluster", cluster, "get", "stacks", "-n", "shop")
+	if err != nil || !strings.Contains(out, "web") || !strings.Contains(out, "pending") ||
+		!strings.Contains(out, "500 (default)") {
+		t.Errorf("get stacks: %v\n%s", err, out)
+	}
+	for _, args := range [][]string{{"stack", "ps", "-n", "shop", "web"}, {"stack", "logs", "shop/web"}} {
+		_, err := run(t, append([]string{"--cluster", cluster}, args...)...)
+		if err == nil || !strings.Contains(err.Error(), "stack shop/web is not placed on a host yet") {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+	if _, err := run(t, "--cluster", cluster, "stack", "ps", "web"); err == nil || !strings.Contains(err.Error(), "no stack default/web") {
+		t.Errorf("stack ps in default: %v", err)
 	}
 }
 

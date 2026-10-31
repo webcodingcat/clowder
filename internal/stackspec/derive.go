@@ -28,7 +28,7 @@ func normalizeService(service Service) Service {
 		// an orchestrator's service comes back; a one-shot job says no
 		service.Restart = "always"
 	}
-	restartUnhealthy := service.RestartUnhealthy == nil || *service.RestartUnhealthy
+	restartUnhealthy := service.RestartsUnhealthy()
 	service.RestartUnhealthy = &restartUnhealthy
 	ports := make([]Port, 0, len(service.Ports))
 	for _, port := range service.Ports {
@@ -104,6 +104,12 @@ func mapOrNil(values map[string]string) map[string]string {
 		return nil
 	}
 	return maps.Clone(values)
+}
+
+// RestartsUnhealthy tells whether the supervisor restarts the service's
+// container when it turns unhealthy: unless the spec says no.
+func (s Service) RestartsUnhealthy() bool {
+	return s.RestartUnhealthy == nil || *s.RestartUnhealthy
 }
 
 // withDefaults is the port with the schema's defaults filled in: published

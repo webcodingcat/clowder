@@ -1,6 +1,8 @@
 package stackspec
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"slices"
@@ -253,6 +255,27 @@ services:
 	}
 }
 
+// The state compares a stored spec with a new one by their JSON: one read
+// back from a snapshot must normalize to the same JSON as before.
+func TestANormalizedSpecSurvivesJSON(t *testing.T) {
+	normalized := Normalize(decodeShop(t))
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var readBack Spec
+	if err := json.Unmarshal(encoded, &readBack); err != nil {
+		t.Fatal(err)
+	}
+	again, err := json.Marshal(Normalize(readBack))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(encoded, again) {
+		t.Errorf("\n%s\n%s", encoded, again)
+	}
+}
+
 func TestPrioritiesAreNumbersOrCategories(t *testing.T) {
 	if priority, err := ParsePriority("700"); err != nil || *priority.Value != 700 {
 		t.Errorf("700: %+v, %v", priority, err)
@@ -260,7 +283,11 @@ func TestPrioritiesAreNumbersOrCategories(t *testing.T) {
 	if priority, err := ParsePriority("high"); err != nil || priority.Category != "high" {
 		t.Errorf("high: %+v, %v", priority, err)
 	}
-	for _, text := range []string{"-1", "1001", "High", ""} {
+	// none written is the cluster's default, resolved when it is placed
+	if priority, err := ParsePriority(""); err != nil || priority.Value != nil || priority.Category != "" {
+		t.Errorf(`"": %+v, %v`, priority, err)
+	}
+	for _, text := range []string{"-1", "1001", "High"} {
 		if _, err := ParsePriority(text); err == nil {
 			t.Errorf("%q was taken", text)
 		}

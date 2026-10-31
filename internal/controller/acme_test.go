@@ -27,6 +27,8 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/ingress"
+	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -267,11 +269,9 @@ func newACMERunner(t *testing.T, ca *fakeCA) (*acmeRunner, *leader) {
 		Secrets: map[string]state.Sealed{"token": state.Sealed("t")},
 		Files:   map[string][]byte{"ca.pem": ca.trust()},
 	})
-	l.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Namespace: "default", Name: "shop", Owner: state.OwnerCLI})
-	l.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Namespace: "default", Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1, Routes: []string{"shop.example.com/"},
-		Source: "name: shop\nservices: {app: {image: x, x-clowder: {http: {host: shop.example.com, port: 80}}}}\n",
-	})
+	putResource(l, resource.KindStack, "shop", stackspec.Spec{Services: map[string]stackspec.Service{
+		"app": {Image: "x", HTTP: &stackspec.HTTP{Host: "shop.example.com", Port: 80}},
+	}})
 
 	challenges := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var answer string
@@ -340,7 +340,7 @@ func TestACertificateIsOrderedThroughTheChallengeTheAgentsServe(t *testing.T) {
 		t.Errorf("%d orders and %d accounts, want one each", calls.orders, calls.accounts)
 	}
 
-	l.apply(state.KindDeleteStack, state.UserActor("alice"), state.DeleteStack{Namespace: "default", Name: "shop"})
+	deleteResource(l, resource.KindStack, "shop")
 	runner.pass(context.Background())
 	l.Read(func(current *state.State) {
 		if len(current.Certificates) != 0 {
@@ -416,8 +416,16 @@ func TestRenewalComesWhenAThirdOfTheLifetimeIsLeftOrAsConfigured(t *testing.T) {
 	if !renewalDue(nil, clusterdir.ACME{}, start) {
 		t.Error("a domain without a certificate is not due")
 	}
+	routed := func(routes ...stackspec.HTTP) *state.Stack {
+		spec := stackspec.Spec{Services: map[string]stackspec.Service{}}
+		for index, route := range routes {
+			spec.Services[fmt.Sprint("s", index)] = stackspec.Service{HTTP: &route}
+		}
+		return &state.Stack{Spec: spec}
+	}
 	if fmt.Sprint(routeDomains(&state.State{Stacks: map[string]*state.Stack{
-		"a": {Routes: []string{"shop.example.com/", "shop.example.com/api"}}, "b": {Routes: []string{"blog.example.com/"}},
+		"a": routed(stackspec.HTTP{Host: "shop.example.com"}, stackspec.HTTP{Host: "shop.example.com", Path: "/api"}),
+		"b": routed(stackspec.HTTP{Host: "Blog.example.com"}),
 	}})) != "[blog.example.com shop.example.com]" {
 		t.Error("the domains of the routes")
 	}

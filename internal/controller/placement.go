@@ -57,8 +57,8 @@ func RunPlacement(ctx context.Context, cluster Cluster, propose Propose, conditi
 // how soon it should look again: when a pushed-out service will have fit
 // long enough, else 0.
 func (p *placer) place(ctx context.Context) time.Duration {
-	// Plan parses every stack: too slow for the state's lock, which Raft's
-	// Apply waits for
+	// Plan weighs every stack on every host: too slow for the state's lock,
+	// which Raft's Apply waits for
 	var copied *state.State
 	var err error
 	p.cluster.Read(func(current *state.State) { copied, err = current.Copy() })
@@ -66,7 +66,7 @@ func (p *placer) place(ctx context.Context) time.Duration {
 		p.logger.Error("place the stacks", "error", err)
 		return 0
 	}
-	decisions := scheduler.Plan(ctx, copied)
+	decisions := scheduler.Plan(copied)
 	p.noteOverCapacity(copied, decisions.OverCapacity)
 	for _, lists := range decisions.PushOuts {
 		p.logger.Warn("pushing out services: the host's stacks reserve more than it offers", "pushed_out", lists)

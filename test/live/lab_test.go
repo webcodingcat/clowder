@@ -20,7 +20,6 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/names"
 )
@@ -133,27 +132,6 @@ func writeClusterFile(t *testing.T, name string, content []byte) {
 	if err := os.WriteFile(filepath.Join(clusterDir(), name), content, 0o644); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// createAndApply creates a stack and applies its Compose file.
-func createAndApply(t *testing.T, name, content string) {
-	t.Helper()
-	mustClowder(t, "stack", "create", name, "--dir", stackDir(name), "--age", recipient)
-	file := filepath.Join(stackDir(name), "clowder.yaml")
-	if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	mustClowder(t, "stack", "apply", name, "--file", file)
-}
-
-// stackInfo is a stack as the cluster lists it.
-func stackInfo(t *testing.T, name string) api.StackInfo {
-	t.Helper()
-	stacks, err := listStacks()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return stacks[name]
 }
 
 // runs tells whether a service of a stack has a running container.

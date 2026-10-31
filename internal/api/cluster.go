@@ -1,18 +1,13 @@
 package api
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"maps"
 	"net/http"
-	"slices"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
-	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -60,16 +55,12 @@ func (s *Server) cluster(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, info)
 }
 
-// applyCluster seals the secrets and commits the new cluster.yaml.
+// applyCluster seals the secrets and commits the new cluster.yaml. The
+// state refuses one that a resource of the cluster would no longer pass.
 func (s *Server) applyCluster(w http.ResponseWriter, r *http.Request) {
 	var apply ClusterApply
 	if err := json.NewDecoder(r.Body).Decode(&apply); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("read the request: %w", err))
-		return
-	}
-	resourcesRevision, err := s.checkStacksAgainst(r.Context(), apply.Spec.WithDefaults())
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	payload, err := s.sealApply(apply)
@@ -77,47 +68,7 @@ func (s *Server) applyCluster(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	payload.ResourcesRevision = resourcesRevision
 	s.write(w, r, state.KindApplyConfig, payload)
-}
-
-// checkStacksAgainst refuses a cluster.yaml that a stack of the cluster
-// would not pass: a storage class it uses, a priority category it names, its
-// place in stacks.privileged must not go while the stack is there. It tells
-// the resources revision it checked, which the state compares at commit;
-// the state checks the volume resources itself.
-func (s *Server) checkStacksAgainst(ctx context.Context, config clusterdir.Config) (int64, error) {
-	// what the check needs of a stack, read under the state's lock
-	type stackSource struct{ namespace, name, source string }
-	stacks := map[string]stackSource{}
-	var revision int64
-	s.config.Cluster.Read(func(current *state.State) {
-		revision = current.ResourcesRevision
-		for id, stack := range current.Stacks {
-			stacks[id] = stackSource{namespace: stack.Namespace, name: stack.Name, source: stack.Source}
-		}
-	})
-	var problems compose.Problems
-	for _, id := range slices.Sorted(maps.Keys(stacks)) {
-		stack := stacks[id]
-		parsed, err := compose.Parse(ctx, stack.name, []byte(stack.source))
-		if err != nil {
-			continue // a stack the cluster cannot read is no reason to refuse cluster.yaml
-		}
-		if _, err := checkAgainstCluster(stack.namespace, parsed, config); err != nil {
-			var stackProblems compose.Problems
-			if !errors.As(err, &stackProblems) {
-				return 0, err
-			}
-			for _, problem := range stackProblems {
-				problems = append(problems, "stack "+id+": "+problem)
-			}
-		}
-	}
-	if len(problems) > 0 {
-		return 0, fmt.Errorf("cluster.yaml would break stacks of the cluster: %w", problems)
-	}
-	return revision, nil
 }
 
 func (s *Server) sealApply(apply ClusterApply) (state.ApplyConfig, error) {

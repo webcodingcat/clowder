@@ -200,8 +200,7 @@ func (r *room) priority(ref serviceRef) int {
 
 // effectiveOf works out the effective priorities of a stack's services.
 // The categories come from the current cluster.yaml, so a changed category
-// counts without a new apply; one that is gone counts as the stack's
-// priority at its apply.
+// counts without a new apply; the state keeps every category a stack names.
 func (r *room) effectiveOf(name string) map[string]int {
 	stack := r.current.Stacks[name]
 	priorities := r.current.Config.Spec.WithDefaults().Priorities
@@ -211,10 +210,7 @@ func (r *room) effectiveOf(name string) map[string]int {
 		if value, ok := effective[service]; ok {
 			return value
 		}
-		own, err := priorities.Resolve(stack.Services[service].Priority)
-		if err != nil {
-			own = stack.Priority
-		}
+		own, _ := priorities.Resolve(stack.Services[service].Priority) // resolves: the state checked it
 		seen[service] = true
 		for _, dependency := range stack.Services[service].DependsOn {
 			if !seen[dependency] { // Compose refuses cycles; this only guards

@@ -56,7 +56,7 @@ and the journals of `clowder-setup` and `clowderd`. The steps:
    trusts the registry's CA (`/etc/docker/certs.d`), and the test pushes its image there,
    then logs out, so only the agent's login pulls it.
 3. A stack runs from the private registry with a replicated and a plain volume, a secret
-   file and a secret variable.
+   file and a secret variable, applied as resources (`clowder apply -f`).
 4. An agent restart leaves its containers running, unchanged.
 5. The supervisor: a crashed container (`kill -9` of its process; `docker kill` would be a
    stop by hand) runs again within 2 s by Docker's own times, an `unhealthy` one is
@@ -69,10 +69,10 @@ and the journals of `clowder-setup` and `clowderd`. The steps:
 7. A changed secret file recreates its container only.
 8. With the agent stopped, `docker compose up` fails on a missing secret file; started
    again, the agent brings the stack back.
-9. A volume that fits no pool leaves its stack `pending` with the reason in `stack ps`, and
-   the running stack untouched.
+9. A volume that fits no pool leaves its stack `pending` with the reason in `get stacks`,
+   and the running stack untouched.
 10. Twenty more stacks run.
-11. The stack goes with its volumes.
+11. The stack goes, then its volumes.
 12. The Floating IP, moved off the host by hand through the Cloud API, comes back.
 13. HTTPS: a zone `example.com` in HLab's DNS points `shop.example.com` at the Floating IP;
     the cluster orders its certificate at HLab's Pebble (HTTP-01), and the stack behind it
@@ -97,7 +97,7 @@ and the journals of `clowder-setup` and `clowderd`. The steps:
 20. The memory, idle, with 21 stacks and at the end, is logged: the agent must stay under
     150 MB, the agent and Traefik together under 300 MB.
 
-It reads `clowder stack ps --output json` and `docker inspect`. Values it compares it reads
+It reads `clowder get stacks -o json` and `docker inspect`. Values it compares it reads
 within a step; what carries over between steps is stated where it does: `shop` lives from
 step 3 to 11, `echo` from step 13 to 19.
 
@@ -110,7 +110,7 @@ clowder is built in phases; each ends with live tests on HLab.
 | 0 | the spike: DRBD quorum and fencing, WireGuard, the real client IP, on three hosts | done |
 | 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | done |
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done |
-| 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | in progress: namespaces in the state and on the host; the stack schema and its renderer; namespaces, volumes and secrets as resources in the state, the API and the CLI (`apply`, `get`, `delete`) |
+| 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | in progress: namespaces, volumes, secrets and stacks as resources in the state, the API, the agent and the CLI (`apply`, `get`, `delete`); next the restart, the watch, then run the live tests |
 | 2 | three hosts: replication, failover with fencing | |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
@@ -129,12 +129,14 @@ Known gaps to close in phase 2. They do no harm on a single host:
 - `storage.Ensure` promotes a resource with `--force` when this host has no `primary` marker.
   That is right for a new volume on one host; after a failover it would force an outdated
   copy. Whether a volume was ever initialised must come from the state, not a local file.
-- A volume a stack no longer names stays: nothing sends `delete-volume` yet.
 - A stack whose `compose up` fails after a reboot or a restart of Docker stays `running` in
   the state; only the agent's log says so. The host should report it.
-- The placement does not bind a stack to the host its volumes are on. When `put-volume`
-  committed but the stack's `set-stack-status` did not (an error, a change of leader), a
-  later pass may pick another host for the stack.
+- A volume's copy that no stack on its host uses stays mounted, and with replicas its DRBD
+  resource stays primary: on one host the next stack that names it takes it over once the
+  old one stopped. With several hosts a copy without a stack must be unmounted and
+  secondary, so a stack on another host can take the volume.
+- A stack whose placed volumes sit on different hosts (left by deleted stacks) waits; on
+  one host it cannot happen.
 - The ACME self-check asks the Floating IP, which reaches the leader's own Traefik; with
   several hosts it must ask the ingress host instead (Certificates of the routes).
 - A Prometheus in a stack or outside the cluster cannot reach `/metrics` yet: only the
@@ -147,10 +149,12 @@ Known gaps to close in phase 2. They do no harm on a single host:
   added later gets a volume but no thin pool on an existing host.
 
 Before users get permissions (they have none yet: every user may do everything): the
-leader trusts a user command that a host forwards (`/v1/internal/propose`). The checks of
-the agent that took the request (the stack against the cluster, privileges, host actions)
-are not repeated on the leader. That holds while root on any host has every key anyway;
-with permissions the checks must move into the leader's commit path.
+leader trusts the actor a host names for a user's command it forwards
+(`/v1/internal/propose`, `/v1/internal/changes`). That holds while root on any host has
+every key anyway. The state already asks `Authorize` on the leader for every change of a
+resource; with permissions it reads the cluster's role bindings there. Whoever may use the
+API can check a guessed value against a secret's digest; until there are permissions that
+is every user, who can read the value through a privileged stack anyway.
 
 What the spike of phase 0 showed on three HLab hosts, before any clowder code existed, and
 what the design rests on:
@@ -180,8 +184,8 @@ what the design rests on:
 ```
 user's machine                 any agent               leader                stack's host
 ──────────────                 ─────────               ──────                ────────────
-clowder stack apply ──mTLS──▶  API: check, seal  ──▶  Raft log ──▶ every agent's state
-  (files, secrets)                                       │
+clowder apply -f    ──mTLS──▶  API: read, seal  ──▶  leader decides ──▶ Raft log ──▶ every agent's state
+  (resources)                                            │
                                                          ▼
                                                    placement: host, volumes
                                                          │
@@ -195,24 +199,26 @@ clowder stack apply ──mTLS──▶  API: check, seal  ──▶  Raft log �
 
 ## A stack's way
 
-1. `clowder stack create shop --age <key>` registers the name (`create-stack`). The stack is
-   `created`: nothing places or runs it yet. The command writes what is missing of `shop/`:
-   `clowder.yaml` (the stack's Compose file, `name: shop`), an empty `secrets.sops.yaml` and
-   the `.sops.yaml` that encrypts it for the key.
-2. `clowder stack apply shop` loads and checks `shop/clowder.yaml` on the user's machine,
-   decrypts the secrets the stack asks for and sends both (`PUT /v1/stacks/shop`). The agent
-   that takes the call checks the stack against the cluster, seals the secrets and commits
-   `put-stack` through the leader: the stack is `pending`.
-3. The leader's placement picks a host and a pool for each volume and commits the volumes
-   (`put-volume`) and the stack's host (`set-stack-status starting`).
-4. That host's agent makes the volumes (LV, DRBD, ext4, mount), renders the Compose file,
-   writes the secrets to tmpfs, runs `docker compose up` and reports `running`.
-5. `clowder stack ps|logs shop` asks the stack's host, through any agent.
-6. A later `stack apply` raises the stack's generation; a running stack is `starting` again.
-   The stack keeps its host, the placement adds only volumes it newly names, and the host's
-   agent brings the new generation up, Compose recreating only the containers whose
-   configuration or secret files changed, and reports `running`. A stack or volume that finds
-   no place waits, with the reason in `stack ps`.
+1. `clowder apply -f shop/` reads the resources of the directory on the user's machine
+   (a namespace, its volumes and secrets, the stack; a secret may be in a SOPS file of its
+   own) and sends them in one request, namespaces first (`POST /v1/apply`).
+2. The agent that takes the call reads each spec strictly, seals the secrets and hands the
+   commands to the leader, which tries them on a copy of its state and commits each that
+   changes something (`put-resource`): the volumes are `pending`, the stack is `pending`.
+3. The leader's placement picks a host for the stack and a pool for each volume it names
+   that waits, and commits the volumes (`put-volume`) and the stack's host
+   (`set-stack-status starting`).
+4. That host's agent makes the volumes (LV, DRBD, ext4, mount), renders the Compose file
+   from the stack's spec, writes the secrets to tmpfs, runs `docker compose up` and reports
+   `running`, with the secrets the containers came up with.
+5. `clowder get stacks` shows it; `clowder stack ps|logs shop` asks the stack's host,
+   through any agent.
+6. A changed stack raises its generation; a running stack is `starting` again. It keeps its
+   host, the placement adds only volumes it newly names, and the host's agent brings the
+   new generation up, Compose recreating only the containers whose configuration or secrets
+   changed. A changed secret recreates the containers that use it, without a new generation.
+   The same files applied again change nothing. A stack or volume that finds no place
+   waits, with the reason in `get stacks`.
 
 ## Words
 
@@ -229,7 +235,7 @@ clowder stack apply ──mTLS──▶  API: check, seal  ──▶  Raft log �
 | active, passive | a host that runs stacks; a second host that waits until there are three |
 | actor | who sent a command: `leader`, `host/<id>` or `user/<name>` |
 | sealed | encrypted with the cluster's data key before it goes into the state |
-| generation | of a stack: counts its applies; of a volume: grows with a restore or class move, part of its LV's name |
+| generation | of a resource: counts the changes of its spec (an apply that changes nothing counts not); a volume's data generation grows with a restore or class move and is part of its LV's name |
 
 ## The two binaries
 
@@ -274,10 +280,9 @@ Packages in *italics* do not exist yet.
 
 ## Namespaces and names (`internal/names`)
 
-- **Namespaces** keep stacks apart: two namespaces may each have a stack `shop`. The
-  bootstrap makes `default`; until `clowder apply` makes others (phase 1c), the CLI's stacks
-  are in `default`. Users and the state name a stack `<namespace>/<stack>` (`names.ID`, the
-  key of `State.Stacks`).
+- **Namespaces** keep resources apart: two namespaces may each have a stack, a volume and a
+  secret `shop`. The bootstrap makes `default`. Users and the state name a resource
+  `<namespace>/<name>` (`names.ID`, the key of `State.Stacks`, `Volumes`, `Secrets`).
 - **One rule for every name** (`names.Valid`): a DNS label of at most `names.MaxLength`
   characters, lowercase letters, digits and `-`. No `_`: on the host it joins a namespace and
   a stack, so it separates them unambiguously. Namespaces must not start with `clowder-`,
@@ -289,12 +294,12 @@ Packages in *italics* do not exist yet.
   | What | Name |
   |---|---|
   | Compose project, the agent's stack directory, the secrets' directory, the supervisor's hold, Traefik's service | `<namespace>_<stack>` (`names.Project`) |
-  | Compose network | `<namespace>_<stack>_<network>` (`names.Network`); with a stack spec the one network `<namespace>_<stack>_net` (`names.StackNetwork`) |
-  | container, with a stack spec | `<namespace>_<stack>_<service>` (`names.Container`) |
-  | volume ID | `<namespace>/<volume>` for a `Volume` resource (`names.ID`); `<namespace>/<stack>/<volume>` for a volume of a stack's Compose file (`names.VolumeID`), until stacks are resources: the two never meet |
-  | LV, DRBD resource, mount point, Docker volume | `clw-<readable>-<hash8>-g<generation>` (`names.VolumeName`) |
-  | the agent's record of a volume's copies | `volume-records/<namespace>_<stack>_<volume>.json` (`names.FileName`) |
-  | bridge | `cbr-` and 11 hex digits of a hash of the stack's ID and network (`names.BridgeName`); a stack spec's one network takes the bridge of the network `default`, so a stack keeps its bridge when it moves to a spec |
+  | the stack's one Docker network | `<namespace>_<stack>_net` (`names.StackNetwork`) |
+  | container | `<namespace>_<stack>_<service>` (`names.Container`) |
+  | volume ID | `<namespace>/<volume>` (`names.ID`) |
+  | LV, DRBD resource, mount point, Docker volume | `clw-<readable>-<hash8>-g<data generation>` (`names.VolumeName`) |
+  | the agent's record of a volume's copies | `volume-records/<namespace>_<volume>.json` (`names.FileName`) |
+  | bridge | `cbr-` and 11 hex digits of a hash of the stack's ID (`names.BridgeName`) |
   | locks, alert keys | `stack/<namespace>/<stack>`, `volume/<volume ID>`, `stack-waiting/<namespace>/<stack>` |
   | metrics | the labels `namespace` and `stack` |
 
@@ -309,99 +314,75 @@ Packages in *italics* do not exist yet.
 
 ## Stack specs (`internal/stackspec`)
 
-Phase 1c replaces the Compose file a user writes by a schema of clowder's own; Compose is
-then only how the agent runs a stack (`compose.RenderStack`). Until the `Stack` resource
-uses it (1c.5), the package is a library with its tests, next to the Compose files below.
+A stack is a resource with a schema of clowder's own; Compose is only how the agent runs it
+on a host (`compose.Render`).
 
-- **Only what clowder knows runs.** `Decode` reads YAML strictly: a field the schema does
-  not have is an error, where a Compose file passes what clowder does not know. `env` takes
-  any YAML scalar and keeps its text as written (`8080`, `1.0`, `yes`).
+- **Only what clowder knows runs.** `Decode` reads YAML (and so JSON) strictly: a field the
+  schema does not have is an error. `env` takes any scalar and keeps its text as written
+  (`8080`, `1.0`, `yes`); the CLI keeps a number's text when it turns YAML into JSON
+  (`resource.ParseDocuments`), so `1.0` arrives as `"1.0"`. Only a number JSON cannot
+  write as it stands arrives as YAML reads it (`0x10` as `"16"`), and `True` as `"true"`.
+- **What would break clowder's model has no field**: nothing ties a container to one host
+  (no bind mounts but `/etc/localtime` read-only, no devices), nothing shares the host's
+  namespaces, and clowder sets the rest itself (names, networks, the restart policy). A
+  route's host must be a domain name and its path a URL path: both go into a Traefik rule.
 - **`Check`** lists every problem at once (`Problems`): names, image, mounts at clean
-  absolute paths, ports that are not reserved (`ReservedPort`), routes, dependencies that
-  exist and go in no circle, durations, sizes, restart rules. What only the cluster knows
-  (priority categories, privileges, the namespace's volumes and secrets) is not its job.
+  absolute paths, ports that are not reserved (`ReservedPort`), two services with the same
+  published port or route, routes, dependencies that exist and go in no circle, durations,
+  sizes, restart rules. What only the cluster knows (priority categories, privileges, the
+  namespace's volumes and secrets, other stacks' ports and routes) the state checks.
 - **`Normalize`** fills in the schema's own defaults (`restart: always`, `restartUnhealthy`,
-  a port's `published` and `protocol`) and sorts the lists that are sets, so two specs that
-  mean the same are equal. Defaults of `cluster.yaml` (reservations, priority) stay out:
-  the scheduler takes them when it places, so a changed `cluster.yaml` changes no spec.
-- **No I/O, no clock**: the state will read specs, so depguard and forbidigo hold
-  `stackspec` to the state's rules.
-- **`RenderStack`** writes the Compose file from a normalized spec with its own types (no
-  compose-go): one network per stack (`names.StackNetwork`), container names without the
-  replica number (`names.Container`), a dependency on a service with a healthcheck waits
-  until it is healthy. Golden files in `internal/compose/testdata/spec`, which
-  `bin/dev test-tools` checks with Debian's docker-compose.
+  a port's `published` and `protocol`, a route's path) and writes in one way what may be
+  written in several (sorted sets, a route's host in lower case, capabilities without
+  `CAP_`), so two specs that mean the same are equal. Defaults of `cluster.yaml`
+  (reservations, priority) stay out: the scheduler takes them when it places, so a changed
+  `cluster.yaml` changes no spec.
+- **Privileges are the cluster's to give.** What reaches beyond the container
+  (`privileged`, a capability outside `harmlessCapabilities`, a `securityOpt` other than
+  `no-new-privileges`) is listed per service (`Service.Privileges`). Such a container can
+  read the host's keys and other stacks' volumes and secrets, and change the rules that keep
+  containers apart. So only stacks that `cluster.yaml` names in `stacks.privileged` (as
+  `<namespace>/<stack>`) may have it; the state refuses the stack otherwise, and an
+  `apply-config` that takes such a stack off the list.
+- **Secrets.** A service names secrets of its namespace as files (`secrets`, at
+  `/run/secrets/<name>`, for images that read `*_FILE`) or as variables (`secretEnv:
+  {VARIABLE: secret}`). A variable also ends up in Docker's container configuration on the
+  host's disk and in `docker inspect`; a file does not.
+- **No I/O, no clock**: the state reads specs, so depguard and forbidigo hold `stackspec` to
+  the state's rules.
 - **A new field:** its type with both tags (`yaml`, `json`) and a comment in `spec.go`, its
   check in `check.go`, its default or order in `Normalize` if it has one, its rendering in
-  `render_stack.go`, the field in `testdata/spec/stack.yaml`, then `bin/dev test
-  ./internal/compose -update` and a look at the golden file's diff.
+  `internal/compose/render.go`, the field in `internal/compose/testdata/spec/stack.yaml`,
+  then `bin/dev test ./internal/compose -update` and a look at the golden file's diff.
 
-## Stacks (`internal/compose`)
+## Rendering (`internal/compose`)
 
-- **Bound to their name.** The first file of a stack says `name: <stack>` as written, and no
-  later file sets one (`CheckNames` reads it before compose-go fills in or normalizes
-  anything). `Load` and `Parse` compare the project's name with the stack, so the CLI and
-  again the API refuse a file for another stack.
-- **What breaks clowder's model is refused** (`Load`, `load.go` for the stack, `service.go`
-  for its services): what ties a container to one host (bind mounts except `/etc/localtime`
-  read-only, configs from a file, devices, anonymous and external volumes, external
-  networks), what shares the host's namespaces (`network_mode: host`, `pid`/`ipc: host`),
-  and what clowder sets itself (`build`, `container_name`, replicas, network drivers and
-  subnets, port ranges, host addresses, `ReservedPort`), and two services with the same
-  published port or HTTP route (`checkUnique`). A route's host must be a domain name and its
-  path a URL path: both go into a Traefik rule. Every problem is reported at once
-  (`Problems`); the `x-clowder` blocks are decoded strictly, and only an unknown key there
-  ends the checks of its block.
-- **Privileges are the cluster's to give.** What reaches beyond the container (`privileged`,
-  a capability outside `harmlessCapabilities`, `security_opt` other than
-  `no-new-privileges`, `cgroup_parent`) is listed per service (`Service.Privileges`). Such a
-  container can read the host's keys and other stacks' volumes and secrets, and change the
-  rules that keep containers apart. So only stacks that `cluster.yaml` names in
-  `stacks.privileged` (as `<namespace>/<stack>`) may have it: `put-stack` says whether the
-  stack asks for any (`PutStack.Privileged`), and the state refuses it unless the list names
-  the stack, and refuses an `apply-config` that takes such a stack off the list. The API
-  checks the same first, to answer with every problem at once. `cluster apply` also refuses
-  a `cluster.yaml` that a stack of the cluster would no longer pass (storage classes,
-  priorities); that check holds at commit too: `put-stack` carries the `cluster.yaml`
-  revision it was checked against, `apply-config` the resources revision
-  (`State.ResourcesRevision`), and the state refuses either when the other changed in
-  between.
-- **Variables are filled in on the user's machine.** `Source` fills in the variables and
-  env files and drops the user's paths; the result is stored in the state and on the host as
-  it is, not sealed. Passwords therefore belong in the stack's secrets file, never in a
-  `${VARIABLE}` or the Compose file.
-- **Secrets.** A service asks with `x-clowder.secrets: [name]` (a file `/run/secrets/<name>`
-  in the container, for images that read `*_FILE`) or `x-clowder.secret_env: {VARIABLE: name}`.
-  The stack names its SOPS file in `x-clowder.secrets_file`: relative to its first file, a
-  map of names to strings, possibly shared by several stacks. Compose's own `secrets:` are
-  refused, and so are configs from a variable: docker compose on the host would read the
-  agent's environment. A variable also ends up in Docker's container configuration on the
-  host's disk and in `docker inspect`; a file does not.
-- **Rendering.** `Render` writes the file docker compose gets on a host: the stack's project
-  `<namespace>_<stack>` (`names.Project`) as its name and the networks' names, `restart: "no"`
-  (the agent restarts), the agent's resolver, each port on the Floating IP and the node
-  address, a fixed bridge name per network (`names.BridgeName`), volumes bound to
-  `<mount>/data` under the copy's LV name, secrets as files in `Target.SecretsDir`.
-  `RenderSecretEnv` writes the secret variables as a second Compose file. Every `$` in a
-  value becomes `$$` (`EscapeDollars`): the values were filled in on the user's machine, and
-  docker compose on the host would fill in variables once more, from the agent's
+- **`Render`** writes the file docker compose gets on a host from a stack's spec, with its
+  own types: the stack's project `<namespace>_<stack>` (`names.Project`) as its name, one
+  network (`names.StackNetwork`) with a fixed bridge name (`names.BridgeName`), container
+  names without Compose's replica number (`names.Container`), `restart: "no"` (the agent
+  restarts), the agent's resolver, each port on the Floating IP and the node address,
+  volumes bound to `<mount>/data` under the copy's LV name, secrets as files in
+  `Target.SecretsDir`; a dependency on a service with a healthcheck waits until it is
+  healthy. HTTP routes are not in it: Traefik routes them. `RenderSecretEnv` writes the
+  secret variables as a second Compose file. Every `$` in a value becomes `$$`
+  (`escapeDollars`): docker compose on the host would fill in variables from the agent's
   environment.
-- **Labels, and which apply recreates what.** Every container gets `clowder.stack` (its
-  project); one that
-  asks for secret files also gets `clowder.secrets`, a digest of their values
-  (`Target.SecretDigests`). Nothing else: Compose recreates exactly the containers whose
-  configuration changed, and a changed secret file keeps its path, so only its digest tells
+- **Labels, and which change recreates what.** Every container gets `clowder.stack` (its
+  project); one that asks for secret files also gets `clowder.secrets`, a digest of them
+  (`Target.SecretLabels`). Nothing else: Compose recreates exactly the containers whose
+  configuration changed, and a changed secret file keeps its path, so only the label tells
   Compose. Secret variables are in the second Compose file, which Compose compares itself,
-  and a volume's new generation is a new volume name. The digest is an HMAC-SHA256 with a
-  key derived from the data key (`datakey.Key.Derive`), over each secret's name and value
-  with their lengths: it is on disk and in `docker inspect`, and without the key it says
+  and a volume's new data generation is a new volume name. The label is an HMAC-SHA256
+  (`digest.HMAC`) with a key derived from the data key, over the names and the state's
+  digests of the service's secret files: it is on disk and in `docker inspect`, and says
   nothing about a short password. A change to these labels changes every container's
   configuration: an agent of a release with other labels recreates all containers once
   after the upgrade.
-- **Golden files.** `testdata/shop/rendered.golden.yaml` and `secrets.golden.yaml`. After an
-  intended change: `bin/dev test ./internal/compose -update`, then review the diff.
-  `bin/dev test-tools` checks both with Debian's `docker-compose`, and that it fills in
-  nothing.
+- **Golden files.** `testdata/spec/rendered.golden.yaml` and `secrets.golden.yaml`, from
+  `testdata/spec/stack.yaml`. After an intended change: `bin/dev test ./internal/compose
+  -update`, then review the diff. `bin/dev test-tools` checks both with Debian's
+  `docker-compose`, and that it fills in nothing.
 
 ## Cluster directory (`internal/clusterdir`)
 
@@ -410,10 +391,10 @@ uses it (1c.5), the package is a library with its tests, next to the Compose fil
   schema of `cluster.yaml` from the Go types.
 - `ReadSOPS` decrypts a SOPS file with the user's age key, as SOPS finds it. It refuses a
   file with values left in clear (a rule like `unencrypted_suffix`): these files hold
-  secrets. `Secrets`, `Credentials` and the stacks' secrets all read through it.
+  secrets. `Secrets` and `Credentials` read through it; `DecryptSOPS` does the same for
+  content read elsewhere (a `Secret` resource on stdin or in a file of `apply`).
 - `WriteSOPS` and `WriteSOPSConfig` write a SOPS file and the `.sops.yaml` beside it, for
-  `cluster bootstrap` and `stack create` alike. `testdata/test-age-key.txt` is a test-only
-  key for the fixtures.
+  `cluster bootstrap`. `testdata/test-age-key.txt` is a test-only key for the fixtures.
 - **Files next to `cluster.yaml`** (`acme.ca`): `FileNames` lists those it names, by paths
   relative to it and written with `/` (the CLI runs on Windows too), and `Check` refuses
   absolute ones, `..` and more than 8. `cluster apply` reads them (`Directory.Files`) and
@@ -453,31 +434,28 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   everything before it changes anything, so a refused command leaves no trace; the state's
   `Index` follows the log either way.
 - **Commands.** A command has a kind, a payload of the type with the same name (`AddHost`,
-  `PutStack`, ...) and an actor (`leader`, `host/<id>`, `user/<name>`) that the API takes from
+  `PutResource`, ...) and an actor (`leader`, `host/<id>`, `user/<name>`) that the API takes from
   the caller's certificate. Which actor may send which kind is the API's check. The state
   checks only what it alone can tell: a host reports only about itself and never moves
   another host, and about a stack only while it runs there, without moving it.
 - **In use so far:** `bootstrap` (init), `apply-config`, `add-user` (the first user),
-  `set-host-phase` (host actions), `create-stack`, `put-stack` and `delete-stack` (the user),
-  `put-volume`, `set-stack-status`, `set-stack-wait-reason` and `set-pushed-out`
-  (placement, the stack's host), `set-ingress` (the ingress loop), `put-acme-account`,
-  `put-acme-challenge`, `delete-acme-challenge`, `put-certificate` and `delete-certificate`
-  (the ACME loop), `put-alert` and `resolve-alert` (the alerts), `report-host` and
-  `forget-copy` (each agent). The other kinds
-  (`delete-volume`, hosts joining, operations, users beyond the first) are there for the
-  next steps; they are tested, but nothing sends them yet. `put-resource` and
-  `delete-resource` come from the API's `/v1/apply` and `/v1/delete`, decided on the
-  leader.
-- **Resources** (phase 1c): namespaces (`Namespaces`), volumes (`Volumes`, by
-  `<namespace>/<name>`; `Volume.IsResource` tells them from a stack's own) and secrets
-  (`Secrets`), each with a `Meta`. The kinds and their specs are in `internal/resource`,
-  which the CLI and the API share. Four counters, each with one job:
+  `set-host-phase` (host actions), `put-resource` and `delete-resource` (the user, through
+  `/v1/apply` and `/v1/delete`, decided on the leader), `put-volume`, `set-stack-status`,
+  `set-stack-wait-reason` and `set-pushed-out` (placement, the stack's host), `set-ingress`
+  (the ingress loop), `put-acme-account`, `put-acme-challenge`, `delete-acme-challenge`,
+  `put-certificate` and `delete-certificate` (the ACME loop), `put-alert` and
+  `resolve-alert` (the alerts), `report-host` and `forget-copy` (each agent). The other
+  kinds (hosts joining, operations, users beyond the first) are there for the next steps;
+  they are tested, but nothing sends them yet.
+- **Resources** (phase 1c): namespaces (`Namespaces`), and by `<namespace>/<name>` stacks
+  (`Stacks`), volumes (`Volumes`) and secrets (`Secrets`), each with a `Meta`. The kinds
+  and their specs are in `internal/resource` (a stack's in `internal/stackspec`), which the
+  CLI and the API share. Three counters, each with one job:
 
   | Counter | Counts |
   |---|---|
   | `Meta.Generation` | the changes of a resource's spec |
   | `Meta.ResourceVersion` | the index of the command that last changed the resource, spec or status |
-  | `State.ResourcesRevision` | the changes of any resource; `apply-config` names the one it checked against |
   | `Volume.DataGeneration` | a volume's data: a restore or a class move makes a new LV (`-g<N>`) |
 
   - `put-resource` and `delete-resource` carry the kind; `resourceKinds` holds each kind's
@@ -487,53 +465,54 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
     owner (another channel is refused, even for a spec that would change nothing), whether
     anything changes, then the rest.
   - **Unchanged is not a change.** A spec equal to the stored one (a secret's by its
-    digest, as the same value seals differently every time) changes nothing: not
-    `Generation`, not `ResourceVersion`, not `ResourcesRevision`, and leaves no audit entry,
-    so a GitOps loop that applies the same files restarts nothing and keeps the audit. A
-    `put-volume` that writes the record as it is changes nothing either. Both answer with
-    `errUnchanged`, which `Apply` takes as applied without a trace; a status command that
-    joins them does the same.
+    digest, as the same value seals differently every time; a stack's normalized) changes
+    nothing: not `Generation`, not `ResourceVersion`, and leaves no audit entry, so a GitOps
+    loop that applies the same files restarts nothing and keeps the audit. The status
+    commands (`put-volume`, `set-stack-status`, `set-stack-wait-reason`, `set-pushed-out`)
+    that write what is there change nothing either. They answer with `errUnchanged`, which
+    `Apply` takes as applied without a trace.
+  - **The state checks against `cluster.yaml` itself**, in the log's order: a stack's
+    priority categories and privileges, a volume's storage class; `apply-config` refuses
+    what a resource of the cluster would no longer pass. No check happens outside the state
+    that a later command could make stale, so no revision travels with a command.
   - `Apply` returns the resources a command changed (`[]Change`, with the command's index
     as their `ResourceVersion`); a handler records each with `changed` or `deleted`.
   - A namespace's owner owns only the namespace; any channel may put resources into it.
     `default` belongs to no channel and cannot be deleted. A namespace goes only when it
     holds nothing; nothing cascades.
   - A volume is made `pending`, without a copy and without a DRBD minor: the placement
-    places it with the first stack that names it (once stacks are resources). Its class must be in `cluster.yaml`, and
-    `apply-config` refuses to drop a class a volume has. Its spec cannot change yet. A new
-    volume starts one `DataGeneration` above the retired copies of a deleted one of the
-    same ID, and the state refuses an LV name a volume or a retired copy has already (the
-    name holds only 32 bits of a hash). `put-volume` changes a volume resource's copies
-    and status, never its `Meta` or spec; `delete-volume` refuses a resource.
+    places it with the first stack that names it. Its class must be in `cluster.yaml`. Its
+    spec cannot change yet. A new volume starts one `DataGeneration` above the retired
+    copies of a deleted one of the same ID, and the state refuses an LV name a volume or a
+    retired copy has already (the name holds only 32 bits of a hash). `put-volume` changes
+    a volume's copies and status, never its `Meta` or spec. A volume serves one stack; one
+    a stack names cannot be deleted, and a deleted stack leaves its volumes, with their
+    data, for the next stack that names them.
   - A secret's value is sealed; the API computes its digest. The limits are on the values
     in clear (`resource.MaxSecretBytes`, per namespace, in the cluster), which the state
     reads from the sealed length (`ClearSize`: age adds a header of fixed length and a tag
-    per 64 KiB); a test in `datakey` holds that against real sealing.
-- **Retired copies.** A volume copy's data goes only when the state says so: `delete-stack`
-  with its volumes, `delete-volume`, `delete-resource` of a volume, and a `put-volume` that
-  changes the data generation or takes a copy off a host each add the copies they give up to
-  `Retired` (volume, data generation, host). The host removes those and forgets each with
-  `forget-copy`; a removed host's go with it. A copy that is merely missing from the state
-  stays: a bug in the placement must not cost data. A stack whose deleted volumes are still
-  being removed cannot be created again under the same name, as its new volumes would have
-  the LVs of the old ones.
-- **Stacks.** `create-stack` registers a stack as `created` (no Source, `CreatedBy` from the
-  actor, `Owner` the channel: cli or gitops); only `put-stack` moves it on, to `pending`, and
-  nothing places a `created` stack. `put-stack` changes registered stacks only, and makes a
-  `running` stack `starting` until its host reports the new generation up: a host's
-  `set-stack-status` names the generation it ran, and one about an older generation is
-  refused. An apply that changes a volume the stack has (class, size, replicas) is refused
-  by the API, as nothing changes an existing volume yet. `put-stack` carries
-  the stack's published ports (`udp/9987`) and HTTP routes (`shop.example.com/api`) as the
-  API read them from the source: the state does not parse Compose files (that would pull
-  compose-go into it), but refuses a port or route another stack has. They live on their
-  stack, so a delete frees them and nothing separate can drift.
-  `delete-stack` with `WithVolumes` takes the volumes along in the same command, so the
-  placement cannot put one back in between. `set-stack-wait-reason` records why the
-  placement finds no place for a stack or a volume it newly names (`WaitReason`, shown by
-  `stack ps`) and changes nothing else, so it never unplaces a stack that runs. The state
-  is the placement's memory of the reason: it writes a change once, also after a change of
-  leader, and clears it when the stack no longer waits.
+    per 64 KiB); a test in `datakey` holds that against real sealing. A secret a stack
+    names cannot be deleted.
+  - **A stack's spec** is stored normalized (`stackspec.Normalize`), so the state reads it
+    itself and nothing derived travels with the command: it runs `stackspec.Check`, resolves
+    the priorities with `cluster.yaml`'s categories, checks privileges, refuses a published
+    port or HTTP route another stack has and volumes or secrets its namespace lacks, and
+    keeps what the scheduler needs of each service (`Stack.Services`: the priority as
+    written, the reservations, the dependencies). A new stack is `pending`; a changed one
+    that runs is `starting` until its host reports the new generation up: a host's
+    `set-stack-status` names the generation it ran, and one about an older generation is
+    refused. With `running` the host reports the digests of the secrets its containers came
+    up with (`AppliedSecrets`). `set-stack-wait-reason` records why the placement finds no
+    place for a stack or a volume it names (`WaitReason`) and changes nothing else, so it
+    never unplaces a stack that runs. The state is the placement's memory of the reason: it
+    writes a change once, also after a change of leader, and clears it when the stack no
+    longer waits.
+- **Retired copies.** A volume copy's data goes only when the state says so:
+  `delete-resource` of a volume, and a `put-volume` that changes the data generation or
+  takes a copy off a host each add the copies they give up to `Retired` (volume, data
+  generation, host). The host removes those and forgets each with `forget-copy`; a removed
+  host's go with it. A copy that is merely missing from the state stays: a bug in the
+  placement must not cost data.
 - **Host phases** (`phaseChanges`; L = the leader, on its own or for a user; H = the host
   itself):
 
@@ -570,16 +549,16 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   (`TakeOver`).
 - **Invariants** the state holds itself, as the last place to catch a wrong command: one
   first user, valid names (`internal/names`), volumes with 0 to 3 replicas and a DRBD minor
-  exactly when replicated, one copy per host, a stack deleted only with its volumes, a
-  removed host's certificate revoked.
+  exactly when replicated (a pending volume has neither copy nor minor), one copy per host,
+  one stack per volume, nothing deleted that a stack names, a removed host's certificate
+  revoked.
 - **Secrets** arrive sealed (`Sealed`, age for the data key); `state` never sees them in
-  clear. Those `cluster.yaml` names are `ClusterSecrets`. A stack's own secrets come with
-  its `put-stack` and replace the old ones as a whole: whoever cannot decrypt the stack's
-  secrets file can remove its secrets with an apply, never keep them for a changed stack.
-  Their limits are `MaxStackSecrets`, `MaxStackSecretsBytes` and `resource.MaxSecretBytes`;
-  the state checks the count and the names, the API the sizes it sees in clear.
+  clear. Those `cluster.yaml` names are `ClusterSecrets`, the namespaces' `Secrets`. A
+  stack names at most `MaxStackSecrets`. Whoever may apply could once only remove a stack's
+  secrets without its SOPS file; with secrets as resources, permissions will take that
+  place.
 - `Copy` gives a deep copy without the audit, for work too slow for the state's lock (the
-  placement parses every stack) or that keeps parts of the state (the agent's stacks).
+  placement weighs every stack) or that keeps parts of the state (the agent's stacks).
 - Snapshots are gzip-compressed JSON (`WriteSnapshot`, `ReadSnapshot`). The audit keeps the
   last `auditSize` commands, finished operations the last `keptFinished`.
 
@@ -664,6 +643,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
     other resource a read answers applies again as it is (`resource.Metadata`'s owner,
     generation and resource version and the status are the cluster's, an apply ignores
     them).
+- **JSON names.** What users write and read as resources (`resource.Object`, the specs and
+  the statuses `get` shows) is camelCase, as in the files users apply; everything else
+  (commands, the state, snapshots, the other bodies of the API, `cluster.yaml`) is
+  snake_case.
 - `api.HostActions` lists the user's host actions with the phases they start from; the server
   checks them and the CLI makes its subcommands from them.
 - CLI and agent refuse each other more than one minor version apart (`X-Clowder-Version`,
@@ -676,8 +659,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **The CLI** finds the cluster directory (`--cluster`, `$CLOWDER_CLUSTER`, the working
   directory) and the user (`--user`, `$CLOWDER_USER`, the only credentials file), then talks
   to the cluster with the user's certificate: `cluster status|apply|diff|schema`,
-  `host list|drain|undrain|remove|enable`, `stack create|apply|delete|ps|logs`,
-  `apply`, `get`, `delete`.
+  `host list|drain|undrain|remove|enable`, `apply`, `get`, `delete`, `stack ps|logs`.
 - **Exit codes**, for every command: 0 when it did what was asked, 2 for a wrong call
   (`usageError`: an unknown command, flags or arguments that do not fit; `checkArgs` makes
   every command's argument errors one, and gives each command of commands a `RunE` that
@@ -691,9 +673,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   and named on stderr, and a cluster directory is refused. A SOPS file (by its content:
   the key `sops`) of a resource (SOPS keeps the keys, so `apiVersion` shows) is decrypted
   with the user's age key (`clusterdir.DecryptSOPS`) and must hold exactly one `Secret`,
-  so `sopsage` keeps every value encrypted; a SOPS file of anything else, such as a
-  stack's secrets file, is skipped unopened. A resource without a namespace is in
-  `default`. The resources go namespaces first in one request; each result is printed,
+  so `sopsage` keeps every value encrypted; a SOPS file of anything else, such as the
+  cluster's secrets, is skipped unopened. A resource without a namespace is in `default`.
+  The resources go namespaces first, then volumes and secrets, then stacks, in one request
+  (`applyRank`); each result is printed,
   and one not applied, deleted or unchanged makes the command fail. `--dry-run` checks
   everything and changes nothing.
 - **`get <kind> [[<namespace>/]<name>]`** and **`delete <kind> [<namespace>/]<name>`**
@@ -704,31 +687,15 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   which `apply` takes again; a secret shows only its digest) or `-o json`. `delete -f`
   deletes the resources of files in the reverse order of an apply, with the namespaces the
   files name (no `-n`).
-- **`stack create`** registers the stack (`POST /v1/stacks/<name>`; for the user who created
-  it and while it is `created`, again does nothing, so a failed run can be repeated). It then
-  writes the missing files of the stack's directory and never overwrites one; an existing
-  `clowder.yaml` must be the stack's. Stack directories belong outside the cluster
-  directory, whose `.sops.yaml` rule would match their files; users there point the CLI at
-  the cluster with `$CLOWDER_CLUSTER`. Colleagues are added with sops itself: their key into
-  the stack's `.sops.yaml`, then `sops updatekeys secrets.sops.yaml` in the stack's
-  directory.
-- **`stack apply`** loads the stack's files on the user's machine (`compose.Load`, all
-  problems at once) and sends the self-contained file (`compose.Stack.Source`). If the stack
-  asks for secrets, the CLI decrypts its secrets file (`clusterdir.ReadSOPS`) and sends the
-  values asked for, each a non-empty string, in clear inside mutual TLS like `cluster apply`.
-  The agent parses the stack again, checks it against the cluster (`checkAgainstCluster`),
-  and `sealStackSecrets` checks that exactly the secrets the stack asks for came, within the
-  limits, and seals them.
-- **`stack delete`** refuses a stack with volumes unless `--delete-volumes` says so. `stack ps`
-  and `stack logs` ask the stack's host through `/v1/internal/stacks/<project>/ps|logs`
-  (`names.Project`), wherever the CLI came in. The stack commands name stacks of the
-  namespace `default` until `clowder apply` comes (phase 1c). The list of stacks (`stack ps`
-  without a name) also comes as JSON (`--output json`, `api.StackInfo`) for scripts and the
-  live tests; the other commands print tables only so far.
-- **Who can read a stack's secrets:** whoever can decrypt its secrets file; every host (a
-  stack must start anywhere); and, until there are permissions, every user of the cluster
-  through a stack named in `stacks.privileged`, as such a container reaches the secrets and
-  the data key on its host.
+- **`stack ps|logs [<namespace>/]<stack>`** (`stack.go`) ask the stack's host
+  (`GET /v1/stacks/{namespace}/{name}/ps|logs`, then `/v1/internal/stacks/<project>/...`,
+  `names.Project`), wherever the CLI came in. The list of stacks, also as JSON for scripts
+  and the live tests, is `get stacks`; its table shows a priority that comes from
+  `cluster.yaml`'s default as `(default)`.
+- **Who can read a secret:** whoever may apply it, or decrypt the SOPS file it came in;
+  every host (a stack must start anywhere); and, until there are permissions, every user of
+  the cluster, through a stack that names it or one named in `stacks.privileged`, as such a
+  container reaches the secrets and the data key on its host.
 - **`cluster apply`** sends `cluster.yaml` with the secrets of `secrets.sops.yaml` in clear
   inside mutual TLS; the agent seals them before they go into the state. Its hash covers
   both, so `cluster diff` tells changed fields of `cluster.yaml` from changed secrets without
@@ -818,10 +785,12 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   threshold trips early rather than late, and a small pool as early as a large one.
 - **Tests.** The package's test goes the whole way on 127.0.0.1: init, the agent with a
   notify socket, the user's bootstrap, apply and diff, the Floating IP reaching the nft
-  rules, and a stack created, applied, listed and deleted. `stacks_test.go` runs single
-  passes of the runner against a state in memory: a failed `compose up`, a new volume
-  generation, a stack that leaves the host, secrets written, changed and removed, the digest
-  label changing with a secret file. That docker compose fails on a missing secret file and
+  rules, and a volume and a stack applied, listed and deleted. `stacks_test.go` runs single
+  passes of the runner against a state in memory: a failed `compose up`, a new data
+  generation, a volume that outlives its stack, a volume that passes to the next stack only
+  once the old one stopped (and waits while a stop fails), secrets written, changed and
+  removed, the label changing with a secret, the secrets the containers came up with
+  reported. That docker compose fails on a missing secret file and
   recreates exactly the containers that changed is for the live tests: CI has no Docker
   daemon.
 
@@ -872,25 +841,25 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 
 - `scheduler.Plan` reads the state and returns its decisions: what hosts over capacity push
   out, where pending stacks go (highest priority first), why the others wait, and which
-  pushed-out service may come back. Every new volume must fit its pool (`Fits`: without
-  overcommit, the pool's volumes and the new one stay within the pool less its reserve, a
-  class's fallbacks included). Volumes, DRBD minors and room are taken only for a stack that
-  fits.
+  pushed-out service may come back. A volume is placed with the first stack that names it,
+  on that stack's host, and must fit its pool there (`Fits`: without overcommit, the pool's
+  volumes and the new one stay within the pool less its reserve, a class's fallbacks
+  included); a placed volume stays where its copy is, so a stack that names one goes only
+  to that host. Volumes, DRBD minors and room are taken only for a stack that fits.
 - **Room, one measure for everything.** A host offers what it reported (memory, CPUs) less
   `system_reserve` (default 512M, 0.25). Each service of a stack on it that is `starting` or
-  `running` takes its reservations (`deploy.resources.reservations`, default
-  `defaults.reservations`, 128M and 0.1), unless it is pushed out. Nothing measures what
-  containers really use. `put-stack` carries what the scheduler needs of each service
-  (`PutStack.Services`: the priority as written, the reservations, `depends_on`), since the
-  state does not parse Compose files.
+  `running` takes its reservations (`resources.reserve`, default `defaults.reservations`,
+  128M and 0.1), unless it is pushed out. Nothing measures what containers really use. The
+  state keeps what the scheduler needs of each service (`Stack.Services`: the priority as
+  written, the reservations, `dependsOn`).
 - **Priorities.** A service's effective priority is the lowest of its own (else the
   stack's) and of everything it depends on: stopping a service stops what depends on it, so
   a running service never depends on a pushed-out one. Categories are resolved with the
   current `cluster.yaml` at every pass (`Priorities.Resolve`), so a changed category counts
   without a new apply; pending stacks are placed by their highest service's. Only
-  `depends_on` within a stack counts: a service another stack imports
-  (`x-clowder.imports`) may be pushed out, and that stack loses it as it would lose any
-  service it does not own.
+  `dependsOn` within a stack counts: a service another stack imports (with imports, phase
+  4) may be pushed out, and that stack loses it as it would lose any service it does not
+  own.
 - **Waiting.** `Stack.WaitingSince` is set with the first wait reason and kept while only
   its text changes; it is in the state so the alert for a stack that waits too long
   survives a change of leader.
@@ -922,7 +891,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **On the host** a pushed-out service is left out of `compose up` (`--scale <service>=0`,
   which also removes its running container), and the supervisor's rule for it is "no
   restart". Only the leader changes `Stack.PushedOut`; a host's status report no longer
-  carries it. `put-stack` drops services the new generation no longer has. Whether compose
+  carries it. A new generation drops services it no longer has. Whether compose
   up leaves the rest running is checked by the live tests: `bin/dev test-tools` has no
   Docker daemon.
 
@@ -947,10 +916,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   `traefik.yml` differs from the one Traefik came up with: at the first pass after the agent
   started, after Docker restarted (`forget`), and after a new image pin or Floating IP. Each
   of its files is compared with what is on disk, so one removed or changed by hand comes
-  back at the next pass. It reads only the Floating IP, the stacks' sources and the
+  back at the next pass. It reads only the Floating IP, the stacks' routes and the
   certificates from the state, no copy of all of it: it passes at every event of Docker's.
-- **Routes.** `ingress.RenderDynamic` writes the file provider's `routes.yaml`: per
-  `x-clowder.http` a service `<project>.<service>` whose servers are the containers of that
+- **Routes.** `ingress.RenderDynamic` writes the file provider's `routes.yaml`: per service
+  with `http` a service `<project>.<service>` whose servers are the containers of that
   service on this host that run and, if they have a health check, are healthy
   (`docker.Inspect`; the address in the network whose name sorts first), and routers
   `<entrypoint>.<project>.<service>`. A route without such a container keeps its routers with
@@ -999,7 +968,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - Only the leader's loops call the hoster: the controller opens the token from the state
   and makes the client (`HostParts.Hoster`, a fake in the tests). depguard keeps `hoster`
   out of the CLI, the state and the scheduler.
-- **clowder's ports** lie in 7400-7499, which `compose.ReservedPort` keeps from the stacks:
+- **clowder's ports** lie in 7400-7499, which `stackspec.ReservedPort` keeps from the stacks:
   Raft 7400 and the API 7443 (node address and underlay), `/metrics` 7444 and Traefik's
   internal entrypoint 7480 (node address), the ACME challenges 7445 and Traefik's health
   check 7446 (127.0.0.1). On the Floating IP, 80 and 443 are Traefik's.

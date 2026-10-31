@@ -318,7 +318,7 @@ func RenderDynamic(routes []Route, certificates []CertificateFiles) ([]byte, err
 }
 
 // rule matches the route's host and, unless it is "/" or empty, its path
-// and below. compose.Load made sure neither holds a backtick.
+// and below. stackspec.Check made sure neither holds a backtick.
 func rule(route Route) string {
 	matcher := "Host(`" + strings.ToLower(route.Host) + "`)"
 	if route.Path != "" && route.Path != "/" {

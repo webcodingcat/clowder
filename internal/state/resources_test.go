@@ -34,8 +34,8 @@ func TestAnUnchangedResourceIsNoChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []Change{{Kind: resource.KindNamespace, Name: "shop", ResourceVersion: c.index}}
-	if !slices.Equal(changes, want) || c.state.ResourcesRevision != 1 {
-		t.Errorf("changes %v, want %v; revision %d", changes, want, c.state.ResourcesRevision)
+	if !slices.Equal(changes, want) {
+		t.Errorf("changes %v, want %v", changes, want)
 	}
 	volume := putResource(resource.KindVolume, "shop", "data", testVolumeSpec())
 	c.mustApply(KindPutResource, UserActor("alice"), volume)
@@ -89,7 +89,7 @@ func TestANamespaceGoesOnlyEmptyAndDefaultStays(t *testing.T) {
 	c.mustApply(KindPutResource, UserActor("alice"),
 		putResource(resource.KindSecret, "shop", "token", SealedSecret{Value: sealedOf(5), Digest: "d"}))
 	shop := DeleteResource{Kind: resource.KindNamespace, Name: "shop", Owner: OwnerCLI}
-	c.refuse(KindDeleteResource, UserActor("alice"), shop, "still holds secret shop/token")
+	c.refuse(KindDeleteResource, UserActor("alice"), shop, "still holds Secret shop/token")
 	c.mustApply(KindDeleteResource, UserActor("alice"),
 		DeleteResource{Kind: resource.KindSecret, Namespace: "shop", Name: "token", Owner: OwnerCLI})
 	changes, err := c.changes(KindDeleteResource, UserActor("alice"), shop)
@@ -123,8 +123,8 @@ func TestAVolumeWaitsForItsStackAndCannotChangeYet(t *testing.T) {
 	// its class stays while it is there
 	config := testConfig()
 	config.StorageClasses = map[string]clusterdir.StorageClass{"slow": {Pool: "vg-slow/thin"}}
-	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: testSecrets(), ResourcesRevision: 1},
-		"volume default/data is of storage class fast")
+	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: testSecrets()},
+		"volume default/data has storage class fast, so the class must stay")
 	// the leader records where it is, and only that
 	placed := *volume
 	placed.Status = VolumeOK
@@ -151,7 +151,13 @@ func TestAVolumeWaitsForItsStackAndCannotChangeYet(t *testing.T) {
 		len(changes) != 0 {
 		t.Errorf("the same record again: changes %v, %v", changes, err)
 	}
-	c.refuse(KindDeleteVolume, LeaderActor, DeleteVolume{ID: "default/data"}, "only its owner deletes it")
+	// placed, it keeps a copy: only its delete gives up its data
+	backToPending := *c.state.Volumes["default/data"]
+	backToPending.Status, backToPending.Placements, backToPending.Minor = VolumePending, nil, nil
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: backToPending}, "holds data")
+	noCopy := *c.state.Volumes["default/data"]
+	noCopy.Placements = nil
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: noCopy}, "holds data")
 	// a volume made again after its delete starts above its retired copies
 	c.mustApply(KindDeleteResource, UserActor("alice"),
 		DeleteResource{Kind: resource.KindVolume, Namespace: "default", Name: "data", Owner: OwnerCLI})
@@ -162,6 +168,22 @@ func TestAVolumeWaitsForItsStackAndCannotChangeYet(t *testing.T) {
 	if generation := c.state.Volumes["default/data"].DataGeneration; generation != 2 {
 		t.Errorf("data generation %d after a retired copy of 1", generation)
 	}
+}
+
+func TestClusterYAMLKeepsTheClassACopyIsIn(t *testing.T) {
+	c := newCluster(t)
+	config := testConfig()
+	config.StorageClasses["fast"] = clusterdir.StorageClass{Fallback: []string{"bulk"}}
+	config.StorageClasses["bulk"] = clusterdir.StorageClass{Pool: "vg-bulk/thin"}
+	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: testSecrets()})
+	c.mustApply(KindPutResource, UserActor("alice"), putResource(resource.KindVolume, "default", "data", testVolumeSpec()))
+	// fast is only its fallback: the copy is in bulk
+	placed := *c.state.Volumes["default/data"]
+	minor := 0
+	placed.Status, placed.Minor, placed.Placements = VolumeOK, &minor, []Placement{{Host: 0, Class: "bulk"}}
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: placed})
+	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets()},
+		"volume default/data has storage class bulk, so the class must stay")
 }
 
 func TestSecretsChangeByDigestWithinTheirLimits(t *testing.T) {

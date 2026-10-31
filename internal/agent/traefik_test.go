@@ -15,6 +15,8 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/ingress"
+	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -25,12 +27,9 @@ import (
 func newTestTraefik(t *testing.T) (*traefikRunner, *stackRunner, *fakeDocker) {
 	t.Helper()
 	runner, cluster, fake, _ := newTestRunner(t)
-	cluster.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Namespace: "default", Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
-		Source: "name: shop\nservices:\n  app:\n    image: nginx\n    volumes: [db:/data]\n" +
-			"    x-clowder: {http: {host: shop.example.com, port: 8080}}\n" +
-			"volumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n",
-	})
+	cluster.put(resource.KindStack, "shop", usingDB(stackspec.Service{
+		HTTP: &stackspec.HTTP{Host: "shop.example.com", Port: 8080},
+	}))
 	labels := map[string]string{docker.ProjectLabel: shopProject, docker.ServiceLabel: "app"}
 	fake.containers = []docker.Container{
 		{ID: "healthy", State: "running", Labels: labels},
@@ -111,8 +110,16 @@ func TestTraefikComesUpWithRoutesToTheContainersThatMayTakeRequests(t *testing.T
 func TestARouteFollowsItsContainersAtOnce(t *testing.T) {
 	traefik, _, fake := newTestTraefik(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go traefik.run(ctx)
+	stopped := make(chan struct{})
+	go func() {
+		traefik.run(ctx)
+		close(stopped)
+	}()
+	// the loop writes into the test's directory until it ends
+	defer func() {
+		cancel()
+		<-stopped
+	}()
 	waitForRoutes(t, traefik, func(routes string) bool { return strings.Contains(routes, "172.18.0.2") })
 
 	fake.mu.Lock()
@@ -158,8 +165,12 @@ func TestACertificateBringsHTTPSAndARenewalComesUnderNewNames(t *testing.T) {
 	traefik, _, _ := newTestTraefik(t)
 	cluster := traefik.cluster.(*testCluster)
 	put := func(chain string) {
+		key, err := cluster.keys.Seal([]byte("key of " + chain))
+		if err != nil {
+			t.Fatal(err)
+		}
 		cluster.apply(state.KindPutCertificate, state.LeaderActor, state.PutCertificate{Certificate: state.Certificate{
-			Domain: "shop.example.com", Key: state.Sealed("key of " + chain), Chain: []byte(chain),
+			Domain: "shop.example.com", Key: key, Chain: []byte(chain),
 			NotBefore: time.Now(), NotAfter: time.Now().Add(time.Hour),
 		}})
 	}

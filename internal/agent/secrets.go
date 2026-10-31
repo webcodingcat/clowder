@@ -12,6 +12,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/digest"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -25,54 +26,61 @@ const DefaultSecretsDir = "/run/clowder-secrets"
 type stackSecrets struct {
 	// files holds the value of each secret a service asks for as a file.
 	files map[string][]byte
-	// digests holds, per service that asks for secret files, the digest of
-	// their values (compose.Target.SecretDigests).
-	digests map[string]string
+	// labels holds, per service that asks for secret files, the digest of
+	// those secrets (compose.Target.SecretLabels).
+	labels map[string]string
 	// env is the second Compose file with the secret variables; nil if the
 	// stack sets none.
 	env []byte
+	// digests are those of every secret the stack names, as the state has
+	// them, by name: what the host reports its containers came up with.
+	digests map[string]string
 }
 
-// secretDigestPurpose names the key, derived from the data key, that the
-// digests of secret files are made with.
-const secretDigestPurpose = "clowder secrets label"
+// secretLabelPurpose names the key, derived from the data key, that the
+// labels of secret files are made with.
+const secretLabelPurpose = "clowder secrets label"
 
-// secretDigest is an HMAC-SHA256 over the secrets of one service, in name
-// order, each name and value preceded by its length, so no two sets of
-// secrets give the same input.
-func secretDigest(key []byte, values map[string]string, names []string) string {
+// secretLabel is an HMAC-SHA256 over the names and the state's digests of
+// the secret files of one service, in name order: it changes with any of
+// them, so Compose recreates the container, and says nothing about the
+// values to whoever reads docker inspect.
+func secretLabel(key []byte, digests map[string]string, secretNames []string) string {
 	var parts [][]byte
-	for _, name := range slices.Sorted(slices.Values(names)) {
-		parts = append(parts, []byte(name), []byte(values[name]))
+	for _, name := range slices.Sorted(slices.Values(secretNames)) {
+		parts = append(parts, []byte(name), []byte(digests[name]))
 	}
 	return digest.HMAC(key, parts...)
 }
 
-// openSecrets opens the sealed values of the secrets the stack asks for.
-func (r *stackRunner) openSecrets(parsed *compose.Stack, sealed map[string]state.Sealed) (stackSecrets, error) {
+// openSecrets opens the secrets a stack names, the Secret resources of its
+// namespace.
+func (r *stackRunner) openSecrets(desired desiredState, stack *state.Stack) (stackSecrets, error) {
 	values := map[string]string{}
-	for _, name := range parsed.SecretNames() {
-		value, ok := sealed[name]
+	secrets := stackSecrets{files: map[string][]byte{}, labels: map[string]string{}, digests: map[string]string{}}
+	for _, name := range stack.Spec.SecretNames() {
+		secret, ok := desired.secrets[names.ID(stack.Namespace, name)]
 		if !ok {
-			return stackSecrets{}, fmt.Errorf("stack %s asks for secret %s, which the cluster does not have", parsed.Name, name)
+			return stackSecrets{}, fmt.Errorf("stack %s names secret %s, which its namespace does not have", stack.ID(), name)
 		}
-		opened, err := r.open(value)
+		opened, err := r.open(secret.Spec.Value)
 		if err != nil {
-			return stackSecrets{}, fmt.Errorf("open secret %s of stack %s: %w", name, parsed.Name, err)
+			return stackSecrets{}, fmt.Errorf("open secret %s of stack %s: %w", name, stack.ID(), err)
 		}
 		values[name] = string(opened)
+		secrets.digests[name] = secret.Spec.Digest
 	}
-	env, err := compose.RenderSecretEnv(parsed, values)
+	env, err := compose.RenderSecretEnv(stack.Name, stack.Spec, values)
 	if err != nil {
 		return stackSecrets{}, err
 	}
-	secrets := stackSecrets{files: map[string][]byte{}, digests: map[string]string{}, env: env}
-	for serviceName, service := range parsed.Services {
+	secrets.env = env
+	for serviceName, service := range stack.Spec.Services {
 		for _, name := range service.Secrets {
 			secrets.files[name] = []byte(values[name])
 		}
 		if len(service.Secrets) > 0 {
-			secrets.digests[serviceName] = secretDigest(r.digestKey, values, service.Secrets)
+			secrets.labels[serviceName] = secretLabel(r.digestKey, secrets.digests, service.Secrets)
 		}
 	}
 	return secrets, nil

@@ -47,7 +47,7 @@ func TestTheRealSopsDecryptsWhatEncryptWrites(t *testing.T) {
 	assertSameYAML(t, plaintext, readTestdata(t, "plain.yaml"))
 }
 
-// clowder stack create writes an empty file for the user to fill with sops.
+// An empty file, for the user to fill with sops, opens too.
 func TestTheRealSopsOpensAnEmptyMap(t *testing.T) {
 	sealed, err := Encrypt([]byte("{}\n"), []string{testRecipient}, time.Now())
 	if err != nil {

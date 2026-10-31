@@ -96,7 +96,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	defer stopLoops(stopReconcilers, &loops, loopsTimeout, logger)
 	loops.Go(func() { reconcileNetwork(reconcilers, node, parts.Network, logger) })
 
-	digestKey, err := credentials.dataKey.Derive(secretDigestPurpose)
+	digestKey, err := credentials.dataKey.Derive(secretLabelPurpose)
 	if err != nil {
 		return err
 	}

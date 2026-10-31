@@ -177,6 +177,52 @@ func TestResourcesReadBackAsTheyApplyAndSecretsWithoutTheirValue(t *testing.T) {
 	}
 }
 
+func TestAStackShowsItsStatusAndIsAskedForOnItsHost(t *testing.T) {
+	cluster := newTestCluster(t)
+	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	ctx := context.Background()
+	result, err := client.ApplyResources(ctx, ApplyRequest{Resources: []resource.Object{
+		object(resource.KindNamespace, "", "shop", ""),
+		object(resource.KindStack, "shop", "web", `{"services": {"app": {"image": "example/app"}}}`),
+	}}, false)
+	if err != nil || !slices.Equal(outcomes(result), []string{Applied, Applied}) {
+		t.Fatalf("apply: %+v, %v", result, err)
+	}
+	var stack resource.Object
+	if err := client.Get(ctx, "/v1/resources/stack/shop/web", &stack); err != nil {
+		t.Fatal(err)
+	}
+	var status StackStatus
+	// no priority written: cluster.yaml's default, normal
+	if err := json.Unmarshal(stack.Status, &status); err != nil || status.Status != string(state.StackPending) ||
+		status.Priority != 500 || !status.Default || status.Host != "" {
+		t.Errorf("status %s, %v", stack.Status, err)
+	}
+	for path, want := range map[string]int{
+		"/v1/stacks/shop/web/ps":      http.StatusConflict, // not placed yet
+		"/v1/stacks/shop/web/logs":    http.StatusConflict,
+		"/v1/stacks/default/web/ps":   http.StatusNotFound, // another namespace's
+		"/v1/stacks/shop/nothing/ps":  http.StatusNotFound,
+		"/v1/stacks/shop/Not_Web/ps":  http.StatusNotFound,
+		"/v1/stacks/shop/web/unknown": http.StatusNotFound,
+	} {
+		if err := client.Get(ctx, path, &[]ContainerInfo{}); statusOf(err) != want {
+			t.Errorf("%s: want HTTP %d, got %v", path, want, err)
+		}
+	}
+	// placed on host 1, the stack is asked for there: these test agents run
+	// no containers, which only host 1 itself answers
+	host := state.HostID(1)
+	leader := cluster.clusters[0]
+	leader.mu.Lock()
+	leader.state.Stacks["shop/web"].Host = &host
+	leader.mu.Unlock()
+	if err := client.Get(ctx, "/v1/stacks/shop/web/ps", &[]ContainerInfo{}); statusOf(err) != http.StatusServiceUnavailable ||
+		!strings.Contains(err.Error(), "runs no containers") {
+		t.Errorf("ps of a placed stack: %v", err)
+	}
+}
+
 func TestTheLeaderDecidesNotAFollowerThatIsBehind(t *testing.T) {
 	cluster := newTestCluster(t)
 	// host 1 still has a namespace shop that the leader has not: it would

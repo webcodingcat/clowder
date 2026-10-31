@@ -222,7 +222,7 @@ func endsContainer(signal int) bool {
 }
 
 // unhealthy restarts a container whose health check fails, unless its
-// service says not to (x-clowder.restart_unhealthy: false). It backs off
+// service says not to (restartUnhealthy: false in its stack). It backs off
 // like a crash: a container that stays unhealthy is not restarted at every
 // health check.
 func (s *Supervisor) unhealthy(ctx context.Context, stack, service, id string) {

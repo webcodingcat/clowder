@@ -1,240 +1,177 @@
 package state
 
 import (
-	"errors"
+	"cmp"
 	"fmt"
 	"maps"
-	"reflect"
 	"slices"
-	"strings"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/stackspec"
+	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// CreateStack registers a stack before its first apply.
-type CreateStack struct {
-	Namespace string `json:"namespace"`
-	Name      string `json:"name"`
-	Owner     string `json:"owner"`
-}
+// MaxStackSecrets is how many secrets a stack may name: each is a file or
+// a variable on its host, rewritten at every change.
+const MaxStackSecrets = 64
 
-func applyCreateStack(s *State, cmd Command, payload CreateStack) error {
-	if err := s.checkStackName(payload.Namespace, payload.Name); err != nil {
-		return err
-	}
-	if payload.Owner == "" {
-		return errors.New("the stack needs an owner")
-	}
-	id := names.ID(payload.Namespace, payload.Name)
-	if _, exists := s.Stacks[id]; exists {
-		return fmt.Errorf("stack %s exists already", id)
-	}
-	// a new volume of the same name would have the same LV as a retired one
-	// of the deleted stack, and its host would take the old data for it
-	if slices.ContainsFunc(s.Retired, func(c RetiredCopy) bool { return stackOfVolume(c.Volume) == id }) {
-		return fmt.Errorf("the volumes of the deleted stack %s are still being removed; try again in a minute", id)
-	}
-	createdBy := cmd.Actor
-	if IsUserActor(cmd.Actor) {
-		createdBy = strings.TrimPrefix(cmd.Actor, userActorPrefix)
-	}
-	s.Stacks[id] = &Stack{
-		Namespace: payload.Namespace, Name: payload.Name, Owner: payload.Owner, CreatedBy: createdBy,
-		Status: StackCreated,
+func findStack(s *State, id string) *Meta {
+	if stack, ok := s.Stacks[id]; ok {
+		return &stack.Meta
 	}
 	return nil
 }
 
-// stackOfVolume is the ID of the stack a volume belongs to, or "" for an ID
-// that names none (put-volume refuses those).
-func stackOfVolume(volumeID string) string {
-	stackID, _ := names.StackOfVolume(volumeID)
-	return stackID
-}
-
-// checkStackName refuses a stack name that is not valid, or a namespace the
-// cluster does not have.
-func (s *State) checkStackName(namespace, stack string) error {
-	if !names.Valid(stack) {
-		return fmt.Errorf("stack name %q: %s", stack, names.Rule)
+// putStack stores a stack's spec, normalized, so a spec written another way
+// but meaning the same is unchanged. The state reads the spec itself: it
+// checks it against the cluster (priority categories, privileges, ports
+// and routes of other stacks) and the namespace (its volumes and secrets),
+// and works out what the scheduler needs. A running stack becomes
+// starting until its host reports the new generation up; any other keeps
+// its status, which its host or the placement moves on.
+func putStack(s *State, id string, payload PutResource) (*Meta, error) {
+	written, err := decodeSpec[stackspec.Spec](payload.Kind, id, payload.Spec)
+	if err != nil {
+		return nil, err
 	}
-	if _, ok := s.Namespaces[namespace]; !ok {
-		return fmt.Errorf("no namespace %q", namespace)
+	spec := stackspec.Normalize(written)
+	stored, exists := s.Stacks[id]
+	if exists && sameJSON(stored.Spec, spec) {
+		return nil, nil
 	}
-	return nil
-}
-
-// PutStack replaces the Compose file of a registered stack; the agent of its
-// host applies the new generation.
-type PutStack struct {
-	Namespace string `json:"namespace"`
-	Name      string `json:"name"`
-	Owner     string `json:"owner"`
-	Source    string `json:"source"`
-	Priority  int    `json:"priority"`
-	// Ports and Routes are what the stack publishes, as the API read them
-	// from Source (compose.Stack.PublishedPorts and Routes): the state does
-	// not parse Compose files, but must refuse what another stack has.
-	Ports  []string `json:"ports,omitempty"`
-	Routes []string `json:"routes,omitempty"`
-	// Services are the stack's services as the scheduler needs them.
-	Services map[string]Service `json:"services,omitempty"`
-	// Privileged is true when a service asks for what reaches beyond its
-	// container: the state, the last place to check, refuses it unless
-	// stacks.privileged names the stack.
-	Privileged bool `json:"privileged,omitempty"`
-	// Secrets replace the stack's secrets as a whole: every sender sends all
-	// the stack asks for, an operation too. So whoever cannot decrypt the
-	// stack's secrets file can only remove the secrets, never keep them for a
-	// changed stack.
-	Secrets map[string]Sealed `json:"secrets,omitempty"`
-	// ConfigRevision is the cluster.yaml the stack was checked against
-	// (storage classes, priorities, privileges): if a cluster apply came in
-	// between, the check no longer holds and the command is refused.
-	ConfigRevision int64 `json:"config_revision"`
-	// Operation is set when the operation holding the lock makes the change.
-	Operation string `json:"operation,omitempty"`
-}
-
-// The limits of a stack's own secrets (each at most
-// resource.MaxSecretBytes): every apply writes them into the Raft log. The
-// API checks the values' sizes before it seals them; the state checks only
-// the count. They go with the stacks' own secrets, for Secret resources.
-const (
-	MaxStackSecrets      = 64
-	MaxStackSecretsBytes = 256 << 10
-)
-
-func applyPutStack(s *State, _ Command, payload PutStack) error {
-	if err := s.checkStackName(payload.Namespace, payload.Name); err != nil {
-		return err
+	if problems := stackspec.Check(spec); len(problems) > 0 {
+		return nil, fmt.Errorf("stack %s: %w", id, problems)
 	}
-	id := names.ID(payload.Namespace, payload.Name)
+	services, err := servicesOf(spec, s.Config.Spec.WithDefaults().Priorities)
+	if err != nil {
+		return nil, fmt.Errorf("stack %s: %w", id, err)
+	}
+	var host *HostID
+	if exists {
+		host = stored.Host
+	}
+	if err := s.checkStack(id, payload.Namespace, host, spec); err != nil {
+		return nil, err
+	}
+	if err := s.checkUnlocked(stackLock(id), ""); err != nil {
+		return nil, err
+	}
 	switch {
-	case payload.Owner == "":
-		return errors.New("the stack needs an owner")
-	case payload.Source == "":
-		return fmt.Errorf("stack %s has no Compose file", id)
-	case len(payload.Secrets) > MaxStackSecrets:
-		return fmt.Errorf("stack %s has %d secrets, more than %d", id, len(payload.Secrets), MaxStackSecrets)
-	case payload.ConfigRevision != s.Config.Revision:
-		return fmt.Errorf("stack %s was checked against cluster.yaml revision %d, but %d came in between; apply again",
-			id, payload.ConfigRevision, s.Config.Revision)
-	case payload.Privileged && !slices.Contains(s.Config.Spec.Stacks.Privileged, id):
+	case !exists:
+		stored = &Stack{
+			Meta:   Meta{Namespace: payload.Namespace, Name: payload.Name, Owner: payload.Owner},
+			Status: StackPending,
+		}
+		s.Stacks[id] = stored
+	case stored.Status == StackRunning:
+		// the host reports running again once the new generation is up, so
+		// users can tell when it is
+		stored.Status = StackStarting
+	}
+	stored.Spec, stored.Services = spec, services
+	// a service the new generation no longer has is pushed out no more; the
+	// scheduler looks at the stack again at its next pass
+	stored.PushedOut = slices.DeleteFunc(stored.PushedOut, func(service string) bool {
+		_, kept := services[service]
+		return !kept
+	})
+	return &stored.Meta, nil
+}
+
+// servicesOf works out what the scheduler needs of each service: its
+// priority as written (its own, else the stack's), which must resolve with
+// the cluster's categories, its reservations (zero for the cluster's
+// default) and what it depends on.
+func servicesOf(spec stackspec.Spec, priorities clusterdir.Priorities) (map[string]Service, error) {
+	services := map[string]Service{}
+	for _, name := range slices.Sorted(maps.Keys(spec.Services)) {
+		service := spec.Services[name]
+		priority, err := stackspec.ParsePriority(cmp.Or(service.Priority, spec.Priority))
+		if err != nil {
+			return nil, fmt.Errorf("service %s: %w", name, err)
+		}
+		if _, err := priorities.Resolve(priority); err != nil {
+			return nil, fmt.Errorf("service %s: %w", name, err)
+		}
+		reserved := Service{Priority: priority, DependsOn: slices.Clone(service.DependsOn)}
+		if reserve := service.Resources.Reserve; reserve != nil {
+			reserved.CPUs = reserve.CPUs
+			if reserve.Memory != "" {
+				memory, err := units.ParseSize(reserve.Memory)
+				if err != nil {
+					return nil, fmt.Errorf("service %s: %w", name, err)
+				}
+				reserved.MemoryBytes = memory
+			}
+		}
+		services[name] = reserved
+	}
+	return services, nil
+}
+
+// checkStack checks a stack against what only the state knows: privileges
+// need stacks.privileged; no other stack may publish its ports or take its
+// routes (both would reach the same address); its volumes and secrets must
+// be its namespace's, and a volume serves one stack only, as two stacks on
+// one file system would ruin it. A placed stack (host) cannot name a volume
+// whose data is on another host: it could never start.
+func (s *State) checkStack(id, namespace string, host *HostID, spec stackspec.Spec) error {
+	if spec.Privileged() && !slices.Contains(s.Config.Spec.Stacks.Privileged, id) {
 		return fmt.Errorf("stack %s reaches beyond its containers; only stacks named in stacks.privileged of "+
 			"cluster.yaml may", id)
 	}
-	for _, secret := range slices.Sorted(maps.Keys(payload.Secrets)) {
-		if !names.Valid(secret) {
-			return fmt.Errorf("stack %s: %q is not a secret name", id, secret)
-		}
-	}
-	if err := s.checkUnlocked(stackLock(id), payload.Operation); err != nil {
-		return err
-	}
-	if err := s.checkUnclaimed(id, payload); err != nil {
-		return err
-	}
-	for _, name := range slices.Sorted(maps.Keys(payload.Services)) {
-		for _, dependency := range payload.Services[name].DependsOn {
-			if _, ok := payload.Services[dependency]; !ok {
-				return fmt.Errorf("stack %s: service %s depends on %s, which the stack does not have",
-					id, name, dependency)
-			}
-		}
-	}
-	stack, exists := s.Stacks[id]
-	switch {
-	case !exists:
-		return fmt.Errorf("no stack %s; register it first (clowder stack create)", id)
-	case stack.Owner != payload.Owner:
-		return fmt.Errorf("stack %s belongs to %s, not to %s", id, stack.Owner, payload.Owner)
-	}
-	switch stack.Status {
-	case StackCreated:
-		stack.Status = StackPending // the only way out of created
-	case StackRunning:
-		// the host reports running again once the new generation is up, so
-		// users can tell when it is
-		stack.Status = StackStarting
-	}
-	stack.Generation++
-	stack.Source = payload.Source
-	stack.Priority = payload.Priority
-	stack.Ports, stack.Routes = payload.Ports, payload.Routes
-	stack.Services = payload.Services
-	stack.Privileged = payload.Privileged
-	// a service the new generation no longer has is pushed out no more; the
-	// scheduler looks at the stack again at its next pass
-	stack.PushedOut = slices.DeleteFunc(stack.PushedOut, func(service string) bool {
-		_, kept := payload.Services[service]
-		return !kept
-	})
-	stack.Secrets = payload.Secrets
-	s.ResourcesRevision++
-	return nil
-}
-
-// checkUnclaimed refuses a port or an HTTP route that another stack has:
-// both stacks would reach the same address. A stack's own earlier
-// generation does not count, so an apply keeps what it had.
-func (s *State) checkUnclaimed(id string, payload PutStack) error {
+	ports, routes := spec.PublishedPorts(), spec.Routes()
 	for _, otherID := range slices.Sorted(maps.Keys(s.Stacks)) {
 		if otherID == id {
 			continue
 		}
 		other := s.Stacks[otherID]
-		for _, port := range payload.Ports {
-			if slices.Contains(other.Ports, port) {
+		for _, port := range other.Spec.PublishedPorts() {
+			if slices.Contains(ports, port) {
 				return fmt.Errorf("stack %s: port %s is published by stack %s already", id, port, otherID)
 			}
 		}
-		for _, route := range payload.Routes {
-			if slices.Contains(other.Routes, route) {
+		for _, route := range other.Spec.Routes() {
+			if slices.Contains(routes, route) {
 				return fmt.Errorf("stack %s: route %s belongs to stack %s already", id, route, otherID)
 			}
+		}
+	}
+	for _, volume := range spec.VolumeNames() {
+		named, ok := s.Volumes[names.ID(namespace, volume)]
+		if !ok {
+			return fmt.Errorf("stack %s: namespace %s has no volume %s", id, namespace, volume)
+		}
+		if host != nil && named.Status != VolumePending && !slices.ContainsFunc(named.Placements,
+			func(placement Placement) bool { return placement.Host == *host && !placement.Tiebreaker }) {
+			return fmt.Errorf("stack %s runs on host %d, but volume %s has its data on another host", id, *host, volume)
+		}
+		if other := s.stackNaming(namespace, volume, id, func(stack *Stack) []string {
+			return stack.Spec.VolumeNames()
+		}); other != "" {
+			return fmt.Errorf("stack %s: volume %s is stack %s's already; a volume serves one stack", id, volume, other)
+		}
+	}
+	secrets := spec.SecretNames()
+	if len(secrets) > MaxStackSecrets {
+		return fmt.Errorf("stack %s names %d secrets, more than %d", id, len(secrets), MaxStackSecrets)
+	}
+	for _, secret := range secrets {
+		if _, ok := s.Secrets[names.ID(namespace, secret)]; !ok {
+			return fmt.Errorf("stack %s: namespace %s has no secret %s", id, namespace, secret)
 		}
 	}
 	return nil
 }
 
-// DeleteStack removes a stack. A stack with volumes goes only together with
-// them (WithVolumes), in this one command: deleted one by one, the
-// placement would put a volume back between two commands.
-type DeleteStack struct {
-	Namespace   string `json:"namespace"`
-	Name        string `json:"name"`
-	WithVolumes bool   `json:"with_volumes,omitempty"`
-	// Operation is set when the operation holding the lock makes the change.
-	Operation string `json:"operation,omitempty"`
-}
-
-func applyDeleteStack(s *State, _ Command, payload DeleteStack) error {
-	id := names.ID(payload.Namespace, payload.Name)
-	if _, ok := s.Stacks[id]; !ok {
-		return fmt.Errorf("no stack %s", id)
-	}
-	if err := s.checkUnlocked(stackLock(id), payload.Operation); err != nil {
+// removeStack removes a stack; its volumes stay, with their data, for the
+// next stack that names them.
+func removeStack(s *State, id string) error {
+	if err := s.checkUnlocked(stackLock(id), ""); err != nil {
 		return err
-	}
-	var volumes []string
-	for _, volumeID := range slices.Sorted(maps.Keys(s.Volumes)) {
-		if stackOfVolume(volumeID) != id {
-			continue
-		}
-		if !payload.WithVolumes {
-			return fmt.Errorf("stack %s still has volume %s", id, volumeID)
-		}
-		if err := s.checkUnlocked(volumeLock(volumeID), payload.Operation); err != nil {
-			return err
-		}
-		volumes = append(volumes, volumeID)
-	}
-	for _, volumeID := range volumes {
-		s.retire(s.Volumes[volumeID], nil)
-		delete(s.Volumes, volumeID)
 	}
 	delete(s.Stacks, id)
 	return nil
@@ -249,15 +186,15 @@ type SetStackStatus struct {
 	// it 0. A report about an older generation is refused: an apply came in
 	// between, and that generation has yet to come up.
 	Generation int64 `json:"generation,omitempty"`
+	// AppliedSecrets are the digests of the secrets the containers came up
+	// with, by name; the host sends them with running, the leader none.
+	AppliedSecrets map[string]string `json:"applied_secrets,omitempty"`
 }
 
 func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) error {
 	stack, ok := s.Stacks[payload.ID]
-	switch {
-	case !ok:
+	if !ok {
 		return fmt.Errorf("no stack %s", payload.ID)
-	case stack.Status == StackCreated:
-		return fmt.Errorf("stack %s was never applied", payload.ID)
 	}
 	switch payload.Status {
 	case StackPending, StackStarting, StackRunning, StackWaitingForHost, StackStopped:
@@ -277,10 +214,18 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) error {
 		return fmt.Errorf("stack %s: the report is about generation %d, but %d is applied",
 			payload.ID, payload.Generation, stack.Generation)
 	}
+	applied := stack.AppliedSecrets
+	if IsHostActor(cmd.Actor) {
+		applied = payload.AppliedSecrets
+	}
+	if stack.Status == payload.Status && samePlace(stack.Host, payload.Host) && maps.Equal(stack.AppliedSecrets, applied) {
+		return errUnchanged
+	}
 	if !samePlace(stack.Host, payload.Host) {
 		stack.LastMove = cmd.At
 	}
-	stack.Status, stack.Host = payload.Status, payload.Host
+	stack.Status, stack.Host, stack.AppliedSecrets = payload.Status, payload.Host, applied
+	s.changed(resource.KindStack, &stack.Meta)
 	return nil
 }
 
@@ -303,15 +248,24 @@ func applySetPushedOut(s *State, _ Command, payload SetPushedOut) error {
 			}
 		}
 	}
-	for id, services := range payload.Stacks {
-		s.Stacks[id].PushedOut = slices.Compact(slices.Sorted(slices.Values(services)))
+	unchanged := true
+	for _, id := range slices.Sorted(maps.Keys(payload.Stacks)) {
+		stack := s.Stacks[id]
+		pushedOut := slices.Compact(slices.Sorted(slices.Values(payload.Stacks[id])))
+		if !slices.Equal(stack.PushedOut, pushedOut) {
+			stack.PushedOut, unchanged = pushedOut, false
+			s.changed(resource.KindStack, &stack.Meta)
+		}
+	}
+	if unchanged {
+		return errUnchanged
 	}
 	return nil
 }
 
 // SetStackWaitReason records why the placement cannot place a stack or a
-// volume it newly names; an empty reason clears it. It changes nothing else,
-// so it never moves or stops a stack that runs. WaitingSince starts with the
+// volume it names; an empty reason clears it. It changes nothing else, so
+// it never moves or stops a stack that runs. WaitingSince starts with the
 // first reason, at the command's time.
 type SetStackWaitReason struct {
 	ID     string `json:"id"` // the stack's
@@ -320,16 +274,18 @@ type SetStackWaitReason struct {
 
 func applySetStackWaitReason(s *State, cmd Command, payload SetStackWaitReason) error {
 	stack, ok := s.Stacks[payload.ID]
-	if !ok {
-		return fmt.Errorf("no stack %s", payload.ID)
-	}
 	switch {
+	case !ok:
+		return fmt.Errorf("no stack %s", payload.ID)
+	case stack.WaitReason == payload.Reason:
+		return errUnchanged
 	case payload.Reason == "":
 		stack.WaitingSince = time.Time{}
 	case stack.WaitReason == "":
 		stack.WaitingSince = cmd.At
 	}
 	stack.WaitReason = payload.Reason
+	s.changed(resource.KindStack, &stack.Meta)
 	return nil
 }
 
@@ -345,180 +301,5 @@ func (s *State) checkLiveHost(id *HostID) error {
 	if host, ok := s.Hosts[*id]; !ok || host.Phase == Removed {
 		return fmt.Errorf("host %d is not a member", *id)
 	}
-	return nil
-}
-
-// MaxMinor is the highest DRBD minor: its port 10000 + minor stays in the
-// range stackspec.ReservedPort keeps for DRBD (10000-10999); both change
-// together.
-const MaxMinor = 999
-
-// PutVolume creates a stack's volume or replaces a volume's record: where
-// its copies are and how they are. A volume resource keeps its Meta and its
-// spec, which only put-resource sets.
-type PutVolume struct {
-	Volume Volume `json:"volume"`
-	// Operation is set when the operation holding the lock makes the change.
-	Operation string `json:"operation,omitempty"`
-}
-
-func applyPutVolume(s *State, _ Command, payload PutVolume) error {
-	volume := payload.Volume
-	old, exists := s.Volumes[volume.ID]
-	if exists && old.IsResource() {
-		if volume.Spec != old.Spec {
-			return fmt.Errorf("volume %s: its spec changes only with an apply", volume.ID)
-		}
-		volume.Meta = old.Meta
-	} else if err := s.checkStackVolume(volume.ID); err != nil {
-		return err
-	}
-	if exists && reflect.DeepEqual(*old, volume) {
-		return errUnchanged
-	}
-	if err := s.checkUnlocked(volumeLock(volume.ID), payload.Operation); err != nil {
-		return err
-	}
-	if err := checkVolume(volume); err != nil {
-		return err
-	}
-	if exists && volume.DataGeneration < old.DataGeneration {
-		return fmt.Errorf("volume %s: data generation %d is older than %d",
-			volume.ID, volume.DataGeneration, old.DataGeneration)
-	}
-	if volume.Minor != nil {
-		if *volume.Minor < 0 || *volume.Minor > MaxMinor {
-			return fmt.Errorf("volume %s: minor %d is not from 0 to %d", volume.ID, *volume.Minor, MaxMinor)
-		}
-		for _, other := range s.Volumes {
-			if other.ID != volume.ID && other.Minor != nil && *other.Minor == *volume.Minor {
-				return fmt.Errorf("volume %s: minor %d belongs to %s", volume.ID, *volume.Minor, other.ID)
-			}
-		}
-	}
-	// fewer placements than replicas is allowed: a degraded volume waits for
-	// its missing copies
-	placed := map[HostID]bool{}
-	for _, placement := range volume.Placements {
-		if err := s.checkLiveHost(&placement.Host); err != nil {
-			return fmt.Errorf("volume %s: %w", volume.ID, err)
-		}
-		if placed[placement.Host] {
-			return fmt.Errorf("volume %s: two copies on host %d", volume.ID, placement.Host)
-		}
-		placed[placement.Host] = true
-	}
-	if exists {
-		s.retire(old, &volume)
-	}
-	s.Volumes[volume.ID] = &volume
-	if volume.IsResource() {
-		s.changed(resource.KindVolume, &volume.Meta)
-	}
-	return nil
-}
-
-// checkStackVolume refuses a volume of a stack's Compose file whose ID is
-// not a stack's volume or whose stack is gone; a volume resource is made by
-// put-resource only.
-func (s *State) checkStackVolume(id string) error {
-	stackID, ok := names.StackOfVolume(id)
-	if !ok {
-		return fmt.Errorf("volume ID %q is not namespace/stack/volume, and there is no volume %s", id, id)
-	}
-	if _, ok := s.Stacks[stackID]; !ok {
-		return fmt.Errorf("volume %s: no stack %s", id, stackID)
-	}
-	return nil
-}
-
-// retire records the copies of old as retired, except those that kept,
-// the volume's new record, still has: same host, same data generation.
-func (s *State) retire(old *Volume, kept *Volume) {
-	for _, placement := range old.Placements {
-		if kept != nil && kept.DataGeneration == old.DataGeneration &&
-			slices.ContainsFunc(kept.Placements, func(p Placement) bool { return p.Host == placement.Host }) {
-			continue
-		}
-		retired := RetiredCopy{Volume: old.ID, DataGeneration: old.DataGeneration, Host: placement.Host}
-		if !slices.Contains(s.Retired, retired) {
-			s.Retired = append(s.Retired, retired)
-		}
-	}
-}
-
-// ForgetCopy is a host telling that a retired copy of its is gone.
-type ForgetCopy struct {
-	Copy RetiredCopy `json:"copy"`
-}
-
-func applyForgetCopy(s *State, cmd Command, payload ForgetCopy) error {
-	if cmd.Actor != HostActor(payload.Copy.Host) {
-		return fmt.Errorf("only host %d itself forgets its copies", payload.Copy.Host)
-	}
-	index := slices.Index(s.Retired, payload.Copy)
-	if index < 0 {
-		return fmt.Errorf("no retired copy of %s (data generation %d) on host %d",
-			payload.Copy.Volume, payload.Copy.DataGeneration, payload.Copy.Host)
-	}
-	s.Retired = slices.Delete(s.Retired, index, index+1)
-	return nil
-}
-
-// checkVolume holds what a volume's record must be on its own: the state is
-// the last place to catch a wrong one.
-func checkVolume(volume Volume) error {
-	copies := 0
-	for _, placement := range volume.Placements {
-		if !placement.Tiebreaker {
-			copies++
-		}
-	}
-	replicas := volume.Spec.Replicas
-	if err := volume.Spec.Check(); err != nil {
-		return fmt.Errorf("volume %s: %w", volume.ID, err)
-	}
-	switch {
-	case volume.DataGeneration < 0 || volume.DataGeneration > names.MaxDataGeneration:
-		// the generation is part of the LV's name, whose length has a limit
-		return fmt.Errorf("volume %s: data generation %d is not from 0 to %d", volume.ID, volume.DataGeneration,
-			names.MaxDataGeneration)
-	case copies > max(replicas, 1):
-		// replicas 0 is one plain LV on one host
-		return fmt.Errorf("volume %s: %d copies for %d replicas", volume.ID, copies, replicas)
-	case volume.Status == VolumePending && (len(volume.Placements) > 0 || volume.Minor != nil):
-		// the minor comes with the first copy, from the placement
-		return fmt.Errorf("volume %s: a pending volume has no copies and no DRBD minor", volume.ID)
-	case volume.Status != VolumePending && (replicas == 0) != (volume.Minor == nil):
-		return fmt.Errorf("volume %s: a DRBD minor exactly when it has replicas", volume.ID)
-	}
-	switch volume.Status {
-	case VolumePending, VolumeOK, VolumeDegraded, VolumeResyncing, VolumeRestorePending:
-		return nil
-	default:
-		return fmt.Errorf("volume %s: unknown status %q", volume.ID, volume.Status)
-	}
-}
-
-// DeleteVolume removes a volume's record.
-type DeleteVolume struct {
-	ID string `json:"id"`
-	// Operation is set when the operation holding the lock makes the change.
-	Operation string `json:"operation,omitempty"`
-}
-
-func applyDeleteVolume(s *State, _ Command, payload DeleteVolume) error {
-	volume, ok := s.Volumes[payload.ID]
-	switch {
-	case !ok:
-		return fmt.Errorf("no volume %s", payload.ID)
-	case volume.IsResource():
-		return fmt.Errorf("volume %s is a resource; only its owner deletes it (delete-resource)", payload.ID)
-	}
-	if err := s.checkUnlocked(volumeLock(payload.ID), payload.Operation); err != nil {
-		return err
-	}
-	s.retire(s.Volumes[payload.ID], nil)
-	delete(s.Volumes, payload.ID)
 	return nil
 }

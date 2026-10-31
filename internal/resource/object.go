@@ -15,7 +15,7 @@ import (
 const APIVersion = "clowder/v1"
 
 // Kinds are the kinds of resources.
-var Kinds = []string{KindNamespace, KindSecret, KindVolume}
+var Kinds = []string{KindNamespace, KindSecret, KindStack, KindVolume}
 
 // KindOf is the kind a word names: the kind in lower case ("volume"), as
 // the API's paths write it.
@@ -33,7 +33,8 @@ type Object struct {
 	APIVersion string   `json:"apiVersion"`
 	Kind       string   `json:"kind"`
 	Metadata   Metadata `json:"metadata"`
-	// Spec is the kind's (VolumeSpec, SecretSpec; a namespace has none).
+	// Spec is the kind's (VolumeSpec, SecretSpec, stackspec.Spec; a
+	// namespace has none).
 	Spec json.RawMessage `json:"spec,omitempty"`
 	// Status is what the cluster tells about the resource; an apply
 	// ignores it.

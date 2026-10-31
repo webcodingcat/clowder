@@ -15,6 +15,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/stackspec"
 )
 
 // MaxHosts is the size of a cluster: a host ID is also the DRBD node-id and
@@ -59,10 +60,7 @@ type State struct {
 	Namespaces map[string]*Namespace `json:"namespaces,omitempty"`
 	Stacks     map[string]*Stack     `json:"stacks,omitempty"`  // names.ID: "<namespace>/<stack>"
 	Secrets    map[string]*Secret    `json:"secrets,omitempty"` // names.ID: "<namespace>/<secret>"
-	// ResourcesRevision counts the changes of resources: a cluster apply
-	// checked against them commits only if none came in between.
-	ResourcesRevision int64              `json:"resources_revision,omitempty"`
-	Volumes           map[string]*Volume `json:"volumes,omitempty"` // Volume.ID
+	Volumes    map[string]*Volume    `json:"volumes,omitempty"` // names.ID: "<namespace>/<volume>"
 	// Retired are the volume copies the cluster gave up: the only ones an
 	// agent removes, so a copy that is merely missing from the state (a bug)
 	// keeps its data.
@@ -207,34 +205,21 @@ type SealedSecret struct {
 	Digest string `json:"digest"`
 }
 
-// Stack is a registered Compose stack.
+// Stack is a stack of a namespace: its spec as the user applied it,
+// normalized, and its status, which the leader and its host write.
 type Stack struct {
-	Namespace string `json:"namespace"`
-	Name      string `json:"name"`
-	Owner     string `json:"owner"` // the channel: OwnerCLI or GitOpsOwner(source)
-	// CreatedBy is the actor that registered the stack: a user's name, or
-	// the actor itself for anyone else.
-	CreatedBy string `json:"created_by,omitempty"`
-	// Generation counts the applies of this stack.
-	Generation int64 `json:"generation"`
-	// Source is the stack's Compose file as the CLI checked and sent it
-	// (compose.Stack.Source): self-contained, x-clowder included.
-	Source string `json:"source"`
-	// Secrets are the values of the secrets the stack asks for, by name,
-	// sealed with the data key.
-	Secrets  map[string]Sealed `json:"secrets,omitempty"`
-	Priority int               `json:"priority"`
-	// Ports ("udp/9987") and Routes ("shop.example.com/") are what the stack
-	// publishes; no other stack may have the same.
-	Ports  []string `json:"ports,omitempty"`
-	Routes []string `json:"routes,omitempty"`
-	// Services are what the scheduler needs of each service, by name.
+	Meta
+	Spec stackspec.Spec `json:"spec"`
+	// Services are what the scheduler needs of each service, by name,
+	// worked out from the spec when it was put (servicesOf), so the
+	// scheduler reads no sizes or priorities again.
 	Services map[string]Service `json:"services,omitempty"`
-	// Privileged is true when a service reaches beyond its container
-	// (compose.Service.Privileges): stacks.privileged must name the stack.
-	Privileged bool        `json:"privileged,omitempty"`
-	Host       *HostID     `json:"host,omitempty"` // nil: not placed yet
-	Status     StackStatus `json:"status"`
+	Host     *HostID            `json:"host,omitempty"` // nil: not placed yet
+	Status   StackStatus        `json:"status"`
+	// AppliedSecrets are the digests of the secrets the containers on its
+	// host came up with, by name: a changed secret that has not reached the
+	// containers yet differs from its digest.
+	AppliedSecrets map[string]string `json:"applied_secrets,omitempty"`
 	// PushedOut are the services stopped for services of higher priority,
 	// sorted; only the leader changes the list (set-pushed-out).
 	PushedOut []string  `json:"pushed_out,omitempty"`
@@ -259,13 +244,7 @@ func (s *Stack) Project() string {
 	return names.Project(s.Namespace, s.Name)
 }
 
-// VolumeID is the ID of the stack's volume of that name.
-func (s *Stack) VolumeID(volume string) string {
-	return names.VolumeID(s.Namespace, s.Name, volume)
-}
-
-// Service is what the scheduler needs of one service of a stack, as the
-// API read it from the stack's Compose file.
+// Service is what the scheduler needs of one service of a stack.
 type Service struct {
 	// Priority is as written: the service's own, else the stack's; the
 	// scheduler resolves it with the current cluster.yaml, so a changed
@@ -279,11 +258,11 @@ type Service struct {
 	DependsOn []string `json:"depends_on,omitempty"`
 }
 
-// OwnerCLI owns the stacks applied with clowder stack apply.
+// OwnerCLI owns the resources users apply with the CLI.
 const OwnerCLI = "cli"
 
-// GitOpsOwner owns the stacks of a GitOps source; a stack has one owner, so
-// the CLI and a source never overwrite each other.
+// GitOpsOwner owns the resources of a GitOps source; a resource has one
+// owner, so the CLI and a source never overwrite each other.
 func GitOpsOwner(source string) string {
 	return "gitops:" + source
 }
@@ -293,9 +272,6 @@ type StackStatus string
 
 // The states of a stack.
 const (
-	// StackCreated is registered and never applied: it has no Source, and
-	// nothing places or runs it until put-stack moves it to pending.
-	StackCreated        StackStatus = "created"
 	StackPending        StackStatus = "pending"
 	StackStarting       StackStatus = "starting"
 	StackRunning        StackStatus = "running"
@@ -303,13 +279,9 @@ const (
 	StackStopped        StackStatus = "stopped"
 )
 
-// Volume is a volume and where its copies are. It is a resource of a
-// namespace (ID "<namespace>/<name>"), or, until stacks are resources, a
-// volume of a stack's Compose file (ID "<namespace>/<stack>/<volume>",
-// names.VolumeID), which has no Meta.
+// Volume is a volume of a namespace and where its copies are.
 type Volume struct {
 	Meta
-	ID   string              `json:"id"`
 	Spec resource.VolumeSpec `json:"spec"`
 	// DataGeneration grows with a restore or a class move; it is part of
 	// the LV's name (names.VolumeName), at most names.MaxDataGeneration.
@@ -319,10 +291,9 @@ type Volume struct {
 	Status         VolumeStatus `json:"status"`
 }
 
-// IsResource tells a volume resource from a volume of a stack's Compose
-// file, which has no Meta.
-func (v *Volume) IsResource() bool {
-	return v.Name != ""
+// ID is the volume's key in State.Volumes.
+func (v *Volume) ID() string {
+	return names.ID(v.Namespace, v.Name)
 }
 
 // Placement is one copy of a volume.

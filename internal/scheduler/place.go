@@ -6,21 +6,18 @@
 // cluster's default); a host offers what it reported less system_reserve.
 // A new stack goes to a host where all of it fits, else to one where its
 // services push out services of lower effective priority, one service
-// after the other (fitStack). Phase 2 adds moving and replicating to make
-// room.
+// after the other (fitStack).
 package scheduler
 
 import (
 	"cmp"
-	"context"
 	"fmt"
 	"maps"
 	"slices"
 	"strings"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
-	"github.com/webcodingcat/clowder/internal/compose"
-	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/units"
 )
@@ -70,7 +67,7 @@ type Decisions struct {
 // Plan makes hosts over capacity fit, places the volumes that placed stacks
 // have gained and the stacks that have no host yet (highest priority
 // first), and names the pushed-out service that may come back.
-func Plan(ctx context.Context, current *state.State) Decisions {
+func Plan(current *state.State) Decisions {
 	planner := newPlanner(current)
 	var decisions Decisions
 	for _, id := range slices.Sorted(maps.Keys(current.Hosts)) {
@@ -85,14 +82,11 @@ func Plan(ctx context.Context, current *state.State) Decisions {
 	var unplaced []*state.Stack
 	for _, name := range slices.Sorted(maps.Keys(current.Stacks)) {
 		stack := current.Stacks[name]
-		switch {
-		case stack.Status == state.StackCreated:
-			// never applied: nothing to place
-		case stack.Host == nil:
+		if stack.Host == nil {
 			unplaced = append(unplaced, stack)
-		default:
-			decisions.add(planner.decide(ctx, stack))
+			continue
 		}
+		decisions.add(planner.decide(stack))
 	}
 	// by the highest effective priority of their services, from the
 	// current categories like every other priority here
@@ -105,7 +99,7 @@ func Plan(ctx context.Context, current *state.State) Decisions {
 	}
 	slices.SortStableFunc(unplaced, func(a, b *state.Stack) int { return cmp.Compare(highest(b), highest(a)) })
 	for _, stack := range unplaced {
-		decisions.add(planner.decide(ctx, stack))
+		decisions.add(planner.decide(stack))
 	}
 	if len(decisions.PushOuts) > 0 || slices.ContainsFunc(decisions.Placements, func(p Placement) bool { return p.Place }) {
 		return decisions
@@ -129,12 +123,8 @@ func (d *Decisions) add(placement Placement, waiting *Waiting) {
 }
 
 // decide places one stack; a Waiting says why it cannot.
-func (p *planner) decide(ctx context.Context, stack *state.Stack) (Placement, *Waiting) {
-	parsed, err := compose.Parse(ctx, stack.Name, []byte(stack.Source))
-	if err != nil {
-		return Placement{}, &Waiting{Stack: stack.ID(), Reason: err.Error()}
-	}
-	placement, reason := p.place(stack, parsed)
+func (p *planner) decide(stack *state.Stack) (Placement, *Waiting) {
+	placement, reason := p.place(stack)
 	if reason != "" {
 		return Placement{}, &Waiting{Stack: stack.ID(), Reason: reason}
 	}
@@ -180,9 +170,9 @@ func (p *planner) take(host state.HostID, pool string, size int64) {
 // place decides for one stack; a reason means it waits. A new stack goes
 // to the active host where all of it fits with the least room left (best
 // fit), else to the first where its services push out others.
-func (p *planner) place(stack *state.Stack, parsed *compose.Stack) (Placement, string) {
+func (p *planner) place(stack *state.Stack) (Placement, string) {
 	if stack.Host != nil {
-		volumes, reason := p.newVolumes(stack, *stack.Host, parsed)
+		volumes, reason := p.newVolumes(stack, *stack.Host)
 		return Placement{Stack: stack.ID(), Host: *stack.Host, Volumes: volumes}, reason
 	}
 	var whole, pushing []stackFit
@@ -207,7 +197,7 @@ func (p *planner) place(stack *state.Stack, parsed *compose.Stack) (Placement, s
 	}
 	slices.SortStableFunc(whole, func(a, b stackFit) int { return cmp.Compare(freeMemory[a.host], freeMemory[b.host]) })
 	for _, fit := range append(whole, pushing...) {
-		volumes, reason := p.newVolumes(stack, fit.host, parsed)
+		volumes, reason := p.newVolumes(stack, fit.host)
 		if reason != "" {
 			reasons[fit.host] = reason
 			continue
@@ -233,9 +223,11 @@ type allocation struct {
 	size int64
 }
 
-// newVolumes places the stack's volumes that are not in the state yet on
-// host, taking their space; a reason says why one does not fit.
-func (p *planner) newVolumes(stack *state.Stack, host state.HostID, parsed *compose.Stack) ([]state.Volume, string) {
+// newVolumes places on host the volumes the stack names that wait for
+// their first stack (pending), taking their space; a reason says why one
+// does not fit, or why host is the wrong one: a placed volume stays where
+// its copy is, so the stack must go there.
+func (p *planner) newVolumes(stack *state.Stack, host state.HostID) ([]state.Volume, string) {
 	var volumes []state.Volume
 	var tentative []allocation
 	// a stack that does not fit takes nothing: neither space nor minors
@@ -245,22 +237,31 @@ func (p *planner) newVolumes(stack *state.Stack, host state.HostID, parsed *comp
 			delete(p.minors, minor)
 		}
 	}
-	for _, name := range slices.Sorted(maps.Keys(parsed.Volumes)) {
-		id := stack.VolumeID(name)
-		if _, exists := p.current.Volumes[id]; exists {
+	for _, name := range stack.Spec.VolumeNames() {
+		current, ok := p.current.Volumes[names.ID(stack.Namespace, name)]
+		switch {
+		case !ok:
+			giveBack()
+			return nil, fmt.Sprintf("volume %s is gone", name) // the state refuses this; a guard
+		case current.Status != state.VolumePending:
+			if !slices.ContainsFunc(current.Placements, func(placement state.Placement) bool {
+				return placement.Host == host && !placement.Tiebreaker
+			}) {
+				giveBack()
+				return nil, fmt.Sprintf("volume %s has its data on another host", name)
+			}
 			continue
 		}
-		wanted := parsed.Volumes[name]
-		class, pool, ok := p.fit(host, wanted.Class, wanted.Size, tentative)
+		wanted := current.Spec
+		class, pool, ok := p.fit(host, wanted.Class, int64(wanted.Size), tentative)
 		if !ok {
 			giveBack()
-			return nil, fmt.Sprintf("volume %s (%s, class %s) fits no pool", name, units.FormatSize(wanted.Size), wanted.Class)
+			return nil, fmt.Sprintf("volume %s (%s, class %s) fits no pool", name,
+				units.FormatSize(int64(wanted.Size)), wanted.Class)
 		}
-		volume := state.Volume{
-			ID: id, DataGeneration: 1,
-			Spec:       resource.VolumeSpec{Class: wanted.Class, Size: units.Size(wanted.Size), Replicas: wanted.Replicas},
-			Placements: []state.Placement{{Host: host, Class: class}}, Status: state.VolumeOK,
-		}
+		volume := *current
+		volume.Placements = []state.Placement{{Host: host, Class: class}}
+		volume.Status = state.VolumeOK
 		if wanted.Replicas > 0 {
 			minor, ok := p.freeMinor()
 			if !ok {
@@ -270,7 +271,7 @@ func (p *planner) newVolumes(stack *state.Stack, host state.HostID, parsed *comp
 			minors = append(minors, minor)
 			volume.Minor = &minor
 		}
-		tentative = append(tentative, allocation{pool, wanted.Size})
+		tentative = append(tentative, allocation{pool, int64(wanted.Size)})
 		volumes = append(volumes, volume)
 	}
 	for _, each := range tentative {

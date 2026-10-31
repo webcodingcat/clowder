@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/api"
+	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/resource"
 )
 
 // What bin/dev live hands over: the work directory (OpenTofu's outputs, the
@@ -137,10 +139,16 @@ func (h host) service(t *testing.T, service string) string {
 
 // clowder runs the CLI against the test's cluster directory.
 func clowder(args ...string) (string, error) {
+	return clowderWithInput(nil, args...)
+}
+
+// clowderWithInput runs the CLI with input on its stdin (apply -f -).
+func clowderWithInput(input io.Reader, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 	cli := exec.CommandContext(ctx, clowderBinary, args...)
 	cli.Dir = workDir
+	cli.Stdin = input
 	cli.Env = append(os.Environ(), "CLOWDER_CLUSTER="+clusterDir())
 	output, err := cli.CombinedOutput()
 	if err != nil {
@@ -162,9 +170,60 @@ func mustClowder(t *testing.T, args ...string) string {
 
 func clusterDir() string { return filepath.Join(workDir, "cluster") }
 
-// stackDir is the directory of a stack: outside the cluster directory, as
-// DEVELOPING.md asks.
+// stackDir is the directory of a stack's resources: outside the cluster
+// directory, which apply refuses.
 func stackDir(name string) string { return filepath.Join(workDir, "stacks", name) }
+
+// stackFile is the file of a stack's resources: the stack and its volumes.
+func stackFile(name string) string { return filepath.Join(stackDir(name), name+".yaml") }
+
+// document is a resource of the namespace default as a YAML document; spec
+// is the spec's YAML, which goes indented below spec:.
+func document(kind, name, spec string) string {
+	var indented strings.Builder
+	for _, line := range strings.SplitAfter(strings.TrimRight(spec, "\n"), "\n") {
+		indented.WriteString("  " + line)
+	}
+	return "---\napiVersion: " + resource.APIVersion + "\nkind: " + kind + "\nmetadata: {name: " + name + "}\n" +
+		"spec:\n" + indented.String() + "\n"
+}
+
+// volumeDocument is a Volume resource of the namespace default.
+func volumeDocument(name, class, size string, replicas int) string {
+	return document(resource.KindVolume, name, fmt.Sprintf("class: %s\nsize: %s\nreplicas: %d", class, size, replicas))
+}
+
+// secretResource is a Secret resource of the namespace default, for
+// yaml.Marshal: its value is quoted as YAML needs it.
+func secretResource(name, value string) map[string]any {
+	return map[string]any{
+		"apiVersion": resource.APIVersion,
+		"kind":       resource.KindSecret,
+		"metadata":   map[string]string{"name": name},
+		"spec":       map[string]string{"value": value},
+	}
+}
+
+// createAndApply writes a stack's resources (the stack and its volumes) to
+// its file and applies them.
+func createAndApply(t *testing.T, name, content string) {
+	t.Helper()
+	if err := os.MkdirAll(stackDir(name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stackFile(name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustClowder(t, "apply", "-f", stackFile(name))
+}
+
+// removeStack deletes the resources of a stack's file, the stack before its
+// volumes and their data, and waits until the cluster no longer lists it.
+func removeStack(t *testing.T, name string) {
+	t.Helper()
+	mustClowder(t, "delete", "-f", stackFile(name))
+	waitGone(t, name)
+}
 
 // eventually calls check until it succeeds, and fails the test with the last
 // error once the deadline has passed.
@@ -183,31 +242,84 @@ func eventually(t *testing.T, deadline time.Duration, what string, check func() 
 	}
 }
 
-// listStacks reads clowder stack ps --output json.
-func listStacks() (map[string]api.StackInfo, error) {
-	output, err := clowder("stack", "ps", "--output", "json")
+// listedStack is a stack as clowder get stacks lists it.
+type listedStack struct {
+	generation int64
+	api.StackStatus
+}
+
+// listResources reads clowder get <kind> -o json for the namespace default.
+func listResources(kind string) ([]resource.Object, error) {
+	output, err := clowder("get", kind, "-o", "json")
 	if err != nil {
 		return nil, err
 	}
-	var stacks []api.StackInfo
-	if err := json.Unmarshal([]byte(output), &stacks); err != nil {
-		return nil, fmt.Errorf("read stack ps: %w", err)
+	var objects []resource.Object
+	if err := json.Unmarshal([]byte(output), &objects); err != nil {
+		return nil, fmt.Errorf("read get %s: %w", kind, err)
 	}
-	listed := map[string]api.StackInfo{}
-	for _, stack := range stacks {
-		listed[stack.Name] = stack
+	return objects, nil
+}
+
+// listStacks reads the stacks of the namespace default by name.
+func listStacks() (map[string]listedStack, error) {
+	objects, err := listResources("stacks")
+	if err != nil {
+		return nil, err
+	}
+	listed := map[string]listedStack{}
+	for _, object := range objects {
+		stack := listedStack{generation: object.Metadata.Generation}
+		if err := json.Unmarshal(object.Status, &stack.StackStatus); err != nil {
+			return nil, fmt.Errorf("read the status of stack %s: %w", object.Metadata.Name, err)
+		}
+		listed[object.Metadata.Name] = stack
 	}
 	return listed, nil
 }
 
-// generation is a stack's generation as the cluster lists it.
-func generation(t *testing.T, name string) int64 {
+// stackInfo is a stack as the cluster lists it; zero if it lists none.
+func stackInfo(t *testing.T, name string) listedStack {
 	t.Helper()
 	stacks, err := listStacks()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return stacks[name].Generation
+	return stacks[name]
+}
+
+// secretDigests are the digests of the secrets of the namespace default by
+// name.
+func secretDigests(t *testing.T) map[string]string {
+	t.Helper()
+	objects, err := listResources("secrets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digests := map[string]string{}
+	for _, object := range objects {
+		var status api.SecretStatus
+		if err := json.Unmarshal(object.Status, &status); err != nil {
+			t.Fatalf("read the status of secret %s: %v", object.Metadata.Name, err)
+		}
+		digests[object.Metadata.Name] = status.Digest
+	}
+	return digests
+}
+
+// volumeLV is the LV of a volume of the namespace default: its name on the
+// host, with the data generation the cluster gave it.
+func volumeLV(t *testing.T, name string) string {
+	t.Helper()
+	var object resource.Object
+	if err := json.Unmarshal([]byte(mustClowder(t, "get", "volume", name, "-o", "json")), &object); err != nil {
+		t.Fatalf("read volume %s: %v", name, err)
+	}
+	var status api.VolumeStatus
+	if err := json.Unmarshal(object.Status, &status); err != nil {
+		t.Fatalf("read the status of volume %s: %v", name, err)
+	}
+	return names.VolumeName(names.ID(names.Default, name), status.DataGeneration)
 }
 
 // waitRunning waits until the stack runs in the given generation.
@@ -222,8 +334,24 @@ func waitRunning(t *testing.T, name string, generation int64) {
 		switch {
 		case !found:
 			return fmt.Errorf("not listed")
-		case stack.Status != "running" || stack.Generation != generation:
-			return fmt.Errorf("%s, generation %d", stack.Status, stack.Generation)
+		case stack.Status != "running" || stack.generation != generation:
+			return fmt.Errorf("%s, generation %d", stack.Status, stack.generation)
+		}
+		return nil
+	})
+}
+
+// waitSecrets waits until the stack's containers came up with the secrets
+// of the given digests, by name. A changed secret changes no stack's
+// generation: the host reports the digests its containers have.
+func waitSecrets(t *testing.T, name string, digests map[string]string) {
+	t.Helper()
+	eventually(t, stackDeadline, fmt.Sprintf("stack %s up with its secrets", name), func() error {
+		applied := stackInfo(t, name).AppliedSecrets
+		for secret, digest := range digests {
+			if applied[secret] != digest {
+				return fmt.Errorf("secret %s has not reached the containers", secret)
+			}
 		}
 		return nil
 	})

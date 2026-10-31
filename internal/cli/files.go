@@ -85,7 +85,7 @@ func readDirectory(dir string, report io.Writer) ([]resource.Object, error) {
 // readFile reads the resources of one file. A SOPS file of a resource is
 // decrypted with the user's age key and must hold one Secret: a file of its
 // own per secret keeps sopsage as it is, every value encrypted. A SOPS file
-// of anything else (a stack's secrets file) is not decrypted. Unless
+// of anything else (the cluster's secrets) is not decrypted. Unless
 // required, a file without resources holds none (a directory skips it);
 // else it is an error.
 func readFile(name string, data []byte, required bool) ([]resource.Object, error) {

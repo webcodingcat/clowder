@@ -138,9 +138,8 @@ func fillPool(t *testing.T, server host, received *receiver) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	createAndApply(t, "filler", "name: filler\nservices:\n  app:\n    image: "+publicImage+
-		"\n    command: [sleep, infinity]\n    stop_grace_period: 1s\n    volumes: [data:/data]\n"+
-		fmt.Sprintf("volumes:\n  data:\n    x-clowder: {class: small, size: %dM, replicas: 0}\n", poolBytes*90/100>>20))
+	createAndApply(t, "filler", simpleStack("filler", "filler-data")+
+		volumeDocument("filler-data", "small", fmt.Sprintf("%dM", poolBytes*90/100>>20), 0))
 	waitRunning(t, "filler", 1)
 	app := server.must(t, "docker ps -q --filter label=com.docker.compose.project="+project("filler"))
 	// zeros take blocks of a thin pool as any data does
@@ -154,8 +153,8 @@ func fillPool(t *testing.T, server host, received *receiver) {
 		}
 		return nil
 	})
-	mustClowder(t, "stack", "delete", "filler", "--delete-volumes")
-	waitGone(t, "filler")
+	// the stack, then its volume with the data
+	removeStack(t, "filler")
 	eventually(t, 3*time.Minute, "the all-clear of pool-use", func() error {
 		if !received.hasMessage("/webhook", "resolved", key) {
 			return fmt.Errorf("no all-clear")

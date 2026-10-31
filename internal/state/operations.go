@@ -52,13 +52,11 @@ func volumeLock(id string) string { return "volume/" + id }
 // validLock accepts what stackLock and volumeLock make: a lock that names
 // nothing would never conflict, and so protect nothing.
 func validLock(lock string) bool {
-	if id, ok := strings.CutPrefix(lock, "stack/"); ok {
-		_, _, ok := names.SplitID(id)
-		return ok
-	}
-	if id, ok := strings.CutPrefix(lock, "volume/"); ok {
-		_, ok := names.StackOfVolume(id)
-		return ok
+	for _, prefix := range []string{"stack/", "volume/"} {
+		if id, ok := strings.CutPrefix(lock, prefix); ok {
+			_, _, ok := names.SplitID(id)
+			return ok
+		}
 	}
 	return false
 }

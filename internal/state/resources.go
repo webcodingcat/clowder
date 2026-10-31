@@ -1,11 +1,11 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
@@ -47,18 +47,18 @@ const (
 )
 
 // Authorize tells whether an actor may do a verb to the resources of a kind
-// in a namespace. It decides on the leader, in the state, so no agent that
-// took a request decides for it; the API asks it too, for its reads and to
-// answer early (it applies a request to a copy of its state first).
-// Until users get permissions every user may do everything.
-func Authorize(actor, verb, kind, namespace string) error {
-	_, _, _, _ = actor, verb, kind, namespace // read once users get permissions
+// in a namespace. It decides in the state, as every command applies, so
+// the actor's permissions are those of the state at that point of the log,
+// and no agent that took a request decides alone; the API asks it too, for
+// its reads. Until users get permissions every user may do everything, so
+// it reads none of its arguments yet.
+func Authorize(_, _, _, _ string) error {
 	return nil
 }
 
 // PutResource creates or changes a resource. A spec equal to the stored
-// one changes nothing: not the generation, not the resource version, not
-// ResourcesRevision, so applying the same files again restarts nothing.
+// one changes nothing: not the generation, not the resource version, so
+// applying the same files again restarts nothing.
 type PutResource struct {
 	// Kind is the resource's (resource.KindVolume), not the command's.
 	Kind string `json:"kind"`
@@ -67,14 +67,13 @@ type PutResource struct {
 	Name      string `json:"name"`
 	Owner     string `json:"owner"` // the channel: OwnerCLI or GitOpsOwner(source)
 	// Spec is the kind's: none for a namespace, resource.VolumeSpec,
-	// SealedSecret.
+	// SealedSecret, stackspec.Spec.
 	Spec json.RawMessage `json:"spec,omitempty"`
 }
 
 // DeleteResource removes a resource that nothing uses.
 type DeleteResource struct {
-	Kind string `json:"kind"` // the resource's
-
+	Kind      string `json:"kind"` // the resource's
 	Namespace string `json:"namespace,omitempty"`
 	Name      string `json:"name"`
 	Owner     string `json:"owner"`
@@ -97,6 +96,7 @@ var resourceKinds = map[string]resourceKind{
 	resource.KindNamespace: {find: findNamespace, put: putNamespace, remove: removeNamespace},
 	resource.KindVolume:    {find: findVolume, put: putVolumeResource, remove: removeVolumeResource},
 	resource.KindSecret:    {find: findSecret, put: putSecret, remove: removeSecret},
+	resource.KindStack:     {find: findStack, put: putStack, remove: removeStack},
 }
 
 // applyPutResource checks in a fixed order: who may, whose the resource is,
@@ -129,7 +129,6 @@ func applyPutResource(s *State, cmd Command, payload PutResource) error {
 		return errUnchanged
 	}
 	meta.Generation++
-	s.ResourcesRevision++
 	s.changed(payload.Kind, meta)
 	return nil
 }
@@ -157,7 +156,6 @@ func applyDeleteResource(s *State, cmd Command, payload DeleteResource) error {
 	if err := kind.remove(s, id); err != nil {
 		return err
 	}
-	s.ResourcesRevision++
 	s.deleted(payload.Kind, meta)
 	return nil
 }
@@ -240,19 +238,17 @@ func removeNamespace(s *State, id string) error {
 	if id == names.Default {
 		return fmt.Errorf("namespace %s belongs to the cluster", id)
 	}
-	// every ID starts with its namespace: a stack's, a volume's of either
-	// shape, a secret's
 	inNamespace := func(resourceID string) bool {
-		namespace, _, _ := strings.Cut(resourceID, "/")
+		namespace, _, _ := names.SplitID(resourceID)
 		return namespace == id
 	}
 	for _, held := range []struct {
 		kind string
 		ids  []string
 	}{
-		{"stack", slices.Sorted(maps.Keys(s.Stacks))},
-		{"volume", slices.Sorted(maps.Keys(s.Volumes))},
-		{"secret", slices.Sorted(maps.Keys(s.Secrets))},
+		{resource.KindStack, slices.Sorted(maps.Keys(s.Stacks))},
+		{resource.KindVolume, slices.Sorted(maps.Keys(s.Volumes))},
+		{resource.KindSecret, slices.Sorted(maps.Keys(s.Secrets))},
 	} {
 		if index := slices.IndexFunc(held.ids, inNamespace); index >= 0 {
 			return fmt.Errorf("namespace %s still holds %s %s; delete what it holds first", id, held.kind, held.ids[index])
@@ -262,171 +258,25 @@ func removeNamespace(s *State, id string) error {
 	return nil
 }
 
-func findVolume(s *State, id string) *Meta {
-	if volume, ok := s.Volumes[id]; ok {
-		return &volume.Meta
-	}
-	return nil
+// sameJSON tells whether two values encode alike. The state compares what
+// it stores this way, not field by field: an agent that read its state from
+// a snapshot (JSON, where an empty list and none read back alike) must
+// decide as one that applied the whole log.
+func sameJSON(a, b any) bool {
+	encodedA, errA := json.Marshal(a)
+	encodedB, errB := json.Marshal(b)
+	return errA == nil && errB == nil && bytes.Equal(encodedA, encodedB)
 }
 
-// putVolumeResource makes a volume. It is placed once a stack names it,
-// on that stack's host; until then it waits (VolumePending).
-func putVolumeResource(s *State, id string, payload PutResource) (*Meta, error) {
-	spec, err := decodeSpec[resource.VolumeSpec](payload.Kind, id, payload.Spec)
-	if err != nil {
-		return nil, err
-	}
-	if stored, ok := s.Volumes[id]; ok {
-		if stored.Spec == spec {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("volume %s %w", id, stored.Spec.CheckUnchanged(spec))
-	}
-	if err := spec.Check(); err != nil {
-		return nil, fmt.Errorf("volume %s: %w", id, err)
-	}
-	if _, ok := s.Config.Spec.StorageClasses[spec.Class]; !ok {
-		return nil, fmt.Errorf("volume %s: the cluster has no storage class %q", id, spec.Class)
-	}
-	generation := s.nextDataGeneration(id)
-	if err := s.checkFreeLV(id, generation); err != nil {
-		return nil, err
-	}
-	volume := &Volume{
-		Meta: Meta{Namespace: payload.Namespace, Name: payload.Name, Owner: payload.Owner},
-		ID:   id, Spec: spec, DataGeneration: generation, Status: VolumePending,
-	}
-	s.Volumes[id] = volume
-	return &volume.Meta, nil
-}
-
-// nextDataGeneration is a new volume's: one above the highest retired copy
-// of a deleted volume of the same ID, so its LV cannot be taken for one of
-// theirs, whose hosts may not have removed them yet.
-func (s *State) nextDataGeneration(id string) int64 {
-	generation := int64(1)
-	for _, retired := range s.Retired {
-		if retired.Volume == id {
-			generation = max(generation, retired.DataGeneration+1)
+// stackNaming is the first stack, by ID, that names a volume or secret of
+// its namespace; "" for none. The stack except does not count (the one
+// being put); named picks what a stack names.
+func (s *State) stackNaming(namespace, name, except string, named func(stack *Stack) []string) string {
+	for _, id := range slices.Sorted(maps.Keys(s.Stacks)) {
+		stack := s.Stacks[id]
+		if id != except && stack.Namespace == namespace && slices.Contains(named(stack), name) {
+			return id
 		}
 	}
-	return generation
-}
-
-// checkFreeLV refuses an LV name that a volume or a retired copy has
-// already: the name holds only 32 bits of a hash of the ID.
-func (s *State) checkFreeLV(id string, generation int64) error {
-	if generation > names.MaxDataGeneration {
-		return fmt.Errorf("volume %s: data generation %d is beyond %d", id, generation, names.MaxDataGeneration)
-	}
-	lv := names.VolumeName(id, generation)
-	for _, otherID := range slices.Sorted(maps.Keys(s.Volumes)) {
-		other := s.Volumes[otherID]
-		if names.VolumeName(other.ID, other.DataGeneration) == lv {
-			return fmt.Errorf("volume %s would have the LV of volume %s; choose another name", id, other.ID)
-		}
-	}
-	for _, retired := range s.Retired {
-		if names.VolumeName(retired.Volume, retired.DataGeneration) == lv {
-			return fmt.Errorf("volume %s would have the LV of a removed copy of %s; choose another name",
-				id, retired.Volume)
-		}
-	}
-	return nil
-}
-
-// removeVolumeResource retires the volume's copies: their hosts remove them.
-func removeVolumeResource(s *State, id string) error {
-	if err := s.checkUnlocked(volumeLock(id), ""); err != nil {
-		return err
-	}
-	s.retire(s.Volumes[id], nil)
-	delete(s.Volumes, id)
-	return nil
-}
-
-func findSecret(s *State, id string) *Meta {
-	if secret, ok := s.Secrets[id]; ok {
-		return &secret.Meta
-	}
-	return nil
-}
-
-// putSecret stores a secret's sealed value. The limits are on the values in
-// clear (ClearSize): per value, per namespace and in the cluster, as every
-// apply writes them into the Raft log and every snapshot holds them.
-func putSecret(s *State, id string, payload PutResource) (*Meta, error) {
-	spec, err := decodeSpec[SealedSecret](payload.Kind, id, payload.Spec)
-	if err != nil {
-		return nil, err
-	}
-	stored, exists := s.Secrets[id]
-	if exists && stored.Spec.Digest == spec.Digest {
-		return nil, nil
-	}
-	size := ClearSize(spec.Value)
-	switch {
-	case spec.Digest == "":
-		return nil, fmt.Errorf("secret %s has no digest", id)
-	case size < 0:
-		return nil, fmt.Errorf("secret %s: the value is not sealed", id)
-	case size == 0:
-		return nil, fmt.Errorf("secret %s is empty", id)
-	case size > resource.MaxSecretBytes:
-		return nil, fmt.Errorf("secret %s is larger than %d bytes", id, resource.MaxSecretBytes)
-	}
-	inNamespace, inCluster := size, size
-	for otherID, other := range s.Secrets {
-		if otherID == id {
-			continue
-		}
-		inCluster += ClearSize(other.Spec.Value)
-		if other.Namespace == payload.Namespace {
-			inNamespace += ClearSize(other.Spec.Value)
-		}
-	}
-	switch {
-	case inNamespace > resource.MaxNamespaceSecretBytes:
-		return nil, fmt.Errorf("secret %s: the secrets of namespace %s would be larger than %d bytes",
-			id, payload.Namespace, resource.MaxNamespaceSecretBytes)
-	case inCluster > resource.MaxClusterSecretBytes:
-		return nil, fmt.Errorf("secret %s: the secrets of the cluster would be larger than %d bytes",
-			id, resource.MaxClusterSecretBytes)
-	}
-	if !exists {
-		stored = &Secret{Meta: Meta{Namespace: payload.Namespace, Name: payload.Name, Owner: payload.Owner}}
-		s.Secrets[id] = stored
-	}
-	stored.Spec = spec
-	return &stored.Meta, nil
-}
-
-func removeSecret(s *State, id string) error {
-	delete(s.Secrets, id)
-	return nil
-}
-
-// The length of what age adds when it seals for the cluster's one X25519
-// recipient (datakey.Key.Seal).
-const (
-	// sealedHeader is the header ("age-encryption.org/v1", one recipient
-	// stanza, the MAC) and the payload's nonce.
-	sealedHeader = 168 + 16
-	// sealedChunk is how much clear text age seals at a time; each chunk
-	// gets a tag of sealedTag bytes.
-	sealedChunk = 64 << 10
-	sealedTag   = 16
-)
-
-// ClearSize is how long a sealed value is in clear, worked out from its
-// length, so the state can hold the limits without opening the value; -1
-// for what is too short to be sealed. A test in datakey holds it against
-// real sealing, so a change in age's format fails there.
-func ClearSize(sealed Sealed) int {
-	body := len(sealed) - sealedHeader
-	if body < sealedTag {
-		return -1
-	}
-	chunks := (body + sealedChunk + sealedTag - 1) / (sealedChunk + sealedTag)
-	return body - chunks*sealedTag
+	return ""
 }

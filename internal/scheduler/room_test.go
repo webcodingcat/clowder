@@ -1,7 +1,6 @@
 package scheduler
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -32,16 +31,16 @@ func service(priority int, memory int64, dependsOn ...string) state.Service {
 func running(current *state.State, name string, services map[string]state.Service, pushedOut ...string) {
 	host := state.HostID(0)
 	current.Stacks["default/"+name] = &state.Stack{
-		Namespace: "default", Name: name, Status: state.StackRunning, Host: &host, Services: services,
-		PushedOut: pushedOut, Source: "name: " + name + "\nservices: {app: {image: example/app}}\n",
+		Meta:   state.Meta{Namespace: "default", Name: name},
+		Status: state.StackRunning, Host: &host, Services: services, PushedOut: pushedOut,
 	}
 }
 
 // pending adds the stack default/new, which waits for a host.
 func pending(current *state.State, services map[string]state.Service) {
 	current.Stacks["default/new"] = &state.Stack{
-		Namespace: "default", Name: "new", Status: state.StackPending, Services: services,
-		Source: "name: new\nservices: {app: {image: example/app}}\n",
+		Meta:   state.Meta{Namespace: "default", Name: "new"},
+		Status: state.StackPending, Services: services,
 	}
 }
 
@@ -65,7 +64,7 @@ func TestANewStackPushesOutLowerPrioritiesLowestFirst(t *testing.T) {
 			current := roomCluster(1000)
 			running(current, "shop", shop())
 			pending(current, map[string]state.Service{"web": service(800, test.need)})
-			decisions := Plan(context.Background(), current)
+			decisions := Plan(current)
 			if test.pushed == "waits" {
 				if len(decisions.Placements) != 0 || len(decisions.Waiting) != 1 ||
 					!strings.Contains(decisions.Waiting[0].Reason, "service web (1000M and 0.1 CPUs) finds no room") {
@@ -94,7 +93,7 @@ func TestEachServiceOfANewStackPushesOutOnlyBelowItsOwnPriority(t *testing.T) {
 	current := roomCluster(1000)
 	running(current, "base", map[string]state.Service{"core": service(900, 700), "cache": service(200, 300)})
 	pending(current, map[string]state.Service{"api": service(800, 300), "worker": service(100, 300)})
-	decisions := Plan(context.Background(), current)
+	decisions := Plan(current)
 	if len(decisions.Placements) != 1 {
 		t.Fatalf("decisions %+v", decisions)
 	}
@@ -110,7 +109,7 @@ func TestWhatDependsOnAPushedOutServiceGoesWithIt(t *testing.T) {
 	// data goes first (by name), and view with it
 	running(current, "low", map[string]state.Service{"data": service(300, 500), "view": service(600, 500, "data")})
 	pending(current, map[string]state.Service{"web": service(500, 200)})
-	decisions := Plan(context.Background(), current)
+	decisions := Plan(current)
 	if len(decisions.Placements) != 1 || fmt.Sprint(decisions.Placements[0].PushedOut["default/low"]) != "[data view]" {
 		t.Errorf("decisions %+v", decisions)
 	}
@@ -133,7 +132,7 @@ func TestAHostOverCapacityPushesOutBelowItsHighestPriority(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			current := roomCluster(test.capacity)
 			running(current, "shop", test.services)
-			decisions := Plan(context.Background(), current)
+			decisions := Plan(current)
 			var pushed string
 			if len(decisions.PushOuts) == 1 {
 				pushed = fmt.Sprint(decisions.PushOuts[0]["default/shop"])
@@ -161,7 +160,7 @@ func TestAPushedOutServiceComesBackWhenItFitsWithAMargin(t *testing.T) {
 			current := roomCluster(test.capacity)
 			running(current, "shop", shop(), "cache")
 			got := "none"
-			if restart := Plan(context.Background(), current).Restart; restart != nil {
+			if restart := Plan(current).Restart; restart != nil {
 				got = fmt.Sprintf("%s/%s %v", restart.Stack, restart.Service, restart.PushedOut)
 			}
 			if got != test.want {
@@ -178,7 +177,7 @@ func TestRestartsGoByPriorityAndDependencies(t *testing.T) {
 	running(current, "shop", map[string]state.Service{
 		"db": service(900, 300), "app": service(950, 100, "db"), "big": service(600, 800), "small": service(100, 100),
 	}, "db", "app", "big", "small")
-	restart := Plan(context.Background(), current).Restart
+	restart := Plan(current).Restart
 	if restart == nil || restart.Service != "db" || fmt.Sprint(restart.PushedOut) != "[app big small]" {
 		t.Errorf("restart %+v", restart)
 	}
@@ -188,7 +187,7 @@ func TestAWaitingStackGetsRoomBeforeAPushedOutService(t *testing.T) {
 	current := roomCluster(1000)
 	running(current, "shop", shop(), "cache")
 	pending(current, map[string]state.Service{"web": service(800, 300)})
-	decisions := Plan(context.Background(), current)
+	decisions := Plan(current)
 	if len(decisions.Placements) != 1 || decisions.Restart != nil {
 		t.Errorf("decisions %+v", decisions)
 	}
@@ -221,7 +220,7 @@ func TestCategoriesComeFromTheCurrentClusterYAML(t *testing.T) {
 	running(current, "batch", map[string]state.Service{"job": low})
 	pending(current, map[string]state.Service{"web": {MemoryBytes: 300 * mib}}) // the default: 500
 	// low is 600 now, above the new stack's 500: nothing to push out
-	if waiting := Plan(context.Background(), current).Waiting; len(waiting) != 1 {
+	if waiting := Plan(current).Waiting; len(waiting) != 1 {
 		t.Errorf("waiting %+v", waiting)
 	}
 }

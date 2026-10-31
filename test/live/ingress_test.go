@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/resource"
 )
 
 // The test's domain in a DNS zone of HLab's Cloud API, which serves it in
@@ -31,11 +32,10 @@ const pythonImage = "python:3.13-alpine3.22"
 
 // echoStack is the stack behind the domain: web answers with the
 // X-Forwarded-For it got, udp with the address it got a datagram from.
-const echoStack = `name: echo
-services:
+var echoStack = document(resource.KindStack, "echo", `services:
   web:
-    image: ` + pythonImage + `
-    stop_grace_period: 1s
+    image: `+pythonImage+`
+    stopGracePeriod: 1s
     command:
       - python
       - -c
@@ -49,12 +49,11 @@ services:
                 self.end_headers()
                 self.wfile.write(body)
         http.server.HTTPServer(("", 8080), Echo).serve_forever()
-    x-clowder:
-      http: {host: ` + domain + `, port: 8080}
+    http: {host: `+domain+`, port: 8080}
   udp:
-    image: ` + pythonImage + `
-    stop_grace_period: 1s
-    ports: ["9987:9987/udp"]
+    image: `+pythonImage+`
+    stopGracePeriod: 1s
+    ports: [{port: 9987, protocol: udp}]
     command:
       - python
       - -c
@@ -65,7 +64,7 @@ services:
         while True:
             data, peer = server.recvfrom(512)
             server.sendto(peer[0].encode(), peer)
-`
+`)
 
 // certificateDeadline is how long the first certificate may take: the DNS
 // check, the self-check through Traefik, the CA's validation.

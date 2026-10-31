@@ -11,46 +11,46 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
 // storeStack is DEVELOPING.md's example of priorities: db at critical
 // (900), app at the stack's high (700) and depending on db, cache at low
 // (200); each reserves 200M.
-const storeStack = `name: store
-x-clowder: {priority: high}
+var storeStack = document(resource.KindStack, "store", `priority: high
 services:
   db:
-    image: ` + publicImage + `
+    image: `+publicImage+`
     command: [sleep, infinity]
-    stop_grace_period: 1s
-    deploy: {resources: {reservations: {memory: 200M}}}
-    x-clowder: {priority: critical}
+    stopGracePeriod: 1s
+    resources: {reserve: {memory: 200M}}
+    priority: critical
   app:
-    image: ` + publicImage + `
+    image: `+publicImage+`
     command: [sleep, infinity]
-    stop_grace_period: 1s
-    depends_on: [db]
-    deploy: {resources: {reservations: {memory: 200M}}}
+    stopGracePeriod: 1s
+    dependsOn: [db]
+    resources: {reserve: {memory: 200M}}
   cache:
-    image: ` + publicImage + `
+    image: `+publicImage+`
     command: [sleep, infinity]
-    stop_grace_period: 1s
-    deploy: {resources: {reservations: {memory: 200M}}}
-    x-clowder: {priority: low}
-`
+    stopGracePeriod: 1s
+    resources: {reserve: {memory: 200M}}
+    priority: low
+`)
 
 // prioritizedStack is a stack whose services run sleep at a priority and
 // reserve memory (name: "priority/memory").
 func prioritizedStack(name string, services map[string]string) string {
-	content := "name: " + name + "\nservices:\n"
+	spec := "services:\n"
 	for _, service := range slices.Sorted(maps.Keys(services)) {
 		priority, memory, _ := strings.Cut(services[service], "/")
-		content += fmt.Sprintf("  %s:\n    image: %s\n    command: [sleep, infinity]\n    stop_grace_period: 1s\n"+
-			"    deploy: {resources: {reservations: {memory: %s}}}\n    x-clowder: {priority: %s}\n",
+		spec += fmt.Sprintf("  %s:\n    image: %s\n    command: [sleep, infinity]\n    stopGracePeriod: 1s\n"+
+			"    resources: {reserve: {memory: %s}}\n    priority: %q\n",
 			service, publicImage, memory, priority)
 	}
-	return content
+	return document(resource.KindStack, name, spec)
 }
 
 // pushOutDeadline is how long a pushed-out service may take to come back:
@@ -65,8 +65,7 @@ const pushOutDeadline = 5 * time.Minute
 func pushOut(t *testing.T, server host) {
 	// echo's services run at the default priority (500), below app's: they
 	// would go before app
-	mustClowder(t, "stack", "delete", "echo")
-	waitGone(t, "echo")
+	removeStack(t, "echo")
 	createAndApply(t, "store", storeStack)
 	waitRunning(t, "store", 1)
 	// system_reserve takes what is free now but 100M: the host then has
@@ -108,8 +107,7 @@ func pushOut(t *testing.T, server host) {
 		if !server.runs(t, "store", "db") {
 			t.Error("db was pushed out by a lower priority")
 		}
-		mustClowder(t, "stack", "delete", "urgent")
-		waitGone(t, "urgent")
+		removeStack(t, "urgent")
 		eventually(t, pushOutDeadline, "the pushed-out services come back", func() error {
 			store := stackInfo(t, "store")
 			if len(store.PushedOut) > 0 || !server.runs(t, "store", "cache") || !server.runs(t, "store", "app") {
@@ -128,7 +126,6 @@ func pushOut(t *testing.T, server host) {
 	if !server.runs(t, "mixed", "api") || server.runs(t, "mixed", "worker") {
 		t.Error("mixed should run api and not worker")
 	}
-	mustClowder(t, "stack", "delete", "mixed")
-	waitGone(t, "mixed")
+	removeStack(t, "mixed")
 	changeConfig(t, func(config *clusterdir.Config) { config.SystemReserve.Memory = "" })
 }

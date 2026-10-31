@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -82,15 +85,42 @@ func newLeader(t *testing.T, poolSize int64) *leader {
 		Secrets: map[string]state.Sealed{"token": state.Sealed("t")},
 	})
 	l.apply(state.KindReportHost, state.HostActor(0), state.ReportHost{
-		Host: 0, Version: "1.0.0",
+		Host: 0, Version: "1.0.0", Capacity: state.Resources{MemoryBytes: 4 << 30, CPUs: 4},
 		Pools: map[string]state.Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: poolSize}},
 	})
-	l.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Namespace: "default", Name: "shop", Owner: state.OwnerCLI})
-	l.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Namespace: "default", Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
-		Source: "name: shop\nservices: {app: {image: x}}\nvolumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 1}\n",
-	})
+	putResource(l, resource.KindVolume, "db", resource.VolumeSpec{Class: "fast", Size: 1 << 30, Replicas: 1})
+	putResource(l, resource.KindStack, "shop", stackspec.Spec{Services: map[string]stackspec.Service{
+		"app": {Image: "x", Volumes: []stackspec.Mount{{Volume: "db", Path: "/db"}}},
+	}})
 	return l
+}
+
+// putResource applies a resource of the namespace default, as clowder
+// apply does.
+func putResource(l *leader, kind, name string, spec any) {
+	l.t.Helper()
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		l.t.Fatal(err)
+	}
+	l.apply(state.KindPutResource, state.UserActor("alice"), state.PutResource{
+		Kind: kind, Namespace: "default", Name: name, Owner: state.OwnerCLI, Spec: encoded,
+	})
+}
+
+// deleteResource deletes a resource of the namespace default.
+func deleteResource(l *leader, kind, name string) {
+	l.t.Helper()
+	l.apply(state.KindDeleteResource, state.UserActor("alice"), state.DeleteResource{
+		Kind: kind, Namespace: "default", Name: name, Owner: state.OwnerCLI,
+	})
+}
+
+// reserving is a stack of one service that reserves memory at a priority.
+func reserving(service, priority, memory string) stackspec.Spec {
+	return stackspec.Spec{Priority: priority, Services: map[string]stackspec.Service{service: {
+		Image: "x", Resources: stackspec.Resources{Reserve: &stackspec.Amount{Memory: memory}},
+	}}}
 }
 
 // runPlacement runs the placement until the test ends.
@@ -120,8 +150,8 @@ func TestAPendingStackIsPlacedWithItsVolumes(t *testing.T) {
 	runPlacement(t, l)
 	waitFor(t, l, "the stack was not placed", func(current *state.State) bool {
 		stack := current.Stacks["default/shop"]
-		return stack.Host != nil && stack.Status == state.StackStarting && current.Volumes["default/shop/db"] != nil &&
-			stack.WaitReason == ""
+		return stack.Host != nil && stack.Status == state.StackStarting &&
+			current.Volumes["default/db"].Status == state.VolumeOK && stack.WaitReason == ""
 	})
 }
 
@@ -156,7 +186,7 @@ func TestAStackThatFitsNowhereShowsWhyUntilItFits(t *testing.T) {
 	})
 
 	l.apply(state.KindReportHost, state.HostActor(0), state.ReportHost{
-		Host: 0, Version: "1.0.1",
+		Host: 0, Version: "1.0.1", Capacity: state.Resources{MemoryBytes: 4 << 30, CPUs: 4},
 		Pools: map[string]state.Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: 100 << 30}},
 	})
 	placement.place(context.Background())
@@ -175,20 +205,10 @@ func TestAServicePushedOutComesBackAfterItFitAMinute(t *testing.T) {
 		Host: 0, Version: "1.0.0", Capacity: state.Resources{MemoryBytes: 1512 << 20, CPUs: 2.25},
 		Pools: map[string]state.Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: 100 << 30}},
 	})
-	low, high := 200, 800
-	l.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Namespace: "default", Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
-		Source:   "name: shop\nservices: {app: {image: x}}\n",
-		Services: map[string]state.Service{"app": {Priority: clusterdir.Priority{Value: &low}, MemoryBytes: 600 << 20}},
-	})
+	putResource(l, resource.KindStack, "shop", reserving("app", "200", "600M"))
 	placement := newPlacer(l)
 	placement.place(context.Background())
-	l.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{Namespace: "default", Name: "web", Owner: state.OwnerCLI})
-	l.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Namespace: "default", Name: "web", Owner: state.OwnerCLI, ConfigRevision: 1,
-		Source:   "name: web\nservices: {web: {image: x}}\n",
-		Services: map[string]state.Service{"web": {Priority: clusterdir.Priority{Value: &high}, MemoryBytes: 500 << 20}},
-	})
+	putResource(l, resource.KindStack, "web", reserving("web", "800", "500M"))
 	placement.place(context.Background())
 	l.Read(func(current *state.State) {
 		if fmt.Sprint(current.Stacks["default/shop"].PushedOut) != "[app]" || current.Stacks["default/web"].Host == nil {
@@ -196,7 +216,7 @@ func TestAServicePushedOutComesBackAfterItFitAMinute(t *testing.T) {
 		}
 	})
 
-	l.apply(state.KindDeleteStack, state.UserActor("alice"), state.DeleteStack{Namespace: "default", Name: "web"})
+	deleteResource(l, resource.KindStack, "web")
 	if again := placement.place(context.Background()); again <= 0 || again > restartAfter {
 		t.Errorf("look again in %v", again)
 	}

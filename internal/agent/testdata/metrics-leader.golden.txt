@@ -45,10 +45,10 @@ clowder_host_phase{host="node0",phase="recovering"} 0
 clowder_host_phase{host="node0",phase="removed"} 0
 # HELP clowder_host_reserved_cpus CPUs the services on a host reserve.
 # TYPE clowder_host_reserved_cpus gauge
-clowder_host_reserved_cpus{host="node0"} 0
+clowder_host_reserved_cpus{host="node0"} 0.1
 # HELP clowder_host_reserved_memory_bytes Memory the services on a host reserve.
 # TYPE clowder_host_reserved_memory_bytes gauge
-clowder_host_reserved_memory_bytes{host="node0"} 0
+clowder_host_reserved_memory_bytes{host="node0"} 134217728
 # HELP clowder_leader 1 while this host leads the cluster.
 # TYPE clowder_leader gauge
 clowder_leader{host="node0"} 1

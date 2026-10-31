@@ -1,6 +1,6 @@
 // Package stackspec is a stack as clowder describes it: its own schema, not
 // a Compose file. Compose is only how the agent runs a stack on a host; it
-// renders the Compose file from the spec (compose.RenderStack). A field
+// renders the Compose file from the spec (compose.Render). A field
 // that the schema does not have is an error, so only what clowder knows
 // runs. The package does no I/O: the CLI, the API and the state share it.
 package stackspec
@@ -59,7 +59,7 @@ type Service struct {
 	// the supervisor applies it, Docker never restarts a container itself.
 	Restart string `yaml:"restart,omitempty" json:"restart,omitempty"`
 	// RestartUnhealthy restarts a container that turns unhealthy (default
-	// true).
+	// true; RestartsUnhealthy reads it).
 	RestartUnhealthy *bool     `yaml:"restartUnhealthy,omitempty" json:"restartUnhealthy,omitempty"`
 	Resources        Resources `yaml:"resources,omitempty" json:"resources,omitzero"`
 	// StopGracePeriod is a duration (10s, 1m30s), StopSignal a signal's
@@ -135,6 +135,11 @@ type Amount struct {
 
 // Decode reads a spec as users write it, in YAML. A field the schema does
 // not have is an error, not ignored.
+//
+// JSON is YAML too, so the API reads a spec the CLI sends as JSON with it;
+// the CLI keeps each number as written (resource.ParseDocuments), so an env
+// value of 1.0 arrives as "1.0". A number JSON cannot write as it stands
+// arrives as YAML reads it (0x10 as "16"), a boolean as true or false.
 func Decode(data []byte) (Spec, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)

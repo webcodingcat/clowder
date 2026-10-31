@@ -21,13 +21,13 @@ import (
 
 	"filippo.io/age"
 
-	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/cli"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/hoster"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
+	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/sopsage"
 	"github.com/webcodingcat/clowder/internal/storage"
 )
@@ -194,8 +194,9 @@ func (f *fakeStorage) MountPoint(volume storage.Volume) string {
 // container per stack.
 type fakeDocker struct {
 	calls
-	// failedUps is how many compose ups fail before one works
-	failedUps int
+	// failedUps and failedDowns are how many compose ups and downs fail
+	// before one works
+	failedUps, failedDowns int
 	// down makes Ping fail as if refused, hangs as if it timed out
 	down, hangs bool
 	// upFiles and leftOut are the files and the services left out of the
@@ -248,6 +249,12 @@ func (f *fakeDocker) ComposeUp(_ context.Context, stack string, files, leftOut [
 
 func (f *fakeDocker) ComposeDown(_ context.Context, stack, _ string) error {
 	f.add("down %s", stack)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failedDowns > 0 {
+		f.failedDowns--
+		return errors.New("the container does not stop")
+	}
 	return nil
 }
 
@@ -436,52 +443,43 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 		t.Errorf("diff after apply: %q, %v", out, err)
 	}
 
-	// a stack: created with its directory, then with a volume placed, its
-	// volume made, compose up, running
-	stackDir := filepath.Join(t.TempDir(), "shop")
-	composeFile := filepath.Join(stackDir, "clowder.yaml")
-	if _, err := clowder(t, "--cluster", dir, "stack", "apply", "shop", "-f", composeFile); err == nil {
-		t.Error("an apply without the stack's file")
-	}
-	create := []string{"--cluster", dir, "stack", "create", "shop", "--dir", stackDir}
-	if _, err := clowder(t, create...); err == nil || !strings.Contains(err.Error(), "--age is required") {
-		t.Errorf("a create without --age: %v", err)
-	}
-	if _, err := clowder(t, append(create, "--age", identity.Recipient().String())...); err != nil {
+	// a stack with a volume: applied, the volume placed with it and made,
+	// compose up, running
+	resources := filepath.Join(t.TempDir(), "shop.yaml")
+	if err := os.WriteFile(resources, []byte(`apiVersion: clowder/v1
+kind: Volume
+metadata: {name: db}
+spec: {class: fast, size: 1G, replicas: 0}
+---
+apiVersion: clowder/v1
+kind: Stack
+metadata: {name: shop}
+spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
+`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, file := range []string{"clowder.yaml", "secrets.sops.yaml", ".sops.yaml"} {
-		if _, err := os.Stat(filepath.Join(stackDir, file)); err != nil {
-			t.Errorf("stack create wrote no %s: %v", file, err)
-		}
-	}
-	if _, err := clowder(t, create...); err != nil { // all files there: registered again, nothing written
-		t.Errorf("a second create of a stack never applied: %v", err)
-	}
-	if err := os.WriteFile(composeFile, []byte("name: shop\nservices:\n  app: {image: nginx, volumes: [db:/data]}\n"+
-		"volumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n"), 0o600); err != nil {
+	if _, err := clowder(t, "--cluster", dir, "apply", "-f", resources); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := clowder(t, "--cluster", dir, "stack", "apply", "shop", "-f", composeFile); err != nil {
-		t.Fatal(err)
-	}
-	lv := names.VolumeName("default/shop/db", 1)
+	lv := names.VolumeName("default/db", 1)
 	hostStorage.waitFor(t, "ensure "+lv)
 	hostDocker.waitFor(t, "up default_shop")
 	if _, err := os.Stat(filepath.Join(files.Dir, "stacks", "default_shop", "compose.yaml")); err != nil {
 		t.Errorf("the rendered Compose file: %v", err)
 	}
-	waitForOutput(t, "running", "--cluster", dir, "stack", "ps")
-	listed, err := clowder(t, "--cluster", dir, "stack", "ps", "--output", "json")
-	var stacks []api.StackInfo
+	waitForOutput(t, "running", "--cluster", dir, "get", "stacks")
+	listed, err := clowder(t, "--cluster", dir, "get", "stacks", "-o", "json")
+	var stacks []resource.Object
+	var status struct{ Status, Host string }
 	if err != nil || json.Unmarshal([]byte(listed), &stacks) != nil || len(stacks) != 1 ||
-		stacks[0].Name != "shop" || stacks[0].Status != "running" || stacks[0].Host != "node0" {
-		t.Errorf("stack ps --output json: %q, %v", listed, err)
+		stacks[0].Metadata.Name != "shop" || json.Unmarshal(stacks[0].Status, &status) != nil ||
+		status.Status != "running" || status.Host != "node0" {
+		t.Errorf("get stacks -o json: %q, %v", listed, err)
 	}
 	waitForOutput(t, "Up 2 seconds", "--cluster", dir, "stack", "ps", "shop")
 	waitForOutput(t, "hello", "--cluster", dir, "stack", "logs", "shop")
-	// deleted with its volume: compose down, the LV removed
-	if _, err := clowder(t, "--cluster", dir, "stack", "delete", "shop", "--delete-volumes"); err != nil {
+	// deleted, the stack before its volume: compose down, the LV removed
+	if _, err := clowder(t, "--cluster", dir, "delete", "-f", resources); err != nil {
 		t.Fatal(err)
 	}
 	hostDocker.waitFor(t, "down default_shop")

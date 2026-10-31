@@ -22,7 +22,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
-	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/resource"
 )
 
 // The host's files, as setup.sh and the agent lay them out. They are copied,
@@ -45,45 +45,38 @@ const (
 	registryPWFile = "registry/password"
 )
 
-// shopStack is the test's stack: app counts its starts on a replicated
-// volume and reads a secret as a file and one as a variable; with a
-// greeting, web joins it, with a healthcheck the test can fail. sleep as
-// PID 1 ignores SIGTERM: the short grace period spares 10 s at each stop.
+// shopStack is the test's stack with its volumes: app counts its starts on
+// a replicated volume and reads a secret as a file and one as a variable;
+// with a greeting, web joins it, with a healthcheck the test can fail.
+// sleep as PID 1 ignores SIGTERM: the short grace period spares 10 s at
+// each stop.
 func shopStack(greeting string) string {
-	stack := `name: shop
-x-clowder:
-  secrets_file: secrets.sops.yaml
-services:
+	spec := `services:
   app:
     image: ` + privateImage + `
     command: ["sh", "-c", "date >> /data/starts && exec sleep infinity"]
-    stop_grace_period: 1s
-    volumes: [data:/data, scratch:/scratch]
-    x-clowder:
-      secrets: [password]
-      secret_env: {API_TOKEN: api-token}
+    stopGracePeriod: 1s
+    volumes: [{volume: data, path: /data}, {volume: scratch, path: /scratch}]
+    secrets: [password]
+    secretEnv: {API_TOKEN: api-token}
 `
 	if greeting != "" {
 		// the file comes back at every start: a restart keeps the
 		// container's file system
-		stack += `  web:
+		spec += `  web:
     image: ` + publicImage + `
     command: ["sh", "-c", "touch /tmp/healthy && exec sleep infinity"]
-    stop_grace_period: 1s
-    environment: {GREETING: ` + greeting + `}
+    stopGracePeriod: 1s
+    env: {GREETING: ` + greeting + `}
     healthcheck:
-      test: ["CMD", "test", "-e", "/tmp/healthy"]
+      command: [test, -e, /tmp/healthy]
       interval: 2s
       retries: 2
-      start_period: 0s
 `
 	}
-	return stack + `volumes:
-  data:
-    x-clowder: {class: fast, size: 1G, replicas: 2}
-  scratch:
-    x-clowder: {class: bulk, size: 1G, replicas: 0}
-`
+	return document(resource.KindStack, "shop", spec) +
+		volumeDocument("data", "fast", "1G", 2) +
+		volumeDocument("scratch", "bulk", "1G", 0)
 }
 
 // The deadlines of the steps. The setup installs packages, builds DRBD's
@@ -282,25 +275,53 @@ var (
 	secondSecrets = map[string]string{"password": "second pa$$word", "api-token": "tok$en 'two'"}
 )
 
-// applyShop writes the stack's file and secrets, applies them and waits
-// until the new generation runs.
+// applyShop writes the stack's resources and secrets and applies them:
+// password from a SOPS file of its own in the stack's directory, which the
+// apply of the directory decrypts, api-token on stdin. Then it waits until
+// the stack's generation runs with these secrets.
 func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(stackDir("shop"), "clowder.yaml"), []byte(shopStack(greeting)), 0o644); err != nil {
+	if err := os.MkdirAll(stackDir("shop"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := clusterdir.WriteSOPS(filepath.Join(stackDir("shop"), "secrets.sops.yaml"), secrets, recipient); err != nil {
+	before := stackInfo(t, "shop").generation // 0 before the first apply
+	previous, _ := os.ReadFile(stackFile("shop"))
+	specChanged := before == 0 || string(previous) != shopStack(greeting)
+	if err := os.WriteFile(stackFile("shop"), []byte(shopStack(greeting)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	next := generation(t, "shop") + 1
-	mustClowder(t, "stack", "apply", "shop", "--file", filepath.Join(stackDir("shop"), "clowder.yaml"))
-	waitRunning(t, "shop", next)
+	passwordFile := filepath.Join(stackDir("shop"), "password.sops.yaml")
+	if err := clusterdir.WriteSOPS(passwordFile, secretResource("password", secrets["password"]), recipient); err != nil {
+		t.Fatal(err)
+	}
+	token, err := yaml.Marshal(secretResource("api-token", secrets["api-token"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := clowderWithInput(bytes.NewReader(token), "apply", "-f", "-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("clowder apply -f - (api-token):\n%s", output)
+	// the secrets before the stack, as apply orders a directory
+	mustClowder(t, "apply", "-f", stackDir("shop"))
+	// a changed spec is the stack's next generation; a change of secrets
+	// alone keeps it
+	generation, want := stackInfo(t, "shop").generation, before
+	if specChanged {
+		want++
+	}
+	if generation != want {
+		t.Errorf("generation %d after the apply, want %d", generation, want)
+	}
+	waitRunning(t, "shop", generation)
+	digests := secretDigests(t)
+	waitSecrets(t, "shop", map[string]string{"password": digests["password"], "api-token": digests["api-token"]})
 }
 
-// runStack creates the stack, applies it and checks the container: its
-// image from the private registry, its secrets, its volume, both pools.
+// runStack applies the stack and checks the container: its image from the
+// private registry, its secrets, its volume, both pools.
 func runStack(t *testing.T, server host) {
-	mustClowder(t, "stack", "create", "shop", "--dir", stackDir("shop"), "--age", recipient)
 	applyShop(t, "", firstSecrets)
 	mustClowder(t, "stack", "ps", "shop")
 
@@ -313,10 +334,10 @@ func runStack(t *testing.T, server host) {
 		t.Errorf("app started %d times on its volume, want 1", got)
 	}
 	// data (replicated) went to the pool of fast, scratch to the one of bulk
-	for _, pool := range []string{"vg-fast", "vg-bulk"} {
-		server.must(t, "lvs --noheadings -o lv_name "+pool+" | grep -q shop")
-	}
-	server.must(t, "drbdsetup status | grep -q shop")
+	data, scratch := volumeLV(t, "data"), volumeLV(t, "scratch")
+	server.must(t, "lvs --noheadings -o lv_name vg-fast | grep -qw "+data)
+	server.must(t, "lvs --noheadings -o lv_name vg-bulk | grep -qw "+scratch)
+	server.must(t, "drbdsetup status | grep -qw "+data)
 }
 
 func checkSecrets(t *testing.T, server host, want map[string]string) {
@@ -359,7 +380,7 @@ func shopContainers(t *testing.T, server host) map[string]container {
 // supervisor starts containers through the API.
 func restartAgent(t *testing.T, server host) {
 	before := shopContainers(t, server)
-	wanted := generation(t, "shop")
+	wanted := stackInfo(t, "shop").generation
 	server.must(t, "systemctl restart clowderd")
 	waitRunning(t, "shop", wanted)
 	time.Sleep(agentPass)
@@ -442,7 +463,7 @@ func supervise(t *testing.T, server host) {
 // the pools, the watchdog) is still there, and the mount guard holds.
 func reboot(t *testing.T, server host, tofu outputs) {
 	startsBefore := starts(t, server)
-	wanted := generation(t, "shop")
+	wanted := stackInfo(t, "shop").generation
 	// without its marker the setup runs again at this boot, as after its own
 	// reboot into a newer kernel: systemd must start it, and each of its
 	// steps must hold on a finished host
@@ -521,9 +542,7 @@ func checkStartOrder(t *testing.T, server host) {
 func checkMountGuard(t *testing.T, server host) {
 	startsBefore := starts(t, server)
 	app := server.service(t, "app")
-	// generation 1: no restore or class move happened to the volume
-	device := server.must(t, "docker volume inspect --format '{{index .Options \"device\"}}' "+
-		names.VolumeName(names.VolumeID(names.Default, "shop", "data"), 1))
+	device := server.must(t, "docker volume inspect --format '{{index .Options \"device\"}}' "+volumeLV(t, "data"))
 	if path.Base(device) != "data" {
 		t.Fatalf("the volume binds %s, not the data directory of a mount", device)
 	}
@@ -574,7 +593,7 @@ func changeSecrets(t *testing.T, server host) {
 func missingSecretFile(t *testing.T, server host) {
 	server.must(t, "systemctl stop clowderd")
 	server.must(t, "rm "+stackSecretsDir+"/files/password")
-	output, err := server.run("docker compose --project-name shop --file " + renderedStackFile +
+	output, err := server.run("docker compose --project-name " + project("shop") + " --file " + renderedStackFile +
 		" --file " + stackSecretsDir + "/env.yaml up --detach --force-recreate")
 	if err == nil {
 		t.Errorf("compose up started the stack without its secret file:\n%s", output)
@@ -583,7 +602,7 @@ func missingSecretFile(t *testing.T, server host) {
 	}
 	server.must(t, "systemctl start clowderd")
 	// the failed recreate leaves old containers renamed
-	// (<id>_default_shop-web-1); the agent's compose up replaces or starts
+	// (<id>_default_shop_web); the agent's compose up replaces or starts
 	// them (Compose may keep such a name), so wait until each service has one
 	// container, running
 	eventually(t, stackDeadline, "the agent brought the stack back", func() error {
@@ -601,7 +620,7 @@ func missingSecretFile(t *testing.T, server host) {
 // says why, and the running stack is untouched.
 func fullPool(t *testing.T, server host) {
 	before := shopContainers(t, server)
-	writeSimpleStack(t, "big", "volumes:\n  huge:\n    x-clowder: {class: bulk, size: 1T, replicas: 0}\n")
+	createAndApply(t, "big", simpleStack("big", "huge")+volumeDocument("huge", "bulk", "1T", 0))
 	eventually(t, stackDeadline, "big waits with a reason", func() error {
 		stacks, err := listStacks()
 		if err != nil {
@@ -613,22 +632,23 @@ func fullPool(t *testing.T, server host) {
 		}
 		return nil
 	})
-	mustClowder(t, "stack", "ps")
+	mustClowder(t, "get", "stacks")
 	checkUnchanged(t, before, shopContainers(t, server))
-	mustClowder(t, "stack", "delete", "big")
-	waitGone(t, "big")
+	removeStack(t, "big")
 }
 
-// writeSimpleStack creates and applies a stack of one service on the public
-// image, with the given tail of its Compose file. It only sleeps, so it
-// reserves little: with the default (0.1 CPUs) the host's 2 CPUs would take
-// 17 services (2 CPUs less the system reserve of 0.25, in tenths), fewer
-// than shop's two and the twenty stacks.
-func writeSimpleStack(t *testing.T, name, tail string) {
-	t.Helper()
-	createAndApply(t, name, "name: "+name+"\nservices:\n  app:\n    image: "+publicImage+
-		"\n    command: [sleep, infinity]\n    stop_grace_period: 1s\n"+
-		"    deploy: {resources: {reservations: {cpus: \"0.01\", memory: 16M}}}\n"+tail)
+// simpleStack is a stack of one service on the public image that mounts
+// the volume of the namespace at /data, if one is named. It only sleeps, so
+// it reserves little: with the default (0.1 CPUs) the host's 2 CPUs would
+// take 17 services (2 CPUs less the system reserve of 0.25, in tenths),
+// fewer than shop's two and the twenty stacks.
+func simpleStack(name, volume string) string {
+	spec := "services:\n  app:\n    image: " + publicImage + "\n    command: [sleep, infinity]\n" +
+		"    stopGracePeriod: 1s\n    resources: {reserve: {cpus: 0.01, memory: 16M}}\n"
+	if volume != "" {
+		spec += "    volumes: [{volume: " + volume + ", path: /data}]\n"
+	}
+	return document(resource.KindStack, name, spec)
 }
 
 // runManyStacks runs twenty small stacks next to shop, measures the agent
@@ -639,7 +659,7 @@ func runManyStacks(t *testing.T, server host) {
 		names = append(names, fmt.Sprintf("s%02d", i))
 	}
 	for _, name := range names {
-		writeSimpleStack(t, name, "")
+		createAndApply(t, name, simpleStack(name, ""))
 	}
 	eventually(t, stackDeadline, "all stacks run", func() error {
 		stacks, err := listStacks()
@@ -655,19 +675,24 @@ func runManyStacks(t *testing.T, server host) {
 	})
 	checkMemory(t, server, fmt.Sprintf("with %d stacks", manyStacks+1))
 	for _, name := range names {
-		mustClowder(t, "stack", "delete", name)
+		mustClowder(t, "delete", "stack", name)
 	}
 	waitGone(t, names...)
 }
 
-// deleteStack deletes the stack with its volumes: the containers, the LVs
-// and the DRBD resource go.
+// deleteStack deletes the stack, then its volumes and secrets: the
+// containers, the LVs and the DRBD resource go. The delete of the stack's
+// directory takes the stack before its volumes and the password; api-token
+// came on stdin.
 func deleteStack(t *testing.T, server host) {
-	mustClowder(t, "stack", "delete", "shop", "--delete-volumes")
+	data, scratch := volumeLV(t, "data"), volumeLV(t, "scratch")
+	mustClowder(t, "delete", "-f", stackDir("shop"))
+	mustClowder(t, "delete", "secret", "api-token")
 	waitGone(t, "shop")
 	eventually(t, stackDeadline, "the host removed the stack", func() error {
 		output, err := server.run("docker ps -aq --filter label=com.docker.compose.project=" + project("shop") + "; " +
-			"lvs --noheadings -o lv_name | grep shop; drbdsetup status | grep shop; true")
+			"lvs --noheadings -o lv_name | grep -w -e " + data + " -e " + scratch + "; " +
+			"drbdsetup status | grep -w " + data + "; true")
 		if err == nil && output != "" {
 			return fmt.Errorf("left on the host:\n%s", output)
 		}

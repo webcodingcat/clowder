@@ -45,16 +45,12 @@ const (
 	KindRevoke              = "revoke"
 	KindPutResource         = "put-resource"
 	KindDeleteResource      = "delete-resource"
-	KindCreateStack         = "create-stack"
-	KindPutStack            = "put-stack"
-	KindDeleteStack         = "delete-stack"
 	KindSetStackStatus      = "set-stack-status"
 	KindSetStackWaitReason  = "set-stack-wait-reason"
 	KindSetPushedOut        = "set-pushed-out"
 	KindPutAlert            = "put-alert"
 	KindResolveAlert        = "resolve-alert"
 	KindPutVolume           = "put-volume"
-	KindDeleteVolume        = "delete-volume"
 	KindForgetCopy          = "forget-copy"
 	KindStartOperation      = "start-operation"
 	KindAdvanceOperation    = "advance-operation"
@@ -121,16 +117,12 @@ var handlers = map[string]handler{
 	KindRevoke:              decoded(applyRevoke),
 	KindPutResource:         decoded(applyPutResource),
 	KindDeleteResource:      decoded(applyDeleteResource),
-	KindCreateStack:         decoded(applyCreateStack),
-	KindPutStack:            decoded(applyPutStack),
-	KindDeleteStack:         decoded(applyDeleteStack),
 	KindSetStackStatus:      decoded(applySetStackStatus),
 	KindSetStackWaitReason:  decoded(applySetStackWaitReason),
 	KindSetPushedOut:        decoded(applySetPushedOut),
 	KindPutAlert:            decoded(applyPutAlert),
 	KindResolveAlert:        decoded(applyResolveAlert),
 	KindPutVolume:           decoded(applyPutVolume),
-	KindDeleteVolume:        decoded(applyDeleteVolume),
 	KindForgetCopy:          decoded(applyForgetCopy),
 	KindStartOperation:      decoded(applyStartOperation),
 	KindAdvanceOperation:    decoded(applyAdvanceOperation),

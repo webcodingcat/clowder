@@ -16,6 +16,8 @@ const (
 	KindNamespace = "Namespace"
 	KindVolume    = "Volume"
 	KindSecret    = "Secret"
+	// KindStack's spec is a stackspec.Spec.
+	KindStack = "Stack"
 )
 
 // Namespaced tells whether the resources of a kind live in a namespace.

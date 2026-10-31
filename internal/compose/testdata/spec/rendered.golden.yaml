@@ -122,17 +122,17 @@ networks:
       com.docker.network.bridge.name: cbr-97375646b1d
 volumes:
   data:
-    name: clw-shop-web-data-d8035330-g1
+    name: clw-shop-data-73fdf519-g1
     driver: local
     driver_opts:
-      device: /var/lib/clowder/volumes/clw-shop-web-data-d8035330-g1/data
+      device: /var/lib/clowder/volumes/clw-shop-data-73fdf519-g1/data
       o: bind
       type: none
   uploads:
-    name: clw-shop-web-uploads-a79fce31-g1
+    name: clw-shop-uploads-cc9ce375-g1
     driver: local
     driver_opts:
-      device: /var/lib/clowder/volumes/clw-shop-web-uploads-a79fce31-g1/data
+      device: /var/lib/clowder/volumes/clw-shop-uploads-cc9ce375-g1/data
       o: bind
       type: none
 secrets:

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -24,9 +25,9 @@ func newApplyResources(g *globals) *cobra.Command {
 	var dryRun bool
 	command := &cobra.Command{
 		Use:   "apply -f <file|directory|->",
-		Short: "Create or change resources: namespaces, volumes, secrets",
+		Short: "Create or change resources: namespaces, volumes, secrets, stacks",
 		Long: "Applies the resources of a YAML file, of the YAML files of a directory, or of stdin (-),\n" +
-			"namespaces first. A secret may come in a SOPS file of its own (*.sops.yaml), which is\n" +
+			"namespaces first, stacks last. A secret may come in a SOPS file of its own (*.sops.yaml), which is\n" +
 			"decrypted with your age key. A resource applied as it is changes nothing. A resource\n" +
 			"the cluster refuses stops the apply: those after it are not tried, as they usually need it.",
 		Args: cobra.NoArgs,
@@ -55,13 +56,18 @@ func newApplyResources(g *globals) *cobra.Command {
 	return command
 }
 
-// applyRank orders an apply: a namespace before what it holds. A delete
-// goes the other way round.
+// applyRank orders an apply: a namespace before what it holds, a stack
+// after the volumes and secrets it names. A delete goes the other way
+// round.
 func applyRank(kind string) int {
-	if kind == resource.KindNamespace {
+	switch kind {
+	case resource.KindNamespace:
 		return 0
+	case resource.KindStack:
+		return 2
+	default:
+		return 1
 	}
-	return 1
 }
 
 func newGet(g *globals) *cobra.Command {
@@ -379,6 +385,24 @@ func printTable(out io.Writer, kind string, objects []resource.Object) error {
 			}
 			_, _ = fmt.Fprintf(table, "%s\t%s\t%d\t%s\n", object.Metadata.Namespace, object.Metadata.Name,
 				object.Metadata.Generation, status.Digest[:min(len(status.Digest), digestShown)])
+		}
+	case resource.KindStack:
+		// what the stack waits for last: it is long, and empty for most
+		// stacks; a running stack waits too when a volume it names finds no
+		// place
+		_, _ = fmt.Fprintln(table, "NAMESPACE\tNAME\tSTATUS\tHOST\tPRIORITY\tGENERATION\tPUSHED OUT\tWAITING FOR")
+		for _, object := range objects {
+			var status api.StackStatus
+			if err := decodeParts(object, nil, &status); err != nil {
+				return err
+			}
+			priority := strconv.Itoa(status.Priority)
+			if status.Default {
+				priority += " (default)"
+			}
+			_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", object.Metadata.Namespace, object.Metadata.Name,
+				status.Status, status.Host, priority, object.Metadata.Generation, strings.Join(status.PushedOut, ","),
+				status.WaitReason)
 		}
 	}
 	return table.Flush()

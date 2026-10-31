@@ -2,7 +2,6 @@ package compose
 
 import (
 	"bytes"
-	"context"
 	"flag"
 	"net/netip"
 	"os"
@@ -11,42 +10,49 @@ import (
 	"testing"
 
 	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/stackspec"
 )
 
 var update = flag.Bool("update", false, "write the golden files anew")
 
-// loadShop loads the example stack in testdata/shop.
-func loadShop(t *testing.T) *Stack {
+// loadSpec reads testdata/spec/stack.yaml as the API stores it: checked
+// and normalized.
+func loadSpec(t *testing.T) stackspec.Spec {
 	t.Helper()
-	stack, err := Load(context.Background(), LoadOptions{
-		Name: "shop", WorkingDir: "testdata/shop", Files: []string{"testdata/shop/compose.yaml"},
-	})
+	content, err := os.ReadFile("testdata/spec/stack.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return stack
+	spec, err := stackspec.Decode(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if problems := stackspec.Check(spec); len(problems) > 0 {
+		t.Fatal(problems)
+	}
+	return stackspec.Normalize(spec)
 }
 
-// shopTarget is a host where every volume of the shop is mounted.
-func shopTarget() Target {
-	mounted := func(volume string, generation int64) MountedVolume {
-		name := names.VolumeName(names.VolumeID("default", "shop", volume), generation)
+// specTarget is a host where the volumes of the namespace shop that web
+// names are mounted.
+func specTarget() Target {
+	mounted := func(volume string) MountedVolume {
+		name := names.VolumeName(names.ID("shop", volume), 1)
 		return MountedVolume{Dir: "/var/lib/clowder/volumes/" + name, Name: name}
 	}
 	return Target{
-		Namespace:   "default",
-		FloatingIP:  netip.MustParseAddr("203.0.113.11"),
-		NodeAddress: netip.MustParseAddr("10.77.0.3"),
-		Resolver:    netip.MustParseAddr("169.254.77.53"),
-		Volumes:     map[string]MountedVolume{"pgdata": mounted("pgdata", 1), "cachedata": mounted("cachedata", 2)},
-		SecretsDir:  "/run/clowder-secrets/default_shop/files",
-		// only db asks for a secret file; app's secret is a variable
-		SecretDigests: map[string]string{"db": "digest-of-db-password"},
+		Namespace:    "shop",
+		FloatingIP:   netip.MustParseAddr("203.0.113.11"),
+		NodeAddress:  netip.MustParseAddr("10.77.0.3"),
+		Resolver:     netip.MustParseAddr("169.254.77.53"),
+		Volumes:      map[string]MountedVolume{"data": mounted("data"), "uploads": mounted("uploads")},
+		SecretsDir:   "/run/clowder-secrets/shop_web/files",
+		SecretLabels: map[string]string{"app": "digest-of-api-key"},
 	}
 }
 
-// matchGolden compares a rendered file with its golden file in
-// testdata/<dir>; -update writes it anew.
+// matchGolden compares a rendered file with testdata/<dir>/<name>; with
+// -update it writes the file first.
 func matchGolden(t *testing.T, dir, name string, rendered []byte) {
 	t.Helper()
 	golden := filepath.Join("testdata", dir, name)
@@ -64,62 +70,59 @@ func matchGolden(t *testing.T, dir, name string, rendered []byte) {
 	}
 }
 
-func TestRenderedShopMatchesTheGoldenFile(t *testing.T) {
-	rendered, err := Render(loadShop(t), shopTarget())
+func TestARenderedSpecMatchesTheGoldenFile(t *testing.T) {
+	rendered, err := Render("web", loadSpec(t), specTarget())
 	if err != nil {
 		t.Fatal(err)
 	}
-	matchGolden(t, "shop", "rendered.golden.yaml", rendered)
+	matchGolden(t, "spec", "rendered.golden.yaml", rendered)
+	for _, want := range []string{
+		"container_name: shop_web_app", "name: shop_web_net", "condition: service_healthy",
+		"condition: service_started", "restart: \"no\"", "Hello $$USER",
+	} {
+		if !strings.Contains(string(rendered), want) {
+			t.Errorf("the rendered file lacks %q", want)
+		}
+	}
 }
 
 func TestTheSecretVariablesMatchTheGoldenFile(t *testing.T) {
-	stack := loadShop(t)
-	if _, err := RenderSecretEnv(stack, map[string]string{}); err == nil {
+	spec := loadSpec(t)
+	if _, err := RenderSecretEnv("web", spec, map[string]string{}); err == nil {
 		t.Error("rendered without the value")
 	}
-	rendered, err := RenderSecretEnv(stack, map[string]string{"db-password": "pa$$word\nline two", "unused": "x"})
+	rendered, err := RenderSecretEnv("web", spec, map[string]string{"db-password": "pa$$word", "api-key": "k"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	matchGolden(t, "shop", "secrets.golden.yaml", rendered)
+	matchGolden(t, "spec", "secrets.golden.yaml", rendered)
 }
 
 func TestRenderNeedsACompleteTarget(t *testing.T) {
-	unmounted := shopTarget()
-	unmounted.Volumes = map[string]MountedVolume{}
-	noFloatingIP := shopTarget()
-	noFloatingIP.FloatingIP = netip.Addr{}
-	noDigest := shopTarget()
-	noDigest.SecretDigests = nil
-	noNamespace := shopTarget()
-	noNamespace.Namespace = ""
+	unmounted := specTarget()
+	unmounted.Volumes = map[string]MountedVolume{"data": unmounted.Volumes["data"]}
+	noResolver := specTarget()
+	noResolver.Resolver = netip.Addr{}
+	noLabel := specTarget()
+	noLabel.SecretLabels = nil
+	badNamespace := specTarget()
+	badNamespace.Namespace = "clowder-x"
 	for want, target := range map[string]Target{
-		"not mounted": unmounted, "no floating IP": noFloatingIP, "no digest of the secrets of service db": noDigest,
-		`namespace "" is not valid`: noNamespace,
+		"volume uploads is not mounted": unmounted, "no resolver": noResolver,
+		"no label for the secrets of service app": noLabel, `namespace "clowder-x" is not valid`: badNamespace,
 	} {
-		if _, err := Render(loadShop(t), target); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := Render("web", loadSpec(t), target); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("want an error with %q, got %v", want, err)
 		}
 	}
 }
 
-func TestTwoNamespacesRenderApart(t *testing.T) {
-	other := shopTarget()
-	other.Namespace, other.SecretsDir = "other", "/run/clowder-secrets/other_shop/files"
-	rendered, err := Render(loadShop(t), other)
+func TestEveryDollarInAValueIsMeantAsItStands(t *testing.T) {
+	escaped, err := escapeDollars([]byte("a$b: x$y\nlist: [$1]\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"name: other_shop", "clowder.stack: other_shop", "name: other_shop_default"} {
-		if !strings.Contains(string(rendered), want) {
-			t.Errorf("the stack of namespace other lacks %q:\n%s", want, rendered)
-		}
-	}
-	mine, err := Render(loadShop(t), shopTarget())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(rendered), "default_shop") || bytes.Equal(rendered, mine) {
-		t.Error("two namespaces render the same names")
+	if string(escaped) != "a$b: x$$y\nlist: [$$1]\n" {
+		t.Errorf("escaped %q", escaped)
 	}
 }

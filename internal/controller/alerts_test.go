@@ -131,14 +131,13 @@ func newTestAlerts(t *testing.T) (*Alerts, *leader, *fakeChannel, *fakeChannel) 
 	t.Helper()
 	l := newLeader(t, 100<<30)
 	var config clusterdir.Config
-	var revision int64
-	l.Read(func(current *state.State) { config, revision = current.Config.Spec, current.ResourcesRevision })
+	l.Read(func(current *state.State) { config = current.Config.Spec })
 	config.Alerts = &clusterdir.Alerts{Channels: []clusterdir.AlertChannel{
 		{Type: "webhook", URL: &clusterdir.SecretRef{Secret: "hook"}},
 		{Type: "discord", Webhook: &clusterdir.SecretRef{Secret: "discord"}, MinSeverity: clusterdir.SeverityCritical},
 	}}
 	l.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
-		Spec: config, ResourcesRevision: revision,
+		Spec:    config,
 		Secrets: map[string]state.Sealed{"token": state.Sealed("t"), "hook": state.Sealed("h"), "discord": state.Sealed("d")},
 	})
 	webhook, discord := &fakeChannel{}, &fakeChannel{}

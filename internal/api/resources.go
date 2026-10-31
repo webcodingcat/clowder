@@ -16,6 +16,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/digest"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -89,6 +90,23 @@ type VolumeCopy struct {
 // SecretStatus is a secret's status: its digest, never its value.
 type SecretStatus struct {
 	Digest string `json:"digest"`
+}
+
+// StackStatus is a stack's status as the API shows it.
+type StackStatus struct {
+	Status string `json:"status"`
+	Host   string `json:"host,omitempty"` // empty: not placed yet
+	// Priority is the stack's as the cluster resolves it now; Default tells
+	// that the spec names none and cluster.yaml's default applies.
+	Priority int  `json:"priority"`
+	Default  bool `json:"default,omitempty"`
+	// PushedOut are the services stopped for others of higher priority.
+	PushedOut []string `json:"pushedOut,omitempty"`
+	// WaitReason is why the stack or a volume it names finds no place.
+	WaitReason string `json:"waitReason,omitempty"`
+	// AppliedSecrets are the digests of the secrets its containers came up
+	// with: one that differs from the secret's own has not reached them yet.
+	AppliedSecrets map[string]string `json:"appliedSecrets,omitempty"`
 }
 
 // secretResourcePurpose names the key the digests of Secret resources
@@ -191,6 +209,14 @@ func (s *Server) putCommand(actor string, object resource.Object) (state.Command
 			return state.Command{}, err
 		}
 		spec = volume
+	case resource.KindStack:
+		// read strictly here, as the state reads the spec leniently;
+		// stackspec.Check runs in the state
+		stack, err := stackspec.Decode(object.Spec)
+		if err != nil {
+			return state.Command{}, err
+		}
+		spec = stack
 	case resource.KindSecret:
 		secret, err := resource.DecodeSecretSpec(object.Spec)
 		if err != nil {
@@ -450,10 +476,7 @@ func (s *Server) answerResource(w http.ResponseWriter, r *http.Request, ref reso
 }
 
 // objects are the resources of a kind as the API shows them, sorted by
-// namespace and name. A secret shows its digest, never its value
-// (State.Secrets holds only Secret resources; a stack's own secrets live on
-// the stack). The volumes of stacks' Compose files are no resources and do
-// not show.
+// namespace and name. A secret shows its digest, never its value.
 func objects(current *state.State, kind string) []resource.Object {
 	var shown []resource.Object
 	add := func(meta state.Meta, spec, status any) {
@@ -480,17 +503,38 @@ func objects(current *state.State, kind string) []resource.Object {
 		}
 	case resource.KindVolume:
 		for _, id := range slices.Sorted(maps.Keys(current.Volumes)) {
-			if volume := current.Volumes[id]; volume.IsResource() {
-				add(volume.Meta, volume.Spec, volumeStatus(current, volume))
-			}
+			volume := current.Volumes[id]
+			add(volume.Meta, volume.Spec, volumeStatus(current, volume))
 		}
 	case resource.KindSecret:
 		for _, id := range slices.Sorted(maps.Keys(current.Secrets)) {
 			secret := current.Secrets[id]
 			add(secret.Meta, nil, SecretStatus{Digest: secret.Spec.Digest})
 		}
+	case resource.KindStack:
+		for _, id := range slices.Sorted(maps.Keys(current.Stacks)) {
+			stack := current.Stacks[id]
+			add(stack.Meta, stack.Spec, stackStatus(current, stack))
+		}
 	}
 	return shown
+}
+
+func stackStatus(current *state.State, stack *state.Stack) StackStatus {
+	status := StackStatus{
+		Status: string(stack.Status), PushedOut: stack.PushedOut, WaitReason: stack.WaitReason,
+		AppliedSecrets: stack.AppliedSecrets, Default: stack.Spec.Priority == "",
+	}
+	if stack.Host != nil {
+		if host, ok := current.Hosts[*stack.Host]; ok {
+			status.Host = host.Name
+		}
+	}
+	// the state checked that it resolves, at the apply and at every
+	// cluster apply since
+	written, _ := stackspec.ParsePriority(stack.Spec.Priority)
+	status.Priority, _ = current.Config.Spec.WithDefaults().Priorities.Resolve(written)
+	return status
 }
 
 func volumeStatus(current *state.State, volume *state.Volume) VolumeStatus {

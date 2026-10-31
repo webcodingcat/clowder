@@ -210,7 +210,7 @@ func (r *acmeRunner) commit(ctx context.Context, kind string, payload any) {
 func routeDomains(current *state.State) []string {
 	domains := map[string]bool{}
 	for _, stack := range current.Stacks {
-		for _, route := range stack.Routes {
+		for _, route := range stack.Spec.Routes() {
 			// a route is "<host><path>" with the host in lowercase
 			host, _, _ := strings.Cut(route, "/")
 			domains[host] = true

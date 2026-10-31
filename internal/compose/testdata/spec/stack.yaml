@@ -1,5 +1,5 @@
 # A stack with a spec of its own (stackspec) that uses every field
-# RenderStack renders; rendered.golden.yaml and secrets.golden.yaml are what
+# Render renders; rendered.golden.yaml and secrets.golden.yaml are what
 # it gives for the namespace shop.
 priority: high
 services:

@@ -80,14 +80,7 @@ func SplitProject(project string) (namespace, stack string, ok bool) {
 	return namespace, stack, ok && ValidNamespace(namespace) && Valid(stack)
 }
 
-// Network is the Docker network of a stack: "<project>_<network>", as Compose
-// would name it, but with the namespace in the project.
-func Network(namespace, stack, network string) string {
-	return Project(namespace, stack) + "_" + network
-}
-
-// StackNetwork is the one Docker network of a stack with a spec of its own
-// (stackspec): "<project>_net".
+// StackNetwork is the one Docker network of a stack: "<project>_net".
 func StackNetwork(namespace, stack string) string {
 	return Project(namespace, stack) + "_net"
 }
@@ -98,25 +91,8 @@ func Container(namespace, stack, service string) string {
 	return Project(namespace, stack) + "_" + service
 }
 
-// VolumeID is the ID of a stack's volume: "<namespace>/<stack>/<volume>".
-func VolumeID(namespace, stack, volume string) string {
-	return ID(namespace, stack) + "/" + volume
-}
-
-// StackOfVolume is the ID of the stack a volume ID belongs to; ok is false
-// for anything VolumeID does not make of valid names.
-func StackOfVolume(volumeID string) (stackID string, ok bool) {
-	index := strings.LastIndex(volumeID, "/")
-	if index < 0 {
-		return "", false
-	}
-	stackID = volumeID[:index]
-	_, _, ok = SplitID(stackID)
-	return stackID, ok && Valid(volumeID[index+1:])
-}
-
-// FileName is the file name of a record per ID ("shop/web/data" ->
-// "shop_web_data"): no name has "_", so it is unique.
+// FileName is the file name of a record per ID ("shop/data" ->
+// "shop_data"): no name has "_", so it is unique.
 func FileName(id string) string {
 	return strings.ReplaceAll(id, "/", "_")
 }
@@ -148,16 +124,11 @@ func VolumeName(id string, generation int64) string {
 	return fmt.Sprintf("clw-%s-%s-g%d", readable, shortHash(id, 8), generation)
 }
 
-// BridgeName is the Linux bridge of a stack's network: "cbr-" and the first
-// 11 hex digits of a hash of the stack's ID and the network, within the 15
-// characters an interface name may have. The default network hashes the ID
-// alone; it cannot meet another network's key, which has one "/" more.
-func BridgeName(stackID, network string) string {
-	key := stackID
-	if network != "default" {
-		key += "/" + network
-	}
-	return "cbr-" + shortHash(key, 11)
+// BridgeName is the Linux bridge of a stack's one network: "cbr-" and the
+// first 11 hex digits of a hash of the stack's ID, within the 15 characters
+// an interface name may have.
+func BridgeName(stackID string) string {
+	return "cbr-" + shortHash(stackID, 11)
 }
 
 // shortHash is the first hex digits of the SHA-256 of key.

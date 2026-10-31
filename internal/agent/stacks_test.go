@@ -2,11 +2,12 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -17,8 +18,10 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
+	"github.com/webcodingcat/clowder/internal/datakey"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/supervisor"
 )
@@ -29,6 +32,7 @@ type testCluster struct {
 	t     *testing.T
 	mu    sync.Mutex
 	state *state.State
+	keys  *datakey.Key
 }
 
 func (c *testCluster) Read(use func(current *state.State)) {
@@ -60,6 +64,47 @@ func (c *testCluster) apply(kind, actor string, payload any) {
 	}
 }
 
+// put applies a resource of the namespace default, as clowder apply does.
+func (c *testCluster) put(kind, name string, spec any) {
+	c.t.Helper()
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	c.apply(state.KindPutResource, state.UserActor("alice"), state.PutResource{
+		Kind: kind, Namespace: names.Default, Name: name, Owner: state.OwnerCLI, Spec: encoded,
+	})
+}
+
+// remove deletes a resource of the namespace default.
+func (c *testCluster) remove(kind, name string) {
+	c.t.Helper()
+	c.apply(state.KindDeleteResource, state.UserActor("alice"), state.DeleteResource{
+		Kind: kind, Namespace: names.Default, Name: name, Owner: state.OwnerCLI,
+	})
+}
+
+// putSecret applies a secret of the namespace default, sealed with the
+// cluster's data key; its digest stands for one the API computes.
+func (c *testCluster) putSecret(name, value string) {
+	c.t.Helper()
+	sealed, err := c.keys.Seal([]byte(value))
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	c.put(resource.KindSecret, name, state.SealedSecret{Value: sealed, Digest: "digest of " + value})
+}
+
+// place puts a stack of the namespace default on host 0, as the placement
+// does.
+func (c *testCluster) place(name string) {
+	c.t.Helper()
+	host := state.HostID(0)
+	c.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{
+		ID: names.ID(names.Default, name), Status: state.StackStarting, Host: &host,
+	})
+}
+
 // stack returns a stack of the namespace default.
 func (c *testCluster) stack(name string) state.Stack {
 	c.mu.Lock()
@@ -71,17 +116,28 @@ func (c *testCluster) stack(name string) state.Stack {
 // runner keeps of it.
 const shopProject = "default_shop"
 
-// shopLV is the LV of the volume db of default/shop in a generation.
-func shopLV(generation int64) string {
-	return names.VolumeName(names.VolumeID(names.Default, "shop", "db"), generation)
+// dbLV is the LV of the volume default/db in a data generation.
+func dbLV(generation int64) string {
+	return names.VolumeName(names.ID(names.Default, "db"), generation)
 }
 
-// newTestRunner is a runner on host 0 of a cluster with the stack "shop" of
-// the namespace default: one service and the volume "db" (generation 1),
-// placed on host 0.
+// usingDB is a stack whose service app mounts the volume db.
+func usingDB(app stackspec.Service) stackspec.Spec {
+	app.Image = "nginx"
+	app.Volumes = []stackspec.Mount{{Volume: "db", Path: "/data"}}
+	return stackspec.Spec{Services: map[string]stackspec.Service{"app": app}}
+}
+
+// newTestRunner is a runner on host 0 of a cluster with the stack shop of
+// the namespace default: one service that mounts the volume db (data
+// generation 1), both placed on host 0.
 func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fakeStorage) {
 	t.Helper()
-	cluster := &testCluster{t: t, state: &state.State{}}
+	keys, err := datakey.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cluster := &testCluster{t: t, state: &state.State{}, keys: keys}
 	cluster.apply(state.KindBootstrap, state.LeaderActor, state.Bootstrap{
 		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
 		JoinKey: state.Sealed("j"),
@@ -98,19 +154,10 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 		},
 		Secrets: map[string]state.Sealed{"token": state.Sealed("t")},
 	})
-	cluster.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{
-		Namespace: names.Default, Name: "shop", Owner: state.OwnerCLI,
-	})
-	cluster.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Namespace: names.Default, Name: "shop", Owner: state.OwnerCLI, ConfigRevision: 1,
-		Source: "name: shop\nservices: {app: {image: nginx, volumes: [db:/data]}}\n" +
-			"volumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n",
-	})
-	putVolume(cluster, 1)
-	host := state.HostID(0)
-	cluster.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{
-		ID: "default/shop", Status: state.StackStarting, Host: &host,
-	})
+	cluster.put(resource.KindVolume, "db", resource.VolumeSpec{Class: "fast", Size: 1 << 30, Replicas: 0})
+	cluster.put(resource.KindStack, "shop", usingDB(stackspec.Service{}))
+	placeDB(cluster, 1)
+	cluster.place("shop")
 
 	docker, storage := &fakeDocker{}, &fakeStorage{dir: t.TempDir()}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -118,10 +165,7 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 		files: Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}, host: Host{ID: 0, Name: "node0", NodeAddress: netip.MustParseAddr("10.77.0.1")},
 		cluster: cluster, docker: docker, storage: storage, logger: logger,
 		propose: cluster.propose, applied: map[string][32]byte{}, logins: map[string][32]byte{},
-		unexplained: map[string]bool{},
-		// the tests' sealed values are their clear text
-		open:      func(sealed state.Sealed) ([]byte, error) { return []byte(sealed), nil },
-		digestKey: []byte("the test's digest key"),
+		unexplained: map[string]bool{}, open: keys.Open, digestKey: []byte("the test's digest key"),
 	}
 	// the tests run passes, never the supervisor's loop, which calls the two
 	// functions left out
@@ -129,11 +173,15 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 	return runner, cluster, docker, storage
 }
 
-func putVolume(cluster *testCluster, generation int64) {
-	cluster.apply(state.KindPutVolume, state.LeaderActor, state.PutVolume{Volume: state.Volume{
-		ID: "default/shop/db", DataGeneration: generation, Spec: resource.VolumeSpec{Class: "fast", Size: 1 << 30},
-		Placements: []state.Placement{{Host: 0, Class: "fast"}}, Status: state.VolumeOK,
-	}})
+// placeDB places the volume db on host 0 in a data generation, as the
+// placement (the first) or a restore (the next) does.
+func placeDB(cluster *testCluster, generation int64) {
+	cluster.t.Helper()
+	var volume state.Volume
+	cluster.Read(func(current *state.State) { volume = *current.Volumes["default/db"] })
+	volume.DataGeneration, volume.Status = generation, state.VolumeOK
+	volume.Placements = []state.Placement{{Host: 0, Class: "fast"}}
+	cluster.apply(state.KindPutVolume, state.LeaderActor, state.PutVolume{Volume: volume})
 }
 
 func (c *calls) count(line string) int {
@@ -170,6 +218,9 @@ func TestAFailedComposeUpIsTriedAgain(t *testing.T) {
 func TestAPushedOutServiceIsLeftOutAndNotRestarted(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
 	runner.pass(context.Background())
+	if rule, ok := runner.rules(shopProject, "app"); !ok || rule.Restart != "always" || !rule.RestartUnhealthy {
+		t.Errorf("the rule of a service %+v, %v", rule, ok)
+	}
 	cluster.mu.Lock()
 	cluster.state.Stacks["default/shop"].PushedOut = []string{"app"} // as set-pushed-out writes it
 	cluster.mu.Unlock()
@@ -185,12 +236,12 @@ func TestAPushedOutServiceIsLeftOutAndNotRestarted(t *testing.T) {
 	}
 }
 
-func TestANewGenerationReplacesTheLV(t *testing.T) {
+func TestANewDataGenerationReplacesTheLV(t *testing.T) {
 	runner, cluster, docker, storage := newTestRunner(t)
 	runner.pass(context.Background())
-	putVolume(cluster, 2) // a restore
+	placeDB(cluster, 2) // a restore
 	runner.pass(context.Background())
-	old, current := shopLV(1), shopLV(2)
+	old, current := dbLV(1), dbLV(2)
 	if storage.count("ensure "+current) != 1 || storage.count("remove "+old) != 1 || storage.count("remove "+current) != 0 {
 		t.Errorf("storage calls %q", storage.lines)
 	}
@@ -205,93 +256,91 @@ func TestANewGenerationReplacesTheLV(t *testing.T) {
 func TestACopyTheStateLostIsKept(t *testing.T) {
 	runner, cluster, _, storage := newTestRunner(t)
 	runner.pass(context.Background())
-	// a bug, not a command, takes the volume out of the state
+	// a bug, not a command, takes the volume and its stack out of the state
 	cluster.mu.Lock()
-	delete(cluster.state.Volumes, "default/shop/db")
+	delete(cluster.state.Volumes, "default/db")
+	delete(cluster.state.Stacks, "default/shop")
 	cluster.mu.Unlock()
 	runner.pass(context.Background())
 	runner.pass(context.Background())
-	if storage.count("remove "+shopLV(1)) != 0 {
+	if storage.count("remove "+dbLV(1)) != 0 {
 		t.Errorf("a copy that is neither placed nor retired was removed: %q", storage.lines)
 	}
-	if !runner.unexplained[shopLV(1)] {
+	if !runner.unexplained[dbLV(1)] {
 		t.Error("no warning about the kept copy")
 	}
 }
 
-func TestAStackThatLeftIsStoppedAndForgotten(t *testing.T) {
+func TestAVolumeOutlivesItsStack(t *testing.T) {
 	runner, cluster, docker, storage := newTestRunner(t)
 	runner.pass(context.Background())
 
-	// moved off this host, but its volume copy stays here for now
-	cluster.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{ID: "default/shop", Status: state.StackPending})
+	cluster.remove(resource.KindStack, "shop")
 	runner.pass(context.Background())
 	runner.pass(context.Background())
-	if docker.count("down "+shopProject) != 1 || storage.count("remove "+shopLV(1)) != 0 {
+	if docker.count("down "+shopProject) != 1 || storage.count("remove "+dbLV(1)) != 0 {
 		t.Errorf("docker %q, storage %q", docker.lines, storage.lines)
 	}
 	// the stack's files go with compose down, the copy's record stays
 	if _, err := os.Stat(runner.files.stackDir(shopProject)); !os.IsNotExist(err) {
 		t.Errorf("the stack's directory is left: %v", err)
 	}
-	if _, err := os.Stat(runner.files.volumeRecord("default/shop/db")); err != nil {
+	if _, err := os.Stat(runner.files.volumeRecord("default/db")); err != nil {
 		t.Errorf("the record of the copy left with the stack: %v", err)
 	}
 
-	cluster.apply(state.KindDeleteStack, state.UserActor("alice"), state.DeleteStack{
-		Namespace: names.Default, Name: "shop", WithVolumes: true,
-	})
+	cluster.remove(resource.KindVolume, "db")
 	runner.pass(context.Background())
-	if storage.count("remove "+shopLV(1)) != 1 {
+	if storage.count("remove "+dbLV(1)) != 1 {
 		t.Errorf("storage %q", storage.lines)
 	}
 	if retired := cluster.state.Retired; len(retired) != 0 {
 		t.Errorf("the removed copy is not forgotten: %v", retired)
 	}
-	if _, err := os.Stat(runner.files.volumeRecord("default/shop/db")); !os.IsNotExist(err) {
+	if _, err := os.Stat(runner.files.volumeRecord("default/db")); !os.IsNotExist(err) {
 		t.Errorf("the record of the removed copy is left: %v", err)
 	}
 }
 
-func TestAStackThatLeftStopsBeforeTheOthersComeUp(t *testing.T) {
-	runner, cluster, docker, _ := newTestRunner(t)
+// handOver deletes shop and applies blog on shop's volume, so both land in
+// the runner's next pass.
+func handOver(cluster *testCluster) {
+	cluster.t.Helper()
+	cluster.remove(resource.KindStack, "shop")
+	cluster.put(resource.KindStack, "blog", usingDB(stackspec.Service{}))
+	cluster.place("blog")
+}
+
+func TestAVolumePassesOnlyOnceItsStackStopped(t *testing.T) {
+	runner, cluster, docker, storage := newTestRunner(t)
 	runner.pass(context.Background())
-	// shop leaves this host and blog comes, in the same pass
-	cluster.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{ID: "default/shop", Status: state.StackPending})
-	cluster.apply(state.KindCreateStack, state.UserActor("alice"), state.CreateStack{
-		Namespace: names.Default, Name: "blog", Owner: state.OwnerCLI,
-	})
-	cluster.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Namespace: names.Default, Name: "blog", Owner: state.OwnerCLI, ConfigRevision: 1,
-		Source: "name: blog\nservices: {web: {image: nginx}}\n",
-	})
-	host := state.HostID(0)
-	cluster.apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{
-		ID: "default/blog", Status: state.StackStarting, Host: &host,
-	})
+	handOver(cluster)
 	runner.pass(context.Background())
 	docker.mu.Lock()
-	defer docker.mu.Unlock()
 	down := slices.Index(docker.lines, "down "+shopProject)
 	up := slices.Index(docker.lines, "up default_blog")
+	docker.mu.Unlock()
 	if down < 0 || up < 0 || down > up {
 		t.Errorf("docker %q: shop must go down before blog comes up", docker.lines)
 	}
+	if storage.count("remove "+dbLV(1)) != 0 || cluster.stack("blog").Status != state.StackRunning {
+		t.Errorf("storage %q, blog %s", storage.lines, cluster.stack("blog").Status)
+	}
 }
 
-// putShopWithSecrets applies shop again: app asks for db-password as a file
-// and, with apiKey set, for api-key as the variable API_KEY.
-func putShopWithSecrets(cluster *testCluster, password, apiKey string) {
-	app := "{image: nginx, volumes: [db:/data], x-clowder: {secrets: [db-password]}}"
-	secrets := map[string]state.Sealed{"db-password": state.Sealed(password)}
-	if apiKey != "" {
-		app = "{image: nginx, volumes: [db:/data], x-clowder: {secrets: [db-password], secret_env: {API_KEY: api-key}}}"
-		secrets["api-key"] = state.Sealed(apiKey)
+func TestAStackWaitsWhileAStackThatFailedToStopHoldsItsVolume(t *testing.T) {
+	runner, cluster, docker, _ := newTestRunner(t)
+	runner.pass(context.Background())
+	handOver(cluster)
+	docker.failedDowns = 1
+	runner.pass(context.Background())
+	if docker.count("up default_blog") != 0 {
+		t.Fatalf("blog came up beside shop, which still runs: %q", docker.lines)
 	}
-	cluster.apply(state.KindPutStack, state.UserActor("alice"), state.PutStack{
-		Namespace: names.Default, Name: "shop", Owner: state.OwnerCLI, Secrets: secrets, ConfigRevision: 1,
-		Source: "name: shop\nservices:\n  app: " + app + "\nvolumes:\n  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n",
-	})
+	runner.pass(context.Background()) // shop stops now
+	if docker.count("up default_blog") != 1 || cluster.stack("blog").Status != state.StackRunning {
+		t.Errorf("docker %q, blog %s", docker.lines, cluster.stack("blog").Status)
+	}
 }
 
 func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
@@ -299,7 +348,11 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 	password := runner.files.secretFile(shopProject, "db-password")
 	env := runner.files.secretEnvFile(shopProject)
 
-	putShopWithSecrets(cluster, "first", "key")
+	cluster.putSecret("db-password", "first")
+	cluster.putSecret("api-key", "key")
+	cluster.put(resource.KindStack, "shop", usingDB(stackspec.Service{
+		Secrets: []string{"db-password"}, SecretEnv: map[string]string{"API_KEY": "api-key"},
+	}))
 	runner.pass(context.Background())
 	if content, err := os.ReadFile(password); err != nil || string(content) != "first" {
 		t.Errorf("the secret file: %q, %v", content, err)
@@ -314,9 +367,13 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 	if len(docker.upFiles) != 2 || docker.upFiles[1] != env {
 		t.Errorf("compose up with %v", docker.upFiles)
 	}
+	want := map[string]string{"db-password": "digest of first", "api-key": "digest of key"}
+	if applied := cluster.stack("shop").AppliedSecrets; !maps.Equal(applied, want) {
+		t.Errorf("applied secrets %v, want %v", applied, want)
+	}
 
-	// a new password and no variable any more: rewritten, env.yaml gone
-	putShopWithSecrets(cluster, "second", "")
+	// a new password, the stack unchanged: rewritten, and reported
+	cluster.putSecret("db-password", "second")
 	runner.pass(context.Background())
 	if content, err := os.ReadFile(password); err != nil || string(content) != "second" {
 		t.Errorf("the changed secret file: %q, %v", content, err)
@@ -325,10 +382,17 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 	if secretsLabel(t, runner) == firstLabel {
 		t.Error("the label of app did not change with its secret file")
 	}
+	if applied := cluster.stack("shop").AppliedSecrets; applied["db-password"] != "digest of second" {
+		t.Errorf("applied secrets %v after the change", applied)
+	}
+
+	// no variable any more: env.yaml goes
+	cluster.put(resource.KindStack, "shop", usingDB(stackspec.Service{Secrets: []string{"db-password"}}))
+	runner.pass(context.Background())
 	if _, err := os.Stat(env); !os.IsNotExist(err) {
 		t.Errorf("the secret variables stayed: %v", err)
 	}
-	if ups := docker.count("up " + shopProject); ups != 2 || len(docker.upFiles) != 1 {
+	if ups := docker.count("up " + shopProject); ups != 3 || len(docker.upFiles) != 1 {
 		t.Errorf("%d compose ups, the last with %v", ups, docker.upFiles)
 	}
 
@@ -342,7 +406,7 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 // secretsLabel reads the digest label of app from shop's rendered file.
 func secretsLabel(t *testing.T, runner *stackRunner) string {
 	t.Helper()
-	content, err := os.ReadFile(filepath.Join(runner.files.stackDir(shopProject), "compose.yaml"))
+	content, err := os.ReadFile(runner.files.stackFile(shopProject))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,23 +425,23 @@ func secretsLabel(t *testing.T, runner *stackRunner) string {
 	return label
 }
 
-func TestSecretDigestsAreKeyedAndUnambiguous(t *testing.T) {
-	values := map[string]string{"a": "bc", "ab": "c", "x": "1"}
-	digest := secretDigest([]byte("key"), values, []string{"a", "x"})
-	if digest != secretDigest([]byte("key"), values, []string{"x", "a"}) {
-		t.Error("the order of the names changed the digest")
+func TestSecretLabelsAreKeyedAndUnambiguous(t *testing.T) {
+	digests := map[string]string{"a": "bc", "ab": "c", "x": "1"}
+	label := secretLabel([]byte("key"), digests, []string{"a", "x"})
+	if label != secretLabel([]byte("key"), digests, []string{"x", "a"}) {
+		t.Error("the order of the names changed the label")
 	}
 	for what, other := range map[string]string{
-		"another key":                    secretDigest([]byte("other"), values, []string{"a", "x"}),
-		"another value":                  secretDigest([]byte("key"), map[string]string{"a": "bc", "x": "2"}, []string{"a", "x"}),
-		"the same bytes split elsewhere": secretDigest([]byte("key"), values, []string{"ab", "x"}),
+		"another key":                    secretLabel([]byte("other"), digests, []string{"a", "x"}),
+		"another digest":                 secretLabel([]byte("key"), map[string]string{"a": "bc", "x": "2"}, []string{"a", "x"}),
+		"the same bytes split elsewhere": secretLabel([]byte("key"), digests, []string{"ab", "x"}),
 	} {
-		if other == digest {
-			t.Errorf("%s gave the same digest", what)
+		if other == label {
+			t.Errorf("%s gave the same label", what)
 		}
 	}
-	if strings.Contains(digest, "bc") || len(digest) != 64 {
-		t.Errorf("digest %q", digest)
+	if strings.Contains(label, "bc") || len(label) != 64 {
+		t.Errorf("label %q", label)
 	}
 }
 

@@ -21,8 +21,24 @@ spec: {class: fast, size: 10G, replicas: 1}
 		t.Fatal(err)
 	}
 	if len(objects) != 2 || objects[1].Ref() != (Ref{Kind: KindVolume, Namespace: "shop", Name: "data"}) ||
-		string(objects[1].Spec) != `{"class":"fast","replicas":1,"size":"10G"}` {
+		string(objects[1].Spec) != `{"class":"fast","size":"10G","replicas":1}` {
 		t.Errorf("objects %+v", objects)
+	}
+}
+
+func TestNumbersKeepTheTextTheyWereWrittenIn(t *testing.T) {
+	objects, err := ParseDocuments([]byte(`
+apiVersion: clowder/v1
+kind: Stack
+metadata: {name: shop}
+spec: {services: {app: {image: x, env: {RATIO: 1.0, PORT: 8080, DEBUG: true, HEX: 0x10, NAME: shop}}}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"services":{"app":{"image":"x","env":{"RATIO":1.0,"PORT":8080,"DEBUG":true,"HEX":16,"NAME":"shop"}}}}`
+	if string(objects[0].Spec) != want {
+		t.Errorf("spec %s, want %s", objects[0].Spec, want)
 	}
 }
 

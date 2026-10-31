@@ -45,32 +45,20 @@ func TestProjectsAndFilesOfTwoNamespacesNeverMeet(t *testing.T) {
 	if Project("a-b", "c") == Project("a", "b-c") {
 		t.Error("the projects of a-b/c and a/b-c are the same")
 	}
-	if FileName(VolumeID("a-b", "c", "d")) == FileName(VolumeID("a", "b-c", "d")) {
-		t.Error("the volumes of a-b/c and a/b-c share their file")
-	}
-}
-
-func TestAVolumeIDTellsItsStack(t *testing.T) {
-	stack, ok := StackOfVolume(VolumeID("shop", "web", "data"))
-	if !ok || stack != "shop/web" {
-		t.Errorf("StackOfVolume = %q, %v", stack, ok)
-	}
-	for _, id := range []string{"shop/data", "shop/web/", "data", "Shop/web/data", "shop/web/da_ta"} {
-		if _, ok := StackOfVolume(id); ok {
-			t.Errorf("StackOfVolume(%q) is ok", id)
-		}
+	if FileName(ID("a-b", "c")) == FileName(ID("a", "b-c")) {
+		t.Error("the volumes a-b/c and a/b-c share their file")
 	}
 }
 
 func TestVolumeNamesOfDifferentVolumesNeverMeet(t *testing.T) {
-	if VolumeName(VolumeID("a-b", "c", "d"), 1) == VolumeName(VolumeID("a", "b-c", "d"), 1) {
+	if VolumeName(ID("a-b", "c"), 1) == VolumeName(ID("a", "b-c"), 1) {
 		t.Error("the hash must keep a-b/c and a/b-c apart")
 	}
-	if VolumeName("shop/web/db", 1) == VolumeName("shop/web/db", 2) {
+	if VolumeName("shop/db", 1) == VolumeName("shop/db", 2) {
 		t.Error("generations must differ")
 	}
 	long := strings.Repeat("a", MaxLength)
-	if VolumeName(VolumeID(long, long, "x"), 1) == VolumeName(VolumeID(long, long, "y"), 1) {
+	if VolumeName(ID(long, long+"x"), 1) == VolumeName(ID(long, long+"y"), 1) {
 		t.Error("the hash must keep volumes apart whose readable part is cut alike")
 	}
 }
@@ -83,7 +71,7 @@ func TestVolumeNamesFitDeviceMapper(t *testing.T) {
 	if !Valid(dashes) {
 		t.Fatalf("%q is no valid name", dashes)
 	}
-	lv := VolumeName(VolumeID(dashes, dashes, dashes), MaxDataGeneration)
+	lv := VolumeName(ID(dashes, dashes), MaxDataGeneration)
 	if len(lv) > 127 {
 		t.Errorf("LV %s has %d characters, more than LVM and DRBD take", lv, len(lv))
 	}
@@ -96,12 +84,11 @@ func TestVolumeNamesFitDeviceMapper(t *testing.T) {
 
 func TestBridgeNamesFitTheKernelLimit(t *testing.T) {
 	long := strings.Repeat("a", MaxLength)
-	if name := BridgeName(ID(long, long), "backend"); len(name) > 15 {
+	if name := BridgeName(ID(long, long)); len(name) > 15 {
 		t.Errorf("%s has %d characters, more than an interface name may have", name, len(name))
 	}
-	if BridgeName("shop/web", "default") == BridgeName("shop/web", "backend") ||
-		BridgeName("a/web", "default") == BridgeName("b/web", "default") {
-		t.Error("bridges of different networks must differ")
+	if BridgeName("a/web") == BridgeName("b/web") {
+		t.Error("the bridges of two stacks must differ")
 	}
 }
 

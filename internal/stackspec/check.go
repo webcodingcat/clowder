@@ -335,9 +335,12 @@ func checkCycles(services map[string]Service) Problems {
 }
 
 // ParsePriority reads a priority as written: a whole number from 0 to 1000,
-// or a category's name. Whether the category exists depends on the
-// cluster.
+// or a category's name; none ("") is the zero Priority, the cluster's
+// default. Whether the category exists depends on the cluster.
 func ParsePriority(text string) (clusterdir.Priority, error) {
+	if text == "" {
+		return clusterdir.Priority{}, nil
+	}
 	if number, err := strconv.Atoi(text); err == nil {
 		if number < 0 || number > 1000 {
 			return clusterdir.Priority{}, fmt.Errorf("%d is not from 0 to 1000", number)

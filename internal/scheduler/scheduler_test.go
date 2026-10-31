@@ -1,12 +1,15 @@
 package scheduler
 
 import (
-	"context"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/units"
 )
@@ -54,42 +57,46 @@ func cluster() *state.State {
 	}
 }
 
-// source is a stack's Compose file with one service and these volumes.
-func source(stack, volumes string) string {
-	return "name: " + stack + "\nservices:\n  app:\n    image: example/app\nvolumes:\n" + volumes
+// volume is a volume's spec: class, size in GiB, replicas.
+func volume(class string, size int64, replicas int) resource.VolumeSpec {
+	return resource.VolumeSpec{Class: class, Size: units.Size(size * gib), Replicas: replicas}
 }
 
-// stack adds a stack of the namespace default, with a Compose file with
-// these volumes, and returns it.
-func stack(current *state.State, name, volumes string) *state.Stack {
-	added := &state.Stack{Namespace: "default", Name: name, Source: source(name, volumes)}
+// stack adds a pending stack of the namespace default whose one service
+// mounts these volumes, each a volume of the namespace that waits for its
+// first stack, and returns the stack.
+func stack(current *state.State, name string, volumes map[string]resource.VolumeSpec) *state.Stack {
+	app := stackspec.Service{Image: "example/app"}
+	for _, volumeName := range slices.Sorted(maps.Keys(volumes)) {
+		app.Volumes = append(app.Volumes, stackspec.Mount{Volume: volumeName, Path: "/" + volumeName})
+		current.Volumes[names.ID("default", volumeName)] = &state.Volume{
+			Meta: state.Meta{Namespace: "default", Name: volumeName},
+			Spec: volumes[volumeName], DataGeneration: 1, Status: state.VolumePending,
+		}
+	}
+	added := &state.Stack{
+		Meta: state.Meta{Namespace: "default", Name: name}, Status: state.StackPending,
+		Spec: stackspec.Spec{Services: map[string]stackspec.Service{"app": app}},
+	}
 	current.Stacks[added.ID()] = added
 	return added
 }
 
-func TestAStackNeverAppliedIsNotPlaced(t *testing.T) {
-	current := cluster()
-	stack(current, "shop", "").Status = state.StackCreated
-	if decisions := Plan(context.Background(), current); len(decisions.Placements)+len(decisions.Waiting) > 0 {
-		t.Errorf("decisions %+v", decisions)
-	}
-}
-
 func TestAStackGoesWhereItsVolumesFit(t *testing.T) {
 	current := cluster()
-	stack(current, "shop", "  db:\n    x-clowder: {class: fast, size: 20G, replicas: 1}\n"+
-		"  cache:\n    x-clowder: {class: any, size: 12G, replicas: 0}\n")
-	decisions := Plan(context.Background(), current)
+	stack(current, "shop", map[string]resource.VolumeSpec{"db": volume("fast", 20, 1), "cache": volume("any", 12, 0)})
+	decisions := Plan(current)
 	placements, waiting := decisions.Placements, decisions.Waiting
 	if len(waiting) > 0 || len(placements) != 1 || !placements[0].Place || placements[0].Host != 0 {
 		t.Fatalf("placements %+v, waiting %+v", placements, waiting)
 	}
 	volumes := map[string]state.Volume{}
-	for _, volume := range placements[0].Volumes {
-		volumes[volume.ID] = volume
+	for _, placed := range placements[0].Volumes {
+		volumes[placed.ID()] = placed
 	}
-	db, cache := volumes["default/shop/db"], volumes["default/shop/cache"]
-	if db.Minor == nil || *db.Minor != 0 || db.Placements[0].Class != "fast" {
+	db, cache := volumes["default/db"], volumes["default/cache"]
+	if db.Minor == nil || *db.Minor != 0 || db.Placements[0].Class != "fast" || db.Status != state.VolumeOK ||
+		db.Name != "db" {
 		t.Errorf("db %+v", db)
 	}
 	// 12 GiB do not fit the 10 GiB bulk pool: any falls back to fast
@@ -100,10 +107,9 @@ func TestAStackGoesWhereItsVolumesFit(t *testing.T) {
 
 func TestStacksThatDoNotFitWaitAndTakeNothing(t *testing.T) {
 	current := cluster()
-	stack(current, "big", "  small:\n    x-clowder: {class: fast, size: 10G, replicas: 1}\n"+
-		"  huge:\n    x-clowder: {class: fast, size: 75G, replicas: 1}\n")
-	stack(current, "next", "  data:\n    x-clowder: {class: fast, size: 80G, replicas: 1}\n")
-	decisions := Plan(context.Background(), current)
+	stack(current, "big", map[string]resource.VolumeSpec{"small": volume("fast", 10, 1), "huge": volume("fast", 75, 1)})
+	stack(current, "next", map[string]resource.VolumeSpec{"data": volume("fast", 80, 1)})
+	decisions := Plan(current)
 	placements, waiting := decisions.Placements, decisions.Waiting
 	// huge (first by name) fits, small after it does not
 	// the reason is shown to users: sizes in units, the hosts' reasons joined
@@ -122,33 +128,48 @@ func TestAPlacedStackGetsOnlyItsNewVolumes(t *testing.T) {
 	current := cluster()
 	host := state.HostID(0)
 	minor := 0
-	shop := stack(current, "shop", "  db:\n    x-clowder: {class: fast, size: 20G, replicas: 1}\n"+
-		"  files:\n    x-clowder: {class: fast, size: 50G, replicas: 1}\n")
+	shop := stack(current, "shop", map[string]resource.VolumeSpec{"db": volume("fast", 20, 1), "files": volume("fast", 50, 1)})
 	shop.Host = &host
-	current.Volumes["default/shop/db"] = &state.Volume{
-		ID: "default/shop/db", Spec: resource.VolumeSpec{Class: "fast", Size: units.Size(20 * gib), Replicas: 1}, Minor: &minor,
-		Placements: []state.Placement{{Host: 0, Class: "fast"}},
-	}
-	decisions := Plan(context.Background(), current)
+	db := current.Volumes["default/db"]
+	db.Minor, db.Status, db.Placements = &minor, state.VolumeOK, []state.Placement{{Host: 0, Class: "fast"}}
+	decisions := Plan(current)
 	placements, waiting := decisions.Placements, decisions.Waiting
 	if len(waiting) > 0 || len(placements) != 1 || placements[0].Place {
 		t.Fatalf("placements %+v, waiting %+v", placements, waiting)
 	}
 	files := placements[0].Volumes
-	if len(files) != 1 || files[0].ID != "default/shop/files" || *files[0].Minor != 1 {
+	if len(files) != 1 || files[0].ID() != "default/files" || *files[0].Minor != 1 {
 		t.Errorf("new volumes %+v", files)
 	}
-	shop.Source = source("shop", "  db:\n    x-clowder: {class: fast, size: 20G, replicas: 1}\n")
-	if placements := Plan(context.Background(), current).Placements; len(placements) != 0 {
+	app := shop.Spec.Services["app"]
+	app.Volumes = app.Volumes[:1] // db only
+	shop.Spec.Services["app"] = app
+	if placements := Plan(current).Placements; len(placements) != 0 {
 		t.Errorf("a placed stack without new volumes: %+v", placements)
+	}
+}
+
+func TestAStackGoesWhereItsVolumeKeepsItsData(t *testing.T) {
+	current := cluster()
+	current.Hosts[1] = &state.Host{ID: 1, Name: "node1", Phase: state.Active, Pools: current.Hosts[0].Pools}
+	stack(current, "shop", map[string]resource.VolumeSpec{"data": volume("fast", 1, 0)})
+	data := current.Volumes["default/data"]
+	data.Status, data.Placements = state.VolumeOK, []state.Placement{{Host: 1, Class: "fast"}}
+	placements := Plan(current).Placements
+	if len(placements) != 1 || placements[0].Host != 1 || len(placements[0].Volumes) != 0 {
+		t.Errorf("placements %+v", placements)
+	}
+	current.Hosts[1].Phase = state.Draining
+	if waiting := Plan(current).Waiting; len(waiting) != 1 || !strings.Contains(waiting[0].Reason, "has its data on another host") {
+		t.Errorf("waiting %+v", waiting)
 	}
 }
 
 func TestWithoutAnActiveHostEveryStackWaits(t *testing.T) {
 	current := cluster()
 	current.Hosts[0].Phase = state.Draining
-	stack(current, "shop", "  db:\n    x-clowder: {class: fast, size: 1G, replicas: 0}\n")
-	if waiting := Plan(context.Background(), current).Waiting; len(waiting) != 1 || waiting[0].Reason != "no active host" {
+	stack(current, "shop", map[string]resource.VolumeSpec{"db": volume("fast", 1, 0)})
+	if waiting := Plan(current).Waiting; len(waiting) != 1 || waiting[0].Reason != "no active host" {
 		t.Errorf("waiting %+v", waiting)
 	}
 }

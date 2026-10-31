@@ -12,7 +12,6 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
-	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/supervisor"
@@ -54,29 +53,23 @@ func (r *stackRunner) rules(project, service string) (supervisor.Rule, bool) {
 	if !ok {
 		return supervisor.Rule{}, false
 	}
-	var source string
-	var pushedOut bool
+	var rule supervisor.Rule
+	var known bool
 	r.cluster.Read(func(current *state.State) {
 		stack, ok := current.Stacks[names.ID(namespace, stackName)]
-		if ok && stack.Host != nil && *stack.Host == r.host.ID {
-			source, pushedOut = stack.Source, slices.Contains(stack.PushedOut, service)
+		if !ok || stack.Host == nil || *stack.Host != r.host.ID {
+			return
+		}
+		found, ok := stack.Spec.Services[service]
+		if !ok {
+			return
+		}
+		rule, known = supervisor.Rule{Restart: found.Restart, RestartUnhealthy: found.RestartsUnhealthy()}, true
+		if slices.Contains(stack.PushedOut, service) {
+			rule = supervisor.Rule{Restart: "no"}
 		}
 	})
-	if source == "" {
-		return supervisor.Rule{}, false
-	}
-	if pushedOut {
-		return supervisor.Rule{Restart: "no"}, true
-	}
-	parsed, err := compose.Parse(context.Background(), stackName, []byte(source))
-	if err != nil {
-		return supervisor.Rule{}, false
-	}
-	found, ok := parsed.Services[service]
-	if !ok {
-		return supervisor.Rule{}, false
-	}
-	return supervisor.Rule{Restart: found.Restart, RestartUnhealthy: found.RestartUnhealthy}, true
+	return rule, known
 }
 
 // Ps lists a stack's containers on this host (api.Containers).

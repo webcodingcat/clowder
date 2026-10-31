@@ -26,9 +26,9 @@ import (
 // for the leader.
 const waitTimeout = 10 * time.Second
 
-// maxRequestBytes bounds every request body: a stack with all its secrets
-// (state.MaxStackSecretsBytes), or an apply with all the secrets a namespace
-// may have (resource.MaxNamespaceSecretBytes), fits with room to spare.
+// maxRequestBytes bounds every request body: an apply with all the secrets
+// a namespace may have (resource.MaxNamespaceSecretBytes) fits with room to
+// spare.
 const maxRequestBytes = 1 << 20
 
 // Cluster is what the server needs from the agent's Raft member.
@@ -106,12 +106,8 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/resources/{kind}", pki.RoleUser, server.listResources)
 	server.handle("GET /v1/resources/{kind}/{namespace}/{name}", pki.RoleUser, server.getResource)
 	server.handle("GET /v1/resources/namespace/{name}", pki.RoleUser, server.getNamespace)
-	server.handle("GET /v1/stacks", pki.RoleUser, server.stacks)
-	server.handle("POST /v1/stacks/{name}", pki.RoleUser, server.createStack)
-	server.handle("PUT /v1/stacks/{name}", pki.RoleUser, server.applyStack)
-	server.handle("DELETE /v1/stacks/{name}", pki.RoleUser, server.deleteStack)
-	server.handle("GET /v1/stacks/{name}/ps", pki.RoleUser, server.stackPs)
-	server.handle("GET /v1/stacks/{name}/logs", pki.RoleUser, server.stackLogs)
+	server.handle("GET /v1/stacks/{namespace}/{name}/ps", pki.RoleUser, server.stackPs)
+	server.handle("GET /v1/stacks/{namespace}/{name}/logs", pki.RoleUser, server.stackLogs)
 	server.handle("POST /v1/alerts/test", pki.RoleUser, server.alertTest)
 	server.handle("GET /v1/alerts/failures", pki.RoleUser, server.alertFailures)
 	server.handle("GET /v1/internal/alerts/failures", pki.RoleHost, server.localAlertFailures)
@@ -383,8 +379,7 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 // its route does.
 var userKinds = map[string]bool{
 	state.KindApplyConfig: true, state.KindSetHostPhase: true,
-	state.KindAddUser:     true, // the bootstrap's first user
-	state.KindCreateStack: true, state.KindPutStack: true, state.KindDeleteStack: true,
+	state.KindAddUser: true, // the bootstrap's first user
 }
 
 // hostKinds are what a host reports about itself.

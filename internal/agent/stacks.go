@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"go.yaml.in/yaml/v3"
+
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
@@ -65,7 +67,7 @@ type stackRunner struct {
 	docker  Docker
 	storage Storage
 	open    func(sealed state.Sealed) ([]byte, error)
-	// digestKey keys the digests of secret files (secretDigestPurpose)
+	// digestKey keys the labels of secret files (secretLabelPurpose)
 	digestKey []byte
 	logger    *slog.Logger
 	// supervisor needs the runner's rules first, so Run sets it afterwards
@@ -95,6 +97,7 @@ type desiredState struct {
 	// the agent keeps per stack
 	stacks     map[string]*state.Stack
 	volumes    map[string]*state.Volume
+	secrets    map[string]*state.Secret
 	hostNames  map[state.HostID]string
 	registries map[string]state.Sealed
 	// retired are the copies the cluster gave up, on any host
@@ -113,7 +116,8 @@ func readDesired(cluster stateReader, self state.HostID) (desiredState, error) {
 	}
 	desired := desiredState{
 		config: copied.Config.Spec, stacks: map[string]*state.Stack{}, volumes: copied.Volumes,
-		hostNames: map[state.HostID]string{}, registries: copied.Registries, retired: copied.Retired,
+		secrets: copied.Secrets, hostNames: map[state.HostID]string{}, registries: copied.Registries,
+		retired: copied.Retired,
 	}
 	for _, stack := range copied.Stacks {
 		if stack.Host != nil && *stack.Host == self {
@@ -144,11 +148,10 @@ func (r *stackRunner) reconcile(ctx context.Context) {
 }
 
 // pass brings this host once to what the state says. The stacks that left
-// stop first, before the others come up, so a stack that comes never
-// starts beside one that is still going. (While a volume belongs to its
-// stack, no volume passes between stacks; when volumes are resources of
-// their own, a stack whose volume a stack that failed to stop still holds
-// must wait as well.)
+// stop first, before the others come up, so a volume passes from a stack
+// that went to the next only once the first has stopped: two databases on
+// one file system would ruin it. A stack whose volume a stack that failed
+// to stop may still hold waits for the next pass.
 func (r *stackRunner) pass(ctx context.Context) {
 	desired, err := readDesired(r.cluster, r.host.ID)
 	if err != nil {
@@ -156,9 +159,9 @@ func (r *stackRunner) pass(ctx context.Context) {
 		return
 	}
 	r.logIn(ctx, desired)
-	r.stopLeavers(ctx, desired)
+	held := r.stopLeavers(ctx, desired)
 	for _, project := range slices.Sorted(maps.Keys(desired.stacks)) {
-		if err := r.apply(ctx, desired, desired.stacks[project]); err != nil {
+		if err := r.apply(ctx, desired, desired.stacks[project], held); err != nil {
 			r.logger.Error("run a stack", "stack", desired.stacks[project].ID(), "error", err)
 		}
 	}
@@ -180,23 +183,24 @@ func (r *stackRunner) forgetApplied() {
 }
 
 // apply runs one stack: its volumes, its rendered Compose file, compose up
-// unless that file came up before, then the status.
-func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *state.Stack) error {
-	parsed, err := compose.Parse(ctx, stack.Name, []byte(stack.Source))
-	if err != nil {
-		return err
-	}
-	secrets, err := r.openSecrets(parsed, stack.Secrets)
+// unless all of it came up before, then the status, with the secrets the
+// containers came up with. held are the LVs that stacks which failed to
+// stop may still hold (stopLeavers).
+func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *state.Stack, held heldVolumes) error {
+	secrets, err := r.openSecrets(desired, stack)
 	if err != nil {
 		return err
 	}
 	project := stack.Project()
 	volumes := map[string]storage.Volume{}
 	mounted := map[string]compose.MountedVolume{}
-	for name := range parsed.Volumes {
-		volume, err := r.describe(desired, stack.VolumeID(name))
+	for _, name := range stack.Spec.VolumeNames() {
+		volume, err := r.describe(desired, names.ID(stack.Namespace, name))
 		if err != nil {
 			return err
+		}
+		if holder, ok := held.holder(volume.LV); ok {
+			return fmt.Errorf("volume %s may still be held by %s, which failed to stop; waiting for it", name, holder)
 		}
 		volumes[name] = volume
 		mounted[name] = compose.MountedVolume{Dir: r.storage.MountPoint(volume), Name: volume.LV}
@@ -206,10 +210,10 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 	// refuses a Floating IP that does not parse, and before the first apply
 	// it is empty, the zero address, which Render refuses.
 	floatingIP, _ := netip.ParseAddr(desired.config.Ingress.FloatingIP)
-	rendered, err := compose.Render(parsed, compose.Target{
+	rendered, err := compose.Render(stack.Name, stack.Spec, compose.Target{
 		Namespace: stack.Namespace, FloatingIP: floatingIP, NodeAddress: r.host.NodeAddress,
 		Resolver: network.Resolver, Volumes: mounted, SecretsDir: r.files.secretFilesDir(project),
-		SecretDigests: secrets.digests,
+		SecretLabels: secrets.labels,
 	})
 	if err != nil {
 		return err
@@ -227,11 +231,12 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 	if err := r.up(ctx, project, rendered, secrets, stack.PushedOut); err != nil {
 		return err
 	}
-	if stack.Status == state.StackRunning {
+	if stack.Status == state.StackRunning && maps.Equal(stack.AppliedSecrets, secrets.digests) {
 		return nil
 	}
 	return commitAsHost(ctx, r.propose, r.host.ID, state.KindSetStackStatus, state.SetStackStatus{
 		ID: stack.ID(), Status: state.StackRunning, Host: stack.Host, Generation: stack.Generation,
+		AppliedSecrets: secrets.digests,
 	})
 }
 
@@ -347,12 +352,16 @@ func poolOf(config clusterdir.Config, volumeID, class string) (string, error) {
 // a leaver got, so a crash at any point is picked up: its compose.yaml
 // exists until compose down worked (stop), then its directory goes, and its
 // secrets go once compose.yaml is gone (removeSecretsOfOthers). Its volume
-// copies have records of their own (removeVolumes).
-func (r *stackRunner) stopLeavers(ctx context.Context, desired desiredState) {
+// copies have records of their own (removeVolumes). It returns the volumes
+// that leavers which failed to stop may still hold.
+func (r *stackRunner) stopLeavers(ctx context.Context, desired desiredState) heldVolumes {
+	held := heldVolumes{}
 	entries, err := os.ReadDir(r.files.stacksDir())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// not knowing the leavers, any of them may hold any volume
 		r.logger.Error("list the stacks of this host", "error", err)
-		return
+		held[anyVolume] = "a stack this host could not list"
+		return held
 	}
 	for _, entry := range entries {
 		project := entry.Name()
@@ -361,11 +370,56 @@ func (r *stackRunner) stopLeavers(ctx context.Context, desired desiredState) {
 		}
 		if err := r.stop(ctx, project); err != nil {
 			r.logger.Error("stop a stack that left this host", "project", project, "error", err)
+			r.hold(held, project)
 			continue
 		}
 		if err := os.RemoveAll(r.files.stackDir(project)); err != nil {
 			r.logger.Error("forget a stack", "project", project, "error", err)
 		}
+	}
+	return held
+}
+
+// heldVolumes are the LVs that stacks which failed to stop may still
+// hold, with the stack's project; anyVolume stands for every LV.
+type heldVolumes map[string]string
+
+// anyVolume is held when a leaver's volumes cannot be told.
+const anyVolume = "*"
+
+// holder tells which stack may hold an LV.
+func (h heldVolumes) holder(lv string) (string, bool) {
+	if holder, ok := h[lv]; ok {
+		return holder, true
+	}
+	holder, ok := h[anyVolume]
+	return holder, ok
+}
+
+// hold records the volumes a leaver's Compose file mounts: what it may
+// still hold while its containers run. A file that does not read holds
+// every volume, as wrongly starting a stack beside it could ruin a file
+// system, and waiting costs only a pass.
+func (r *stackRunner) hold(held heldVolumes, project string) {
+	data, err := os.ReadFile(r.files.stackFile(project))
+	if errors.Is(err, os.ErrNotExist) {
+		return // stopped after all
+	}
+	var file struct {
+		Volumes map[string]struct {
+			Name string `yaml:"name"`
+		} `yaml:"volumes"`
+	}
+	if err == nil {
+		err = yaml.Unmarshal(data, &file)
+	}
+	if err != nil {
+		r.logger.Error("read the volumes of a stack that failed to stop", "project", project, "error", err)
+		held[anyVolume] = project
+		return
+	}
+	for _, volume := range file.Volumes {
+		held[volume.Name] = project
 	}
 }
 

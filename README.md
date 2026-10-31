@@ -1,11 +1,11 @@
 # clowder
 
-A small cluster orchestrator for Docker Compose stacks on hosts with about 4 GB of RAM:
-replicated volumes (DRBD 9), the real client IP behind a Floating IP, priorities, fencing
-through the hoster's API. First hoster: Hetzner Cloud.
+A small cluster orchestrator that runs stacks of containers with Docker Compose on hosts
+with about 4 GB of RAM: replicated volumes (DRBD 9), the real client IP behind a Floating
+IP, priorities, fencing through the hoster's API. First hoster: Hetzner Cloud.
 
-Status: under construction (phases 1a and 1b, one host, are done; see the roadmap in
-[DEVELOPING.md](DEVELOPING.md)).
+Status: under construction (phases 1a and 1b, one host, are done, 1c is under way; see the
+roadmap in [DEVELOPING.md](DEVELOPING.md)).
 Until `v1.0.0`, the state and `cluster.yaml` may change between releases without a way to
 upgrade a running cluster. On one host, what runs today:
 
@@ -22,18 +22,17 @@ upgrade a running cluster. On one host, what runs today:
 - Every host serves `/metrics` for Prometheus on its node address, port 7444: the host's
   phase, pools, containers and restarts, and from the leader the room of each host, the
   certificates' expiry and the open alerts. Only the cluster's hosts reach it.
-- `clowder stack create|apply|delete|ps|logs` runs Compose stacks with their volumes and
-  secrets.
 - `clowder apply -f <file|directory|->`, `clowder get <kind>` and `clowder delete <kind>
-  <name>` manage resources as kubectl does: namespaces, volumes and secrets so far (stacks
-  join them). A namespace comes with `-n` or in the name (`shop/data`), `-A` lists all; a
-  secret may come in a SOPS file of its own. Applying the same files again changes nothing.
-- Every service reserves memory and CPUs (`deploy.resources.reservations`, else
+  <name>` manage resources as kubectl does: namespaces, stacks, volumes and secrets. A
+  namespace comes with `-n` or in the name (`shop/web`), else it is `default`; `-A` lists
+  all. Applying the same files again changes nothing. `clowder stack ps|logs
+  [<namespace>/]<stack>` show a stack's containers and logs.
+- Every service reserves memory and CPUs (`resources.reserve`, else
   `defaults.reservations`), and a stack goes only where its reservations fit. When a host is
-  full, a new stack's services push out services of lower priority (`x-clowder.priority`, a
-  number or a category of `priorities`), with what depends on them; they come back once
-  there is room again for a minute.
-- A service with `x-clowder.http: {host, port}` gets requests for that host on the
+  full, a new stack's services push out services of lower priority (`priority`, a number or
+  a category of `priorities`), with what depends on them; they come back once there is room
+  again for a minute.
+- A service with `http: {host, port}` gets requests for that host on the
   Floating IP through Traefik, only to containers that run and are healthy; the client's
   address arrives in `X-Forwarded-For`. The cluster gets a certificate for the host from
   Let's Encrypt (or the CA of `acme.directory`) once its DNS points at the Floating IP, then
@@ -44,14 +43,48 @@ upgrade a running cluster. On one host, what runs today:
 - The cluster keeps the Floating IP routed to its ingress host through the hoster's API
   (`hoster` in `cluster.yaml`), also when someone moves it by hand.
 
-A stack's passwords live in a SOPS file next to its `clowder.yaml`; the CLI decrypts it
-with your age key, and the cluster keeps the values sealed. Who can read them: whoever can
-decrypt that file, every host of the cluster, and, until clowder has permissions, every user
-through a stack that `cluster.yaml` allows privileges (`stacks.privileged`, as
-`<namespace>/<stack>`; the stack commands use the namespace `default` for now).
+A stack with a volume and a password:
 
-Names of stacks, services, volumes and secrets are lowercase letters, digits and `-`, at most
-63 characters; `_` is not allowed.
+```yaml
+apiVersion: clowder/v1
+kind: Namespace
+metadata: {name: shop}
+---
+apiVersion: clowder/v1
+kind: Volume
+metadata: {namespace: shop, name: data}
+spec: {class: fast, size: 10G, replicas: 1}   # replicas 0: one plain LV without DRBD
+---
+apiVersion: clowder/v1
+kind: Stack
+metadata: {namespace: shop, name: web}
+spec:
+  priority: high
+  services:
+    db:
+      image: postgres:17
+      env: {POSTGRES_USER: shop}
+      secretEnv: {POSTGRES_PASSWORD: db-password}
+      volumes: [{volume: data, path: /var/lib/postgresql/data}]
+      resources: {reserve: {memory: 512M, cpus: 0.5}}
+      healthcheck: {command: [pg_isready], interval: 10s}
+    app:
+      image: registry.example.com/shop:1.4
+      dependsOn: [db]
+      secrets: [db-password]        # the file /run/secrets/db-password
+      http: {host: shop.example.com, port: 8080}
+```
+
+and the secret in a SOPS file of its own, `db-password.sops.yaml` (`kind: Secret`, `spec: {value: ...}`), which
+`clowder apply` decrypts with your age key. A stack's spec knows only what clowder runs: a
+field it does not have is an error. A volume outlives its stack; deleting a volume deletes
+its data. The cluster keeps secrets sealed. Who can read them: whoever may apply them or
+decrypt their files, every host of the cluster, and, until clowder has permissions, every
+user through a stack that names them or that `cluster.yaml` allows privileges
+(`stacks.privileged`, as `<namespace>/<stack>`).
+
+Names of namespaces, stacks, services, volumes and secrets are lowercase letters, digits
+and `-`, at most 63 characters; `_` is not allowed.
 
 | Binary | For | Platforms |
 |---|---|---|
