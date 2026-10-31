@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
@@ -113,7 +113,7 @@ func TestAVolumeWaitsForItsStackAndCannotChangeYet(t *testing.T) {
 		"class is required")
 	c.mustApply(KindPutResource, UserActor("alice"), putResource(resource.KindVolume, "default", "data", spec))
 	volume := c.state.Volumes["default/data"]
-	if volume.Status != VolumePending || volume.DataGeneration != 1 || len(volume.Placements) != 0 {
+	if volume.Status != VolumePending || volume.DataGeneration != 1 || len(volume.Copies) != 0 {
 		t.Errorf("new volume %+v", volume)
 	}
 	larger := spec
@@ -122,13 +122,13 @@ func TestAVolumeWaitsForItsStackAndCannotChangeYet(t *testing.T) {
 		"cannot change a volume yet")
 	// its class stays while it is there
 	config := testConfig()
-	config.StorageClasses = map[string]clusterdir.StorageClass{"slow": {Pool: "vg-slow/thin"}}
+	config.StorageClasses = map[string]clusterspec.StorageClass{"slow": {Pool: "vg-slow/thin"}}
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: testSecrets()},
 		"volume default/data has storage class fast, so the class must stay")
 	// the leader records where it is, and only that
 	placed := *volume
 	placed.Status = VolumeOK
-	placed.Placements = []Placement{{Host: 0, Class: "fast"}}
+	placed.Copies = []VolumeCopy{{Host: 0, Class: "fast"}}
 	placed.Spec.Replicas = 0
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: placed}, "its spec changes only with an apply")
 	placed.Spec.Replicas = 1
@@ -139,7 +139,7 @@ func TestAVolumeWaitsForItsStackAndCannotChangeYet(t *testing.T) {
 		t.Errorf("a pending volume as it is: changes %v, %v", changes, err)
 	}
 	pendingWithCopy := *volume
-	pendingWithCopy.Placements = placed.Placements
+	pendingWithCopy.Copies = placed.Copies
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: pendingWithCopy}, "a pending volume has no copies")
 	minor := 3
 	placed.Minor = &minor
@@ -153,10 +153,10 @@ func TestAVolumeWaitsForItsStackAndCannotChangeYet(t *testing.T) {
 	}
 	// placed, it keeps a copy: only its delete gives up its data
 	backToPending := *c.state.Volumes["default/data"]
-	backToPending.Status, backToPending.Placements, backToPending.Minor = VolumePending, nil, nil
+	backToPending.Status, backToPending.Copies, backToPending.Minor = VolumePending, nil, nil
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: backToPending}, "holds data")
 	noCopy := *c.state.Volumes["default/data"]
-	noCopy.Placements = nil
+	noCopy.Copies = nil
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: noCopy}, "holds data")
 	// a volume made again after its delete starts above its retired copies
 	c.mustApply(KindDeleteResource, UserActor("alice"),
@@ -173,14 +173,14 @@ func TestAVolumeWaitsForItsStackAndCannotChangeYet(t *testing.T) {
 func TestClusterYAMLKeepsTheClassACopyIsIn(t *testing.T) {
 	c := newCluster(t)
 	config := testConfig()
-	config.StorageClasses["fast"] = clusterdir.StorageClass{Fallback: []string{"bulk"}}
-	config.StorageClasses["bulk"] = clusterdir.StorageClass{Pool: "vg-bulk/thin"}
+	config.StorageClasses["fast"] = clusterspec.StorageClass{Fallback: []string{"bulk"}}
+	config.StorageClasses["bulk"] = clusterspec.StorageClass{Pool: "vg-bulk/thin"}
 	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: testSecrets()})
 	c.mustApply(KindPutResource, UserActor("alice"), putResource(resource.KindVolume, "default", "data", testVolumeSpec()))
 	// fast is only its fallback: the copy is in bulk
 	placed := *c.state.Volumes["default/data"]
 	minor := 0
-	placed.Status, placed.Minor, placed.Placements = VolumeOK, &minor, []Placement{{Host: 0, Class: "bulk"}}
+	placed.Status, placed.Minor, placed.Copies = VolumeOK, &minor, []VolumeCopy{{Host: 0, Class: "bulk"}}
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: placed})
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets()},
 		"volume default/data has storage class bulk, so the class must stay")

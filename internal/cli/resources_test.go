@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -190,7 +191,15 @@ func TestResourcesApplyFromADirectoryReadBackAndGo(t *testing.T) {
 		t.Error("the dry run made the namespace")
 	}
 
-	out, err = runWithInput(t, "", "--cluster", cluster, "delete", "-f", files)
+	// a volume goes only with --with-data, and without it nothing goes
+	if _, err := runWithInput(t, "", "--cluster", cluster, "delete", "-f", files); err == nil ||
+		!strings.Contains(err.Error(), "volume shop/data goes with its data; delete it with --with-data") {
+		t.Errorf("delete -f without --with-data: %v", err)
+	}
+	if _, err := run(t, "--cluster", cluster, "get", "secret", "shop/token"); err != nil {
+		t.Errorf("a refused delete took the secret: %v", err)
+	}
+	out, err = runWithInput(t, "", "--cluster", cluster, "delete", "--with-data", "-f", files)
 	if err != nil || !strings.Contains(out, "Namespace shop: deleted") ||
 		strings.Index(out, "Volume shop/data: deleted") > strings.Index(out, "Namespace shop: deleted") {
 		t.Errorf("delete -f: %v\n%s", err, out)
@@ -244,21 +253,21 @@ metadata: {name: shop}
 	}
 }
 
-func TestASecretInClearInAFileIsWarnedOf(t *testing.T) {
+func TestASecretInClearIsTakenOnlyFromStdin(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "token.yaml")
 	secret := "apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: token}\nspec: {value: s3cret}\n"
 	if err := os.WriteFile(path, []byte(secret), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var report bytes.Buffer
-	if _, err := readResources(dir, nil, &report); err != nil ||
-		!strings.Contains(report.String(), "warning: "+path+" holds Secret token in clear") {
-		t.Errorf("a directory: %v\n%s", err, report.String())
+	for _, from := range []string{dir, path} {
+		if _, err := readResources(from, nil, io.Discard); err == nil ||
+			!strings.Contains(err.Error(), path+" holds Secret token in clear") {
+			t.Errorf("%s: %v", from, err)
+		}
 	}
-	report.Reset()
-	if _, err := readResources("-", strings.NewReader(secret), &report); err != nil || report.Len() != 0 {
-		t.Errorf("stdin: %v\n%s", err, report.String())
+	if objects, err := readResources("-", strings.NewReader(secret), io.Discard); err != nil || len(objects) != 1 {
+		t.Errorf("stdin: %v, %v", objects, err)
 	}
 }
 

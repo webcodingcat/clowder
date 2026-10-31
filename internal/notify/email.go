@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 )
 
 // implicitTLSPort is SMTP's port that speaks TLS from the start (RFC 8314);
@@ -33,7 +33,7 @@ type email struct {
 	to       []string
 }
 
-func newEmail(channel clusterdir.AlertChannel, secrets Secrets, files map[string][]byte) (email, error) {
+func newEmail(channel clusterspec.AlertChannel, secrets Secrets, files map[string][]byte) (email, error) {
 	server := channel.SMTP
 	var caPEM []byte
 	if server.CA != "" {

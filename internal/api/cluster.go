@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -15,7 +16,7 @@ import (
 // sends it (PUT /v1/cluster). The secrets travel in clear inside mutual TLS;
 // the agent seals them before they go into the state.
 type ClusterApply struct {
-	Spec       clusterdir.Config                   `json:"spec"`
+	Spec       clusterspec.Config                  `json:"spec"`
 	Secrets    map[string]string                   `json:"secrets"`
 	JoinKeys   []string                            `json:"join_keys"`
 	Registries map[string]clusterdir.RegistryLogin `json:"registries"`
@@ -38,10 +39,10 @@ func (c ClusterApply) Hash() (string, error) {
 // ClusterInfo is the applied cluster.yaml and its files (GET /v1/cluster),
 // without the secrets.
 type ClusterInfo struct {
-	Revision int64             `json:"revision"`
-	Hash     string            `json:"hash"`
-	Spec     clusterdir.Config `json:"spec"`
-	Files    map[string][]byte `json:"files,omitempty"`
+	Revision int64              `json:"revision"`
+	Hash     string             `json:"hash"`
+	Spec     clusterspec.Config `json:"spec"`
+	Files    map[string][]byte  `json:"files,omitempty"`
 }
 
 func (s *Server) cluster(w http.ResponseWriter, _ *http.Request) {

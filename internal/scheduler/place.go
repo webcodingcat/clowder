@@ -16,7 +16,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/units"
@@ -135,7 +135,7 @@ func (p *planner) decide(stack *state.Stack) (Placement, *Waiting) {
 // plan do not both count on the same space, minor or room.
 type planner struct {
 	current *state.State
-	classes map[string]clusterdir.StorageClass
+	classes map[string]clusterspec.StorageClass
 	// allocated sums the volumes on each host's pools.
 	allocated map[state.HostID]map[string][]int64
 	minors    map[int]bool
@@ -151,9 +151,9 @@ func newPlanner(current *state.State) *planner {
 		if volume.Minor != nil {
 			p.minors[*volume.Minor] = true
 		}
-		for _, placement := range volume.Placements {
-			if !placement.Tiebreaker {
-				p.take(placement.Host, p.classes[placement.Class].Pool, int64(volume.Spec.Size))
+		for _, volumeCopy := range volume.Copies {
+			if !volumeCopy.Tiebreaker {
+				p.take(volumeCopy.Host, p.classes[volumeCopy.Class].Pool, int64(volume.Spec.Size))
 			}
 		}
 	}
@@ -244,8 +244,8 @@ func (p *planner) newVolumes(stack *state.Stack, host state.HostID) ([]state.Vol
 			giveBack()
 			return nil, fmt.Sprintf("volume %s is gone", name) // the state refuses this; a guard
 		case current.Status != state.VolumePending:
-			if !slices.ContainsFunc(current.Placements, func(placement state.Placement) bool {
-				return placement.Host == host && !placement.Tiebreaker
+			if !slices.ContainsFunc(current.Copies, func(volumeCopy state.VolumeCopy) bool {
+				return volumeCopy.Host == host && !volumeCopy.Tiebreaker
 			}) {
 				giveBack()
 				return nil, fmt.Sprintf("volume %s has its data on another host", name)
@@ -260,7 +260,7 @@ func (p *planner) newVolumes(stack *state.Stack, host state.HostID) ([]state.Vol
 				units.FormatSize(int64(wanted.Size)), wanted.Class)
 		}
 		volume := *current
-		volume.Placements = []state.Placement{{Host: host, Class: class}}
+		volume.Copies = []state.VolumeCopy{{Host: host, Class: class}}
 		volume.Status = state.VolumeOK
 		if wanted.Replicas > 0 {
 			minor, ok := p.freeMinor()

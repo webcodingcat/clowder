@@ -14,6 +14,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/pki"
 )
 
@@ -220,8 +221,8 @@ func newDiff(g *globals) *cobra.Command {
 
 // changedFields lists the top-level keys of cluster.yaml whose values
 // differ.
-func changedFields(applied, local clusterdir.Config) ([]string, error) {
-	fields := func(config clusterdir.Config) (map[string]json.RawMessage, error) {
+func changedFields(applied, local clusterspec.Config) ([]string, error) {
+	fields := func(config clusterspec.Config) (map[string]json.RawMessage, error) {
 		encoded, err := json.Marshal(config)
 		if err != nil {
 			return nil, err

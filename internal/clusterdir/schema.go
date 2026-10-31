@@ -5,10 +5,14 @@ import (
 	"fmt"
 
 	"github.com/invopop/jsonschema"
+
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 )
 
 // Schema returns the JSON schema of cluster.yaml for editors, made from the Go
-// types that Load decodes into. Check enforces its required fields and enums
+// types that Load decodes into. It lives here, not in clusterspec, so the
+// state does not link the schema library. clusterspec.Check enforces its
+// required fields and enums
 // at every level, plus rules a schema cannot express (the fields of each alert
 // type, pool names, sizes); a test compares the two at the top level.
 func Schema() ([]byte, error) {
@@ -16,7 +20,7 @@ func Schema() ([]byte, error) {
 		FieldNameTag:   "yaml",
 		DoNotReference: true,
 	}
-	schema := reflector.Reflect(&Config{})
+	schema := reflector.Reflect(&clusterspec.Config{})
 	schema.Title = "clowder cluster.yaml"
 	encoded, err := json.MarshalIndent(schema, "", "  ")
 	if err != nil {

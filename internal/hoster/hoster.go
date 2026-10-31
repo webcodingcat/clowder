@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"net/netip"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/hoster/hetzner"
 )
 
@@ -28,7 +28,7 @@ type Hoster interface {
 }
 
 // New is the plugin cluster.yaml names, with the token in clear.
-func New(config clusterdir.Hoster, token string) (Hoster, error) {
+func New(config clusterspec.Hoster, token string) (Hoster, error) {
 	switch config.Type {
 	case "hetzner":
 		return hetzner.New(config.API, token), nil

@@ -21,6 +21,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 )
 
@@ -88,14 +89,14 @@ func download(t *testing.T, url string) []byte {
 }
 
 // changeConfig edits the test's cluster.yaml and applies it.
-func changeConfig(t *testing.T, change func(config *clusterdir.Config)) {
+func changeConfig(t *testing.T, change func(config *clusterspec.Config)) {
 	t.Helper()
 	file := filepath.Join(clusterDir(), clusterdir.ConfigFile)
 	content, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var config clusterdir.Config
+	var config clusterspec.Config
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&config); err != nil {

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -22,7 +22,7 @@ func roomCluster(memory int64) *state.State {
 // service is a service at a priority that reserves memory (MiB) and 0.1 CPUs.
 func service(priority int, memory int64, dependsOn ...string) state.Service {
 	return state.Service{
-		Priority: clusterdir.Priority{Value: &priority}, MemoryBytes: memory * mib, CPUs: 0.1, DependsOn: dependsOn,
+		Priority: clusterspec.Priority{Value: &priority}, MemoryBytes: memory * mib, CPUs: 0.1, DependsOn: dependsOn,
 	}
 }
 
@@ -213,10 +213,10 @@ func TestRoomsAreWhatTheHostsOfferAndTheirServicesReserve(t *testing.T) {
 
 func TestCategoriesComeFromTheCurrentClusterYAML(t *testing.T) {
 	current := roomCluster(1000)
-	current.Config.Spec.Priorities = clusterdir.Priorities{
+	current.Config.Spec.Priorities = clusterspec.Priorities{
 		Default: "normal", Categories: map[string]int{"normal": 500, "low": 600},
 	}
-	low := state.Service{Priority: clusterdir.Priority{Category: "low"}, MemoryBytes: 900 * mib}
+	low := state.Service{Priority: clusterspec.Priority{Category: "low"}, MemoryBytes: 900 * mib}
 	running(current, "batch", map[string]state.Service{"job": low})
 	pending(current, map[string]state.Service{"web": {MemoryBytes: 300 * mib}}) // the default: 500
 	// low is 600 now, above the new stack's 500: nothing to push out

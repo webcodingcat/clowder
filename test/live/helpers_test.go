@@ -221,7 +221,7 @@ func createAndApply(t *testing.T, name, content string) {
 // volumes and their data, and waits until the cluster no longer lists it.
 func removeStack(t *testing.T, name string) {
 	t.Helper()
-	mustClowder(t, "delete", "-f", stackFile(name))
+	mustClowder(t, "delete", "--with-data", "-f", stackFile(name))
 	waitGone(t, name)
 }
 

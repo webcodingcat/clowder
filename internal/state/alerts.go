@@ -6,7 +6,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 )
 
 // Alert is an open alert: a condition the leader saw that someone should
@@ -38,7 +38,7 @@ func applyPutAlert(s *State, cmd Command, payload PutAlert) error {
 	switch {
 	case payload.Key == "" || payload.Kind == "" || payload.Subject == "":
 		return errors.New("an alert needs a key, a kind and a subject")
-	case !slices.Contains(clusterdir.Severities, payload.Severity):
+	case !slices.Contains(clusterspec.Severities, payload.Severity):
 		return fmt.Errorf("alert %s: severity %q is not info, warning or critical", payload.Key, payload.Severity)
 	}
 	since := cmd.At

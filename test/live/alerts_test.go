@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 )
 
 // The mail server bin/dev live runs in the lab's network: STARTTLS with the
@@ -44,21 +44,21 @@ func alertsReachTheChannels(t *testing.T, server host) {
 		"discord-webhook": received.url("/discord"), "alert-webhook": received.url("/webhook"),
 		"heartbeat-url": received.url("/heartbeat"), "smtp-password": "any",
 	})
-	changeConfig(t, func(config *clusterdir.Config) {
-		config.Alerts = &clusterdir.Alerts{
-			Channels: []clusterdir.AlertChannel{
-				{Type: "discord", Webhook: &clusterdir.SecretRef{Secret: "discord-webhook"}},
-				{Type: "webhook", URL: &clusterdir.SecretRef{Secret: "alert-webhook"}},
+	changeConfig(t, func(config *clusterspec.Config) {
+		config.Alerts = &clusterspec.Alerts{
+			Channels: []clusterspec.AlertChannel{
+				{Type: "discord", Webhook: &clusterspec.SecretRef{Secret: "discord-webhook"}},
+				{Type: "webhook", URL: &clusterspec.SecretRef{Secret: "alert-webhook"}},
 				{
 					Type: "email", From: "clowder@" + zone, To: []string{"ops@" + zone},
-					SMTP: &clusterdir.SMTP{
+					SMTP: &clusterspec.SMTP{
 						Host: labAddress, Port: mailServerPort, User: "clowder",
-						Password: &clusterdir.SecretRef{Secret: "smtp-password"}, CA: mailCAFile,
+						Password: &clusterspec.SecretRef{Secret: "smtp-password"}, CA: mailCAFile,
 					},
 				},
 			},
-			Heartbeat: &clusterdir.Heartbeat{
-				URL: clusterdir.SecretRef{Secret: "heartbeat-url"}, Interval: heartbeatInterval.String(),
+			Heartbeat: &clusterspec.Heartbeat{
+				URL: clusterspec.SecretRef{Secret: "heartbeat-url"}, Interval: heartbeatInterval.String(),
 			},
 		}
 	})
@@ -76,7 +76,7 @@ func alertsReachTheChannels(t *testing.T, server host) {
 	fillPool(t, server, received)
 	// the receiver ends with this step: without the channels, the later
 	// steps' alerts fail no delivery
-	changeConfig(t, func(config *clusterdir.Config) { config.Alerts = nil })
+	changeConfig(t, func(config *clusterspec.Config) { config.Alerts = nil })
 }
 
 // mailSubjects are the subjects of the mail that came, one per line.
@@ -128,7 +128,7 @@ func heartbeat(t *testing.T, server host, received *receiver) {
 // pool-use comes, and its all-clear once the volume is gone.
 func fillPool(t *testing.T, server host, received *receiver) {
 	// a reserve of 5 %, so one volume can fill the pool beyond 80 %
-	changeConfig(t, func(config *clusterdir.Config) {
+	changeConfig(t, func(config *clusterspec.Config) {
 		small := config.StorageClasses["small"]
 		small.Reserve = "5%"
 		config.StorageClasses["small"] = small

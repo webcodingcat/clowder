@@ -1,4 +1,4 @@
-package clusterdir
+package clusterspec
 
 import (
 	"fmt"
@@ -91,11 +91,11 @@ func Check(config Config) Problems {
 	files := FileNames(config)
 	for _, name := range files {
 		if !validFileName(name) {
-			report("%q is not a path relative to %s, written with /", name, ConfigFile)
+			report("%q is not a path relative to %s, written with /", name, FileName)
 		}
 	}
 	if len(files) > maxFiles {
-		report("%s names %d files; at most %d are allowed", ConfigFile, len(files), maxFiles)
+		report("%s names %d files; at most %d are allowed", FileName, len(files), maxFiles)
 	}
 	return problems
 }

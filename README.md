@@ -4,10 +4,9 @@ A small cluster orchestrator that runs stacks of containers with Docker Compose 
 with about 4 GB of RAM: replicated volumes (DRBD 9), the real client IP behind a Floating
 IP, priorities, fencing through the hoster's API. First hoster: Hetzner Cloud.
 
-Status: under construction (phases 1a and 1b, one host, are done, 1c is under way; see the
-roadmap in [DEVELOPING.md](DEVELOPING.md)).
-Until `v1.0.0`, the state and `cluster.yaml` may change between releases without a way to
-upgrade a running cluster. On one host, what runs today:
+Status: under construction, on one host so far; [docs/roadmap.md](docs/roadmap.md) says
+how far it is. Until `v1.0.0`, the state and `cluster.yaml` may change between releases
+without a way to upgrade a running cluster. On one host, what runs today:
 
 - `clowderd check` checks a host, `clowderd init` makes it the first of a cluster and starts
   the agent, which keeps the containers apart and answers their DNS.
@@ -77,14 +76,18 @@ spec:
       http: {host: shop.example.com, port: 8080}
 ```
 
-and the secret in a SOPS file of its own, `db-password.sops.yaml` (`kind: Secret`,
-`spec: {value: ...}`), which `clowder apply` decrypts with your age key; a secret in a
-file in clear gets a warning. A stack's spec knows only what clowder runs: a
-field it does not have is an error. A volume outlives its stack; deleting a volume deletes
-its data. The cluster keeps secrets sealed. Who can read them: whoever may apply them or
-decrypt their files, every host of the cluster, and, until clowder has permissions, every
-user through a stack that names them or that `cluster.yaml` allows privileges
-(`stacks.privileged`, as `<namespace>/<stack>`).
+The secret goes in a SOPS file of its own, `db-password.sops.yaml` (`kind: Secret`,
+`spec: {value: ...}`), which `clowder apply` decrypts with your age key.
+
+- A stack's spec knows only what clowder runs: a field it does not have is an error.
+- A volume outlives its stack. Deleting a volume deletes its data, so `clowder delete`
+  takes one only with `--with-data`.
+- A secret in a file in clear is refused; in clear it comes only on stdin
+  (`clowder apply -f -`). The cluster keeps secrets sealed.
+- Who can read a secret: whoever may apply it or decrypt its file, every host of the
+  cluster, and, until clowder has permissions, every user, through a stack that names it
+  or one that `cluster.yaml` allows privileges (`stacks.privileged`, as
+  `<namespace>/<stack>`).
 
 Names of namespaces, stacks, services, volumes and secrets are lowercase letters, digits
 and `-`, at most 63 characters; `_` is not allowed.

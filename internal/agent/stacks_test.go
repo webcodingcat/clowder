@@ -16,7 +16,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/datakey"
 	"github.com/webcodingcat/clowder/internal/docker"
@@ -147,11 +147,11 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 		},
 	})
 	cluster.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
-		Spec: clusterdir.Config{
+		Spec: clusterspec.Config{
 			Name: "prod", Seeds: []string{"10.0.0.2"},
-			Hoster:         clusterdir.Hoster{Type: "hetzner", Token: clusterdir.SecretRef{Secret: "token"}},
-			Ingress:        clusterdir.Ingress{FloatingIP: "203.0.113.10"},
-			StorageClasses: map[string]clusterdir.StorageClass{"fast": {Pool: "vg-fast/thin"}},
+			Hoster:         clusterspec.Hoster{Type: "hetzner", Token: clusterspec.SecretRef{Secret: "token"}},
+			Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.10"},
+			StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 		},
 		Secrets: map[string]state.Sealed{"token": state.Sealed("t")},
 	})
@@ -181,7 +181,7 @@ func placeDB(cluster *testCluster, generation int64) {
 	var volume state.Volume
 	cluster.Read(func(current *state.State) { volume = *current.Volumes["default/db"] })
 	volume.DataGeneration, volume.Status = generation, state.VolumeOK
-	volume.Placements = []state.Placement{{Host: 0, Class: "fast"}}
+	volume.Copies = []state.VolumeCopy{{Host: 0, Class: "fast"}}
 	cluster.apply(state.KindPutVolume, state.LeaderActor, state.PutVolume{Volume: volume})
 }
 

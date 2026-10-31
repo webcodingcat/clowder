@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strconv"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/units"
 )
@@ -51,7 +51,7 @@ func (r resources) String() string {
 
 // readResources reads resources of cluster.yaml; WithDefaults filled them
 // in and Check made sure they read.
-func readResources(config clusterdir.Resources) resources {
+func readResources(config clusterspec.Resources) resources {
 	memory, _ := units.ParseSize(config.Memory)
 	cpus, _ := strconv.ParseFloat(config.CPUs, 64)
 	return resources{memory, milli(cpus)}

@@ -20,12 +20,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 )
 
 var testMessage = Message{
 	Cluster: "prod", Event: Raised, Key: "pool-use/node0/vg/thin/data", Kind: "pool-use",
-	Severity: clusterdir.SeverityCritical, Subject: "pool vg/thin on node0 is full", Text: "95 % of its data is used.",
+	Severity: clusterspec.SeverityCritical, Subject: "pool vg/thin on node0 is full", Text: "95 % of its data is used.",
 }
 
 // secrets opens every secret as its own name with a prefix.
@@ -58,7 +58,7 @@ func TestDiscordGetsAnEmbedColoredBySeverity(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&got)
 	}))
 	defer server.Close()
-	notifier, err := New(clusterdir.AlertChannel{Type: "discord", Webhook: &clusterdir.SecretRef{Secret: "hook"}},
+	notifier, err := New(clusterspec.AlertChannel{Type: "discord", Webhook: &clusterspec.SecretRef{Secret: "hook"}},
 		func(string) (string, error) { return server.URL, nil }, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -217,11 +217,11 @@ func startSMTP(t *testing.T, server *fakeSMTP) int {
 	return listener.Addr().(*net.TCPAddr).Port
 }
 
-func emailChannel(port int) clusterdir.AlertChannel {
-	return clusterdir.AlertChannel{
+func emailChannel(port int) clusterspec.AlertChannel {
+	return clusterspec.AlertChannel{
 		Type: "email", From: "clowder@example.com", To: []string{"ops@example.com"},
-		SMTP: &clusterdir.SMTP{
-			Host: "127.0.0.1", Port: port, User: "clowder", Password: &clusterdir.SecretRef{Secret: "smtp"},
+		SMTP: &clusterspec.SMTP{
+			Host: "127.0.0.1", Port: port, User: "clowder", Password: &clusterspec.SecretRef{Secret: "smtp"},
 			CA: "certs/ca.pem",
 		},
 	}

@@ -23,7 +23,7 @@ import (
 
 	"golang.org/x/crypto/acme"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/ingress"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/units"
@@ -224,7 +224,7 @@ func routeDomains(current *state.State) []string {
 // lifetime. A longer one would renew every new certificate at once, so it
 // is ignored for that certificate, and ignored is true. Both come from the
 // state alone, so no setting and no change of leader can renew in a loop.
-func renewBefore(certificate *state.Certificate, config clusterdir.ACME) (before time.Duration, ignored bool) {
+func renewBefore(certificate *state.Certificate, config clusterspec.ACME) (before time.Duration, ignored bool) {
 	lifetime := certificate.Lifetime()
 	byDefault := lifetime / 3
 	if config.RenewBefore == "" {
@@ -242,7 +242,7 @@ func renewBefore(certificate *state.Certificate, config clusterdir.ACME) (before
 
 // renewalDue tells whether a domain needs a certificate now: it has none,
 // or its renewal window began.
-func renewalDue(certificate *state.Certificate, config clusterdir.ACME, now time.Time) bool {
+func renewalDue(certificate *state.Certificate, config clusterspec.ACME, now time.Time) bool {
 	if certificate == nil {
 		return true
 	}

@@ -5,20 +5,20 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 )
 
 // ApplyConfig replaces cluster.yaml and the secrets with what the user
 // applied. JoinKeys is the whole list of valid bootstrap keys: a key left
 // out is invalid from now on.
 type ApplyConfig struct {
-	Hash       string            `json:"hash"`
-	Spec       clusterdir.Config `json:"spec"`
-	Secrets    map[string]Sealed `json:"secrets"`
-	JoinKeys   []Sealed          `json:"join_keys"`
-	Registries map[string]Sealed `json:"registries"`
+	Hash       string             `json:"hash"`
+	Spec       clusterspec.Config `json:"spec"`
+	Secrets    map[string]Sealed  `json:"secrets"`
+	JoinKeys   []Sealed           `json:"join_keys"`
+	Registries map[string]Sealed  `json:"registries"`
 	// Files are the files next to cluster.yaml that it names, by their
-	// names in it (clusterdir.FileNames); none holds a secret.
+	// names in it (clusterspec.FileNames); none holds a secret.
 	Files map[string][]byte `json:"files,omitempty"`
 }
 
@@ -27,13 +27,13 @@ type ApplyConfig struct {
 // stack names, a stack's place in stacks.privileged. The state checks it
 // itself, in the log's order, so no resource can slip in between.
 func applyConfig(s *State, _ Command, payload ApplyConfig) error {
-	if problems := clusterdir.Check(payload.Spec); len(problems) > 0 {
+	if problems := clusterspec.Check(payload.Spec); len(problems) > 0 {
 		return problems
 	}
-	if problems := clusterdir.CheckFiles(payload.Spec, payload.Files); len(problems) > 0 {
+	if problems := clusterspec.CheckFiles(payload.Spec, payload.Files); len(problems) > 0 {
 		return problems
 	}
-	for _, name := range clusterdir.SecretNames(payload.Spec) {
+	for _, name := range clusterspec.SecretNames(payload.Spec) {
 		if _, ok := payload.Secrets[name]; !ok {
 			return fmt.Errorf("secret %s is used in cluster.yaml but missing", name)
 		}
@@ -52,8 +52,8 @@ func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 	for _, id := range slices.Sorted(maps.Keys(s.Volumes)) {
 		volume := s.Volumes[id]
 		classes := []string{volume.Spec.Class}
-		for _, placement := range volume.Placements {
-			classes = append(classes, placement.Class)
+		for _, volumeCopy := range volume.Copies {
+			classes = append(classes, volumeCopy.Class)
 		}
 		for _, class := range classes {
 			if _, ok := spec.StorageClasses[class]; !ok {
@@ -63,7 +63,7 @@ func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 	}
 	// only the files cluster.yaml names: the payload may carry no others
 	files := map[string][]byte{}
-	for _, name := range clusterdir.FileNames(payload.Spec) {
+	for _, name := range clusterspec.FileNames(payload.Spec) {
 		files[name] = payload.Files[name]
 	}
 	s.Config = ClusterConfig{

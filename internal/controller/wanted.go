@@ -6,7 +6,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -44,17 +44,17 @@ type level struct {
 // The thresholds of the pools (data and metadata) and the root file
 // system, highest first.
 var (
-	poolCritical = level{clusterdir.SeverityCritical, 95, 90}
-	poolWarning  = level{clusterdir.SeverityWarning, 80, 75}
+	poolCritical = level{clusterspec.SeverityCritical, 95, 90}
+	poolWarning  = level{clusterspec.SeverityWarning, 80, 75}
 	poolLevels   = []level{poolCritical, poolWarning}
-	rootLevels   = []level{{clusterdir.SeverityWarning, 90, 85}}
+	rootLevels   = []level{{clusterspec.SeverityWarning, 90, 85}}
 )
 
 // leveled is the severity a value has against levels, given the alert that
 // is open for it; false: no alert.
 func leveled(value int, open *state.Alert, levels []level) (string, bool) {
 	for _, threshold := range levels {
-		stays := open != nil && clusterdir.AtLeast(open.Severity, threshold.severity) && value >= threshold.clear
+		stays := open != nil && clusterspec.AtLeast(open.Severity, threshold.severity) && value >= threshold.clear
 		if value >= threshold.raise || stays {
 			return threshold.severity, true
 		}
@@ -103,18 +103,18 @@ func wantedAlerts(current *state.State, conditions *Conditions, now time.Time) m
 					rootLevels[0].raise))
 		}
 		if held(dockerDownKey(id), "docker-down/"+host.Name, dockerDownFor) {
-			add("docker-down/"+host.Name, "docker-down", clusterdir.SeverityCritical, fmt.Sprintf("Docker on %s does not answer", host.Name),
+			add("docker-down/"+host.Name, "docker-down", clusterspec.SeverityCritical, fmt.Sprintf("Docker on %s does not answer", host.Name),
 				fmt.Sprintf("Docker has not answered the agent's ping for %v or more; the host's stacks may be down.",
 					dockerDownFor))
 		}
 		if held(overCapacityKey(id), "over-capacity/"+host.Name, 0) {
-			add("over-capacity/"+host.Name, "over-capacity", clusterdir.SeverityWarning, fmt.Sprintf("%s is over capacity", host.Name),
+			add("over-capacity/"+host.Name, "over-capacity", clusterspec.SeverityWarning, fmt.Sprintf("%s is over capacity", host.Name),
 				"The services at the host's highest priority reserve more than it offers; nothing was pushed out, "+
 					"since that would not help. Lower system_reserve or the reservations, or give the host more memory.")
 		}
 	}
 	if held(ingressNotHeld, ingressNotHeld, ingressLostFor) {
-		add(ingressNotHeld, ingressNotHeld, clusterdir.SeverityCritical, "the Floating IP is not on the ingress host",
+		add(ingressNotHeld, ingressNotHeld, clusterspec.SeverityCritical, "the Floating IP is not on the ingress host",
 			fmt.Sprintf("For %v or more the leader could not route the Floating IP to a host that can hold it: "+
 				"no request reaches the stacks. The agents' logs say why.", ingressLostFor))
 	}
@@ -122,7 +122,7 @@ func wantedAlerts(current *state.State, conditions *Conditions, now time.Time) m
 	for _, name := range slices.Sorted(maps.Keys(current.Stacks)) {
 		stack := current.Stacks[name]
 		if stack.WaitReason != "" && now.Sub(stack.WaitingSince) >= stackWaitFor {
-			add("stack-waiting/"+name, "stack-waiting", clusterdir.SeverityWarning, fmt.Sprintf("stack %s waits for a place", name),
+			add("stack-waiting/"+name, "stack-waiting", clusterspec.SeverityWarning, fmt.Sprintf("stack %s waits for a place", name),
 				"The stack finds no place: "+stack.WaitReason)
 		}
 	}
@@ -142,14 +142,14 @@ func addCertificateAlerts(current *state.State, now time.Time, add func(key, kin
 			ignoredFor = append(ignoredFor, domain)
 		}
 		if !now.Before(certificate.NotAfter.Add(-before / 2)) {
-			add("certificate-not-renewed/"+domain, "certificate-not-renewed", clusterdir.SeverityWarning,
+			add("certificate-not-renewed/"+domain, "certificate-not-renewed", clusterspec.SeverityWarning,
 				fmt.Sprintf("the certificate of %s is not renewed", domain),
 				fmt.Sprintf("It ends %s and less than half of its renewal window is left. The leader's log says why "+
 					"the orders fail; the domain must point at the Floating IP.", certificate.NotAfter.UTC().Format(time.DateOnly)))
 		}
 	}
 	if len(ignoredFor) > 0 {
-		add("renew-before-ignored", "renew-before-ignored", clusterdir.SeverityWarning,
+		add("renew-before-ignored", "renew-before-ignored", clusterspec.SeverityWarning,
 			"acme.renew_before is not shorter than a certificate's lifetime",
 			fmt.Sprintf("It would renew every new certificate at once, so the leader renews %v when a third of the "+
 				"lifetime is left. Set renew_before shorter.", ignoredFor))

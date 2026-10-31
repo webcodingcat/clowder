@@ -103,8 +103,8 @@ var resourceKinds = map[string]resourceKind{
 
 // applyPutResource checks in a fixed order: who may, whose the resource is,
 // whether anything changes, and only then the rest; so a channel learns
-// nothing of another's resources, and an unchanged resource passes even
-// where its state has moved on since.
+// nothing of another's spec (only that the resource is another's), and an
+// unchanged resource passes even where its state has moved on since.
 func applyPutResource(s *State, cmd Command, payload PutResource) error {
 	kind, ok := resourceKinds[payload.Kind]
 	if !ok {

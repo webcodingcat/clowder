@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/units"
 )
@@ -337,20 +337,20 @@ func checkCycles(services map[string]Service) Problems {
 // ParsePriority reads a priority as written: a whole number from 0 to 1000,
 // or a category's name; none ("") is the zero Priority, the cluster's
 // default. Whether the category exists depends on the cluster.
-func ParsePriority(text string) (clusterdir.Priority, error) {
+func ParsePriority(text string) (clusterspec.Priority, error) {
 	if text == "" {
-		return clusterdir.Priority{}, nil
+		return clusterspec.Priority{}, nil
 	}
 	if number, err := strconv.Atoi(text); err == nil {
 		if number < 0 || number > 1000 {
-			return clusterdir.Priority{}, fmt.Errorf("%d is not from 0 to 1000", number)
+			return clusterspec.Priority{}, fmt.Errorf("%d is not from 0 to 1000", number)
 		}
-		return clusterdir.Priority{Value: &number}, nil
+		return clusterspec.Priority{Value: &number}, nil
 	}
 	if !names.Valid(text) {
-		return clusterdir.Priority{}, fmt.Errorf("%q is neither a number from 0 to 1000 nor a category's name", text)
+		return clusterspec.Priority{}, fmt.Errorf("%q is neither a number from 0 to 1000 nor a category's name", text)
 	}
-	return clusterdir.Priority{Category: text}, nil
+	return clusterspec.Priority{Category: text}, nil
 }
 
 // ValidRoutePath tells whether a path may follow an HTTP route's host.

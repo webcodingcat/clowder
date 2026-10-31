@@ -18,7 +18,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/atomicfile"
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/digest"
@@ -93,7 +93,7 @@ type stackRunner struct {
 
 // desiredState is what this host should run, from a copy of the state.
 type desiredState struct {
-	config clusterdir.Config
+	config clusterspec.Config
 	// stacks are by their Compose project (Stack.Project), the name of all
 	// the agent keeps per stack
 	stacks     map[string]*state.Stack
@@ -105,7 +105,7 @@ type desiredState struct {
 	retired []state.RetiredCopy
 }
 
-// readDesired reads what the host self should run: a copy of the state,
+// readDesired reads what this host should run: a copy of the state,
 // made under the lock Raft's Apply waits for, which a pass then works on
 // outside it.
 func readDesired(cluster stateReader, self state.HostID) (desiredState, error) {
@@ -237,7 +237,7 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 	}
 	return commitAsHost(ctx, r.propose, r.host.ID, state.KindSetStackStatus, state.SetStackStatus{
 		ID: stack.ID(), Status: state.StackRunning, Host: stack.Host, Generation: stack.Generation,
-		AppliedSecrets: secrets.digests,
+		Restarted: stack.Restarted, AppliedSecrets: secrets.digests,
 	})
 }
 
@@ -343,12 +343,12 @@ func (r *stackRunner) describe(desired desiredState, id string) (storage.Volume,
 	if !ok {
 		return storage.Volume{}, fmt.Errorf("volume %s is not placed yet", id)
 	}
-	index := slices.IndexFunc(volume.Placements, func(p state.Placement) bool { return p.Host == r.host.ID })
+	index := slices.IndexFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host.ID })
 	if index < 0 {
 		return storage.Volume{}, fmt.Errorf("volume %s has no copy on this host", id)
 	}
 	lv := names.VolumeName(id, volume.DataGeneration)
-	pool, err := poolOf(desired.config, id, volume.Placements[index].Class)
+	pool, err := poolOf(desired.config, id, volume.Copies[index].Class)
 	if err != nil {
 		return storage.Volume{}, err
 	}
@@ -357,10 +357,10 @@ func (r *stackRunner) describe(desired desiredState, id string) (storage.Volume,
 		return described, nil // replicas 0: a plain LV
 	}
 	resource := &storage.Resource{Name: lv, Minor: *volume.Minor, ResyncRate: desired.config.Replication.ResyncRate}
-	for _, placement := range volume.Placements {
-		node := storage.Node{Host: desired.hostNames[placement.Host], ID: placement.Host}
-		if !placement.Tiebreaker {
-			peerPool, err := poolOf(desired.config, id, placement.Class)
+	for _, volumeCopy := range volume.Copies {
+		node := storage.Node{Host: desired.hostNames[volumeCopy.Host], ID: volumeCopy.Host}
+		if !volumeCopy.Tiebreaker {
+			peerPool, err := poolOf(desired.config, id, volumeCopy.Class)
 			if err != nil {
 				return storage.Volume{}, err
 			}
@@ -376,7 +376,7 @@ func (r *stackRunner) describe(desired desiredState, id string) (storage.Volume,
 // poolOf is the thin pool of a copy's storage class. cluster apply refuses
 // a cluster.yaml without a class a volume uses, so a missing one is a bug
 // to say clearly, not an empty pool for lvcreate.
-func poolOf(config clusterdir.Config, volumeID, class string) (string, error) {
+func poolOf(config clusterspec.Config, volumeID, class string) (string, error) {
 	storageClass, ok := config.StorageClasses[class]
 	if !ok || storageClass.Pool == "" {
 		return "", fmt.Errorf("volume %s: cluster.yaml has no storage class %s with a pool", volumeID, class)
@@ -557,7 +557,7 @@ func (r *stackRunner) warnUnexplained(volume storage.Volume) {
 // in the recorded data generation.
 func (r *stackRunner) placedHere(desired desiredState, volume storage.Volume) bool {
 	current, ok := desired.volumes[volume.ID]
-	if !ok || !slices.ContainsFunc(current.Placements, func(p state.Placement) bool { return p.Host == r.host.ID }) {
+	if !ok || !slices.ContainsFunc(current.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host.ID }) {
 		return false
 	}
 	return names.VolumeName(volume.ID, current.DataGeneration) == volume.LV

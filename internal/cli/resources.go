@@ -39,7 +39,9 @@ func newApplyResources(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			slices.SortStableFunc(objects, func(a, b resource.Object) int { return cmp.Compare(applyRank(a.Kind), applyRank(b.Kind)) })
+			slices.SortStableFunc(objects, func(a, b resource.Object) int {
+				return cmp.Compare(applyRank(a.Kind), applyRank(b.Kind))
+			})
 			client, _, err := g.connect()
 			if err != nil {
 				return err
@@ -121,12 +123,13 @@ func newGet(g *globals) *cobra.Command {
 func newDelete(g *globals) *cobra.Command {
 	var selected selectFlags
 	var from string
-	var dryRun bool
+	var dryRun, withData bool
 	command := &cobra.Command{
 		Use:   "delete (<kind> [<namespace>/]<name> | -f <file|directory|->)",
 		Short: "Delete resources that nothing uses",
 		Long: "Deletes one resource, or those of a file, a directory or stdin (-) in the reverse order\n" +
-			"of an apply. A namespace goes only when empty, a volume with all its data.",
+			"of an apply. A namespace goes only when empty. A volume goes with all its data, so\n" +
+			"deleting one needs --with-data; without it, nothing is deleted.",
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var refs []resource.Ref
@@ -140,8 +143,10 @@ func newDelete(g *globals) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				// the reverse of an apply: b before a
-				slices.SortStableFunc(objects, func(a, b resource.Object) int { return cmp.Compare(applyRank(b.Kind), applyRank(a.Kind)) })
+				// the reverse order of an apply: stacks first, namespaces last
+				slices.SortStableFunc(objects, func(a, b resource.Object) int {
+					return cmp.Compare(applyRank(b.Kind), applyRank(a.Kind))
+				})
 				for _, object := range objects {
 					refs = append(refs, object.Ref())
 				}
@@ -158,7 +163,8 @@ func newDelete(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			result, err := client.DeleteResources(cmd.Context(), api.DeleteRequest{Resources: refs}, dryRun)
+			request := api.DeleteRequest{Resources: refs, WithData: withData}
+			result, err := client.DeleteResources(cmd.Context(), request, dryRun)
 			if err != nil {
 				return err
 			}
@@ -168,6 +174,7 @@ func newDelete(g *globals) *cobra.Command {
 	selected.register(command, false)
 	command.Flags().StringVarP(&from, "filename", "f", "", "delete the resources of a file, a directory, or - for stdin")
 	command.Flags().BoolVar(&dryRun, "dry-run", false, "check everything against the cluster, change nothing")
+	command.Flags().BoolVar(&withData, "with-data", false, "delete volumes too, with all their data")
 	return command
 }
 

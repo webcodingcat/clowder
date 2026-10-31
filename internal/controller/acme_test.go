@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/ingress"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
@@ -259,12 +259,12 @@ func newACMERunner(t *testing.T, ca *fakeCA) (*acmeRunner, *leader) {
 		Host:    state.Host{ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0"},
 	})
 	l.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
-		Spec: clusterdir.Config{
+		Spec: clusterspec.Config{
 			Name: "prod", Seeds: []string{"10.0.0.2"},
-			Hoster:         clusterdir.Hoster{Type: "hetzner", Token: clusterdir.SecretRef{Secret: "token"}},
-			Ingress:        clusterdir.Ingress{FloatingIP: "127.0.0.1"},
-			StorageClasses: map[string]clusterdir.StorageClass{"fast": {Pool: "vg-fast/thin"}},
-			ACME:           clusterdir.ACME{Directory: ca.server.URL + "/directory", CA: "ca.pem", Email: "ops@example.com"},
+			Hoster:         clusterspec.Hoster{Type: "hetzner", Token: clusterspec.SecretRef{Secret: "token"}},
+			Ingress:        clusterspec.Ingress{FloatingIP: "127.0.0.1"},
+			StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
+			ACME:           clusterspec.ACME{Directory: ca.server.URL + "/directory", CA: "ca.pem", Email: "ops@example.com"},
 		},
 		Secrets: map[string]state.Sealed{"token": state.Sealed("t")},
 		Files:   map[string][]byte{"ca.pem": ca.trust()},
@@ -405,15 +405,15 @@ func TestRenewalComesWhenAThirdOfTheLifetimeIsLeftOrAsConfigured(t *testing.T) {
 		{"90d", start.Add(59 * day), false},
 		{"120d", start.Add(60 * day), true},
 	} {
-		config := clusterdir.ACME{RenewBefore: test.renewBefore}
+		config := clusterspec.ACME{RenewBefore: test.renewBefore}
 		if due := renewalDue(certificate, config, test.now); due != test.due {
 			t.Errorf("renew_before %q on day %v: due %v", test.renewBefore, test.now.Sub(start)/day, due)
 		}
 	}
-	if _, ignored := renewBefore(certificate, clusterdir.ACME{RenewBefore: "90d"}); !ignored {
+	if _, ignored := renewBefore(certificate, clusterspec.ACME{RenewBefore: "90d"}); !ignored {
 		t.Error("a renew_before as long as the lifetime was not ignored")
 	}
-	if !renewalDue(nil, clusterdir.ACME{}, start) {
+	if !renewalDue(nil, clusterspec.ACME{}, start) {
 		t.Error("a domain without a certificate is not due")
 	}
 	routed := func(routes ...stackspec.HTTP) *state.Stack {

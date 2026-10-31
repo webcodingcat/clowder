@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
 )
@@ -123,7 +123,7 @@ func TestClusterYAMLKeepsTheCategoriesStacksName(t *testing.T) {
 	spec.Priority = "low"
 	c.putShop(spec)
 	config := testConfig()
-	config.Priorities = clusterdir.Priorities{Default: "normal", Categories: map[string]int{"normal": 500}}
+	config.Priorities = clusterspec.Priorities{Default: "normal", Categories: map[string]int{"normal": 500}}
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: testSecrets()},
 		`cluster.yaml would break stack default/shop: service app: the cluster has no priority category "low"`)
 }
@@ -193,7 +193,7 @@ func TestAPlacedStackNamesNoVolumeWhoseDataIsOnAnotherHost(t *testing.T) {
 	c.mustApply(KindPutResource, UserActor("alice"), putResource(resource.KindVolume, "default", "data", testVolumeSpec()))
 	elsewhere := *c.state.Volumes["default/data"]
 	minor := 0
-	elsewhere.Status, elsewhere.Minor, elsewhere.Placements = VolumeOK, &minor, []Placement{{Host: 1, Class: "fast"}}
+	elsewhere.Status, elsewhere.Minor, elsewhere.Copies = VolumeOK, &minor, []VolumeCopy{{Host: 1, Class: "fast"}}
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: elsewhere})
 
 	uses := shopSpec()
@@ -239,8 +239,13 @@ func TestARestartTakesAlongWhatDependsOnItAndKeepsTheGeneration(t *testing.T) {
 	if stack.Generation != 1 || stack.Status != StackStarting || stack.ResourceVersion != c.index {
 		t.Errorf("restarted stack %+v", stack.Meta)
 	}
-	// the host reports the same generation up again
-	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &host, Generation: 1})
+	// a report from before the restart says nothing about the recreated
+	// containers; the host reports them up with the restart's times
+	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &host, Generation: 1},
+		"the report is about an older restart")
+	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{
+		ID: "default/shop", Status: StackRunning, Host: &host, Generation: 1, Restarted: maps.Clone(stack.Restarted),
+	})
 
 	// none named: all of them
 	c.mustApply(KindRestartStack, UserActor("alice"), RestartStack{Namespace: "default", Name: "shop"})

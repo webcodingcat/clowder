@@ -23,6 +23,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/sopsage"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -90,7 +91,7 @@ func startCluster(t *testing.T) string {
 	if _, err := current.Apply(1, cmd); err != nil {
 		t.Fatal(err)
 	}
-	current.Config.Spec.StorageClasses = map[string]clusterdir.StorageClass{"fast": {Pool: "vg-fast/thin"}}
+	current.Config.Spec.StorageClasses = map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}}
 	hostCertificate, hostKey := issue(func(public ed25519.PublicKey) ([]byte, error) {
 		return ca.IssueHost(public, 0, []netip.Addr{netip.MustParseAddr("127.0.0.1")}, time.Now())
 	})
@@ -116,11 +117,11 @@ func startCluster(t *testing.T) string {
 	t.Cleanup(server.Close)
 
 	dir := t.TempDir()
-	config := clusterdir.Config{
+	config := clusterspec.Config{
 		Name: "test", Seeds: []string{server.Listener.Addr().String()},
-		Hoster:         clusterdir.Hoster{Type: "hetzner", Token: clusterdir.SecretRef{Secret: "hcloud-token"}},
-		Ingress:        clusterdir.Ingress{FloatingIP: "203.0.113.11"},
-		StorageClasses: map[string]clusterdir.StorageClass{"fast": {Pool: "vg-fast/thin"}},
+		Hoster:         clusterspec.Hoster{Type: "hetzner", Token: clusterspec.SecretRef{Secret: "hcloud-token"}},
+		Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.11"},
+		StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 	}
 	writeYAML(t, filepath.Join(dir, clusterdir.ConfigFile), config)
 

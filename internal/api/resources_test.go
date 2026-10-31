@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -30,7 +30,7 @@ func object(kind, namespace, name, spec string) resource.Object {
 func withStorageClass(cluster *testCluster) {
 	for _, each := range cluster.clusters {
 		each.mu.Lock()
-		each.state.Config.Spec.StorageClasses = map[string]clusterdir.StorageClass{"fast": {Pool: "vg-fast/thin"}}
+		each.state.Config.Spec.StorageClasses = map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}}
 		each.mu.Unlock()
 	}
 }
@@ -280,6 +280,14 @@ func TestTheLeaderDecidesNotAFollowerThatIsBehind(t *testing.T) {
 			t.Error("the leader has no namespace shop")
 		}
 	})
+	// a volume goes only with its data said so, and then the whole request
+	// is refused before anything goes
+	err = client.Act(ctx, "/v1/delete", DeleteRequest{Resources: []resource.Ref{
+		{Kind: resource.KindNamespace, Name: "shop"}, {Kind: resource.KindVolume, Namespace: "default", Name: "data"},
+	}}, &result)
+	if statusOf(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "volume default/data goes with its data") {
+		t.Errorf("a volume without with_data: %v", err)
+	}
 	result, err = client.DeleteResources(ctx, DeleteRequest{Resources: []resource.Ref{
 		{Kind: resource.KindNamespace, Name: "shop"},
 		{Kind: resource.KindNamespace, Name: "default"},

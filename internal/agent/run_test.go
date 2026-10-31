@@ -23,6 +23,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/cli"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/hoster"
 	"github.com/webcodingcat/clowder/internal/names"
@@ -54,7 +55,7 @@ type fakeHoster struct {
 	target string
 }
 
-func (f *fakeHoster) connect(_ clusterdir.Hoster, token string) (hoster.Hoster, error) {
+func (f *fakeHoster) connect(_ clusterspec.Hoster, token string) (hoster.Hoster, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.token = token
@@ -484,7 +485,7 @@ spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
 	waitForOutput(t, "Up 2 seconds", "--cluster", dir, "stack", "ps", "shop")
 	waitForOutput(t, "hello", "--cluster", dir, "stack", "logs", "shop")
 	// deleted, the stack before its volume: compose down, the LV removed
-	if _, err := clowder(t, "--cluster", dir, "delete", "-f", resources); err != nil {
+	if _, err := clowder(t, "--cluster", dir, "delete", "--with-data", "-f", resources); err != nil {
 		t.Fatal(err)
 	}
 	hostDocker.waitFor(t, "down default_shop")

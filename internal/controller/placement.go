@@ -68,9 +68,10 @@ func (p *placer) place(ctx context.Context) time.Duration {
 	}
 	decisions := scheduler.Plan(copied)
 	p.noteOverCapacity(copied, decisions.OverCapacity)
-	for _, lists := range decisions.PushOuts {
-		p.logger.Warn("pushing out services: the host's stacks reserve more than it offers", "pushed_out", lists)
-		p.commit(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: lists})
+	// each push-out is the new lists of the stacks it touches, by stack
+	for _, pushOut := range decisions.PushOuts {
+		p.logger.Warn("pushing out services: the host's stacks reserve more than it offers", "pushed_out", pushOut)
+		p.commit(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: pushOut})
 	}
 	p.writeWaitReasons(ctx, copied, decisions.Waiting)
 	for _, placement := range decisions.Placements {

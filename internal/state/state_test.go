@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
@@ -296,12 +296,12 @@ func TestRemovingAUserRevokesTheirCertificates(t *testing.T) {
 	}
 }
 
-func testConfig() clusterdir.Config {
-	return clusterdir.Config{
+func testConfig() clusterspec.Config {
+	return clusterspec.Config{
 		Name: "prod", Seeds: []string{"10.0.0.2"},
-		Hoster:         clusterdir.Hoster{Type: "hetzner", Token: clusterdir.SecretRef{Secret: "hcloud-token"}},
-		Ingress:        clusterdir.Ingress{FloatingIP: "203.0.113.11"},
-		StorageClasses: map[string]clusterdir.StorageClass{"fast": {Pool: "vg-fast/thin"}},
+		Hoster:         clusterspec.Hoster{Type: "hetzner", Token: clusterspec.SecretRef{Secret: "hcloud-token"}},
+		Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.11"},
+		StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 	}
 }
 
@@ -489,11 +489,11 @@ func TestAVolumeRecordKeepsItsInvariantsAndOwnMinor(t *testing.T) {
 	}
 	minor := 5
 	volume := *c.state.Volumes["default/pgdata"]
-	volume.Minor, volume.Placements, volume.Status = &minor, []Placement{{Host: 0, Class: "fast"}}, VolumeOK
+	volume.Minor, volume.Copies, volume.Status = &minor, []VolumeCopy{{Host: 0, Class: "fast"}}, VolumeOK
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: volume})
 
 	other := *c.state.Volumes["default/cache"]
-	other.Minor, other.Placements, other.Status = &minor, volume.Placements, VolumeOK
+	other.Minor, other.Copies, other.Status = &minor, volume.Copies, VolumeOK
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: other}, "minor 5 belongs to default/pgdata")
 	orphan := volume
 	orphan.Name = "blog"
@@ -508,7 +508,7 @@ func TestAVolumeRecordKeepsItsInvariantsAndOwnMinor(t *testing.T) {
 	other.Minor = &tooHigh
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: other}, "not from 0 to 999")
 	twice := volume
-	twice.Placements = []Placement{{Host: 0, Class: "fast"}, {Host: 0, Class: "fast"}}
+	twice.Copies = []VolumeCopy{{Host: 0, Class: "fast"}, {Host: 0, Class: "fast"}}
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: twice}, "2 copies for 1 replicas")
 	respec := volume
 	respec.Spec.Replicas = 2
@@ -532,7 +532,7 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	minor := 5
 	volume := *c.state.Volumes["default/pgdata"]
 	volume.Minor, volume.Status = &minor, VolumeOK
-	volume.Placements = []Placement{{Host: 0, Class: "fast"}, {Host: 1, Class: "fast"}}
+	volume.Copies = []VolumeCopy{{Host: 0, Class: "fast"}, {Host: 1, Class: "fast"}}
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: volume})
 	if len(c.state.Retired) != 0 {
 		t.Fatalf("a new volume retired %v", c.state.Retired)
@@ -540,7 +540,7 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 
 	// the copy on host 1 leaves; the one on host 0 stays
 	moved := volume
-	moved.Placements = []Placement{{Host: 0, Class: "fast"}}
+	moved.Copies = []VolumeCopy{{Host: 0, Class: "fast"}}
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: moved})
 	// a new generation retires the copies of the old one
 	restored := moved

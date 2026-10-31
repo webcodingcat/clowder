@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/buildinfo"
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
@@ -90,8 +90,8 @@ type ClusterConfig struct {
 	Revision int64 `json:"revision"`
 	// Hash of cluster.yaml and the secrets as the CLI applied them, so diff
 	// can tell whether anything changed.
-	Hash string            `json:"hash,omitempty"`
-	Spec clusterdir.Config `json:"spec"`
+	Hash string             `json:"hash,omitempty"`
+	Spec clusterspec.Config `json:"spec"`
 	// Files are the files next to cluster.yaml that it names (acme.ca).
 	Files map[string][]byte `json:"files,omitempty"`
 }
@@ -252,7 +252,7 @@ type Service struct {
 	// Priority is as written: the service's own, else the stack's; the
 	// scheduler resolves it with the current cluster.yaml, so a changed
 	// category takes effect without a new apply.
-	Priority clusterdir.Priority `json:"priority,omitzero"`
+	Priority clusterspec.Priority `json:"priority,omitzero"`
 	// MemoryBytes and CPUs are the reservations; zero means
 	// defaults.reservations.
 	MemoryBytes int64   `json:"memory_bytes,omitempty"`
@@ -290,7 +290,7 @@ type Volume struct {
 	// the LV's name (names.VolumeName), at most names.MaxDataGeneration.
 	DataGeneration int64        `json:"data_generation"`
 	Minor          *int         `json:"minor,omitempty"` // DRBD minor; nil with replicas 0
-	Placements     []Placement  `json:"placements,omitempty"`
+	Copies         []VolumeCopy `json:"copies,omitempty"`
 	Status         VolumeStatus `json:"status"`
 }
 
@@ -299,8 +299,8 @@ func (v *Volume) ID() string {
 	return names.ID(v.Namespace, v.Name)
 }
 
-// Placement is one copy of a volume.
-type Placement struct {
+// VolumeCopy is one copy of a volume, on one host.
+type VolumeCopy struct {
 	Host HostID `json:"host"`
 	// Class is the pool's class the copy is in (any falls back to another).
 	Class      string `json:"class"`

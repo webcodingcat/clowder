@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
@@ -41,7 +41,7 @@ func TestVolumesFitOnlyWithoutOvercommit(t *testing.T) {
 // cluster is one active host with a 100 GiB fast and a 10 GiB bulk pool.
 func cluster() *state.State {
 	return &state.State{
-		Config: state.ClusterConfig{Spec: clusterdir.Config{StorageClasses: map[string]clusterdir.StorageClass{
+		Config: state.ClusterConfig{Spec: clusterspec.Config{StorageClasses: map[string]clusterspec.StorageClass{
 			"fast": {Pool: "vg-fast/thin"},
 			"bulk": {Pool: "vg-bulk/thin"},
 			"any":  {Fallback: []string{"bulk", "fast"}},
@@ -95,12 +95,12 @@ func TestAStackGoesWhereItsVolumesFit(t *testing.T) {
 		volumes[placed.ID()] = placed
 	}
 	db, cache := volumes["default/db"], volumes["default/cache"]
-	if db.Minor == nil || *db.Minor != 0 || db.Placements[0].Class != "fast" || db.Status != state.VolumeOK ||
+	if db.Minor == nil || *db.Minor != 0 || db.Copies[0].Class != "fast" || db.Status != state.VolumeOK ||
 		db.Name != "db" {
 		t.Errorf("db %+v", db)
 	}
 	// 12 GiB do not fit the 10 GiB bulk pool: any falls back to fast
-	if cache.Minor != nil || cache.Placements[0].Class != "fast" {
+	if cache.Minor != nil || cache.Copies[0].Class != "fast" {
 		t.Errorf("cache %+v", cache)
 	}
 }
@@ -131,7 +131,7 @@ func TestAPlacedStackGetsOnlyItsNewVolumes(t *testing.T) {
 	shop := stack(current, "shop", map[string]resource.VolumeSpec{"db": volume("fast", 20, 1), "files": volume("fast", 50, 1)})
 	shop.Host = &host
 	db := current.Volumes["default/db"]
-	db.Minor, db.Status, db.Placements = &minor, state.VolumeOK, []state.Placement{{Host: 0, Class: "fast"}}
+	db.Minor, db.Status, db.Copies = &minor, state.VolumeOK, []state.VolumeCopy{{Host: 0, Class: "fast"}}
 	decisions := Plan(current)
 	placements, waiting := decisions.Placements, decisions.Waiting
 	if len(waiting) > 0 || len(placements) != 1 || placements[0].Place {
@@ -154,7 +154,7 @@ func TestAStackGoesWhereItsVolumeKeepsItsData(t *testing.T) {
 	current.Hosts[1] = &state.Host{ID: 1, Name: "node1", Phase: state.Active, Pools: current.Hosts[0].Pools}
 	stack(current, "shop", map[string]resource.VolumeSpec{"data": volume("fast", 1, 0)})
 	data := current.Volumes["default/data"]
-	data.Status, data.Placements = state.VolumeOK, []state.Placement{{Host: 1, Class: "fast"}}
+	data.Status, data.Copies = state.VolumeOK, []state.VolumeCopy{{Host: 1, Class: "fast"}}
 	placements := Plan(current).Placements
 	if len(placements) != 1 || placements[0].Host != 1 || len(placements[0].Volumes) != 0 {
 		t.Errorf("placements %+v", placements)

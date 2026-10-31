@@ -80,8 +80,18 @@ linters:
             - "!**/internal/stackspec/*_test.go"
             - "**/internal/resource/*.go"
             - "!**/internal/resource/*_test.go"
+            - "**/internal/clusterspec/*.go"
+            - "!**/internal/clusterspec/*_test.go"
           deny:
             - pkg: os
+              desc: the state does no I/O
+            - pkg: github.com/webcodingcat/clowder/internal/clusterdir
+              desc: "the state reads cluster.yaml's types from clusterspec; clusterdir reads files"
+            - pkg: github.com/webcodingcat/clowder/internal/agent
+              desc: the state does no I/O
+            - pkg: github.com/webcodingcat/clowder/internal/controller
+              desc: the state does no I/O
+            - pkg: github.com/webcodingcat/clowder/internal/raftnode
               desc: the state does no I/O
             - pkg: net/http
               desc: the state does no I/O
@@ -108,10 +118,10 @@ linters:
   exclusions:
     rules:
       # forbidigo guards the determinism of the state, the scheduler and the
-      # stack spec they read
-      - path-except: internal/(state|scheduler|stackspec|resource)/
+      # specs they read
+      - path-except: internal/(state|scheduler|stackspec|resource|clusterspec)/
         linters: [forbidigo]
-      - path: internal/(state|scheduler|stackspec|resource)/.*_test\.go
+      - path: internal/(state|scheduler|stackspec|resource|clusterspec)/.*_test\.go
         linters: [forbidigo]
 
 formatters:

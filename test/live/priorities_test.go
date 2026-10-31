@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// storeStack is DEVELOPING.md's example of priorities: db at critical
+// storeStack is the stack of step 19 in docs/live-tests.md: db at critical
 // (900), app at the stack's high (700) and depending on db, cache at low
 // (200); each reserves 200M.
 var storeStack = document(resource.KindStack, "store", `priority: high
@@ -72,7 +72,7 @@ func pushOut(t *testing.T, server host) {
 	// 100M free, in MiB rounded down, so a little more. The cases below
 	// count on it: 300M is cache's 200M and the free 100M, 500M adds app's
 	// 200M, and mixed's api takes the free 100M.
-	defaultReserve, err := units.ParseSize(clusterdir.DefaultSystemReserve.Memory)
+	defaultReserve, err := units.ParseSize(clusterspec.DefaultSystemReserve.Memory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func pushOut(t *testing.T, server host) {
 		metricValue(t, server, "clowder_host_reserved_memory_bytes"))
 	reserve := (defaultReserve + free - 100*mib) / mib
 	t.Logf("free %d MiB; system_reserve %dM", free/mib, reserve)
-	changeConfig(t, func(config *clusterdir.Config) { config.SystemReserve.Memory = fmt.Sprintf("%dM", reserve) })
+	changeConfig(t, func(config *clusterspec.Config) { config.SystemReserve.Memory = fmt.Sprintf("%dM", reserve) })
 
 	for _, test := range []struct {
 		memory    string
@@ -127,5 +127,5 @@ func pushOut(t *testing.T, server host) {
 		t.Error("mixed should run api and not worker")
 	}
 	removeStack(t, "mixed")
-	changeConfig(t, func(config *clusterdir.Config) { config.SystemReserve.Memory = "" })
+	changeConfig(t, func(config *clusterspec.Config) { config.SystemReserve.Memory = "" })
 }

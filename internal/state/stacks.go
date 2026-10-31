@@ -7,7 +7,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
@@ -137,7 +137,7 @@ func applyRestartStack(s *State, cmd Command, payload RestartStack) error {
 // priority as written (its own, else the stack's), which must resolve with
 // the cluster's categories, its reservations (zero for the cluster's
 // default) and what it depends on.
-func servicesOf(spec stackspec.Spec, priorities clusterdir.Priorities) (map[string]Service, error) {
+func servicesOf(spec stackspec.Spec, priorities clusterspec.Priorities) (map[string]Service, error) {
 	services := map[string]Service{}
 	for _, name := range slices.Sorted(maps.Keys(spec.Services)) {
 		service := spec.Services[name]
@@ -197,8 +197,8 @@ func (s *State) checkStack(id, namespace string, host *HostID, spec stackspec.Sp
 		if !ok {
 			return fmt.Errorf("stack %s: namespace %s has no volume %s", id, namespace, volume)
 		}
-		if host != nil && named.Status != VolumePending && !slices.ContainsFunc(named.Placements,
-			func(placement Placement) bool { return placement.Host == *host && !placement.Tiebreaker }) {
+		if host != nil && named.Status != VolumePending && !slices.ContainsFunc(named.Copies,
+			func(volumeCopy VolumeCopy) bool { return volumeCopy.Host == *host && !volumeCopy.Tiebreaker }) {
 			return fmt.Errorf("stack %s runs on host %d, but volume %s has its data on another host", id, *host, volume)
 		}
 		if other := s.stackNaming(namespace, volume, id, func(stack *Stack) []string {
@@ -238,6 +238,10 @@ type SetStackStatus struct {
 	// it 0. A report about an older generation is refused: an apply came in
 	// between, and that generation has yet to come up.
 	Generation int64 `json:"generation,omitempty"`
+	// Restarted are the restart times the host ran with (Stack.Restarted);
+	// the leader sends none. A report about other times is refused, as one
+	// about an older generation: a restart came in between.
+	Restarted map[string]time.Time `json:"restarted,omitempty"`
 	// AppliedSecrets are the digests of the secrets the containers came up
 	// with, by name; the host sends them with running, the leader none.
 	AppliedSecrets map[string]string `json:"applied_secrets,omitempty"`
@@ -265,6 +269,9 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) error {
 	if IsHostActor(cmd.Actor) && payload.Generation != stack.Generation {
 		return fmt.Errorf("stack %s: the report is about generation %d, but %d is applied",
 			payload.ID, payload.Generation, stack.Generation)
+	}
+	if IsHostActor(cmd.Actor) && !maps.EqualFunc(payload.Restarted, stack.Restarted, time.Time.Equal) {
+		return fmt.Errorf("stack %s: the report is about an older restart", payload.ID)
 	}
 	applied := stack.AppliedSecrets
 	if IsHostActor(cmd.Actor) {

@@ -1,4 +1,7 @@
-package clusterdir
+// Package clusterspec is cluster.yaml as clowder reads it: its types, their
+// defaults and Check. It does no I/O, so the state reads and checks the
+// config itself; reading the cluster directory is clusterdir's.
+package clusterspec
 
 import (
 	"fmt"
@@ -9,6 +12,9 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/units"
 )
+
+// FileName is the name of the file in the cluster directory.
+const FileName = "cluster.yaml"
 
 // Config is cluster.yaml: everything cluster-wide. Changes take effect with
 // `clowder cluster apply`; the file is the source, the cluster keeps a copy.

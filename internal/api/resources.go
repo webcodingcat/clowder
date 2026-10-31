@@ -30,6 +30,9 @@ type ApplyRequest struct {
 // they go (what uses a resource before the resource).
 type DeleteRequest struct {
 	Resources []resource.Ref `json:"resources"`
+	// WithData must be set to delete a volume: its data goes with it, and no
+	// later step can bring it back.
+	WithData bool `json:"with_data,omitempty"`
 }
 
 // The outcomes of a resource in an apply or a delete. A dry run answers
@@ -167,6 +170,16 @@ func (s *Server) deleteResources(w http.ResponseWriter, r *http.Request) {
 	var request DeleteRequest
 	if err := decodeStrict(r.Body, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	// refused as a whole, before anything goes: a delete of a directory would
+	// otherwise take the stack and then stop at its volume
+	if index := slices.IndexFunc(request.Resources, func(ref resource.Ref) bool {
+		return ref.Kind == resource.KindVolume
+	}); index >= 0 && !request.WithData {
+		volume := request.Resources[index]
+		writeError(w, http.StatusBadRequest, fmt.Errorf("volume %s goes with its data; delete it with --with-data",
+			names.ID(volume.Namespace, volume.Name)))
 		return
 	}
 	actor := actorOf(identityOf(r))
@@ -361,12 +374,18 @@ func (s *Server) runChanges(ctx context.Context, batch changeBatch) ChangeResult
 // runChange runs one change: on the copy, then, unless it is unchanged or
 // a dry run, through Raft. It returns the outcome, a message for a refusal
 // or failure, and the committed index.
-func (s *Server) runChange(ctx context.Context, copied *state.State, each batchChange, dryRun bool) (string, string, uint64) {
+func (s *Server) runChange(ctx context.Context, copied *state.State, each batchChange, dryRun bool) (
+	outcome, message string, index uint64,
+) {
 	if each.Command == nil {
 		return Refused, each.Error, 0
 	}
+	// The try needs a time, as Apply takes it from the command: the
+	// leader's clock. proposeHere stamps the command it commits anew; the
+	// two times differ by how long the try takes, and no check of a
+	// resource reads them.
 	tried := *each.Command
-	tried.At = time.Now().UTC() // the leader's clock, as proposeHere stamps it
+	tried.At = time.Now().UTC()
 	// Apply moves the copy's index, so the next change gets the one after
 	changed, err := copied.Apply(copied.Index+1, tried)
 	done := Applied
@@ -383,7 +402,7 @@ func (s *Server) runChange(ctx context.Context, copied *state.State, each batchC
 	}
 	ctx, cancel := context.WithTimeout(ctx, waitTimeout)
 	defer cancel()
-	index, err := s.proposeHere(ctx, *each.Command)
+	index, err = s.proposeHere(ctx, *each.Command)
 	var refused *state.Refused
 	switch {
 	case errors.As(err, &refused):
@@ -541,13 +560,13 @@ func stackStatus(current *state.State, stack *state.Stack) StackStatus {
 
 func volumeStatus(current *state.State, volume *state.Volume) VolumeStatus {
 	status := VolumeStatus{Status: string(volume.Status), DataGeneration: volume.DataGeneration}
-	for _, placement := range volume.Placements {
-		host := strconv.Itoa(int(placement.Host))
-		if known, ok := current.Hosts[placement.Host]; ok {
+	for _, volumeCopy := range volume.Copies {
+		host := strconv.Itoa(int(volumeCopy.Host))
+		if known, ok := current.Hosts[volumeCopy.Host]; ok {
 			host = known.Name
 		}
 		status.Copies = append(status.Copies, VolumeCopy{
-			Host: host, Class: placement.Class, Tiebreaker: placement.Tiebreaker,
+			Host: host, Class: volumeCopy.Class, Tiebreaker: volumeCopy.Tiebreaker,
 		})
 	}
 	return status

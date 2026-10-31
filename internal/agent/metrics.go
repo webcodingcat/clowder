@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/docker"
@@ -171,7 +171,7 @@ func (m *metricsSource) addCluster(set *metrics.Set, copied *state.State) {
 	for _, alert := range copied.Alerts {
 		severities[alert.Severity]++
 	}
-	for _, severity := range clusterdir.Severities {
+	for _, severity := range clusterspec.Severities {
 		set.Add("clowder_alerts_open", "Open alerts by severity.", metrics.Gauge, float64(severities[severity]),
 			"severity", severity)
 	}

@@ -16,7 +16,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 )
 
 // The events a message tells of.
@@ -65,7 +65,7 @@ type Secrets func(name string) (string, error)
 
 // New makes the notifier of a channel, with its secrets opened and the
 // files next to cluster.yaml (smtp.ca) at hand.
-func New(channel clusterdir.AlertChannel, secrets Secrets, files map[string][]byte) (Notifier, error) {
+func New(channel clusterspec.AlertChannel, secrets Secrets, files map[string][]byte) (Notifier, error) {
 	switch channel.Type {
 	case "discord":
 		url, err := secrets(channel.Webhook.Secret)
@@ -127,7 +127,7 @@ type discord struct {
 
 func (d discord) Send(ctx context.Context, message Message) error {
 	colors := map[string]int{
-		clusterdir.SeverityInfo: 0x1976D2, clusterdir.SeverityWarning: 0xF9A825, clusterdir.SeverityCritical: 0xD32F2F,
+		clusterspec.SeverityInfo: 0x1976D2, clusterspec.SeverityWarning: 0xF9A825, clusterspec.SeverityCritical: 0xD32F2F,
 	}
 	color := colors[message.Severity]
 	if message.Event == Resolved {

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/notify"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -30,7 +30,7 @@ const (
 )
 
 // Connect makes the notifier of an alert channel (notify.New).
-type Connect func(channel clusterdir.AlertChannel, secrets notify.Secrets, files map[string][]byte) (notify.Notifier, error)
+type Connect func(channel clusterspec.AlertChannel, secrets notify.Secrets, files map[string][]byte) (notify.Notifier, error)
 
 // Alerts raises and resolves the cluster's alerts while this agent leads,
 // and tells the channels: when an alert is raised or gets worse, every
@@ -229,7 +229,7 @@ func (a *Alerts) commit(ctx context.Context, kind string, payload any) bool {
 // raised or got worse than the channels were told, a reminder, one
 // resolved. An alert that gets better (and worse again up to its peak)
 // sends nothing until its reminder or its all-clear.
-func (a *Alerts) notice(config clusterdir.Config, revision int64, open map[string]state.Alert, now time.Time) {
+func (a *Alerts) notice(config clusterspec.Config, revision int64, open map[string]state.Alert, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, key := range slices.Sorted(maps.Keys(open)) {
@@ -241,7 +241,7 @@ func (a *Alerts) notice(config clusterdir.Config, revision int64, open map[strin
 			event = notify.Raised
 		case !known:
 			event = notify.Reminder // open before this agent led
-		case alert.Severity != last.peak && clusterdir.AtLeast(alert.Severity, last.peak):
+		case alert.Severity != last.peak && clusterspec.AtLeast(alert.Severity, last.peak):
 			event = notify.Raised // worse
 		case now.Sub(last.at) >= remindEvery:
 			event = notify.Reminder
@@ -252,7 +252,7 @@ func (a *Alerts) notice(config clusterdir.Config, revision int64, open map[strin
 		}
 		delete(a.raisedHere, key)
 		peak := alert.Severity
-		if known && clusterdir.AtLeast(last.peak, peak) {
+		if known && clusterspec.AtLeast(last.peak, peak) {
 			peak = last.peak
 		}
 		a.noticed[key] = notice{alert: alert, peak: peak, at: now}
@@ -269,7 +269,7 @@ func (a *Alerts) notice(config clusterdir.Config, revision int64, open map[strin
 
 // enqueue adds a message to the outbox of each channel that takes the
 // severity; the oldest go when it is full.
-func (a *Alerts) enqueue(config clusterdir.Config, revision int64, alert state.Alert, event, severity string, now time.Time) {
+func (a *Alerts) enqueue(config clusterspec.Config, revision int64, alert state.Alert, event, severity string, now time.Time) {
 	if config.Alerts == nil {
 		return
 	}
@@ -278,7 +278,7 @@ func (a *Alerts) enqueue(config clusterdir.Config, revision int64, alert state.A
 		Subject: alert.Subject, Text: alert.Message, Since: alert.Since,
 	}
 	for index, channel := range config.Alerts.Channels {
-		if clusterdir.AtLeast(severity, channel.MinSeverity) {
+		if clusterspec.AtLeast(severity, channel.MinSeverity) {
 			a.outbox = append(a.outbox, delivery{channel: index, revision: revision, message: message, next: now})
 		}
 	}
@@ -363,7 +363,7 @@ func (a *Alerts) secrets(copied *state.State) notify.Secrets {
 }
 
 // channelName names a channel of cluster.yaml for people.
-func channelName(config clusterdir.Config, index int) string {
+func channelName(config clusterspec.Config, index int) string {
 	if config.Alerts == nil || index >= len(config.Alerts.Channels) {
 		return fmt.Sprintf("alerts.channels[%d]", index)
 	}
@@ -382,7 +382,7 @@ type Failure struct {
 // Failures are the messages that failed at least once and wait for
 // another try; empty on an agent that does not lead.
 func (a *Alerts) Failures() []Failure {
-	var config clusterdir.Config
+	var config clusterspec.Config
 	a.cluster.Read(func(current *state.State) { config = current.Config.Spec })
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -418,7 +418,7 @@ func (a *Alerts) Test(ctx context.Context) ([]TestResult, error) {
 		return nil, fmt.Errorf("cluster.yaml names no alert channel")
 	}
 	message := notify.Message{
-		Cluster: config.Name, Event: notify.Test, Key: "test", Kind: "test", Severity: clusterdir.SeverityInfo,
+		Cluster: config.Name, Event: notify.Test, Key: "test", Kind: "test", Severity: clusterspec.SeverityInfo,
 		Subject: "test alert", Text: "clowder alert test: this channel gets the cluster's alerts.", Since: time.Now(),
 	}
 	var results []TestResult

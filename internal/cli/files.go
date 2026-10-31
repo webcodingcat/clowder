@@ -24,7 +24,7 @@ func readResources(from string, stdin io.Reader, report io.Writer) ([]resource.O
 		if err != nil {
 			return nil, fmt.Errorf("read stdin: %w", err)
 		}
-		return readFile("stdin", data, true, nil)
+		return readFile("stdin", data, true, false)
 	}
 	info, err := os.Stat(from)
 	if err != nil {
@@ -35,7 +35,7 @@ func readResources(from string, stdin io.Reader, report io.Writer) ([]resource.O
 		if err != nil {
 			return nil, fmt.Errorf("read the resources: %w", err)
 		}
-		return readFile(from, data, true, report)
+		return readFile(from, data, true, true)
 	}
 	return readDirectory(from, report)
 }
@@ -69,7 +69,7 @@ func readDirectory(dir string, report io.Writer) ([]resource.Object, error) {
 			if err != nil {
 				return nil, fmt.Errorf("read the resources: %w", err)
 			}
-			found, err := readFile(path, data, false, report)
+			found, err := readFile(path, data, false, true)
 			if err != nil {
 				return nil, err
 			}
@@ -87,10 +87,10 @@ func readDirectory(dir string, report io.Writer) ([]resource.Object, error) {
 // own per secret keeps sopsage as it is, every value encrypted. A SOPS file
 // of anything else (the cluster's secrets) is not decrypted. Unless
 // required, a file without resources holds none (a directory skips it);
-// else it is an error. A Secret in a file in clear gets a warning on report
-// (nil for stdin, where the value comes from somewhere else): such a file
-// ends up in a repository, a backup, an editor's history.
-func readFile(name string, data []byte, required bool, report io.Writer) ([]resource.Object, error) {
+// else it is an error. A Secret in a file (inFile) in clear is refused: such
+// a file ends up in a repository, a backup, an editor's history. On stdin
+// the value comes from somewhere else, a password manager or a pipe.
+func readFile(name string, data []byte, required, inFile bool) ([]resource.Object, error) {
 	encrypted, holdsResource := sopsFile(data)
 	switch {
 	case encrypted && !holdsResource && required:
@@ -118,9 +118,9 @@ func readFile(name string, data []byte, required bool, report io.Writer) ([]reso
 		if resource.Namespaced(objects[index].Kind) && objects[index].Metadata.Namespace == "" {
 			objects[index].Metadata.Namespace = names.Default
 		}
-		if !encrypted && report != nil && objects[index].Kind == resource.KindSecret {
-			_, _ = fmt.Fprintf(report, "warning: %s holds Secret %s in clear; keep it in a SOPS file of its own\n",
-				name, objects[index].Metadata.Name) // a report only
+		if !encrypted && inFile && objects[index].Kind == resource.KindSecret {
+			return nil, fmt.Errorf("%s holds Secret %s in clear: keep it in a SOPS file of its own, or pass it on stdin",
+				name, objects[index].Metadata.Name)
 		}
 	}
 	return objects, nil

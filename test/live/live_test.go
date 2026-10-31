@@ -3,7 +3,7 @@
 // Package live tests clowder on a real host: the server of examples/hetzner
 // in HLab, set up by the module's cloud-init and driven with the real CLI
 // and SSH. bin/dev live makes the host and runs these tests in the lab's
-// network (DEVELOPING.md, Live tests).
+// network (docs/live-tests.md).
 package live
 
 import (
@@ -22,6 +22,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
@@ -195,15 +196,15 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var config clusterdir.Config
+	var config clusterspec.Config
 	decoder := yaml.NewDecoder(bytes.NewReader(fromModule))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&config); err != nil {
 		t.Fatalf("the module's cluster_yaml: %v", err)
 	}
 	config.Name = "live"
-	config.Hoster = clusterdir.Hoster{
-		Type: "hetzner", Token: clusterdir.SecretRef{Secret: "hcloud-token"}, API: os.Getenv("HCLOUD_ENDPOINT"),
+	config.Hoster = clusterspec.Hoster{
+		Type: "hetzner", Token: clusterspec.SecretRef{Secret: "hcloud-token"}, API: os.Getenv("HCLOUD_ENDPOINT"),
 	}
 	content, err := yaml.Marshal(config)
 	if err != nil {
@@ -686,7 +687,7 @@ func runManyStacks(t *testing.T, server host) {
 // came on stdin.
 func deleteStack(t *testing.T, server host) {
 	data, scratch := volumeLV(t, "data"), volumeLV(t, "scratch")
-	mustClowder(t, "delete", "-f", stackDir("shop"))
+	mustClowder(t, "delete", "--with-data", "-f", stackDir("shop"))
 	mustClowder(t, "delete", "secret", "api-token")
 	waitGone(t, "shop")
 	eventually(t, stackDeadline, "the host removed the stack", func() error {

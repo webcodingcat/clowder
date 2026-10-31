@@ -7,7 +7,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/hoster"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -48,7 +48,7 @@ func withServers(l *leader) {
 func holdOnce(t *testing.T, l *leader, fake *fakeHoster) {
 	t.Helper()
 	open := func(sealed state.Sealed) ([]byte, error) { return append([]byte("opened-"), sealed...), nil }
-	connect := func(config clusterdir.Hoster, token string) (hoster.Hoster, error) {
+	connect := func(config clusterspec.Hoster, token string) (hoster.Hoster, error) {
 		if config.Type != "hetzner" || token != "opened-t" {
 			t.Errorf("connect %v with %q", config, token)
 		}

@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
@@ -137,8 +137,8 @@ func serveHTTPS(t *testing.T, tofu outputs) {
 		}},
 	}, nil)
 	writeClusterFile(t, acmeCAFile, download(t, os.Getenv("HLAB_ACME_CA")))
-	changeConfig(t, func(config *clusterdir.Config) {
-		config.ACME = clusterdir.ACME{Directory: os.Getenv("HLAB_ACME_DIRECTORY"), CA: acmeCAFile, Email: "ops@" + zone}
+	changeConfig(t, func(config *clusterspec.Config) {
+		config.ACME = clusterspec.ACME{Directory: os.Getenv("HLAB_ACME_DIRECTORY"), CA: acmeCAFile, Email: "ops@" + zone}
 	})
 	createAndApply(t, "echo", echoStack)
 	waitRunning(t, "echo", 1)
@@ -276,7 +276,7 @@ func renewCertificate(t *testing.T, tofu outputs) {
 	}
 	renewBefore := lifetime - time.Since(first.NotBefore)/2
 	t.Logf("certificate %s: lifetime %s, renew_before %s", first.SerialNumber, lifetime, renewBefore.Round(time.Minute))
-	changeConfig(t, func(config *clusterdir.Config) {
+	changeConfig(t, func(config *clusterspec.Config) {
 		config.ACME.RenewBefore = fmt.Sprintf("%dm", renewBefore/time.Minute)
 	})
 	var second *x509.Certificate
@@ -294,7 +294,7 @@ func renewCertificate(t *testing.T, tofu outputs) {
 		t.Errorf("renewed again: %s after %s", now.SerialNumber, second.SerialNumber)
 	}
 
-	changeConfig(t, func(config *clusterdir.Config) {
+	changeConfig(t, func(config *clusterspec.Config) {
 		config.ACME.RenewBefore = fmt.Sprintf("%dm", (lifetime+24*time.Hour)/time.Minute)
 	})
 	eventually(t, 2*time.Minute, "the alert renew-before-ignored", func() error {
@@ -303,7 +303,7 @@ func renewCertificate(t *testing.T, tofu outputs) {
 		}
 		return nil
 	})
-	changeConfig(t, func(config *clusterdir.Config) { config.ACME.RenewBefore = "" })
+	changeConfig(t, func(config *clusterspec.Config) { config.ACME.RenewBefore = "" })
 	eventually(t, 2*time.Minute, "renew-before-ignored resolved", func() error {
 		if strings.Contains(clusterStatus(t), "renew-before-ignored") {
 			return fmt.Errorf("still open")

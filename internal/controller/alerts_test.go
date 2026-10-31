@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/notify"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -25,13 +25,13 @@ func TestAThresholdRaisesAtItsValueAndClearsOnlyBelowItsClear(t *testing.T) {
 		want  string // "" for no alert
 	}{
 		{79, nil, ""},
-		{80, nil, clusterdir.SeverityWarning},
-		{77, open(clusterdir.SeverityWarning), clusterdir.SeverityWarning}, // hovers at the threshold: stays
-		{74, open(clusterdir.SeverityWarning), ""},
-		{95, open(clusterdir.SeverityWarning), clusterdir.SeverityCritical},
-		{91, open(clusterdir.SeverityCritical), clusterdir.SeverityCritical},
-		{89, open(clusterdir.SeverityCritical), clusterdir.SeverityWarning}, // back to warning
-		{76, open(clusterdir.SeverityCritical), clusterdir.SeverityWarning},
+		{80, nil, clusterspec.SeverityWarning},
+		{77, open(clusterspec.SeverityWarning), clusterspec.SeverityWarning}, // hovers at the threshold: stays
+		{74, open(clusterspec.SeverityWarning), ""},
+		{95, open(clusterspec.SeverityWarning), clusterspec.SeverityCritical},
+		{91, open(clusterspec.SeverityCritical), clusterspec.SeverityCritical},
+		{89, open(clusterspec.SeverityCritical), clusterspec.SeverityWarning}, // back to warning
+		{76, open(clusterspec.SeverityCritical), clusterspec.SeverityWarning},
 	} {
 		got, _ := leveled(test.value, test.open, poolLevels)
 		if got != test.want {
@@ -130,11 +130,11 @@ func (f *fakeChannel) got() []string {
 func newTestAlerts(t *testing.T) (*Alerts, *leader, *fakeChannel, *fakeChannel) {
 	t.Helper()
 	l := newLeader(t, 100<<30)
-	var config clusterdir.Config
+	var config clusterspec.Config
 	l.Read(func(current *state.State) { config = current.Config.Spec })
-	config.Alerts = &clusterdir.Alerts{Channels: []clusterdir.AlertChannel{
-		{Type: "webhook", URL: &clusterdir.SecretRef{Secret: "hook"}},
-		{Type: "discord", Webhook: &clusterdir.SecretRef{Secret: "discord"}, MinSeverity: clusterdir.SeverityCritical},
+	config.Alerts = &clusterspec.Alerts{Channels: []clusterspec.AlertChannel{
+		{Type: "webhook", URL: &clusterspec.SecretRef{Secret: "hook"}},
+		{Type: "discord", Webhook: &clusterspec.SecretRef{Secret: "discord"}, MinSeverity: clusterspec.SeverityCritical},
 	}}
 	l.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
 		Spec:    config,
@@ -143,7 +143,7 @@ func newTestAlerts(t *testing.T) (*Alerts, *leader, *fakeChannel, *fakeChannel) 
 	webhook, discord := &fakeChannel{}, &fakeChannel{}
 	open := func(sealed state.Sealed) ([]byte, error) { return sealed, nil }
 	alerts := NewAlerts(l, l.propose, open, NewConditions(), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	alerts.connect = func(channel clusterdir.AlertChannel, secrets notify.Secrets, _ map[string][]byte) (notify.Notifier, error) {
+	alerts.connect = func(channel clusterspec.AlertChannel, secrets notify.Secrets, _ map[string][]byte) (notify.Notifier, error) {
 		if channel.Type == "webhook" {
 			if url, err := secrets("hook"); err != nil || url != "h" {
 				t.Errorf("the webhook's URL %q, %v", url, err)
@@ -208,7 +208,7 @@ func TestAChannelForCriticalAlertsGetsTheAllClearAfterADowngrade(t *testing.T) {
 func TestAnOpenAlertStaysUntilItsConditionIsLookedAt(t *testing.T) {
 	alerts, l, _, _ := newTestAlerts(t)
 	l.apply(state.KindPutAlert, state.LeaderActor, state.PutAlert{
-		Key: ingressNotHeld, Kind: ingressNotHeld, Severity: clusterdir.SeverityCritical, Subject: "s",
+		Key: ingressNotHeld, Kind: ingressNotHeld, Severity: clusterspec.SeverityCritical, Subject: "s",
 	})
 	alerts.pass(context.Background()) // a new leader: the ingress loop has not looked yet
 	open := func() bool {

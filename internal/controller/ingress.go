@@ -10,7 +10,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/hoster"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -20,7 +20,7 @@ type Open func(sealed state.Sealed) ([]byte, error)
 
 // ConnectHoster makes the client of the hoster cluster.yaml names, with
 // its token in clear (hoster.New).
-type ConnectHoster func(config clusterdir.Hoster, token string) (hoster.Hoster, error)
+type ConnectHoster func(config clusterspec.Hoster, token string) (hoster.Hoster, error)
 
 // hosterTimeout bounds one look at the hoster, an assignment included.
 const hosterTimeout = 2 * time.Minute

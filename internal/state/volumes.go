@@ -127,7 +127,7 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) error {
 		return fmt.Errorf("no volume %s", id)
 	case volume.Spec != old.Spec:
 		return fmt.Errorf("volume %s: its spec changes only with an apply", id)
-	case old.Status != VolumePending && (volume.Status == VolumePending || len(volume.Placements) == 0):
+	case old.Status != VolumePending && (volume.Status == VolumePending || len(volume.Copies) == 0):
 		return fmt.Errorf("volume %s holds data: it keeps a copy until it is deleted", id)
 	}
 	volume.Meta = old.Meta
@@ -154,17 +154,17 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) error {
 			}
 		}
 	}
-	// fewer placements than replicas is allowed: a degraded volume waits for
-	// its missing copies
+	// fewer copies than replicas is allowed: a degraded volume waits for
+	// its missing ones
 	placed := map[HostID]bool{}
-	for _, placement := range volume.Placements {
-		if err := s.checkLiveHost(&placement.Host); err != nil {
+	for _, volumeCopy := range volume.Copies {
+		if err := s.checkLiveHost(&volumeCopy.Host); err != nil {
 			return fmt.Errorf("volume %s: %w", id, err)
 		}
-		if placed[placement.Host] {
-			return fmt.Errorf("volume %s: two copies on host %d", id, placement.Host)
+		if placed[volumeCopy.Host] {
+			return fmt.Errorf("volume %s: two copies on host %d", id, volumeCopy.Host)
 		}
-		placed[placement.Host] = true
+		placed[volumeCopy.Host] = true
 	}
 	s.retire(old, &volume)
 	s.Volumes[id] = &volume
@@ -175,12 +175,12 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) error {
 // retire records the copies of old as retired, except those that kept,
 // the volume's new record, still has: same host, same data generation.
 func (s *State) retire(old *Volume, kept *Volume) {
-	for _, placement := range old.Placements {
+	for _, volumeCopy := range old.Copies {
 		if kept != nil && kept.DataGeneration == old.DataGeneration &&
-			slices.ContainsFunc(kept.Placements, func(p Placement) bool { return p.Host == placement.Host }) {
+			slices.ContainsFunc(kept.Copies, func(c VolumeCopy) bool { return c.Host == volumeCopy.Host }) {
 			continue
 		}
-		retired := RetiredCopy{Volume: old.ID(), DataGeneration: old.DataGeneration, Host: placement.Host}
+		retired := RetiredCopy{Volume: old.ID(), DataGeneration: old.DataGeneration, Host: volumeCopy.Host}
 		if !slices.Contains(s.Retired, retired) {
 			s.Retired = append(s.Retired, retired)
 		}
@@ -210,8 +210,8 @@ func applyForgetCopy(s *State, cmd Command, payload ForgetCopy) error {
 func checkVolume(volume Volume) error {
 	id := volume.ID()
 	copies := 0
-	for _, placement := range volume.Placements {
-		if !placement.Tiebreaker {
+	for _, volumeCopy := range volume.Copies {
+		if !volumeCopy.Tiebreaker {
 			copies++
 		}
 	}
@@ -227,7 +227,7 @@ func checkVolume(volume Volume) error {
 	case copies > max(replicas, 1):
 		// replicas 0 is one plain LV on one host
 		return fmt.Errorf("volume %s: %d copies for %d replicas", id, copies, replicas)
-	case volume.Status == VolumePending && (len(volume.Placements) > 0 || volume.Minor != nil):
+	case volume.Status == VolumePending && (len(volume.Copies) > 0 || volume.Minor != nil):
 		// the minor comes with the first copy, from the placement
 		return fmt.Errorf("volume %s: a pending volume has no copies and no DRBD minor", id)
 	case volume.Status != VolumePending && (replicas == 0) != (volume.Minor == nil):

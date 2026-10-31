@@ -1,8 +1,8 @@
-// Package clusterdir reads a cluster directory: cluster.yaml, the shared
-// secrets in secrets.sops.yaml and each user's credentials under
-// credentials/. It is portable (Linux, macOS, Windows); the SOPS files are
-// decrypted with the user's age key as SOPS finds it (SOPS_AGE_KEY_FILE,
-// SOPS_AGE_KEY or SOPS's default path).
+// Package clusterdir reads a cluster directory: cluster.yaml (whose types
+// and checks are clusterspec's), the shared secrets in secrets.sops.yaml and
+// each user's credentials under credentials/. It is portable (Linux, macOS,
+// Windows); the SOPS files are decrypted with the user's age key as SOPS
+// finds it (SOPS_AGE_KEY_FILE, SOPS_AGE_KEY or SOPS's default path).
 package clusterdir
 
 import (
@@ -15,13 +15,14 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/sopsage"
 )
 
 // File names inside a cluster directory.
 const (
-	ConfigFile      = "cluster.yaml"
+	ConfigFile      = clusterspec.FileName
 	SecretsFile     = "secrets.sops.yaml"
 	CredentialsDir  = "credentials"
 	credentialsTail = ".sops.yaml"
@@ -32,7 +33,7 @@ const (
 // Directory is a loaded cluster directory.
 type Directory struct {
 	Path   string
-	Config Config
+	Config clusterspec.Config
 }
 
 // Secrets is secrets.sops.yaml after decryption.
@@ -79,11 +80,11 @@ func Load(dir string) (*Directory, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read the cluster directory: %w", err)
 	}
-	var config Config
+	var config clusterspec.Config
 	if err := decodeStrict(content, &config); err != nil {
 		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
 	}
-	if problems := Check(config); len(problems) > 0 {
+	if problems := clusterspec.Check(config); len(problems) > 0 {
 		return nil, problems
 	}
 	config = config.WithDefaults()
@@ -97,8 +98,8 @@ func (d *Directory) Secrets() (*Secrets, error) {
 	if err := d.decryptInto(filepath.Join(d.Path, SecretsFile), &secrets); err != nil {
 		return nil, err
 	}
-	var missing Problems
-	for _, name := range SecretNames(d.Config) {
+	var missing clusterspec.Problems
+	for _, name := range clusterspec.SecretNames(d.Config) {
 		if _, ok := secrets.Values[name]; !ok {
 			missing = append(missing, fmt.Sprintf("secret %q is used in %s but missing in %s",
 				name, ConfigFile, SecretsFile))

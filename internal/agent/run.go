@@ -66,125 +66,31 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	if err := parts.Network.SetUpInterface(ctx, host.NodeAddress); err != nil {
 		return err
 	}
-	node, err := raftnode.Open(raftnode.Config{
-		Dir: files.raftDir(), ID: host.ID, Bind: host.raftAddress(), Advertise: host.raftAddress(),
-		Certificate: credentials.certificate, CA: credentials.ca, Logger: logger,
-	})
+	node, caughtUp, err := openNode(ctx, files, host, credentials, logger)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = node.Close() }() // the log is on disk; nothing is lost
-
-	// answer from the state as the log has it, not from an empty one; a host
-	// without quorum starts anyway after a while, and says so
-	catchUp, cancelCatchUp := context.WithTimeout(ctx, catchUpTimeout)
-	caughtUp := node.CatchUp(catchUp)
-	cancelCatchUp()
-	if caughtUp != nil {
-		logger.Warn("serving before the state caught up with the Raft log", "error", caughtUp)
-	}
-
 	resolver, err := parts.Network.StartResolver()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resolver.Close() }() // stopping: nothing to keep
+
+	running, err := newWorkers(files, host, credentials, node, parts, logger)
+	if err != nil {
+		return err
+	}
 	reconcilers, stopReconcilers := context.WithCancel(ctx)
 	// deferred after the resolver and the Raft node, so it runs before they
 	// close: no loop uses them any more then
 	var loops sync.WaitGroup
 	defer stopLoops(stopReconcilers, &loops, loopsTimeout, logger)
-	loops.Go(func() { reconcileNetwork(reconcilers, node, parts.Network, logger) })
-
-	digestKey, err := credentials.dataKey.Derive(secretLabelPurpose)
+	running.startLoops(reconcilers, &loops, caughtUp)
+	servers, serveErrors, err := running.serve()
 	if err != nil {
 		return err
 	}
-	// every loop commits through the API server's Propose. The server
-	// answers for the stack runner and the alerts (a stack's containers,
-	// the test alert, failed deliveries), so it is made after them: they
-	// get Propose through this. No loop starts before the server is set.
-	var server *api.Server
-	propose := func(ctx context.Context, cmd state.Command) (uint64, error) { return server.Propose(ctx, cmd) }
-	runner := &stackRunner{
-		files: files, host: host, cluster: node, propose: propose,
-		docker: parts.Docker, storage: parts.Storage, open: credentials.dataKey.Open, digestKey: digestKey,
-		logger: logger, applied: map[string][32]byte{}, logins: map[string][32]byte{}, wake: make(chan struct{}, 1),
-		unexplained: map[string]bool{},
-	}
-	traefik := &traefikRunner{
-		files: files, host: host, cluster: node, docker: parts.Docker, open: credentials.dataKey.Open, logger: logger,
-		wake: make(chan struct{}, 1), unopened: map[string]bool{},
-	}
-	conditions := controller.NewConditions()
-	alerts := controller.NewAlerts(node, propose, credentials.dataKey.Open, conditions, logger)
-	server = api.NewServer(api.ServerConfig{
-		Cluster: node, CA: credentials.ca, Certificate: credentials.certificate,
-		APIAddress: func(id state.HostID) string {
-			// every host has the same API port; tests on 127.0.0.1 have one host
-			return net.JoinHostPort(network.NodeAddress(id).String(), strconv.Itoa(host.APIPort))
-		},
-		Keys: credentials.dataKey, Version: buildinfo.Version, Logger: logger,
-		HostID: host.ID, Containers: runner, Alerts: alertsAPI{alerts},
-	})
-	// after Docker restarted, every container is down: the stacks and
-	// Traefik come up again
-	dockerRestarted := func() {
-		runner.forgetApplied()
-		traefik.forget()
-	}
-	runner.supervisor = supervisor.New(parts.Docker, runner.rules, supervisor.DefaultBackoff,
-		dockerRestarted, traefik.look, logger)
-	traefik.supervisor = runner.supervisor
-	loops.Go(func() { runner.supervisor.Run(reconcilers, compose.LabelStack) })
-	loops.Go(func() { controller.RunPlacement(reconcilers, node, propose, conditions, logger) })
-	loops.Go(func() {
-		controller.RunIngress(reconcilers, node, propose, credentials.dataKey.Open, parts.Hoster, conditions, logger)
-	})
-	loops.Go(func() { alerts.Run(reconcilers) })
-	loops.Go(func() { alerts.RunHeartbeat(reconcilers) })
-	loops.Go(func() { controller.RunACME(reconcilers, node, propose, credentials.dataKey, logger) })
-	loops.Go(func() { runner.trim(reconcilers) })
-	reporter := &hostReporter{
-		host: host, version: buildinfo.Version, cluster: node, docker: parts.Docker, storage: parts.Storage,
-		propose: propose, logger: logger, root: "/",
-	}
-	loops.Go(func() {
-		// a state that lags may still place a stack here that has moved on,
-		// so containers start only once the state caught up: the stacks and
-		// Traefik. The report waits too: it compares with the state. Both
-		// are loops of their own, started from here, so they wait.
-		if caughtUp != nil && !waitForState(reconcilers, node, logger) {
-			return
-		}
-		loops.Go(func() { reporter.run(reconcilers) })
-		loops.Go(func() { traefik.run(reconcilers) })
-		runner.reconcile(reconcilers)
-	})
-	servers, serveErrors, err := serveAPI(server, host.apiAddresses(), logger)
-	if err != nil {
-		return err
-	}
-	challenges, err := serveChallenges(node, logger)
-	if err != nil {
-		for _, started := range servers {
-			_ = started.Close() // the listen error is the one to report
-		}
-		return err
-	}
-	servers = append(servers, challenges)
-	source := &metricsSource{
-		host: host, cluster: node, docker: parts.Docker, restarts: runner.supervisor.Restarts,
-		failures: alerts.Failures, memory: readRSS, logger: logger,
-	}
-	exporter, err := serveMetrics(source, metricsAddress(host), logger)
-	if err != nil {
-		for _, started := range servers {
-			_ = started.Close() // the listen error is the one to report
-		}
-		return err
-	}
-	servers = append(servers, exporter)
 	logger.Info("serving", "host", host.Name, "api", host.apiAddresses(), "raft", host.raftAddress(),
 		"metrics", metricsAddress(host))
 	if err := notify("READY=1"); err != nil {
@@ -198,6 +104,151 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		_ = server.Shutdown(shutdown) // stopping: open calls are cut after the timeout
 	}
 	return err
+}
+
+// openNode opens this host's Raft member and waits a while for its state to
+// catch up with the log, so the agent answers from the state as the log has
+// it, not from an empty one. A host without quorum starts anyway after
+// catchUpTimeout, and says so; caughtUp is why it did not catch up, if so.
+func openNode(ctx context.Context, files Files, host Host, credentials credentials, logger *slog.Logger) (
+	node *raftnode.Node, caughtUp error, err error,
+) {
+	node, err = raftnode.Open(raftnode.Config{
+		Dir: files.raftDir(), ID: host.ID, Bind: host.raftAddress(), Advertise: host.raftAddress(),
+		Certificate: credentials.certificate, CA: credentials.ca, Logger: logger,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	catchUp, cancel := context.WithTimeout(ctx, catchUpTimeout)
+	defer cancel()
+	if caughtUp = node.CatchUp(catchUp); caughtUp != nil {
+		logger.Warn("serving before the state caught up with the Raft log", "error", caughtUp)
+	}
+	return node, caughtUp, nil
+}
+
+// workers are the parts of the agent that run in loops or answer the API,
+// and what they share.
+type workers struct {
+	host        Host
+	credentials credentials
+	node        *raftnode.Node
+	parts       HostParts
+	logger      *slog.Logger
+	// propose commits through the API server's Propose, for every loop
+	propose    func(ctx context.Context, cmd state.Command) (uint64, error)
+	runner     *stackRunner
+	traefik    *traefikRunner
+	conditions *controller.Conditions
+	alerts     *controller.Alerts
+	server     *api.Server
+}
+
+// newWorkers makes the stack runner, Traefik's runner, the alerts, the
+// supervisor and the API server; it starts nothing.
+func newWorkers(files Files, host Host, credentials credentials, node *raftnode.Node, parts HostParts,
+	logger *slog.Logger,
+) (*workers, error) {
+	digestKey, err := credentials.dataKey.Derive(secretLabelPurpose)
+	if err != nil {
+		return nil, err
+	}
+	w := &workers{host: host, credentials: credentials, node: node, parts: parts, logger: logger}
+	// The server answers for the stack runner and the alerts (a stack's
+	// containers, the test alert, failed deliveries), so it is made after
+	// them, and they get its Propose through this. No loop starts before
+	// the server is set.
+	w.propose = func(ctx context.Context, cmd state.Command) (uint64, error) { return w.server.Propose(ctx, cmd) }
+	w.runner = &stackRunner{
+		files: files, host: host, cluster: node, propose: w.propose,
+		docker: parts.Docker, storage: parts.Storage, open: credentials.dataKey.Open, digestKey: digestKey,
+		logger: logger, applied: map[string][32]byte{}, logins: map[string][32]byte{}, wake: make(chan struct{}, 1),
+		unexplained: map[string]bool{},
+	}
+	w.traefik = &traefikRunner{
+		files: files, host: host, cluster: node, docker: parts.Docker, open: credentials.dataKey.Open, logger: logger,
+		wake: make(chan struct{}, 1), unopened: map[string]bool{},
+	}
+	w.conditions = controller.NewConditions()
+	w.alerts = controller.NewAlerts(node, w.propose, credentials.dataKey.Open, w.conditions, logger)
+	w.server = api.NewServer(api.ServerConfig{
+		Cluster: node, CA: credentials.ca, Certificate: credentials.certificate,
+		APIAddress: func(id state.HostID) string {
+			// every host has the same API port; tests on 127.0.0.1 have one host
+			return net.JoinHostPort(network.NodeAddress(id).String(), strconv.Itoa(host.APIPort))
+		},
+		Keys: credentials.dataKey, Version: buildinfo.Version, Logger: logger,
+		HostID: host.ID, Containers: w.runner, Alerts: alertsAPI{w.alerts},
+	})
+	// after Docker restarted, every container is down: the stacks and
+	// Traefik come up again
+	dockerRestarted := func() {
+		w.runner.forgetApplied()
+		w.traefik.forget()
+	}
+	w.runner.supervisor = supervisor.New(parts.Docker, w.runner.rules, supervisor.DefaultBackoff,
+		dockerRestarted, w.traefik.look, logger)
+	w.traefik.supervisor = w.runner.supervisor
+	return w, nil
+}
+
+// startLoops starts every loop of the agent; each ends with ctx. caughtUp
+// is openNode's: whether the state lagged at the start.
+func (w *workers) startLoops(ctx context.Context, loops *sync.WaitGroup, caughtUp error) {
+	node, logger, open := w.node, w.logger, w.credentials.dataKey.Open
+	loops.Go(func() { reconcileNetwork(ctx, node, w.parts.Network, logger) })
+	loops.Go(func() { w.runner.supervisor.Run(ctx, compose.LabelStack) })
+	loops.Go(func() { controller.RunPlacement(ctx, node, w.propose, w.conditions, logger) })
+	loops.Go(func() { controller.RunIngress(ctx, node, w.propose, open, w.parts.Hoster, w.conditions, logger) })
+	loops.Go(func() { w.alerts.Run(ctx) })
+	loops.Go(func() { w.alerts.RunHeartbeat(ctx) })
+	loops.Go(func() { controller.RunACME(ctx, node, w.propose, w.credentials.dataKey, logger) })
+	loops.Go(func() { w.runner.trim(ctx) })
+	reporter := &hostReporter{
+		host: w.host, version: buildinfo.Version, cluster: node, docker: w.parts.Docker, storage: w.parts.Storage,
+		propose: w.propose, logger: logger, root: "/",
+	}
+	loops.Go(func() {
+		// a state that lags may still place a stack here that has moved on,
+		// so containers start only once the state caught up: the stacks and
+		// Traefik. The report waits too: it compares with the state. Both
+		// are loops of their own, started from here, so they wait.
+		if caughtUp != nil && !waitForState(ctx, node, logger) {
+			return
+		}
+		loops.Go(func() { reporter.run(ctx) })
+		loops.Go(func() { w.traefik.run(ctx) })
+		w.runner.reconcile(ctx)
+	})
+}
+
+// serve starts the API on the host's addresses, the answers to ACME's
+// challenges and the metrics. If one cannot listen, it closes those it
+// started and returns that error.
+func (w *workers) serve() ([]*http.Server, <-chan error, error) {
+	servers, serveErrors, err := serveAPI(w.server, w.host.apiAddresses(), w.logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	source := &metricsSource{
+		host: w.host, cluster: w.node, docker: w.parts.Docker, restarts: w.runner.supervisor.Restarts,
+		failures: w.alerts.Failures, memory: readRSS, logger: w.logger,
+	}
+	for _, start := range []func() (*http.Server, error){
+		func() (*http.Server, error) { return serveChallenges(w.node, w.logger) },
+		func() (*http.Server, error) { return serveMetrics(source, metricsAddress(w.host), w.logger) },
+	} {
+		started, err := start()
+		if err != nil {
+			for _, server := range servers {
+				_ = server.Close() // the listen error is the one to report
+			}
+			return nil, nil, err
+		}
+		servers = append(servers, started)
+	}
+	return servers, serveErrors, nil
 }
 
 // alertsAPI answers the API's alert routes from the alerts loop.

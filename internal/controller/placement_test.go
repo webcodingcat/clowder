@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -76,11 +76,11 @@ func newLeader(t *testing.T, poolSize int64) *leader {
 		},
 	})
 	l.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
-		Spec: clusterdir.Config{
+		Spec: clusterspec.Config{
 			Name: "prod", Seeds: []string{"10.0.0.2"},
-			Hoster:         clusterdir.Hoster{Type: "hetzner", Token: clusterdir.SecretRef{Secret: "token"}},
-			Ingress:        clusterdir.Ingress{FloatingIP: "203.0.113.10"},
-			StorageClasses: map[string]clusterdir.StorageClass{"fast": {Pool: "vg-fast/thin"}},
+			Hoster:         clusterspec.Hoster{Type: "hetzner", Token: clusterspec.SecretRef{Secret: "token"}},
+			Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.10"},
+			StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 		},
 		Secrets: map[string]state.Sealed{"token": state.Sealed("t")},
 	})
