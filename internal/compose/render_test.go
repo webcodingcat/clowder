@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/stackspec"
@@ -48,6 +49,7 @@ func specTarget() Target {
 		Volumes:      map[string]MountedVolume{"data": mounted("data"), "uploads": mounted("uploads")},
 		SecretsDir:   "/run/clowder-secrets/shop_web/files",
 		SecretLabels: map[string]string{"app": "digest-of-api-key"},
+		Restarted:    map[string]time.Time{"app": time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)},
 	}
 }
 

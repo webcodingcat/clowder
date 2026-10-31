@@ -19,6 +19,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/datakey"
+	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
@@ -212,6 +213,52 @@ func TestAFailedComposeUpIsTriedAgain(t *testing.T) {
 	runner.pass(context.Background())
 	if ups := docker.count("up " + shopProject); ups != 3 {
 		t.Errorf("%d compose ups after Docker restarted, want 3", ups)
+	}
+}
+
+// shopContainer is the container of shop's service app as Docker lists it,
+// with the restart time it came up with ("" for none).
+func shopContainer(restarted string) []docker.Container {
+	labels := map[string]string{compose.LabelStack: shopProject, docker.ServiceLabel: "app"}
+	if restarted != "" {
+		labels[compose.LabelRestarted] = restarted
+	}
+	return []docker.Container{{ID: "app-1", State: "running", Labels: labels}}
+}
+
+func TestARestartPullsAndRecreatesOnce(t *testing.T) {
+	runner, cluster, docker, _ := newTestRunner(t)
+	runner.pass(context.Background())
+	docker.mu.Lock()
+	docker.containers = shopContainer("") // as compose up left it
+	docker.mu.Unlock()
+
+	cluster.apply(state.KindRestartStack, state.UserActor("alice"), state.RestartStack{Namespace: "default", Name: "shop"})
+	if status := cluster.stack("shop").Status; status != state.StackStarting {
+		t.Errorf("a restarted stack is %s", status)
+	}
+	runner.pass(context.Background())
+	if pulls, ups := docker.count("pull "+shopProject+" app"), docker.count("up "+shopProject); pulls != 1 || ups != 2 {
+		t.Errorf("%d pulls and %d compose ups after a restart, want 1 and 2", pulls, ups)
+	}
+	content, err := os.ReadFile(runner.files.stackFile(shopProject))
+	restarted := compose.RestartedLabel(cluster.stack("shop").Restarted["app"])
+	if err != nil || !strings.Contains(string(content), restarted) {
+		t.Errorf("the rendered file lacks the restart's label %s: %v", restarted, err)
+	}
+	if status := cluster.stack("shop").Status; status != state.StackRunning {
+		t.Errorf("after the restart the stack is %s", status)
+	}
+
+	// the container came up with the label: after Docker restarted, compose
+	// up runs again but pulls nothing
+	docker.mu.Lock()
+	docker.containers = shopContainer(restarted)
+	docker.mu.Unlock()
+	runner.forgetApplied()
+	runner.pass(context.Background())
+	if pulls, ups := docker.count("pull "+shopProject+" app"), docker.count("up "+shopProject); pulls != 1 || ups != 3 {
+		t.Errorf("%d pulls and %d compose ups after Docker restarted, want 1 and 3", pulls, ups)
 	}
 }
 

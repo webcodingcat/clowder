@@ -587,6 +587,7 @@ func TestOperationsHoldTheirLocks(t *testing.T) {
 	changed.Services["app"] = stackspec.Service{Image: "y"}
 	c.refuse(KindPutResource, UserActor("alice"), putResource(resource.KindStack, "default", "shop", changed),
 		"locked by operation 01A")
+	c.refuse(KindRestartStack, UserActor("alice"), RestartStack{Namespace: "default", Name: "shop"}, "locked by operation 01A")
 	backup := Operation{ID: "01B", Kind: "backup", Locks: []string{"volume/default/pgdata"}}
 	before := c.encoded()
 	err := c.apply(KindStartOperation, LeaderActor, StartOperation{Operation: backup})

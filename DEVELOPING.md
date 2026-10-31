@@ -110,7 +110,7 @@ clowder is built in phases; each ends with live tests on HLab.
 | 0 | the spike: DRBD quorum and fencing, WireGuard, the real client IP, on three hosts | done |
 | 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | done |
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done |
-| 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | in progress: namespaces, volumes, secrets and stacks as resources in the state, the API, the agent and the CLI (`apply`, `get`, `delete`); next the restart, the watch, then run the live tests |
+| 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | in progress: namespaces, volumes, secrets and stacks as resources in the state, the API, the agent and the CLI (`apply`, `get`, `delete`, `stack restart`); next the watch, then run the live tests |
 | 2 | three hosts: replication, failover with fencing | |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
@@ -219,6 +219,8 @@ clowder apply -f    ──mTLS──▶  API: read, seal  ──▶  leader deci
    changed. A changed secret recreates the containers that use it, without a new generation.
    The same files applied again change nothing. A stack or volume that finds no place
    waits, with the reason in `get stacks`.
+7. `clowder stack restart shop [app]` recreates the services named (or all) and those that
+   depend on them, with their images pulled again, without a new generation.
 
 ## Words
 
@@ -235,7 +237,7 @@ clowder apply -f    ──mTLS──▶  API: read, seal  ──▶  leader deci
 | active, passive | a host that runs stacks; a second host that waits until there are three |
 | actor | who sent a command: `leader`, `host/<id>` or `user/<name>` |
 | sealed | encrypted with the cluster's data key before it goes into the state |
-| generation | of a resource: counts the changes of its spec (an apply that changes nothing counts not); a volume's data generation grows with a restore or class move and is part of its LV's name |
+| generation | of a resource: counts the changes of its spec; an apply that changes nothing does not count. A volume's data generation grows with a restore or class move and is part of its LV's name |
 
 ## The two binaries
 
@@ -370,8 +372,9 @@ on a host (`compose.Render`).
   environment.
 - **Labels, and which change recreates what.** Every container gets `clowder.stack` (its
   project); one that asks for secret files also gets `clowder.secrets`, a digest of them
-  (`Target.SecretLabels`). Nothing else: Compose recreates exactly the containers whose
-  configuration changed, and a changed secret file keeps its path, so only the label tells
+  (`Target.SecretLabels`); one a user restarted gets `clowder.restarted`, the time of the
+  restart (`Target.Restarted`), so a new restart recreates exactly its services. Nothing
+  else: Compose recreates exactly the containers whose configuration changed, and a changed secret file keeps its path, so only the label tells
   Compose. Secret variables are in the second Compose file, which Compose compares itself,
   and a volume's new data generation is a new volume name. The label is an HMAC-SHA256
   (`digest.HMAC`) with a key derived from the data key, over the names and the state's
@@ -440,8 +443,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   another host, and about a stack only while it runs there, without moving it.
 - **In use so far:** `bootstrap` (init), `apply-config`, `add-user` (the first user),
   `set-host-phase` (host actions), `put-resource` and `delete-resource` (the user, through
-  `/v1/apply` and `/v1/delete`, decided on the leader), `put-volume`, `set-stack-status`,
-  `set-stack-wait-reason` and `set-pushed-out` (placement, the stack's host), `set-ingress`
+  `/v1/apply` and `/v1/delete`, decided on the leader), `restart-stack` (`stack restart`),
+  `put-volume`, `set-stack-status`, `set-stack-wait-reason` and `set-pushed-out` (placement, the stack's host), `set-ingress`
   (the ingress loop), `put-acme-account`, `put-acme-challenge`, `delete-acme-challenge`,
   `put-certificate` and `delete-certificate` (the ACME loop), `put-alert` and
   `resolve-alert` (the alerts), `report-host` and `forget-copy` (each agent). The other
@@ -502,7 +505,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
     that runs is `starting` until its host reports the new generation up: a host's
     `set-stack-status` names the generation it ran, and one about an older generation is
     refused. With `running` the host reports the digests of the secrets its containers came
-    up with (`AppliedSecrets`). `set-stack-wait-reason` records why the placement finds no
+    up with (`AppliedSecrets`). `restart-stack` records the time of a restart per service
+    (`Stack.Restarted`), for the services named (none: all) and every service that depends
+    on one of them (`stackspec.Spec.WithDependents`): a dependency holds only when a
+    container starts. It changes no spec, so the generation stays, a running stack is
+    `starting` again, and any channel may restart a stack whoever owns it, so an operator
+    can restart one that GitOps applies (who may is `Authorize`'s, verb `restart`).
+    `set-stack-wait-reason` records why the placement finds no
     place for a stack or a volume it names (`WaitReason`) and changes nothing else, so it
     never unplaces a stack that runs. The state is the placement's memory of the reason: it
     writes a change once, also after a change of leader, and clears it when the stack no
@@ -659,7 +668,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **The CLI** finds the cluster directory (`--cluster`, `$CLOWDER_CLUSTER`, the working
   directory) and the user (`--user`, `$CLOWDER_USER`, the only credentials file), then talks
   to the cluster with the user's certificate: `cluster status|apply|diff|schema`,
-  `host list|drain|undrain|remove|enable`, `apply`, `get`, `delete`, `stack ps|logs`.
+  `host list|drain|undrain|remove|enable`, `apply`, `get`, `delete`, `stack ps|logs|restart`.
 - **Exit codes**, for every command: 0 when it did what was asked, 2 for a wrong call
   (`usageError`: an unknown command, flags or arguments that do not fit; `checkArgs` makes
   every command's argument errors one, and gives each command of commands a `RunE` that
@@ -689,7 +698,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   files name (no `-n`).
 - **`stack ps|logs [<namespace>/]<stack>`** (`stack.go`) ask the stack's host
   (`GET /v1/stacks/{namespace}/{name}/ps|logs`, then `/v1/internal/stacks/<project>/...`,
-  `names.Project`), wherever the CLI came in. The list of stacks, also as JSON for scripts
+  `names.Project`), wherever the CLI came in. **`stack restart [<namespace>/]<stack>
+  [<service>...]`** sends `restart-stack` (`POST /v1/stacks/{namespace}/{name}/restart`,
+  `RestartRequest`). The list of stacks, also as JSON for scripts
   and the live tests, is `get stacks`; its table shows a priority that comes from
   `cluster.yaml`'s default as `(default)`.
 - **Who can read a secret:** whoever may apply it, or decrypt the SOPS file it came in;
@@ -741,7 +752,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   only then, for each stack the state places here, renders its Compose file, `Ensure`s its
   volume copies, writes its secrets, runs `compose up` unless all of it came up before, and
   reports `running`: a volume that passes from one stack to another is never used by both
-  at once. A failed `compose up` is tried again at the next pass. Last, volume copies the
+  at once. A failed `compose up` is tried again at the next pass. Before `compose up` the
+  runner pulls the images of the services a user restarted since their containers came up:
+  their `clowder.restarted` label differs from the state's time. An image may have changed
+  under the same tag. Docker keeps the label, so a reboot pulls nothing again. Last, volume copies the
   state retired here are removed and forgotten (State, Retired copies). A copy the state
   neither places nor retires here stays, with a warning once per run.
 - **Crashes leave nothing unknown.** The files tell how far the runner got. A volume's

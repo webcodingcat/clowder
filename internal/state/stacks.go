@@ -40,7 +40,7 @@ func putStack(s *State, id string, payload PutResource) (*Meta, error) {
 	spec := stackspec.Normalize(written)
 	stored, exists := s.Stacks[id]
 	if exists && sameJSON(stored.Spec, spec) {
-		return nil, nil
+		return nil, errUnchanged
 	}
 	if problems := stackspec.Check(spec); len(problems) > 0 {
 		return nil, fmt.Errorf("stack %s: %w", id, problems)
@@ -78,7 +78,59 @@ func putStack(s *State, id string, payload PutResource) (*Meta, error) {
 		_, kept := services[service]
 		return !kept
 	})
+	maps.DeleteFunc(stored.Restarted, func(service string, _ time.Time) bool {
+		_, kept := services[service]
+		return !kept
+	})
 	return &stored.Meta, nil
+}
+
+// RestartStack recreates services of a stack whose spec has not changed: a
+// new image under the same tag, a retry. It names services of the stack, or
+// none for all of them; those that depend on them come along.
+type RestartStack struct {
+	Namespace string   `json:"namespace"`
+	Name      string   `json:"name"`
+	Services  []string `json:"services,omitempty"`
+}
+
+// applyRestartStack records the restart's time for each service. It changes
+// no spec, so the generation stays; and any channel may restart a stack,
+// whoever owns it, so an operator can restart one that GitOps applies.
+// Whether a user may is Authorize's. A running stack is starting until its
+// host reports the recreated containers up.
+func applyRestartStack(s *State, cmd Command, payload RestartStack) error {
+	if err := Authorize(cmd.Actor, VerbRestart, resource.KindStack, payload.Namespace); err != nil {
+		return err
+	}
+	id := names.ID(payload.Namespace, payload.Name)
+	stack, ok := s.Stacks[id]
+	if !ok {
+		return fmt.Errorf("no stack %s", id)
+	}
+	for _, service := range payload.Services {
+		if _, ok := stack.Spec.Services[service]; !ok {
+			return fmt.Errorf("stack %s has no service %s", id, service)
+		}
+	}
+	if err := s.checkUnlocked(stackLock(id), ""); err != nil {
+		return err
+	}
+	named := payload.Services
+	if len(named) == 0 {
+		named = slices.Collect(maps.Keys(stack.Spec.Services))
+	}
+	if stack.Restarted == nil {
+		stack.Restarted = map[string]time.Time{}
+	}
+	for _, service := range stack.Spec.WithDependents(named) {
+		stack.Restarted[service] = cmd.At
+	}
+	if stack.Status == StackRunning {
+		stack.Status = StackStarting
+	}
+	s.changed(resource.KindStack, &stack.Meta)
+	return nil
 }
 
 // servicesOf works out what the scheduler needs of each service: its

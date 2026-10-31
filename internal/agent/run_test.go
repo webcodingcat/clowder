@@ -247,6 +247,11 @@ func (f *fakeDocker) ComposeUp(_ context.Context, stack string, files, leftOut [
 	return nil
 }
 
+func (f *fakeDocker) ComposePull(_ context.Context, stack string, _, services []string) error {
+	f.add("pull %s %s", stack, strings.Join(services, " "))
+	return nil
+}
+
 func (f *fakeDocker) ComposeDown(_ context.Context, stack, _ string) error {
 	f.add("down %s", stack)
 	f.mu.Lock()

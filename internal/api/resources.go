@@ -107,6 +107,8 @@ type StackStatus struct {
 	// AppliedSecrets are the digests of the secrets its containers came up
 	// with: one that differs from the secret's own has not reached them yet.
 	AppliedSecrets map[string]string `json:"appliedSecrets,omitempty"`
+	// Restarted is when each service was last restarted (stack restart).
+	Restarted map[string]time.Time `json:"restarted,omitempty"`
 }
 
 // secretResourcePurpose names the key the digests of Secret resources
@@ -523,7 +525,7 @@ func objects(current *state.State, kind string) []resource.Object {
 func stackStatus(current *state.State, stack *state.Stack) StackStatus {
 	status := StackStatus{
 		Status: string(stack.Status), PushedOut: stack.PushedOut, WaitReason: stack.WaitReason,
-		AppliedSecrets: stack.AppliedSecrets, Default: stack.Spec.Priority == "",
+		AppliedSecrets: stack.AppliedSecrets, Restarted: stack.Restarted, Default: stack.Spec.Priority == "",
 	}
 	if stack.Host != nil {
 		if host, ok := current.Hosts[*stack.Host]; ok {

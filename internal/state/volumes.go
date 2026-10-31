@@ -33,7 +33,7 @@ func putVolumeResource(s *State, id string, payload PutResource) (*Meta, error) 
 		if err := stored.Spec.CheckUnchanged(spec); err != nil {
 			return nil, fmt.Errorf("volume %s: %w", id, err)
 		}
-		return nil, nil
+		return nil, errUnchanged
 	}
 	if err := spec.Check(); err != nil {
 		return nil, fmt.Errorf("volume %s: %w", id, err)

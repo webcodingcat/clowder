@@ -226,6 +226,40 @@ metadata: {name: shop}
 	if _, err := run(t, "--cluster", cluster, "stack", "ps", "web"); err == nil || !strings.Contains(err.Error(), "no stack default/web") {
 		t.Errorf("stack ps in default: %v", err)
 	}
+
+	out, err = run(t, "--cluster", cluster, "stack", "restart", "-n", "shop", "web", "app")
+	if err != nil || out != "Stack shop/web: restarting\n" {
+		t.Errorf("stack restart: %v\n%s", err, out)
+	}
+	if shown, err := run(t, "--cluster", cluster, "get", "stack", "shop/web", "-o", "yaml"); err != nil ||
+		!strings.Contains(shown, "restarted:") || !strings.Contains(shown, "generation: 1") {
+		t.Errorf("a restarted stack: %v\n%s", err, shown)
+	}
+	if _, err := run(t, "--cluster", cluster, "stack", "restart", "shop/web", "mail"); err == nil ||
+		!strings.Contains(err.Error(), "stack shop/web has no service mail") {
+		t.Errorf("restart of no service: %v", err)
+	}
+	if _, err := run(t, "--cluster", cluster, "stack", "restart"); ExitCode(err) != 2 {
+		t.Errorf("restart without a stack: %v", err)
+	}
+}
+
+func TestASecretInClearInAFileIsWarnedOf(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token.yaml")
+	secret := "apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: token}\nspec: {value: s3cret}\n"
+	if err := os.WriteFile(path, []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var report bytes.Buffer
+	if _, err := readResources(dir, nil, &report); err != nil ||
+		!strings.Contains(report.String(), "warning: "+path+" holds Secret token in clear") {
+		t.Errorf("a directory: %v\n%s", err, report.String())
+	}
+	report.Reset()
+	if _, err := readResources("-", strings.NewReader(secret), &report); err != nil || report.Len() != 0 {
+		t.Errorf("stdin: %v\n%s", err, report.String())
+	}
 }
 
 func TestARefusalNamesItsResourceAndStopsTheRest(t *testing.T) {

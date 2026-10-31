@@ -33,6 +33,20 @@ func (c *Client) ComposeUp(ctx context.Context, stack string, files, leftOut []s
 	return err
 }
 
+// ComposePull pulls the images of some services of a stack again, also
+// those Docker has: an image may have changed under the same tag. compose
+// up pulls only images that are missing.
+func (c *Client) ComposePull(ctx context.Context, stack string, files, services []string) error {
+	args := []string{"compose", "--project-name", stack}
+	for _, file := range files {
+		args = append(args, "--file", file)
+	}
+	args = append(args, "pull")
+	args = append(args, services...)
+	_, err := command.Run(ctx, upTimeout, "docker", args...)
+	return err
+}
+
 // ComposeDown stops and removes a stack's containers, networks and Docker
 // volumes. The data stays: a Docker volume only binds a directory of
 // clowder's volume (compose.Render), and that is clowder's to remove.

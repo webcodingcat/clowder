@@ -50,6 +50,7 @@ services:
     dns:
       - 169.254.77.53
     labels:
+      clowder.restarted: "2026-10-31T12:00:00Z"
       clowder.secrets: digest-of-api-key
       clowder.stack: shop_web
     read_only: true

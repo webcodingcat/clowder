@@ -37,13 +37,14 @@ func (s *State) deleted(kind string, meta Meta) {
 	})
 }
 
-// The verbs Authorize knows so far: put and delete change resources in the
-// state, read is for what never passes Raft (the API's lists). Restart
-// comes with the command that needs it.
+// The verbs Authorize knows: put, delete and restart change resources in
+// the state, read is for what never passes Raft (the API's lists, a stack's
+// ps and logs).
 const (
-	VerbPut    = "put"
-	VerbDelete = "delete"
-	VerbRead   = "read"
+	VerbPut     = "put"
+	VerbDelete  = "delete"
+	VerbRestart = "restart"
+	VerbRead    = "read"
 )
 
 // Authorize tells whether an actor may do a verb to the resources of a kind
@@ -85,8 +86,9 @@ type resourceKind struct {
 	// find returns the resource's Meta, or nil if there is none.
 	find func(s *State, id string) *Meta
 	// put decodes the spec and compares it with the stored one first: for
-	// an equal one it returns nil and changes nothing. Then it checks the
-	// spec against the state and stores it, returning the stored Meta.
+	// an equal one it returns errUnchanged and changes nothing. Then it
+	// checks the spec against the state and stores it, returning the
+	// stored Meta.
 	put func(s *State, id string, payload PutResource) (*Meta, error)
 	// remove checks that nothing uses the resource, then removes it.
 	remove func(s *State, id string) error
@@ -122,11 +124,8 @@ func applyPutResource(s *State, cmd Command, payload PutResource) error {
 		return err
 	}
 	meta, err := kind.put(s, id, payload)
-	switch {
-	case err != nil:
+	if err != nil {
 		return err
-	case meta == nil:
-		return errUnchanged
 	}
 	meta.Generation++
 	s.changed(payload.Kind, meta)
@@ -216,7 +215,7 @@ func findNamespace(s *State, id string) *Meta {
 // resources into it.
 func putNamespace(s *State, id string, payload PutResource) (*Meta, error) {
 	if _, ok := s.Namespaces[id]; ok {
-		return nil, nil
+		return nil, errUnchanged
 	}
 	spec, err := decodeSpec[map[string]json.RawMessage](payload.Kind, id, payload.Spec)
 	if err != nil {

@@ -26,7 +26,9 @@ upgrade a running cluster. On one host, what runs today:
   <name>` manage resources as kubectl does: namespaces, stacks, volumes and secrets. A
   namespace comes with `-n` or in the name (`shop/web`), else it is `default`; `-A` lists
   all. Applying the same files again changes nothing. `clowder stack ps|logs
-  [<namespace>/]<stack>` show a stack's containers and logs.
+  [<namespace>/]<stack>` show a stack's containers and logs; `clowder stack restart
+  [<namespace>/]<stack> [<service>...]` recreates services (all, or those named, with
+  what depends on them) with their images pulled again.
 - Every service reserves memory and CPUs (`resources.reserve`, else
   `defaults.reservations`), and a stack goes only where its reservations fit. When a host is
   full, a new stack's services push out services of lower priority (`priority`, a number or
@@ -75,8 +77,9 @@ spec:
       http: {host: shop.example.com, port: 8080}
 ```
 
-and the secret in a SOPS file of its own, `db-password.sops.yaml` (`kind: Secret`, `spec: {value: ...}`), which
-`clowder apply` decrypts with your age key. A stack's spec knows only what clowder runs: a
+and the secret in a SOPS file of its own, `db-password.sops.yaml` (`kind: Secret`,
+`spec: {value: ...}`), which `clowder apply` decrypts with your age key; a secret in a
+file in clear gets a warning. A stack's spec knows only what clowder runs: a
 field it does not have is an error. A volume outlives its stack; deleting a volume deletes
 its data. The cluster keeps secrets sealed. Who can read them: whoever may apply them or
 decrypt their files, every host of the cluster, and, until clowder has permissions, every

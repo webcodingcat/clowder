@@ -222,8 +222,11 @@ type Stack struct {
 	AppliedSecrets map[string]string `json:"applied_secrets,omitempty"`
 	// PushedOut are the services stopped for services of higher priority,
 	// sorted; only the leader changes the list (set-pushed-out).
-	PushedOut []string  `json:"pushed_out,omitempty"`
-	LastMove  time.Time `json:"last_move,omitzero"`
+	PushedOut []string `json:"pushed_out,omitempty"`
+	// Restarted is when a user last restarted each service (restart-stack),
+	// by name: its host recreates a service whose time changed.
+	Restarted map[string]time.Time `json:"restarted,omitempty"`
+	LastMove  time.Time            `json:"last_move,omitzero"`
 	// WaitReason is why the placement cannot place the stack or a volume it
 	// newly names; empty while nothing waits. Display only.
 	WaitReason string `json:"wait_reason,omitempty"`

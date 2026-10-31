@@ -108,6 +108,7 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/resources/namespace/{name}", pki.RoleUser, server.getNamespace)
 	server.handle("GET /v1/stacks/{namespace}/{name}/ps", pki.RoleUser, server.stackPs)
 	server.handle("GET /v1/stacks/{namespace}/{name}/logs", pki.RoleUser, server.stackLogs)
+	server.handle("POST /v1/stacks/{namespace}/{name}/restart", pki.RoleUser, server.restartStack)
 	server.handle("POST /v1/alerts/test", pki.RoleUser, server.alertTest)
 	server.handle("GET /v1/alerts/failures", pki.RoleUser, server.alertFailures)
 	server.handle("GET /v1/internal/alerts/failures", pki.RoleHost, server.localAlertFailures)
@@ -378,7 +379,7 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 // those the user routes of the API and the bootstrap make; a kind joins when
 // its route does.
 var userKinds = map[string]bool{
-	state.KindApplyConfig: true, state.KindSetHostPhase: true,
+	state.KindApplyConfig: true, state.KindSetHostPhase: true, state.KindRestartStack: true,
 	state.KindAddUser: true, // the bootstrap's first user
 }
 
@@ -395,6 +396,9 @@ var hostKinds = map[string]bool{
 // user's certificate ended at the first agent; it may never speak for another
 // host or for the leader.
 func (s *Server) internalPropose(w http.ResponseWriter, r *http.Request) {
+	// not strict, unlike the user's requests: the agent that forwards may be
+	// of the next release, and a command may carry fields this one does not
+	// know (State, Versions)
 	var cmd state.Command
 	if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("read the command: %w", err))

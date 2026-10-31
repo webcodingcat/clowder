@@ -34,6 +34,7 @@ import (
 type Docker interface {
 	supervisor.Docker
 	ComposeUp(ctx context.Context, stack string, files, leftOut []string) error
+	ComposePull(ctx context.Context, stack string, files, services []string) error
 	ComposeDown(ctx context.Context, stack, file string) error
 	ComposePs(ctx context.Context, stack, file string) (string, error)
 	ComposeLogs(ctx context.Context, stack, file string, follow bool, out io.Writer) error
@@ -213,7 +214,7 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 	rendered, err := compose.Render(stack.Name, stack.Spec, compose.Target{
 		Namespace: stack.Namespace, FloatingIP: floatingIP, NodeAddress: r.host.NodeAddress,
 		Resolver: network.Resolver, Volumes: mounted, SecretsDir: r.files.secretFilesDir(project),
-		SecretLabels: secrets.labels,
+		SecretLabels: secrets.labels, Restarted: stack.Restarted,
 	})
 	if err != nil {
 		return err
@@ -228,7 +229,7 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 			return err
 		}
 	}
-	if err := r.up(ctx, project, rendered, secrets, stack.PushedOut); err != nil {
+	if err := r.up(ctx, project, rendered, secrets, stack.PushedOut, stack.Restarted); err != nil {
 		return err
 	}
 	if stack.Status == state.StackRunning && maps.Equal(stack.AppliedSecrets, secrets.digests) {
@@ -241,10 +242,11 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 }
 
 // up writes a stack's Compose file and secrets and runs compose up without
-// the pushed-out services, unless all of it came up before. A failed
-// compose up is tried again at the next pass.
+// the pushed-out services, unless all of it came up before. It pulls the
+// images of the services a user restarted since their containers came up
+// first. A failed pull or compose up is tried again at the next pass.
 func (r *stackRunner) up(ctx context.Context, project string, rendered []byte, secrets stackSecrets,
-	pushedOut []string,
+	pushedOut []string, restarted map[string]time.Time,
 ) error {
 	hash := upHash(rendered, secrets, pushedOut)
 	r.mu.Lock()
@@ -264,6 +266,15 @@ func (r *stackRunner) up(ctx context.Context, project string, rendered []byte, s
 	if secrets.env != nil {
 		files = append(files, r.files.secretEnvFile(project))
 	}
+	pull, err := r.restartedSinceUp(ctx, project, restarted)
+	if err != nil {
+		return err
+	}
+	if len(pull) > 0 {
+		if err := r.docker.ComposePull(ctx, project, files, pull); err != nil {
+			return err
+		}
+	}
 	if err := composeUpHeld(ctx, r.docker, r.supervisor, project, files, pushedOut); err != nil {
 		return err
 	}
@@ -271,6 +282,31 @@ func (r *stackRunner) up(ctx context.Context, project string, rendered []byte, s
 	r.applied[project] = hash
 	r.mu.Unlock()
 	return r.removeStaleSecrets(project, secrets)
+}
+
+// restartedSinceUp are the services, sorted, whose containers carry another
+// restart time than the state's (compose.LabelRestarted): a user restarted
+// them since. compose up recreates them for the new label; their images are
+// pulled before, as one may have changed under the same tag. Docker keeps
+// the label, so after a reboot or an agent restart nothing is pulled again,
+// and a service without a container gets its image from compose up anyway.
+func (r *stackRunner) restartedSinceUp(ctx context.Context, project string, restarted map[string]time.Time) ([]string, error) {
+	if len(restarted) == 0 {
+		return nil, nil
+	}
+	containers, err := r.docker.Containers(ctx, compose.LabelStack+"="+project)
+	if err != nil {
+		return nil, err
+	}
+	var services []string
+	for _, container := range containers {
+		service := container.Labels[docker.ServiceLabel]
+		at, ok := restarted[service]
+		if ok && container.Labels[compose.LabelRestarted] != compose.RestartedLabel(at) {
+			services = append(services, service)
+		}
+	}
+	return slices.Compact(slices.Sorted(slices.Values(services))), nil
 }
 
 // composeUpHeld runs compose up for a project while the supervisor holds

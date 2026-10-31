@@ -175,6 +175,26 @@ func (s Spec) VolumeNames() []string {
 	return sortedSet(volumes)
 }
 
+// WithDependents are the services named and every service that depends on
+// one of them, directly or through others, sorted: a dependency holds only
+// when a container starts, so whoever restarts a service restarts what
+// depends on it too.
+func (s Spec) WithDependents(services []string) []string {
+	with := map[string]bool{}
+	for _, service := range services {
+		with[service] = true
+	}
+	for added := true; added; {
+		added = false
+		for name, service := range s.Services {
+			if !with[name] && slices.ContainsFunc(service.DependsOn, func(dependency string) bool { return with[dependency] }) {
+				with[name], added = true, true
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(with))
+}
+
 // SecretNames are the secrets of the namespace the stack uses, as files
 // or variables, sorted.
 func (s Spec) SecretNames() []string {

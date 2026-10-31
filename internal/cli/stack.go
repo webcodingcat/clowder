@@ -14,19 +14,15 @@ import (
 func newStack(g *globals) *cobra.Command {
 	stack := &cobra.Command{
 		Use:   "stack",
-		Short: "The containers and logs of a stack (apply, get and delete manage stacks)",
+		Short: "The containers, logs and restarts of a stack (apply, get and delete manage stacks)",
 	}
-	stack.AddCommand(newStackPs(g), newStackLogs(g))
+	stack.AddCommand(newStackPs(g), newStackLogs(g), newStackRestart(g))
 	return stack
 }
 
-// stackPath is the API's path of one stack's containers or logs.
-func stackPath(selected selectFlags, name, what string) (string, error) {
-	stack, err := selected.resolve("stack", name)
-	if err != nil {
-		return "", err
-	}
-	return "/v1/stacks/" + url.PathEscape(stack.namespace) + "/" + url.PathEscape(stack.name) + "/" + what, nil
+// stackPath is the API's path of one stack's containers, logs or restart.
+func stackPath(stack selection, what string) string {
+	return "/v1/stacks/" + url.PathEscape(stack.namespace) + "/" + url.PathEscape(stack.name) + "/" + what
 }
 
 func newStackPs(g *globals) *cobra.Command {
@@ -36,7 +32,7 @@ func newStackPs(g *globals) *cobra.Command {
 		Short: "List the containers of a stack",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := stackPath(selected, args[0], "ps")
+			stack, err := selected.resolve("stack", args[0])
 			if err != nil {
 				return err
 			}
@@ -45,7 +41,7 @@ func newStackPs(g *globals) *cobra.Command {
 				return err
 			}
 			var containers []api.ContainerInfo
-			if err := client.Get(cmd.Context(), path, &containers); err != nil {
+			if err := client.Get(cmd.Context(), stackPath(stack, "ps"), &containers); err != nil {
 				return err
 			}
 			return printContainers(cmd.OutOrStdout(), containers)
@@ -72,7 +68,7 @@ func newStackLogs(g *globals) *cobra.Command {
 		Short: "Show the logs of a stack's containers",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := stackPath(selected, args[0], "logs")
+			stack, err := selected.resolve("stack", args[0])
 			if err != nil {
 				return err
 			}
@@ -80,6 +76,7 @@ func newStackLogs(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			path := stackPath(stack, "logs")
 			if follow {
 				path += "?follow=true"
 			}
@@ -88,5 +85,35 @@ func newStackLogs(g *globals) *cobra.Command {
 	}
 	selected.register(command, false)
 	command.Flags().BoolVarP(&follow, "follow", "f", false, "keep following the logs")
+	return command
+}
+
+func newStackRestart(g *globals) *cobra.Command {
+	var selected selectFlags
+	command := &cobra.Command{
+		Use:   "restart [<namespace>/]<stack> [<service>...]",
+		Short: "Recreate a stack's containers with their images pulled again",
+		Long: "Recreates the containers of the services named, or of all of them, and of every service\n" +
+			"that depends on one of them, after pulling their images again: for a new image under the\n" +
+			"same tag, or a retry. The stack's spec stays as it is.",
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			stack, err := selected.resolve("stack", args[0])
+			if err != nil {
+				return err
+			}
+			client, _, err := g.connect()
+			if err != nil {
+				return err
+			}
+			request := api.RestartRequest{Services: args[1:]}
+			if err := client.Act(cmd.Context(), stackPath(stack, "restart"), request, &api.Written{}); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Stack %s/%s: restarting\n", stack.namespace, stack.name)
+			return err
+		},
+	}
+	selected.register(command, false)
 	return command
 }

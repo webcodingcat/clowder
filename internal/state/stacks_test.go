@@ -216,6 +216,49 @@ func TestTwoNamespacesHaveAStackOfTheSameName(t *testing.T) {
 	}
 }
 
+func TestARestartTakesAlongWhatDependsOnItAndKeepsTheGeneration(t *testing.T) {
+	c := newCluster(t)
+	spec := stackspec.Spec{Services: map[string]stackspec.Service{
+		"db": {Image: "x"}, "api": {Image: "x", DependsOn: []string{"db"}},
+		"web": {Image: "x", DependsOn: []string{"api"}}, "cache": {Image: "x"},
+	}}
+	c.putShop(spec)
+	host := HostID(0)
+	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackStarting, Host: &host})
+	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &host, Generation: 1})
+	stack := c.state.Stacks["default/shop"]
+
+	// any channel restarts, also one that does not own the stack
+	changes, err := c.changes(KindRestartStack, UserActor("bob"), RestartStack{Namespace: "default", Name: "shop", Services: []string{"db"}})
+	if err != nil || len(changes) != 1 || changes[0].ResourceVersion != c.index {
+		t.Fatalf("restart: changes %v, %v", changes, err)
+	}
+	if got := slices.Sorted(maps.Keys(stack.Restarted)); !slices.Equal(got, []string{"api", "db", "web"}) {
+		t.Errorf("restarted %v, want db and what depends on it", got)
+	}
+	if stack.Generation != 1 || stack.Status != StackStarting || stack.ResourceVersion != c.index {
+		t.Errorf("restarted stack %+v", stack.Meta)
+	}
+	// the host reports the same generation up again
+	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &host, Generation: 1})
+
+	// none named: all of them
+	c.mustApply(KindRestartStack, UserActor("alice"), RestartStack{Namespace: "default", Name: "shop"})
+	if len(stack.Restarted) != 4 || !stack.Restarted["cache"].Equal(testTime) {
+		t.Errorf("restarted %v", stack.Restarted)
+	}
+	c.refuse(KindRestartStack, UserActor("alice"), RestartStack{Namespace: "default", Name: "shop", Services: []string{"mail"}},
+		"stack default/shop has no service mail")
+	c.refuse(KindRestartStack, UserActor("alice"), RestartStack{Namespace: "default", Name: "blog"}, "no stack default/blog")
+
+	// a new generation forgets the services it no longer has
+	delete(spec.Services, "cache")
+	c.putShop(spec)
+	if _, ok := stack.Restarted["cache"]; ok || len(stack.Restarted) != 3 {
+		t.Errorf("restarted after cache went %v", stack.Restarted)
+	}
+}
+
 func TestPushedOutServicesAreTheStacksAndANewGenerationDropsGoneOnes(t *testing.T) {
 	c := newCluster(t)
 	spec := stackspec.Spec{Services: map[string]stackspec.Service{

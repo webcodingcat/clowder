@@ -45,6 +45,7 @@ const (
 	KindRevoke              = "revoke"
 	KindPutResource         = "put-resource"
 	KindDeleteResource      = "delete-resource"
+	KindRestartStack        = "restart-stack"
 	KindSetStackStatus      = "set-stack-status"
 	KindSetStackWaitReason  = "set-stack-wait-reason"
 	KindSetPushedOut        = "set-pushed-out"
@@ -117,6 +118,7 @@ var handlers = map[string]handler{
 	KindRevoke:              decoded(applyRevoke),
 	KindPutResource:         decoded(applyPutResource),
 	KindDeleteResource:      decoded(applyDeleteResource),
+	KindRestartStack:        decoded(applyRestartStack),
 	KindSetStackStatus:      decoded(applySetStackStatus),
 	KindSetStackWaitReason:  decoded(applySetStackWaitReason),
 	KindSetPushedOut:        decoded(applySetPushedOut),

@@ -100,10 +100,10 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	if err != nil {
 		return err
 	}
-	// the stack runner and the alerts loop commit through the API server,
-	// and the server answers for them (a stack's containers, the test
-	// alert, failed deliveries): they get the server's Propose through
-	// this, before the server exists
+	// every loop commits through the API server's Propose. The server
+	// answers for the stack runner and the alerts (a stack's containers,
+	// the test alert, failed deliveries), so it is made after them: they
+	// get Propose through this. No loop starts before the server is set.
 	var server *api.Server
 	propose := func(ctx context.Context, cmd state.Command) (uint64, error) { return server.Propose(ctx, cmd) }
 	runner := &stackRunner{
@@ -137,17 +137,17 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		dockerRestarted, traefik.look, logger)
 	traefik.supervisor = runner.supervisor
 	loops.Go(func() { runner.supervisor.Run(reconcilers, compose.LabelStack) })
-	loops.Go(func() { controller.RunPlacement(reconcilers, node, server.Propose, conditions, logger) })
+	loops.Go(func() { controller.RunPlacement(reconcilers, node, propose, conditions, logger) })
 	loops.Go(func() {
-		controller.RunIngress(reconcilers, node, server.Propose, credentials.dataKey.Open, parts.Hoster, conditions, logger)
+		controller.RunIngress(reconcilers, node, propose, credentials.dataKey.Open, parts.Hoster, conditions, logger)
 	})
 	loops.Go(func() { alerts.Run(reconcilers) })
 	loops.Go(func() { alerts.RunHeartbeat(reconcilers) })
-	loops.Go(func() { controller.RunACME(reconcilers, node, server.Propose, credentials.dataKey, logger) })
+	loops.Go(func() { controller.RunACME(reconcilers, node, propose, credentials.dataKey, logger) })
 	loops.Go(func() { runner.trim(reconcilers) })
 	reporter := &hostReporter{
 		host: host, version: buildinfo.Version, cluster: node, docker: parts.Docker, storage: parts.Storage,
-		propose: server.Propose, logger: logger, root: "/",
+		propose: propose, logger: logger, root: "/",
 	}
 	loops.Go(func() {
 		// a state that lags may still place a stack here that has moved on,

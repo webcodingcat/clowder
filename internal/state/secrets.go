@@ -23,7 +23,7 @@ func putSecret(s *State, id string, payload PutResource) (*Meta, error) {
 	}
 	stored, exists := s.Secrets[id]
 	if exists && stored.Spec.Digest == spec.Digest {
-		return nil, nil
+		return nil, errUnchanged
 	}
 	size := ClearSize(spec.Value)
 	switch {

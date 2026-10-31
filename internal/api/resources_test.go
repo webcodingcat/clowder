@@ -223,6 +223,44 @@ func TestAStackShowsItsStatusAndIsAskedForOnItsHost(t *testing.T) {
 	}
 }
 
+func TestARestartGoesThroughAFollowerAndShowsInTheStatus(t *testing.T) {
+	cluster := newTestCluster(t)
+	leader := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	follower := cluster.client(cluster.userCertificate("alice"), testVersion, 1)
+	ctx := context.Background()
+	if _, err := leader.ApplyResources(ctx, ApplyRequest{Resources: []resource.Object{
+		object(resource.KindStack, "default", "web", `{"services": {"db": {"image": "x"}, "app": {"image": "x", "dependsOn": ["db"]}}}`),
+	}}, false); err != nil {
+		t.Fatal(err)
+	}
+	var written Written
+	if err := follower.Act(ctx, "/v1/stacks/default/web/restart", RestartRequest{Services: []string{"db"}}, &written); err != nil ||
+		written.Index == 0 {
+		t.Fatalf("restart: %+v, %v", written, err)
+	}
+	var stack resource.Object
+	var status StackStatus
+	if err := leader.Get(ctx, "/v1/resources/stack/default/web", &stack); err != nil || json.Unmarshal(stack.Status, &status) != nil {
+		t.Fatalf("stack %+v, %v", stack, err)
+	}
+	if len(status.Restarted) != 2 || status.Restarted["app"].IsZero() || stack.Metadata.Generation != 1 {
+		t.Errorf("restarted %v, generation %d; want db and app, generation 1", status.Restarted, stack.Metadata.Generation)
+	}
+	for request, want := range map[string]int{
+		`{"services": ["mail"]}`: http.StatusConflict,
+		`{"servics": ["db"]}`:    http.StatusBadRequest,
+	} {
+		err := leader.Act(ctx, "/v1/stacks/default/web/restart", json.RawMessage(request), &written)
+		if statusOf(err) != want {
+			t.Errorf("%s: want HTTP %d, got %v", request, want, err)
+		}
+	}
+	if err := leader.Act(ctx, "/v1/stacks/default/blog/restart", RestartRequest{}, &written); statusOf(err) != http.StatusConflict ||
+		!strings.Contains(err.Error(), "no stack default/blog") {
+		t.Errorf("restart of no stack: %v", err)
+	}
+}
+
 func TestTheLeaderDecidesNotAFollowerThatIsBehind(t *testing.T) {
 	cluster := newTestCluster(t)
 	// host 1 still has a namespace shop that the leader has not: it would

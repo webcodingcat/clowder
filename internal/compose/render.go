@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
@@ -136,6 +137,9 @@ type Target struct {
 	// Compose would not recreate the container; with a key, the label tells
 	// nothing about the values to whoever reads it.
 	SecretLabels map[string]string
+	// Restarted per service a user restarted: when (LabelRestarted). A new
+	// time changes the container's configuration, so Compose recreates it.
+	Restarted map[string]time.Time
 }
 
 // MountedVolume is a volume as it is mounted on the host.
@@ -149,12 +153,20 @@ type MountedVolume struct {
 
 // Labels that the agent puts on containers: the stack's Compose project
 // (names.Project) on every one, the digest of its secret files on those that
-// ask for some. Nothing else, so an apply recreates only the containers
-// whose configuration or secret files changed.
+// ask for some, the time of the last restart on those a user restarted.
+// Nothing else, so an apply recreates only the containers whose
+// configuration or secret files changed, and a restart those it names.
 const (
-	LabelStack   = "clowder.stack"
-	LabelSecrets = "clowder.secrets"
+	LabelStack     = "clowder.stack"
+	LabelSecrets   = "clowder.secrets"
+	LabelRestarted = "clowder.restarted"
 )
+
+// RestartedLabel is the value of LabelRestarted for a restart at a time:
+// the agent compares it with the label of a running container.
+func RestartedLabel(at time.Time) string {
+	return at.UTC().Format(time.RFC3339Nano)
+}
 
 // Render returns the Compose file that docker compose gets on the host for
 // a stack; the caller has checked the spec (stackspec.Check), Render
@@ -262,6 +274,9 @@ func renderService(stackName, project, name string, spec stackspec.Spec, target 
 			return rendered, fmt.Errorf("render stack %s: no label for the secrets of service %s", stackName, name)
 		}
 		rendered.Labels[LabelSecrets] = target.SecretLabels[name]
+	}
+	if at, ok := target.Restarted[name]; ok {
+		rendered.Labels[LabelRestarted] = RestartedLabel(at)
 	}
 	var err error
 	if rendered.Volumes, err = renderMounts(service); err != nil {

@@ -82,6 +82,26 @@ func (s *Server) stackLogs(w http.ResponseWriter, r *http.Request) {
 	s.logs(w, r, project)
 }
 
+// RestartRequest is the body of POST /v1/stacks/{namespace}/{name}/restart:
+// the services to restart, none for all of them. Those that depend on them
+// come along (state.RestartStack).
+type RestartRequest struct {
+	Services []string `json:"services,omitempty"`
+}
+
+// restartStack commits restart-stack; the state checks the stack and its
+// services.
+func (s *Server) restartStack(w http.ResponseWriter, r *http.Request) {
+	var request RestartRequest
+	if err := decodeStrict(r.Body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.write(w, r, state.KindRestartStack, state.RestartStack{
+		Namespace: r.PathValue("namespace"), Name: r.PathValue("name"), Services: request.Services,
+	})
+}
+
 // localProject is the Compose project of an internal route: only hosts call
 // these, but the project becomes a path on this host, so it must be a
 // stack's.
