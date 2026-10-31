@@ -110,7 +110,7 @@ clowder is built in phases; each ends with live tests on HLab.
 | 0 | the spike: DRBD quorum and fencing, WireGuard, the real client IP, on three hosts | done |
 | 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | done |
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done |
-| 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | in progress: namespaces in the state and on the host; the stack schema and its renderer; namespaces, volumes and secrets as resources in the state and the API |
+| 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | in progress: namespaces in the state and on the host; the stack schema and its renderer; namespaces, volumes and secrets as resources in the state, the API and the CLI (`apply`, `get`, `delete`) |
 | 2 | three hosts: replication, failover with fencing | |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
@@ -633,9 +633,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   placements, new hosts) are made on the leader and never come in from outside; a host never
   speaks for another host or for the leader.
 - A refusal of the state is HTTP 409 with its reason; a write that did not commit is 503.
-- **Resources** (`resources.go`; the CLI's `apply`, `get` and `delete` come next):
+- **Resources** (`resources.go`; the CLI's `apply`, `get` and `delete` below):
   - `POST /v1/apply` (`ApplyRequest`) and `POST /v1/delete` (`DeleteRequest`) take
-    resources in order and answer per resource (`ChangeResult`): `applied`, `unchanged`,
+    resources in order and answer per resource (`ChangeResult`): `applied` or `deleted`,
+    `unchanged`,
     `refused` (the state's no), `failed` (did not commit: no leader, no quorum; try again),
     and `not-tried` after a refusal or failure, since what follows usually needs it. No
     transaction: a repeat converges. They are the only way to change resources; every
@@ -675,7 +676,34 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **The CLI** finds the cluster directory (`--cluster`, `$CLOWDER_CLUSTER`, the working
   directory) and the user (`--user`, `$CLOWDER_USER`, the only credentials file), then talks
   to the cluster with the user's certificate: `cluster status|apply|diff|schema`,
-  `host list|drain|undrain|remove|enable`, `stack create|apply|delete|ps|logs`.
+  `host list|drain|undrain|remove|enable`, `stack create|apply|delete|ps|logs`,
+  `apply`, `get`, `delete`.
+- **Exit codes**, for every command: 0 when it did what was asked, 2 for a wrong call
+  (`usageError`: an unknown command, flags or arguments that do not fit; `checkArgs` makes
+  every command's argument errors one, and gives each command of commands a `RunE` that
+  shows its help and takes an unknown command as a wrong call, where cobra would end as
+  if done), 1 for anything else (refused, missing, not reachable). A refusal shows the
+  state's reason without the command's kind (`state.CommandError`).
+- **`apply -f <file|directory|->`** (`resources.go`, `files.go`) reads YAML documents
+  (`resource.ParseDocuments`: clowder's resources only, or a file of other documents, never
+  both; another apiVersion of clowder's is an error). A directory's YAML files are read,
+  not those below it; hidden files, other files and files of other documents are skipped
+  and named on stderr, and a cluster directory is refused. A SOPS file (by its content:
+  the key `sops`) of a resource (SOPS keeps the keys, so `apiVersion` shows) is decrypted
+  with the user's age key (`clusterdir.DecryptSOPS`) and must hold exactly one `Secret`,
+  so `sopsage` keeps every value encrypted; a SOPS file of anything else, such as a
+  stack's secrets file, is skipped unopened. A resource without a namespace is in
+  `default`. The resources go namespaces first in one request; each result is printed,
+  and one not applied, deleted or unchanged makes the command fail. `--dry-run` checks
+  everything and changes nothing.
+- **`get <kind> [[<namespace>/]<name>]`** and **`delete <kind> [<namespace>/]<name>`**
+  take a kind singular or plural, and the namespace as kubectl does: `-n`, or in the name
+  (`shop/data`), else `default`; `-A` lists every namespace. Where both name one, they must
+  agree; a namespace takes neither (`selectFlags.resolve`, with a table test of every
+  combination). `get` prints a table, or `-o yaml` (documents in the API's field order,
+  which `apply` takes again; a secret shows only its digest) or `-o json`. `delete -f`
+  deletes the resources of files in the reverse order of an apply, with the namespaces the
+  files name (no `-n`).
 - **`stack create`** registers the stack (`POST /v1/stacks/<name>`; for the user who created
   it and while it is `created`, again does nothing, so a failed run can be repeated). It then
   writes the missing files of the stack's directory and never overwrites one; an existing

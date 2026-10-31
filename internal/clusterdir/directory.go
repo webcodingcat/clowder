@@ -175,6 +175,12 @@ func ReadSOPS(file string) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("read %s: %w", file, err)
 	}
+	return DecryptSOPS(file, sealed)
+}
+
+// DecryptSOPS decrypts what ReadSOPS reads from a file, for content read
+// elsewhere (stdin); file names it in messages.
+func DecryptSOPS(file string, sealed []byte) ([]byte, error) {
 	identities, err := sopsage.LoadIdentities()
 	if err != nil {
 		return nil, fmt.Errorf("load the age key for %s: %w", file, err)

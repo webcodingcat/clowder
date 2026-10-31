@@ -260,7 +260,7 @@ func newStackPs(g *globals) *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if output != "table" && output != "json" {
-				return fmt.Errorf("--output %q: table or json", output)
+				return usage("--output %q: table or json", output)
 			}
 			client, _, err := g.connect()
 			if err != nil {

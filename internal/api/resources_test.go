@@ -201,7 +201,7 @@ func TestTheLeaderDecidesNotAFollowerThatIsBehind(t *testing.T) {
 		{Kind: resource.KindNamespace, Name: "default"},
 		{Kind: resource.KindNamespace, Name: "shop"},
 	}}, false)
-	if want := []string{Applied, Refused, NotTried}; err != nil || !slices.Equal(outcomes(result), want) {
+	if want := []string{Deleted, Refused, NotTried}; err != nil || !slices.Equal(outcomes(result), want) {
 		t.Errorf("delete: %+v, %v; want %v", result, err, want)
 	}
 }

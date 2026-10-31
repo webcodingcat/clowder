@@ -35,6 +35,7 @@ type DeleteRequest struct {
 // what a real one would, without committing.
 const (
 	Applied   = "applied"
+	Deleted   = "deleted"
 	Unchanged = "unchanged"
 	// Refused is the state's no: the resource as sent will not go in.
 	Refused = "refused"
@@ -340,13 +341,17 @@ func (s *Server) runChange(ctx context.Context, copied *state.State, each batchC
 	tried.At = time.Now().UTC() // the leader's clock, as proposeHere stamps it
 	// Apply moves the copy's index, so the next change gets the one after
 	changed, err := copied.Apply(copied.Index+1, tried)
+	done := Applied
+	if tried.Kind == state.KindDeleteResource {
+		done = Deleted
+	}
 	switch {
 	case err != nil:
-		return Refused, err.Error(), 0
+		return Refused, reason(err), 0
 	case len(changed) == 0:
 		return Unchanged, "", 0
 	case dryRun:
-		return Applied, "", 0
+		return done, "", 0
 	}
 	ctx, cancel := context.WithTimeout(ctx, waitTimeout)
 	defer cancel()
@@ -354,11 +359,21 @@ func (s *Server) runChange(ctx context.Context, copied *state.State, each batchC
 	var refused *state.Refused
 	switch {
 	case errors.As(err, &refused):
-		return Refused, refused.Error(), 0
+		return Refused, reason(refused), 0
 	case err != nil:
 		return Failed, err.Error(), 0
 	}
-	return Applied, "", index
+	return done, "", index
+}
+
+// reason is why the state refused a command, without the command's kind
+// that Apply puts first: the user named a resource, not a command.
+func reason(err error) string {
+	var refusal *state.CommandError
+	if errors.As(err, &refusal) {
+		return refusal.Err.Error()
+	}
+	return err.Error()
 }
 
 // listResources lists the resources of a kind: of one namespace

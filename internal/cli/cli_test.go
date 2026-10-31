@@ -90,6 +90,7 @@ func startCluster(t *testing.T) string {
 	if _, err := current.Apply(1, cmd); err != nil {
 		t.Fatal(err)
 	}
+	current.Config.Spec.StorageClasses = map[string]clusterdir.StorageClass{"fast": {Pool: "vg-fast/thin"}}
 	hostCertificate, hostKey := issue(func(public ed25519.PublicKey) ([]byte, error) {
 		return ca.IssueHost(public, 0, []netip.Addr{netip.MustParseAddr("127.0.0.1")}, time.Now())
 	})
@@ -98,11 +99,15 @@ func startCluster(t *testing.T) string {
 		t.Fatal(err)
 	}
 	server := httptest.NewUnstartedServer(nil)
+	dataKey, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
 	agent := api.NewServer(api.ServerConfig{
 		Cluster: &oneHost{state: current}, CA: ca.Certificate, Certificate: serverCertificate,
 		APIAddress: func(state.HostID) string { return server.Listener.Addr().String() },
 		Version:    buildinfo.Version, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Alerts: fakeAlerts{},
+		Alerts: fakeAlerts{}, Keys: ageKeys{dataKey},
 	})
 	server.Config.Handler = agent
 	server.Config.ErrorLog = log.New(io.Discard, "", 0)
@@ -151,6 +156,35 @@ func startCluster(t *testing.T) string {
 	t.Setenv(clusterdir.UserEnvVar, "")
 	return dir
 }
+
+// ageKeys seal as the agent's data key does (the CLI may not import
+// datakey): the state reads the length of what age seals.
+type ageKeys struct{ identity *age.X25519Identity }
+
+func (k ageKeys) Seal(plaintext []byte) (state.Sealed, error) {
+	var sealed bytes.Buffer
+	writer, err := age.Encrypt(&sealed, k.identity.Recipient())
+	if err != nil {
+		return nil, err
+	}
+	if _, err := writer.Write(plaintext); err != nil {
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return sealed.Bytes(), nil
+}
+
+func (k ageKeys) Open(sealed state.Sealed) ([]byte, error) {
+	reader, err := age.Decrypt(bytes.NewReader(sealed), k.identity)
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(reader)
+}
+
+func (ageKeys) Derive(purpose string) ([]byte, error) { return []byte(purpose), nil }
 
 // fakeAlerts has two channels, the second of which fails, and one message
 // the email channel has not taken.

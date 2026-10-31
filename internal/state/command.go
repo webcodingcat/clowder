@@ -192,7 +192,7 @@ func (s *State) Apply(index uint64, cmd Command) ([]Change, error) {
 		return nil, nil
 	case err != nil:
 		s.changes = nil
-		return nil, fmt.Errorf("%s: %w", cmd.Kind, err)
+		return nil, &CommandError{Kind: cmd.Kind, Err: err}
 	}
 	s.Audit = append(s.Audit, AuditEntry{Index: index, At: cmd.At, Actor: cmd.Actor, Kind: cmd.Kind})
 	if extra := len(s.Audit) - auditSize; extra > 0 {
@@ -202,6 +202,18 @@ func (s *State) Apply(index uint64, cmd Command) ([]Change, error) {
 	s.changes = nil
 	return changes, nil
 }
+
+// CommandError is a command that its handler refused: the command's kind,
+// and why. The kind comes first in the message, for the logs; the API
+// shows users the reason alone, as they named a resource, not a command.
+type CommandError struct {
+	Kind string
+	Err  error
+}
+
+func (e *CommandError) Error() string { return e.Kind + ": " + e.Err.Error() }
+
+func (e *CommandError) Unwrap() error { return e.Err }
 
 // errUnchanged is a handler's answer to a command that would write what is
 // there already: Apply takes it as applied, and the command leaves no trace,

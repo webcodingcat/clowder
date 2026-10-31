@@ -24,6 +24,10 @@ upgrade a running cluster. On one host, what runs today:
   certificates' expiry and the open alerts. Only the cluster's hosts reach it.
 - `clowder stack create|apply|delete|ps|logs` runs Compose stacks with their volumes and
   secrets.
+- `clowder apply -f <file|directory|->`, `clowder get <kind>` and `clowder delete <kind>
+  <name>` manage resources as kubectl does: namespaces, volumes and secrets so far (stacks
+  join them). A namespace comes with `-n` or in the name (`shop/data`), `-A` lists all; a
+  secret may come in a SOPS file of its own. Applying the same files again changes nothing.
 - Every service reserves memory and CPUs (`deploy.resources.reservations`, else
   `defaults.reservations`), and a stack goes only where its reservations fit. When a host is
   full, a new stack's services push out services of lower priority (`x-clowder.priority`, a

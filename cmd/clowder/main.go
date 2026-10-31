@@ -14,6 +14,6 @@ func main() {
 	slog.SetDefault(logging.New(os.Stderr, logging.Text, slog.LevelInfo))
 	if err := cli.NewRoot().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "clowder:", err)
-		os.Exit(1)
+		os.Exit(cli.ExitCode(err))
 	}
 }
