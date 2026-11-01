@@ -554,7 +554,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
     and `not-tried` after a refusal or failure, since what follows usually needs it. No
     transaction: a repeat converges. They are the only way to change resources; every
     user's change is the channel `cli`. Requests are read strictly, so a typo is an error,
-    not an empty request.
+    not an empty request; the internal routes read leniently, as an agent of the next
+    release may send fields this one does not know.
   - The agent that took the request turns each resource into its `put-resource`
     (`putCommand`): the spec read strictly (`resource.DecodeVolumeSpec`, a field the kind
     does not have is an error; `replicas` has no default), a secret's value sealed and its

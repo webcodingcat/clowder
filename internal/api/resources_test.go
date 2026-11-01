@@ -314,6 +314,27 @@ func TestABatchCarriesOnlyUsersResourceCommands(t *testing.T) {
 	}
 }
 
+func TestTheLeaderTakesABatchWithFieldsOfTheNextRelease(t *testing.T) {
+	cluster := newTestCluster(t)
+	host1 := cluster.client(cluster.hostCertificate(1), testVersion, 0)
+	encoded, err := json.Marshal(changeBatch{Changes: []batchChange{
+		{Ref: resource.Ref{Kind: resource.KindNamespace, Name: "shop"}, Command: mustCommand(t, "shop")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var batch map[string]any
+	if err := json.Unmarshal(encoded, &batch); err != nil {
+		t.Fatal(err)
+	}
+	batch["from_the_next_release"] = true
+	var result ChangeResult
+	if err := host1.Act(context.Background(), "/v1/internal/changes", batch, &result); err != nil ||
+		!slices.Equal(outcomes(result), []string{Applied}) {
+		t.Errorf("a batch with an unknown field: %+v, %v", result, err)
+	}
+}
+
 func TestAChangeThatDidNotCommitIsAFailureNotARefusal(t *testing.T) {
 	cluster := newTestCluster(t)
 	// the server checked that it leads, then Raft lost the lead: nothing

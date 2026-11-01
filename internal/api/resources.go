@@ -323,9 +323,11 @@ func (s *Server) forwardChanges(ctx context.Context, batch changeBatch) (ChangeR
 // does not forward again: if the lead moved meanwhile, the caller asks
 // again.
 func (s *Server) internalChanges(w http.ResponseWriter, r *http.Request) {
+	// not strict, as internalPropose: the follower may be of the next release,
+	// and its commands may carry fields this one does not know
 	var batch changeBatch
-	if err := decodeStrict(r.Body, &batch); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("read the batch: %w", err))
 		return
 	}
 	for _, each := range batch.Changes {
