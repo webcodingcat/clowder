@@ -15,15 +15,19 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   command line, where `/proc` and shell histories keep it. `--public-address` is where users
   reach the API when the underlay is a private network; it goes into `host.json` and the
   state, like `--server-ref`, the hoster's ID of the server (for fencing).
-- **`clowderd run`** (the service) sets up `clowder0` with the node address (a dummy
-  interface, so the address exists on a host without peers), the Raft member, and the API on
-  the underlay, the node address and the public address, each once. The API binds them with
-  `IP_FREEBIND` (`freeBind`): at boot the public address may come up after the agent, which
-  must neither fail nor lock users out then. It waits up to `catchUpTimeout` for its state
-  to catch up with the Raft log, then tells systemd `READY=1`, and feeds the watchdog while
-  the state's lock answers. When it stops, it ends its loops and waits for them, at most
-  `loopsTimeout` (a host tool left behind on a suspended volume must not hold up the stop),
-  before the resolver and the Raft member close (`stopLoops`).
+- **`clowderd run`** (the service) starts in this order:
+  1. `clowder0` with the node address: a dummy interface, so the address exists on a host
+     without peers.
+  2. The Raft member. It waits up to `catchUpTimeout` for its state to catch up with the
+     Raft log.
+  3. The API, once each on the underlay, the node address and the public address. It
+     binds them with `IP_FREEBIND` (`freeBind`): at boot the public address may come up
+     after the agent, which must neither fail nor lock users out then.
+  4. It tells systemd `READY=1` and feeds the watchdog as long as the state's lock answers.
+
+  When it stops, it ends its loops and waits for them, at most `loopsTimeout`: a host tool
+  left behind on a suspended volume must not hold up the stop. Only then do the resolver
+  and the Raft member close (`stopLoops`).
 - `HostParts` are what the agent changes on its host (the network, the storage driver and
   Docker) and the hoster's API. `clowderd run` passes the real ones, the tests fakes.
 - **Reconcilers** run after a change of the state and every `reconcileInterval`, to repair

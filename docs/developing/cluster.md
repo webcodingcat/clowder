@@ -18,15 +18,20 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   the caller's certificate. Which actor may send which kind is the API's check. The state
   checks only what it alone can tell: a host reports only about itself and never moves
   another host, and about a stack only while it runs there, without moving it.
-- **In use so far:** `bootstrap` (init), `apply-config`, `add-user` (the first user),
-  `set-host-phase` (host actions), `put-resource` and `delete-resource` (the user, through
-  `/v1/apply` and `/v1/delete`, decided on the leader), `restart-stack` (`stack restart`),
-  `put-volume`, `set-stack-status`, `set-stack-wait-reason` and `set-pushed-out`
-  (placement, the stack's host), `set-ingress` (the Floating IP's loop), `put-acme-account`,
-  `put-acme-challenge`, `delete-acme-challenge`, `put-certificate` and
-  `delete-certificate` (the ACME loop), `put-alert` and `resolve-alert` (the alerts), `report-host` and `forget-copy` (each agent). The other
-  kinds (hosts joining, operations, users beyond the first) are there for the next steps;
-  they are tested, but nothing sends them yet.
+- **The commands in use so far,** by who sends them:
+
+  | Who | Commands |
+  |---|---|
+  | `clowderd init` | `bootstrap` |
+  | the user | `apply-config`, `add-user` (the first user), `set-host-phase` (host actions), `put-resource` and `delete-resource` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack` |
+  | the placement, the stack's host | `put-volume`, `set-stack-status`, `set-stack-wait-reason`, `set-pushed-out` |
+  | the Floating IP's loop | `set-ingress` |
+  | the ACME loop | `put-acme-account`, `put-acme-challenge`, `delete-acme-challenge`, `put-certificate`, `delete-certificate` |
+  | the alerts | `put-alert`, `resolve-alert` |
+  | each agent | `report-host`, `forget-copy` |
+
+  The other kinds (hosts that join, operations, users beyond the first) are for the next
+  steps. They are tested, but nothing sends them yet.
 - **Resources** (phase 1c): namespaces (`Namespaces`), and by `<namespace>/<name>` stacks
   (`Stacks`), volumes (`Volumes`) and secrets (`Secrets`), each with a `Meta`. The kinds
   and their specs are in `internal/resource` (a stack's in `internal/stackspec`), which the
@@ -39,18 +44,21 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | `Volume.DataGeneration` | a volume's data: a restore or a class move makes a new LV (`-g<N>`) |
 
   - `put-resource` and `delete-resource` carry the kind; `resourceKinds` holds each kind's
-    `find`, `put` and `remove`. A handler checks in a fixed order: `Authorize` (the actor,
-    the verb, the kind, the namespace; it allows everything until users get permissions,
-    and sits here so that the leader decides, not the agent that took the request), the
-    owner (another channel is refused, even for a spec that would change nothing), whether
-    anything changes, then the rest.
-  - **Unchanged is not a change.** A spec equal to the stored one (a secret's by its
-    digest, as the same value seals differently every time; a stack's normalized) changes
-    nothing: not `Generation`, not `ResourceVersion`, and leaves no audit entry, so a GitOps
-    loop that applies the same files restarts nothing and keeps the audit. The status
-    commands (`put-volume`, `set-stack-status`, `set-stack-wait-reason`, `set-pushed-out`)
-    that write what is there change nothing either. They answer with `errUnchanged`, which
-    `Apply` takes as applied without a trace.
+    `find`, `put` and `remove`. A handler checks in a fixed order:
+    1. `Authorize`: may this actor do this to this kind in this namespace? It allows
+       everything until users get permissions. It sits in the state so that the leader
+       decides, not the agent that took the request.
+    2. The owner: a resource of another channel is refused, even when the spec would not
+       change.
+    3. Whether anything changes at all.
+    4. Everything else.
+  - **Unchanged is not a change.** When a spec equals the stored one, nothing changes:
+    neither `Generation` nor `ResourceVersion`, and no audit entry is written. So a GitOps
+    loop that applies the same files restarts nothing and keeps the audit short. A secret
+    is compared by its digest, because the same value seals differently every time; a
+    stack by its normalized spec. The status commands (`put-volume`, `set-stack-status`,
+    `set-stack-wait-reason`, `set-pushed-out`) work the same way. Such a handler returns
+    `errUnchanged`, and `Apply` takes the command as applied without a trace.
   - **The state checks against `cluster.yaml` itself**, in the log's order: a stack's
     priority categories and privileges, a volume's storage class; `apply-config` refuses
     what a resource of the cluster would no longer pass. No check happens outside the state
@@ -284,12 +292,18 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   is named as such (`foreignCA`: a cluster of the same name, or set up anew) instead of
   with x509's words alone: `cluster status|apply|diff|schema`,
   `host list|drain|undrain|remove|enable`, `apply`, `get`, `delete`, `stack ps|logs|restart`.
-- **Exit codes**, for every command: 0 when it did what was asked, 2 for a wrong call
-  (`usageError`: an unknown command, flags or arguments that do not fit; `checkArgs` makes
-  every command's argument errors one, and gives each command of commands a `RunE` that
-  shows its help and takes an unknown command as a wrong call, where cobra would end as
-  if done), 1 for anything else (refused, missing, not reachable). A refusal shows the
-  state's reason without the command's kind (`state.CommandError`).
+- **Exit codes**, the same for every command:
+
+  | Code | When |
+  |---|---|
+  | 0 | the command did what was asked |
+  | 2 | a wrong call: an unknown command, or flags or arguments that do not fit (`usageError`) |
+  | 1 | anything else: refused, missing, not reachable |
+
+  `checkArgs` turns every command's argument errors into a `usageError`. It also gives
+  each command that only holds other commands (`clowder stack`) a `RunE`: that shows the
+  help and takes an unknown subcommand as a wrong call, where cobra would end as if done.
+  A refusal shows the state's reason without the command's kind (`state.CommandError`).
 - **`apply -f <file|directory|->`** (`resources.go`, `files.go`) reads YAML documents
   (`resource.ParseDocuments`: clowder's resources only, or a file of other documents, never
   both; another apiVersion of clowder's is an error). A directory's YAML files are read,
@@ -329,10 +343,12 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   (`openValue`) and refuses unless it was encrypted for the Secret's ID: a value copied
   from another Secret or from `cluster.yaml` (the hoster's token, which a container would
   then read) does not pass. Then `sealSecret` as before.
-- **Who can read a secret:** whoever holds the recovery key (the values in the files);
-  every host (a stack must start anywhere); and, until there are permissions, every user of
-  the cluster, through a stack that names it or one named in `stacks.privileged`, as such a
-  container reaches the secrets and the data key on its host.
+- **Who can read a secret:**
+  - whoever holds the recovery key: every value in the files is encrypted for it too;
+  - every host, as a stack must be able to start anywhere;
+  - until there are permissions, every user of the cluster: through a stack that names
+    the secret, or through a stack in `stacks.privileged`, whose containers reach the
+    secrets and the data key on their host.
 - **`cluster apply`** (`PUT /v1/cluster`, `ClusterApply`) sends the spec with the
   secrets' names, the values still encrypted by name, and the files. The agent opens each
   value with the cluster's age key (`clusterIdentity`, sealed in the state), refuses one
@@ -400,9 +416,16 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   - A service that finds no room even so starts pushed out, with what depends on it
     within the stack. The stack waits only if its first service finds no room.
 
-  So a stack's `cache` at 200 never pushes out another stack's service at 500 because the
-  stack's `api` is at 800. The new stack's own list is written afresh at every placement,
-  so one left by an earlier leader is replaced.
+  An example. A host offers 1 GiB and runs `blog`: one service at priority 500 that
+  reserves 600 MiB. A new stack `shop` comes: `api` at 800 and `cache` at 200, each
+  reserving 300 MiB.
+  1. `api` goes first, as it has the higher priority. It takes 300 of the 400 MiB free.
+  2. `cache` needs 300 MiB, and 100 are left. It may push out only services below its own
+     200; `blog` is at 500. So `cache` starts pushed out, and `blog` keeps running.
+
+  A service is only as strong as its own priority: `api` at 800 does not let `cache`
+  push out `blog`. The new stack's list of pushed-out services is written afresh at every
+  placement, so one left by an earlier leader is replaced.
 - **Over capacity** (a raised `system_reserve`, a stack whose new generation reserves more):
   services below the host's highest effective priority go, lowest first, until the rest
   fits; services at that priority never go for this. If that is not enough, nothing goes and
