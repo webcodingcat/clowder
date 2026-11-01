@@ -15,10 +15,11 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   command line, where `/proc` and shell histories keep it. `--public-address` is where users
   reach the API when the underlay is a private network; it goes into `host.json` and the
   state, like `--server-ref`, the hoster's ID of the server (for fencing).
-- **`clowderd user recovery-code <user>`** prints a code that gives the user access back
-  (the code from a host, in [API and the CLI](cluster.md#api-internalapi-and-the-cli-internalcli)). It reads the data key only and changes
+- **`clowderd user recovery-code <user>`** prints the codes that give the user access back,
+  one for `user recover` and one for `recovery rotate`, each in its command (the code from
+  a host, in [API and the CLI](cluster.md#api-internalapi-and-the-cli-internalcli)). It reads the data key only and changes
   nothing, so it works while the agent is down; it does not know the users, so a mistyped
-  name gives a code that fits nowhere.
+  name gives codes that fit nowhere.
 - **`clowderd run`** (the service) starts in this order:
   1. `clowder0` with the node address: a dummy interface, so the address exists on a host
      without peers.

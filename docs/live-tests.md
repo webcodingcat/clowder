@@ -61,8 +61,8 @@ cloud-init's status and the journals of `clowder-setup` and `clowderd`.
 4. The same files applied again answer `unchanged` and recreate nothing.
 5. A dry run of a new namespace with its stack answers as a real apply and makes nothing.
 6. Access back: with the credentials deleted, the CLI reaches nothing; a code from
-   `clowderd user recovery-code` on the host and `user recover` give new credentials, and
-   the old certificate is refused as revoked.
+   `clowderd user recovery-code` on the host and `user recover` give new credentials; the
+   same code a second time and the old certificate are refused.
 7. `recovery rotate` with valid credentials but a code for another user is refused; with
    the user's own code it makes a new recovery key. After `secret rekey`, the stack's file
    opens with the new key and no longer with the old one, and the cluster keeps what it had.

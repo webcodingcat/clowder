@@ -77,6 +77,8 @@ type RecoverUser struct {
 	Name     string    `json:"name"`
 	Serial   string    `json:"serial"`
 	NotAfter time.Time `json:"not_after"`
+	// Code is the code that proved it, which opens no second time.
+	Code UsedCode `json:"code"`
 }
 
 func applyRecoverUser(s *State, cmd Command, payload RecoverUser) (func(), error) {
@@ -91,7 +93,11 @@ func applyRecoverUser(s *State, cmd Command, payload RecoverUser) (func(), error
 	case s.serialInUse(payload.Serial):
 		return nil, fmt.Errorf("serial %s is used already", payload.Serial)
 	}
+	if err := s.checkCodeUnused(payload.Code); err != nil {
+		return nil, err
+	}
 	return func() {
+		s.useCode(payload.Code, cmd.At)
 		for serial, notAfter := range user.Serials {
 			s.revoke(serial, notAfter, cmd.At)
 		}
@@ -103,16 +109,64 @@ func applyRecoverUser(s *State, cmd Command, payload RecoverUser) (func(), error
 // (clowder recovery rotate): values encrypted from now on are for it.
 type SetRecoveryRecipient struct {
 	Recipient string `json:"recipient"`
+	// Code is the caller's code that allowed it, which opens no second
+	// time.
+	Code UsedCode `json:"code"`
 }
 
-func applySetRecoveryRecipient(s *State, _ Command, payload SetRecoveryRecipient) (func(), error) {
+func applySetRecoveryRecipient(s *State, cmd Command, payload SetRecoveryRecipient) (func(), error) {
 	switch {
 	case !strings.HasPrefix(payload.Recipient, "age1"):
 		return nil, errors.New("the recovery key's recipient is no age key (age1...)")
 	case payload.Recipient == s.RecoveryRecipient:
 		return nil, errUnchanged
 	}
-	return func() { s.RecoveryRecipient = payload.Recipient }, nil
+	if err := s.checkCodeUnused(payload.Code); err != nil {
+		return nil, err
+	}
+	return func() {
+		s.useCode(payload.Code, cmd.At)
+		s.RecoveryRecipient = payload.Recipient
+	}, nil
+}
+
+// UsedCode names a recovery code a command uses (internal/recoverycode):
+// by its digest, so the log and the audit do not show a code that may
+// still be taken, and with when no agent takes it any more.
+type UsedCode struct {
+	Digest  string    `json:"digest"`
+	Expires time.Time `json:"expires"`
+}
+
+// ErrCodeUsed refuses a recovery code that was used already: whoever saw it
+// on a console or in a log must not use it after its user, which would
+// lock the user out with the user's own way back.
+var ErrCodeUsed = errors.New("the code was used already; the next quarter of an hour brings a new one")
+
+// usedCodeKept is how long a used code stays on the list after it
+// expired: an agent whose clock runs behind the leader's still takes it.
+const usedCodeKept = time.Hour
+
+// checkCodeUnused refuses a command without its code, or with one used
+// before.
+func (s *State) checkCodeUnused(code UsedCode) error {
+	if code.Digest == "" || code.Expires.IsZero() {
+		return errors.New("the command names no recovery code")
+	}
+	if _, used := s.UsedCodes[code.Digest]; used {
+		return ErrCodeUsed
+	}
+	return nil
+}
+
+// useCode records a code as used. The list grows only here, so here it
+// also drops the codes that expired more than usedCodeKept before the
+// command, by the command's time, so every agent drops the same.
+func (s *State) useCode(code UsedCode, at time.Time) {
+	maps.DeleteFunc(s.UsedCodes, func(_ string, expires time.Time) bool {
+		return at.Sub(expires) > usedCodeKept
+	})
+	s.UsedCodes[code.Digest] = code.Expires
 }
 
 // RemoveUser removes a user and revokes all their certificates.

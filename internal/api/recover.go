@@ -32,11 +32,12 @@ import (
 //  2. POST /v1/recover over TLS checked against that CA: the user, a new
 //     public key and the code. The agent checks the code, issues the
 //     certificate and commits recover-user, which revokes every other
-//     certificate of the user.
+//     certificate of the user and records the code as used: a code opens
+//     once, so whoever saw it cannot lock the user out with it after.
 //
 // Both come without a certificate, so the agent takes only so many tries
 // (limiter). POST /v1/recovery/rotate is the other use of a code: with the
-// user's certificate and the user's own code, a new recovery key.
+// user's certificate and the user's own code for it, a new recovery key.
 
 // RecoverOffer is the agent's answer to the first contact of a recovery.
 // It comes unchecked; the proofs make the CA trustworthy.
@@ -66,7 +67,7 @@ type RotateRequest struct {
 // errCodeRefused is the one answer to a code that does not open: a user
 // that does not exist gets it too, so the routes tell nobody which users
 // there are.
-var errCodeRefused = errors.New("the code does not fit: wrong, expired, or for another user")
+var errCodeRefused = errors.New("the code does not fit: wrong, expired, used already, or for another user")
 
 // RecoveringCluster is a cluster the CLI found and trusts: its CA proved it
 // knows the code root on a host made.
@@ -162,7 +163,7 @@ func (s *Server) recoverOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	offer := RecoverOffer{CACertificate: string(caPEM)}
-	for _, code := range recoverycode.Codes(key, user, time.Now()) {
+	for _, code := range recoverycode.Codes(key, recoverycode.ForRecover, user, time.Now()) {
 		offer.Proofs = append(offer.Proofs, pki.TrustProof(code[:], caPEM))
 	}
 	writeJSON(w, http.StatusOK, offer)
@@ -189,7 +190,7 @@ func (s *Server) recoverUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	valid, err := s.checkCode(request.User, code)
+	used, valid, err := s.checkCode(recoverycode.ForRecover, request.User, code)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -220,7 +221,9 @@ func (s *Server) recoverUser(w http.ResponseWriter, r *http.Request) {
 	// it, and the command's kind tells the audit that it was a recovery.
 	// No time here: the leader stamps its own (proposeHere).
 	cmd, err := state.NewCommand(state.KindRecoverUser, time.Time{}, state.UserActor(request.User),
-		state.RecoverUser{Name: request.User, Serial: pki.Serial(certificate), NotAfter: certificate.NotAfter})
+		state.RecoverUser{
+			Name: request.User, Serial: pki.Serial(certificate), NotAfter: certificate.NotAfter, Code: used,
+		})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -245,7 +248,7 @@ func (s *Server) rotateRecovery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	valid, err := s.checkCode(identityOf(r).Name, code)
+	used, valid, err := s.checkCode(recoverycode.ForRotate, identityOf(r).Name, code)
 	switch {
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, err)
@@ -258,14 +261,22 @@ func (s *Server) rotateRecovery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("the recovery key's recipient: %w", err))
 		return
 	}
-	s.write(w, r, state.KindSetRecoveryRecipient, state.SetRecoveryRecipient{Recipient: request.Recipient})
+	s.write(w, r, state.KindSetRecoveryRecipient,
+		state.SetRecoveryRecipient{Recipient: request.Recipient, Code: used})
 }
 
-// checkCode tells whether a code is the user's now.
-func (s *Server) checkCode(user string, code recoverycode.Code) (bool, error) {
+// checkCode tells whether a code is the user's for the use now and was not
+// used yet, and names it for the command that uses it. The state refuses
+// the command too if the code was used in the meantime, through another
+// agent.
+func (s *Server) checkCode(use recoverycode.Use, user string, code recoverycode.Code) (state.UsedCode, bool, error) {
 	key, err := s.config.Keys.Derive(recoverycode.Purpose)
 	if err != nil {
-		return false, err
+		return state.UsedCode{}, false, err
 	}
-	return recoverycode.Valid(key, user, code, time.Now()), nil
+	expires, valid := recoverycode.Valid(key, use, user, code, time.Now())
+	used := state.UsedCode{Digest: code.Digest(), Expires: expires}
+	var usedBefore bool
+	s.config.Cluster.Read(func(current *state.State) { _, usedBefore = current.UsedCodes[used.Digest] })
+	return used, valid && !usedBefore, nil
 }

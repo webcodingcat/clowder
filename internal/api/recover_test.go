@@ -35,14 +35,14 @@ func (c *testCluster) withRealCA() {
 	}
 }
 
-// code is what clowderd user recovery-code gives for a user now.
-func (c *testCluster) code(user string) recoverycode.Code {
+// code is what clowderd user recovery-code gives for a use and a user now.
+func (c *testCluster) code(use recoverycode.Use, user string) recoverycode.Code {
 	c.t.Helper()
 	key, err := c.apis[0].config.Keys.Derive(recoverycode.Purpose)
 	if err != nil {
 		c.t.Fatal(err)
 	}
-	return recoverycode.Make(key, user, time.Now())
+	return recoverycode.Make(key, use, user, time.Now())
 }
 
 func (c *testCluster) seed(host int) string {
@@ -64,7 +64,7 @@ func TestARecoveredUserIsBackAndTheOldCertificateIsOut(t *testing.T) {
 
 	// through the follower, which forwards recover-user to the leader
 	found, err := FindClusterByCode(context.Background(), []string{"127.0.0.1:1", cluster.seed(1)}, "alice",
-		cluster.code("alice"), testVersion)
+		cluster.code(recoverycode.ForRecover, "alice"), testVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +97,20 @@ func TestARecoveredUserIsBackAndTheOldCertificateIsOut(t *testing.T) {
 		last.Actor != "user/alice" {
 		t.Errorf("audit %+v", last)
 	}
+
+	// whoever saw the code must not lock alice out with it: the leader's
+	// state knows it was used, and so refuses the command of a follower
+	// that does not know it yet
+	found.seed = cluster.seed(0)
+	_, err = found.Recover(context.Background(), key.Public().(ed25519.PublicKey))
+	if statusOf(err) != http.StatusUnauthorized {
+		t.Errorf("the code once more: want 401, got %v", err)
+	}
+	found.seed = cluster.seed(1)
+	_, err = found.Recover(context.Background(), key.Public().(ed25519.PublicKey))
+	if statusOf(err) != http.StatusConflict || !strings.Contains(err.Error(), "used already") {
+		t.Errorf("the code once more through a follower behind the leader: want 409, got %v", err)
+	}
 }
 
 func TestTheRecoveryTellsNobodyWhichUsersThereAre(t *testing.T) {
@@ -104,11 +118,12 @@ func TestTheRecoveryTellsNobodyWhichUsersThereAre(t *testing.T) {
 	cluster.withRealCA()
 	// the offer for a user that does not exist proves the code as for one that does
 	if _, err := FindClusterByCode(context.Background(), []string{cluster.seed(0)}, "mallory",
-		cluster.code("mallory"), testVersion); err != nil {
+		cluster.code(recoverycode.ForRecover, "mallory"), testVersion); err != nil {
 		t.Fatalf("offer for an unknown user: %v", err)
 	}
 	if _, err := FindClusterByCode(context.Background(), []string{cluster.seed(0)}, "alice",
-		cluster.code("bob"), testVersion); err == nil || !strings.Contains(err.Error(), "cannot prove") {
+		cluster.code(recoverycode.ForRecover, "bob"), testVersion); err == nil ||
+		!strings.Contains(err.Error(), "cannot prove") {
 		t.Errorf("another user's code: %v", err)
 	}
 
@@ -123,10 +138,15 @@ func TestTheRecoveryTellsNobodyWhichUsersThereAre(t *testing.T) {
 		_, err := found.Recover(context.Background(), key.Public().(ed25519.PublicKey))
 		return err
 	}
-	unknown := tryRecover("mallory", cluster.code("mallory"))
-	wrong := tryRecover("alice", cluster.code("bob"))
+	unknown := tryRecover("mallory", cluster.code(recoverycode.ForRecover, "mallory"))
+	wrong := tryRecover("alice", cluster.code(recoverycode.ForRecover, "bob"))
 	if statusOf(unknown) != http.StatusUnauthorized || unknown.Error() != wrong.Error() {
 		t.Errorf("an unknown user (%v) and a wrong code (%v) must get the same answer", unknown, wrong)
+	}
+	// a code seen while alice rotated the recovery key gives no recovery
+	if rotating := tryRecover("alice", cluster.code(recoverycode.ForRotate, "alice")); statusOf(rotating) !=
+		http.StatusUnauthorized {
+		t.Errorf("alice's code to rotate: want 401, got %v", rotating)
 	}
 }
 
@@ -138,18 +158,24 @@ func TestOnlyTheCallersOwnCodeRotatesTheRecoveryKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	recipient := identity.Recipient().String()
+	code := cluster.code(recoverycode.ForRotate, "alice").String()
 
 	_, err = client.Post(context.Background(), "/v1/recovery/rotate", RotateRequest{Recipient: recipient})
 	if statusOf(err) != http.StatusBadRequest {
 		t.Errorf("without a code: want 400, got %v", err)
 	}
 	_, err = client.Post(context.Background(), "/v1/recovery/rotate",
-		RotateRequest{Recipient: recipient, Code: cluster.code("bob").String()})
+		RotateRequest{Recipient: recipient, Code: cluster.code(recoverycode.ForRotate, "bob").String()})
 	if statusOf(err) != http.StatusUnauthorized {
 		t.Errorf("with bob's code: want 401, got %v", err)
 	}
+	_, err = client.Post(context.Background(), "/v1/recovery/rotate",
+		RotateRequest{Recipient: recipient, Code: cluster.code(recoverycode.ForRecover, "alice").String()})
+	if statusOf(err) != http.StatusUnauthorized {
+		t.Errorf("with alice's code to recover: want 401, got %v", err)
+	}
 	if _, err := client.Post(context.Background(), "/v1/recovery/rotate",
-		RotateRequest{Recipient: recipient, Code: cluster.code("alice").String()}); err != nil {
+		RotateRequest{Recipient: recipient, Code: code}); err != nil {
 		t.Fatal(err)
 	}
 	var encryption Encryption
@@ -159,6 +185,16 @@ func TestOnlyTheCallersOwnCodeRotatesTheRecoveryKey(t *testing.T) {
 	if encryption.Recovery != recipient {
 		t.Errorf("recovery %s, want %s", encryption.Recovery, recipient)
 	}
+
+	another, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Post(context.Background(), "/v1/recovery/rotate",
+		RotateRequest{Recipient: another.Recipient().String(), Code: code})
+	if statusOf(err) != http.StatusUnauthorized {
+		t.Errorf("the same code once more: want 401, got %v", err)
+	}
 }
 
 func TestTheRecoveryTakesOnlySoManyTries(t *testing.T) {
@@ -166,7 +202,7 @@ func TestTheRecoveryTakesOnlySoManyTries(t *testing.T) {
 	cluster.withRealCA()
 	for try := range triesPerSender + 1 {
 		_, err := FindClusterByCode(context.Background(), []string{cluster.seed(0)}, "alice",
-			cluster.code("alice"), testVersion)
+			cluster.code(recoverycode.ForRecover, "alice"), testVersion)
 		switch {
 		case try < triesPerSender && err != nil:
 			t.Fatalf("try %d: %v", try+1, err)

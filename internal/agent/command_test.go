@@ -30,17 +30,25 @@ func TestTheRecoveryCodeComesFromTheDataKeyAlone(t *testing.T) {
 	if err := printRecoveryCode(&out, files, "alice", now); err != nil {
 		t.Fatal(err)
 	}
-	code, err := recoverycode.Parse(strings.SplitN(out.String(), "\n", 2)[0])
-	if err != nil {
-		t.Fatalf("output %q: %v", out.String(), err)
-	}
-	// what every agent checks it with
+	// what every agent checks them with
 	derived, err := key.Derive(recoverycode.Purpose)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !recoverycode.Valid(derived, "alice", code, now) {
-		t.Errorf("code %v does not fit", code)
+	uses := map[string]recoverycode.Use{
+		"clowder user recover alice --code ": recoverycode.ForRecover,
+		"clowder recovery rotate --code ":    recoverycode.ForRotate,
+	}
+	for command, use := range uses {
+		_, text, found := strings.Cut(out.String(), command)
+		text, _, _ = strings.Cut(text, "\n")
+		code, err := recoverycode.Parse(text)
+		if !found || err != nil {
+			t.Fatalf("no code for %q in %q: %v", command, out.String(), err)
+		}
+		if _, valid := recoverycode.Valid(derived, use, "alice", code, now); !valid {
+			t.Errorf("code %v for %s does not fit", code, use)
+		}
 	}
 	if err := printRecoveryCode(&out, files, "Alice Smith", now); err == nil {
 		t.Error("a name no user can have gave a code")

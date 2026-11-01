@@ -408,12 +408,24 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   (`clusterdir.Create`).
 - **A code from a host** gives access back (`internal/recoverycode`, `api/recover.go`): root
   on a host runs `clowderd user recovery-code <user>`, which reads only the data key, so it
-  works while the agent is down. The code is the first 80 bits of an HMAC over the user and
-  the quarter of an hour, with a key derived from the data key (`recoverycode.Purpose`), in
-  Crockford's base32: case, `O`/`0`, `I`/`L`/`1` and hyphens do not matter. Every agent
-  checks it alone, against the windows of the last 15 minutes and, in the last minute of
-  one, the next (a host's clock a little ahead); nothing is stored, and a code may be used
-  more than once while it lasts: whoever has one is root on a host anyway.
+  works while the agent is down. A code is the first 80 bits of an HMAC over its use
+  (`recoverycode.ForRecover`, `ForRotate`), the user and the quarter of an hour, with a key
+  derived from the data key (`recoverycode.Purpose`), in Crockford's base32: case,
+  `O`/`0`, `I`/`L`/`1` and hyphens do not matter. Every agent checks it alone, against the
+  windows of the last 15 minutes and, in the last minute of one, the next (a host's clock a
+  little ahead).
+- **A code opens once.** A code seen on a console or in a log would otherwise let whoever
+  saw it recover after the user, revoke the user's new certificate and take over. So
+  `recover-user` and `set-recovery-recipient` carry the code's digest
+  (`recoverycode.Code.Digest`, never the code: the log and the audit show the commands)
+  and when it expires, the end of the window after its own. The handler refuses a digest
+  that `State.UsedCodes` holds and records it otherwise. `useCode` drops the codes that
+  expired more than `usedCodeKept` before the command, by the command's `At`, as `revoke`
+  does. The agent looks in its own state first, so a used code gets the same 401 as a
+  wrong one; through a follower that has not seen the use yet, the leader's state refuses
+  it (409). Each use has its own code, so a user can recover and rotate the recovery key
+  in the same quarter of an hour, and a code seen while rotating gives no recovery. A
+  second recovery in the same window needs the next window's code.
 - **`user recover <user> --code`** (`cli/recover.go`) makes a key pair, then asks
   `GET /v1/recover/offer?user=` for the CA with a `pki.TrustProof` made with each code the
   agent takes, and trusts the CA only if one matches the code typed in
@@ -428,7 +440,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **Both routes come without a certificate,** so each agent takes at most `triesPerSender`
   tries a minute per sender and `triesInAll` in all, in memory (`api/limit.go`); then 429.
   A sender is its IPv4 address, or for IPv6 its /64.
-- **`recovery rotate --code`** needs the user's credentials and their own code: stolen
+- **`recovery rotate --code`** needs the user's credentials and their own code to rotate: stolen
   credentials alone cannot swap the recovery key. The CLI makes the new key and hands it
   over as the bootstrap does, then `POST /v1/recovery/rotate` commits
   `set-recovery-recipient`. Values encrypted afterwards are for the new key; `secret rekey`

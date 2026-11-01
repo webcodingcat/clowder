@@ -19,11 +19,11 @@ func newUser() *cobra.Command {
 	}
 	user.AddCommand(&cobra.Command{
 		Use:   "recovery-code <user>",
-		Short: "Print a code that gives a user access back (changes nothing)",
-		Long: "Prints a short code for clowder user recover (new credentials) and clowder recovery rotate\n" +
-			"(a new recovery key), valid for 15 to 30 minutes. It reads only the data key, so it works\n" +
-			"while the agent is down, and it does not know the users: a mistyped name gives a code\n" +
-			"that fits nowhere.",
+		Short: "Print the codes that give a user access back (changes nothing)",
+		Long: "Prints a short code for clowder user recover (new credentials) and one for clowder recovery\n" +
+			"rotate (a new recovery key), valid for 15 to 30 minutes and each once. It reads only the\n" +
+			"data key, so it works while the agent is down, and it does not know the users: a mistyped\n" +
+			"name gives codes that fit nowhere.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return printRecoveryCode(cmd.OutOrStdout(), Files{Dir: DefaultDir}, args[0], time.Now())
@@ -32,7 +32,8 @@ func newUser() *cobra.Command {
 	return user
 }
 
-// printRecoveryCode prints the user's code of now. Root on a host holds
+// printRecoveryCode prints the user's codes of now, one for each use, in
+// the commands that take them. Root on a host holds
 // every key of the cluster anyway, as with kubeadm kubeconfig user.
 func printRecoveryCode(out io.Writer, files Files, user string, now time.Time) error {
 	if err := pki.CheckUserName(user); err != nil {
@@ -46,7 +47,10 @@ func printRecoveryCode(out io.Writer, files Files, user string, now time.Time) e
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(out, "%s\n\nfor %s, valid for 15 to 30 minutes: clowder user recover %s --code <code>,\n"+
-		"or clowder recovery rotate --code <code>\n", recoverycode.Make(key, user, now), user, user)
+	_, err = fmt.Fprintf(out, "For %s, valid for 15 to 30 minutes, each code once:\n\n"+
+		"  clowder user recover %s --code %s\n"+
+		"  clowder recovery rotate --code %s\n",
+		user, user, recoverycode.Make(key, recoverycode.ForRecover, user, now),
+		recoverycode.Make(key, recoverycode.ForRotate, user, now))
 	return err
 }

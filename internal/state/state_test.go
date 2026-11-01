@@ -35,6 +35,12 @@ func addUser(name, serial string) AddUser {
 	return AddUser{Name: name, Serial: serial, NotAfter: testExpiry}
 }
 
+// recoveryCode is a code a recovery uses, by its digest; it expires half
+// an hour after testTime.
+func recoveryCode(digest string) UsedCode {
+	return UsedCode{Digest: digest, Expires: testTime.Add(30 * time.Minute)}
+}
+
 // cluster is a state under test with its next Raft index.
 type cluster struct {
 	t     *testing.T
@@ -319,7 +325,8 @@ func TestACertificateComesWithItsExpiry(t *testing.T) {
 	c := newCluster(t)
 	c.refuse(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"}, "no expiry")
 	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
-	c.refuse(KindRecoverUser, UserActor("alice"), RecoverUser{Name: "alice", Serial: "a2"}, "no expiry")
+	c.refuse(KindRecoverUser, UserActor("alice"), RecoverUser{Name: "alice", Serial: "a2", Code: recoveryCode("c1")},
+		"no expiry")
 	host := testHost(1)
 	host.CertificateNotAfter = time.Time{}
 	c.refuse(KindAddHost, LeaderActor, AddHost{Host: host}, "no expiry")
@@ -330,12 +337,15 @@ func TestARecoveredUserKeepsOnlyTheNewCertificate(t *testing.T) {
 	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
 	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a2"))
 	c.mustApply(KindAddUser, LeaderActor, addUser("bob", "b1"))
-	c.refuse(KindRecoverUser, UserActor("carol"), RecoverUser{Name: "carol", Serial: "c1", NotAfter: testExpiry},
-		"no user carol")
-	c.refuse(KindRecoverUser, UserActor("alice"), RecoverUser{Name: "alice", Serial: "b1", NotAfter: testExpiry},
-		"used already")
+	recovery := func(name, serial string) RecoverUser {
+		return RecoverUser{Name: name, Serial: serial, NotAfter: testExpiry, Code: recoveryCode("code")}
+	}
+	c.refuse(KindRecoverUser, UserActor("carol"), recovery("carol", "c1"), "no user carol")
+	c.refuse(KindRecoverUser, UserActor("alice"), recovery("alice", "b1"), "used already")
+	c.refuse(KindRecoverUser, UserActor("alice"),
+		RecoverUser{Name: "alice", Serial: "a3", NotAfter: testExpiry}, "no recovery code")
 
-	c.mustApply(KindRecoverUser, UserActor("alice"), RecoverUser{Name: "alice", Serial: "a3", NotAfter: testExpiry})
+	c.mustApply(KindRecoverUser, UserActor("alice"), recovery("alice", "a3"))
 	if serials := c.state.Users["alice"].Serials; len(serials) != 1 || !serials["a3"].Equal(testExpiry) {
 		t.Errorf("alice keeps only a3: %v", serials)
 	}
@@ -395,10 +405,63 @@ func TestANewRecoveryKeyReplacesTheOld(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindAddUser, LeaderActor,
 		AddUser{Name: "alice", Serial: "a1", NotAfter: testExpiry, First: true, RecoveryRecipient: "age1first"})
-	c.refuse(KindSetRecoveryRecipient, UserActor("alice"), SetRecoveryRecipient{Recipient: "AGE-SECRET-KEY-1X"}, "no age key")
-	c.mustApply(KindSetRecoveryRecipient, UserActor("alice"), SetRecoveryRecipient{Recipient: "age1second"})
+	c.refuse(KindSetRecoveryRecipient, UserActor("alice"),
+		SetRecoveryRecipient{Recipient: "AGE-SECRET-KEY-1X", Code: recoveryCode("code")}, "no age key")
+	c.refuse(KindSetRecoveryRecipient, UserActor("alice"), SetRecoveryRecipient{Recipient: "age1second"},
+		"no recovery code")
+	c.mustApply(KindSetRecoveryRecipient, UserActor("alice"),
+		SetRecoveryRecipient{Recipient: "age1second", Code: recoveryCode("code")})
 	if c.state.RecoveryRecipient != "age1second" {
 		t.Errorf("recovery recipient %q", c.state.RecoveryRecipient)
+	}
+}
+
+func TestARecoveryCodeOpensOnce(t *testing.T) {
+	c := newCluster(t)
+	c.mustApply(KindAddUser, LeaderActor,
+		AddUser{Name: "alice", Serial: "a1", NotAfter: testExpiry, First: true, RecoveryRecipient: "age1first"})
+	c.mustApply(KindRecoverUser, UserActor("alice"),
+		RecoverUser{Name: "alice", Serial: "a2", NotAfter: testExpiry, Code: recoveryCode("code")})
+	// whoever saw the code must not take the user's place with it
+	c.refuse(KindRecoverUser, UserActor("alice"),
+		RecoverUser{Name: "alice", Serial: "a3", NotAfter: testExpiry, Code: recoveryCode("code")}, "used already")
+	// a code for a recovery is the same for a new recovery key, and the other way round
+	c.refuse(KindSetRecoveryRecipient, UserActor("alice"),
+		SetRecoveryRecipient{Recipient: "age1second", Code: recoveryCode("code")}, "used already")
+	c.mustApply(KindSetRecoveryRecipient, UserActor("alice"),
+		SetRecoveryRecipient{Recipient: "age1second", Code: recoveryCode("another")})
+	c.refuse(KindRecoverUser, UserActor("alice"),
+		RecoverUser{Name: "alice", Serial: "a3", NotAfter: testExpiry, Code: recoveryCode("another")}, "used already")
+	if _, ok := c.state.Users["alice"].Serials["a2"]; !ok {
+		t.Error("a refused recovery revoked the certificate of the one before")
+	}
+}
+
+func TestAUsedCodeGoesAWhileAfterItExpired(t *testing.T) {
+	c := newCluster(t)
+	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
+	// a recovery at the command's time, not the clock's
+	recoverAt := func(at time.Time, serial, digest string) {
+		t.Helper()
+		code := UsedCode{Digest: digest, Expires: at.Add(30 * time.Minute)}
+		_, err := c.applyAt(at, KindRecoverUser, UserActor("alice"),
+			RecoverUser{Name: "alice", Serial: serial, NotAfter: testExpiry, Code: code})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	recoverAt(testTime, "a2", "first")
+	expires := c.state.UsedCodes["first"]
+	recoverAt(expires.Add(usedCodeKept), "a3", "second")
+	if _, kept := c.state.UsedCodes["first"]; !kept {
+		t.Error("the code went as soon as it expired; an agent whose clock runs behind still takes it")
+	}
+	recoverAt(expires.Add(usedCodeKept+time.Second), "a4", "third")
+	if _, kept := c.state.UsedCodes["first"]; kept {
+		t.Error("the code stays on the list long after it expired")
+	}
+	if len(c.state.UsedCodes) != 2 {
+		t.Errorf("the codes that did not expire went too: %v", c.state.UsedCodes)
 	}
 }
 

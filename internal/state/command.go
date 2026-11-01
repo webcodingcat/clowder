@@ -247,6 +247,9 @@ func (s *State) makeMaps() {
 	if s.Revoked == nil {
 		s.Revoked = map[string]Revocation{}
 	}
+	if s.UsedCodes == nil {
+		s.UsedCodes = map[string]time.Time{}
+	}
 	if s.Namespaces == nil {
 		s.Namespaces = map[string]*Namespace{}
 	}

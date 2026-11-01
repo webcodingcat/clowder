@@ -12,7 +12,7 @@ var testKey = []byte("a key derived from the data key")
 var windowStart = time.Unix(1_800_000_000/900*900, 0)
 
 func TestACodeIsTakenForFifteenToThirtyMinutes(t *testing.T) {
-	code := Make(testKey, "alice", windowStart)
+	code := Make(testKey, ForRecover, "alice", windowStart)
 	tests := []struct {
 		name  string
 		now   time.Time
@@ -27,28 +27,46 @@ func TestACodeIsTakenForFifteenToThirtyMinutes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := Valid(testKey, "alice", code, test.now); got != test.valid {
-				t.Errorf("valid %v, want %v", got, test.valid)
+			expires, valid := Valid(testKey, ForRecover, "alice", code, test.now)
+			if valid != test.valid {
+				t.Errorf("valid %v, want %v", valid, test.valid)
+			}
+			// the state keeps a used code until no agent takes it
+			if want := windowStart.Add(30 * time.Minute); valid && !expires.Equal(want) {
+				t.Errorf("expires %v, want %v", expires, want)
 			}
 		})
 	}
 }
 
-func TestACodeIsOneUsersWithOneKey(t *testing.T) {
-	code := Make(testKey, "alice", windowStart)
-	if Valid(testKey, "bob", code, windowStart) {
+func TestACodeIsOneUsersForOneUseWithOneKey(t *testing.T) {
+	code := Make(testKey, ForRecover, "alice", windowStart)
+	if _, valid := Valid(testKey, ForRecover, "bob", code, windowStart); valid {
 		t.Error("alice's code opens for bob")
 	}
-	if Valid([]byte("another cluster's key"), "alice", code, windowStart) {
+	if _, valid := Valid(testKey, ForRotate, "alice", code, windowStart); valid {
+		t.Error("the code to recover rotates the recovery key")
+	}
+	if _, valid := Valid([]byte("another cluster's key"), ForRecover, "alice", code, windowStart); valid {
 		t.Error("the code opens with another key")
 	}
-	if Make(testKey, "a1", windowStart) == Make(testKey, "a12", windowStart) {
+	if Make(testKey, ForRecover, "a1", windowStart) == Make(testKey, ForRecover, "a12", windowStart) {
 		t.Error("two users share a code")
 	}
 }
 
+func TestADigestNamesOneCode(t *testing.T) {
+	digest := Make(testKey, ForRecover, "alice", windowStart).Digest()
+	if digest != Make(testKey, ForRecover, "alice", windowStart.Add(time.Minute)).Digest() {
+		t.Error("the same code has two digests")
+	}
+	if digest == Make(testKey, ForRecover, "alice", windowStart.Add(Window)).Digest() {
+		t.Error("the next window's code has the same digest")
+	}
+}
+
 func TestCodesReadAsPeopleTypeThem(t *testing.T) {
-	code := Make(testKey, "alice", windowStart)
+	code := Make(testKey, ForRecover, "alice", windowStart)
 	text := code.String()
 	if len(text) != 19 || strings.Count(text, "-") != 3 {
 		t.Fatalf("code %q is not four groups of four", text)
@@ -78,12 +96,12 @@ func TestCodesReadAsPeopleTypeThem(t *testing.T) {
 
 func TestCodesFollowTheAcceptedWindows(t *testing.T) {
 	now := windowStart.Add(14*time.Minute + 30*time.Second)
-	codes := Codes(testKey, "alice", now)
-	if len(codes) != 3 || codes[1] != Make(testKey, "alice", now) {
+	codes := Codes(testKey, ForRecover, "alice", now)
+	if len(codes) != 3 || codes[1] != Make(testKey, ForRecover, "alice", now) {
 		t.Fatalf("codes %v: want the previous, current and next window", codes)
 	}
 	for _, code := range codes {
-		if !Valid(testKey, "alice", code, now) {
+		if _, valid := Valid(testKey, ForRecover, "alice", code, now); !valid {
 			t.Errorf("code %v of the offer is not taken", code)
 		}
 	}

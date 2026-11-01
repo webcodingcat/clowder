@@ -62,6 +62,9 @@ type State struct {
 	// Revoked are the revoked certificates by serial, each until a while
 	// after it expired (revoke).
 	Revoked map[string]Revocation `json:"revoked,omitempty"`
+	// UsedCodes are the recovery codes that were used, by digest, each with
+	// when it expires: a code opens once (useCode).
+	UsedCodes map[string]time.Time `json:"used_codes,omitempty"`
 	// Namespaces hold the other resources; the bootstrap makes names.Default.
 	Namespaces map[string]*Namespace `json:"namespaces,omitempty"`
 	Stacks     map[string]*Stack     `json:"stacks,omitempty"`  // names.ID: "<namespace>/<stack>"

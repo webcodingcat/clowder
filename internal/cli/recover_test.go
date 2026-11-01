@@ -15,10 +15,10 @@ import (
 	"github.com/webcodingcat/clowder/internal/recoverycode"
 )
 
-// codeOf is what clowderd user recovery-code gives startCluster's agent,
-// whose keys derive the purpose itself (ageKeys).
-func codeOf(user string) string {
-	return recoverycode.Make([]byte(recoverycode.Purpose), user, time.Now()).String()
+// codeOf is what clowderd user recovery-code gives startCluster's agent for
+// a use, whose keys derive the purpose itself (ageKeys).
+func codeOf(use recoverycode.Use, user string) string {
+	return recoverycode.Make([]byte(recoverycode.Purpose), use, user, time.Now()).String()
 }
 
 func TestAUserRecoversWithACodeFromAHost(t *testing.T) {
@@ -27,12 +27,19 @@ func TestAUserRecoversWithACodeFromAHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run(t, "--cluster", dir, "user", "recover", "alice", "--code", codeOf("bob")); err == nil ||
-		!strings.Contains(err.Error(), "cannot prove it knows the code") {
-		t.Errorf("bob's code: %v", err)
+	refused := map[string]string{
+		"bob's code":             codeOf(recoverycode.ForRecover, "bob"),
+		"alice's code to rotate": codeOf(recoverycode.ForRotate, "alice"),
+	}
+	for name, code := range refused {
+		if _, err := run(t, "--cluster", dir, "user", "recover", "alice", "--code", code); err == nil ||
+			!strings.Contains(err.Error(), "cannot prove it knows the code") {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 
-	out, err := run(t, "--cluster", dir, "user", "recover", "alice", "--code", strings.ToLower(codeOf("alice")))
+	out, err := run(t, "--cluster", dir, "user", "recover", "alice", "--code",
+		strings.ToLower(codeOf(recoverycode.ForRecover, "alice")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +61,7 @@ func TestAUserRecoversWithACodeFromAHost(t *testing.T) {
 func TestARecoveryWithoutAClusterDirectoryNeedsNameAndSeed(t *testing.T) {
 	startCluster(t)
 	t.Chdir(t.TempDir()) // no cluster.yaml here
-	_, err := run(t, "user", "recover", "alice", "--code", codeOf("alice"))
+	_, err := run(t, "user", "recover", "alice", "--code", codeOf(recoverycode.ForRecover, "alice"))
 	if ExitCode(err) != 2 || !strings.Contains(err.Error(), "--name and --seed") {
 		t.Errorf("want a wrong call that names --name and --seed, got %v", err)
 	}
@@ -63,13 +70,13 @@ func TestARecoveryWithoutAClusterDirectoryNeedsNameAndSeed(t *testing.T) {
 func TestOnlyYourOwnCodeRotatesTheRecoveryKey(t *testing.T) {
 	dir := startCluster(t)
 	keys := t.TempDir()
-	_, err := run(t, "--cluster", dir, "recovery", "rotate", "--code", codeOf("bob"),
+	_, err := run(t, "--cluster", dir, "recovery", "rotate", "--code", codeOf(recoverycode.ForRotate, "bob"),
 		"--recovery-out", filepath.Join(keys, "refused"))
 	if err == nil || !strings.Contains(err.Error(), "the old one still does") {
 		t.Errorf("bob's code: %v", err)
 	}
 
-	out, err := run(t, "--cluster", dir, "recovery", "rotate", "--code", codeOf("alice"),
+	out, err := run(t, "--cluster", dir, "recovery", "rotate", "--code", codeOf(recoverycode.ForRotate, "alice"),
 		"--recovery-out", filepath.Join(keys, "new"))
 	if err != nil {
 		t.Fatal(err)
