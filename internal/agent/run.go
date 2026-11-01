@@ -186,10 +186,10 @@ func newWorkers(files Files, host Host, credentials credentials, node *raftnode.
 	// Traefik come up again
 	dockerRestarted := func() {
 		w.runner.forgetApplied()
-		w.traefik.forget()
+		w.traefik.forgetApplied()
 	}
 	w.runner.supervisor = supervisor.New(parts.Docker, w.runner.rules, supervisor.DefaultBackoff,
-		dockerRestarted, w.traefik.look, logger)
+		dockerRestarted, w.traefik.passNow, logger)
 	w.traefik.supervisor = w.runner.supervisor
 	return w, nil
 }

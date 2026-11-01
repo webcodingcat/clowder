@@ -69,7 +69,7 @@ type traefikRunner struct {
 }
 
 // run keeps Traefik and its routes as this host needs them, until ctx ends:
-// at every change of the state, at once when a container changed (look),
+// at every change of the state, at once when a container changed (passNow),
 // and every reconcileInterval.
 func (t *traefikRunner) run(ctx context.Context) {
 	for {
@@ -88,23 +88,24 @@ func (t *traefikRunner) run(ctx context.Context) {
 	}
 }
 
-// look starts a pass at once; the supervisor calls it after each of
+// passNow starts a pass at once; the supervisor calls it after each of
 // Docker's events, so a container that turns unhealthy leaves its route
 // within seconds.
-func (t *traefikRunner) look() {
+func (t *traefikRunner) passNow() {
 	select {
 	case t.wake <- struct{}{}:
 	default: // a pass is due already
 	}
 }
 
-// forget makes Traefik come up again in a pass it starts at once; the
-// supervisor calls it when Docker restarted, which stopped every container.
-func (t *traefikRunner) forget() {
+// forgetApplied makes Traefik come up again in a pass it starts at once;
+// the supervisor calls it when Docker restarted, which stopped every
+// container.
+func (t *traefikRunner) forgetApplied() {
 	t.mu.Lock()
 	t.cameUp = [32]byte{}
 	t.mu.Unlock()
-	t.look()
+	t.passNow()
 }
 
 // pass writes the certificates and the routes, then runs compose up when

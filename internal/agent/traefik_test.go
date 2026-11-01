@@ -98,7 +98,7 @@ func TestTraefikComesUpWithRoutesToTheContainersThatMayTakeRequests(t *testing.T
 	if ups := fake.count(up); ups != 1 {
 		t.Errorf("Traefik came up %d times, want once", ups)
 	}
-	traefik.forget() // Docker restarted
+	traefik.forgetApplied() // Docker restarted
 	if err := traefik.pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestARouteFollowsItsContainersAtOnce(t *testing.T) {
 	fake.mu.Lock()
 	fake.details["healthy"] = docker.Details{Running: true, Health: "unhealthy"}
 	fake.mu.Unlock()
-	traefik.look() // the supervisor saw health_status: unhealthy
+	traefik.passNow() // the supervisor saw health_status: unhealthy
 	waitForRoutes(t, traefik, func(routes string) bool { return !strings.Contains(routes, "172.18.0.2") })
 }
 
