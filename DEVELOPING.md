@@ -68,7 +68,7 @@ step names the file and function to read; the package's section explains the rul
 2. **Any agent takes the request.** `api/resources.go` `applyResources` turns each
    resource into a `put-resource` command (`putCommand`): it reads the spec strictly, and
    opens a secret's value with the cluster's key and seals it.
-3. **The leader decides.** `decide` hands the commands to the leader
+3. **The leader decides.** `api/resources.go` `decide` hands the commands to the leader
    (`internalChanges` on a follower). `runChanges` tries each on a copy of the state and
    proposes only those that change something.
 4. **The state applies.** `state/resources.go` `applyPutResource` checks who may and whose

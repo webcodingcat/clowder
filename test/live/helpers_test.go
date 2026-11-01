@@ -174,7 +174,16 @@ func clusterDir() string { return filepath.Join(workDir, "cluster") }
 // and a config directory of the test's own for the credentials, so a run
 // neither finds nor overwrites those of the developer.
 func cliEnvironment() []string {
-	return append(os.Environ(), "CLOWDER_CLUSTER="+clusterDir(), "XDG_CONFIG_HOME="+filepath.Join(workDir, "config"))
+	return append(os.Environ(), "CLOWDER_CLUSTER="+clusterDir(), "XDG_CONFIG_HOME="+configDir())
+}
+
+func configDir() string { return filepath.Join(workDir, "config") }
+
+// credentialsFile is where the CLI keeps the test's credentials for the
+// cluster live, as clusterdir.CredentialsPath lays it out below the config
+// directory.
+func credentialsFile() string {
+	return filepath.Join(configDir(), "clowder", "clusters", "live", "credentials.yaml")
 }
 
 // stackDir is the directory of a stack's resources: outside the cluster

@@ -15,7 +15,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// storeStack is the stack of step 23 in docs/live-tests.md: db at critical
+// storeStack is the stack of step 25 in docs/live-tests.md: db at critical
 // (900), app at the stack's high (700) and depending on db, cache at low
 // (200); each reserves 200M.
 var storeStack = document(resource.KindStack, "store", `priority: high

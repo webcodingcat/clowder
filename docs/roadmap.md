@@ -9,14 +9,15 @@ clowder is built in phases; each ends with live tests on HLab
 | 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | done, passes the live tests |
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done, passes the live tests |
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
-| 1d | encrypted values (`!secret`), access and recovery, still on one host | in progress: values in `cluster.yaml` and Secrets, `secret encrypt`, `rekey`, `decrypt`, access back with a code from a host (`user recover`, `recovery rotate`), SOPS gone; next the live tests |
+| 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
 | 2 | three hosts: replication, failover with fencing | |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
-Phase 1c made namespaces, volumes, secrets and stacks resources in the state, the API,
-the agent and the CLI (`apply`, `get` with `--watch`, `delete`, `stack restart`). Phase 1d
-is under way; phase 2 follows it.
+Phase 1d replaced SOPS with values of their own: tagged `!secret` in `cluster.yaml` and in
+Secrets, encrypted for the cluster and the recovery key (`secret encrypt`, `rekey`,
+`decrypt`), with the credentials in the user's config directory and access back through a
+code from a host (`user recover`, `recovery rotate`). Phase 2 is next: three hosts.
 
 Until `v1.0.0`, the state and `cluster.yaml` may change between releases without a way
 to upgrade a running cluster.

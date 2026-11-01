@@ -127,6 +127,8 @@ func TestOneHost(t *testing.T) {
 		{"a stack runs from a private registry with volumes and secrets", func(t *testing.T) { runStack(t, server) }},
 		{"the same files again change nothing", func(t *testing.T) { applyAgainChangesNothing(t, server) }},
 		{"a dry run makes nothing", func(t *testing.T) { dryRunMakesNothing(t, server) }},
+		{"lost credentials come back with a code from the host", func(t *testing.T) { recoverAccess(t, server) }},
+		{"the recovery key changes only with a code", func(t *testing.T) { rotateRecoveryKey(t, server) }},
 		{"a restart recreates the stack, and the watch sees it", func(t *testing.T) {
 			restartRecreatesAndTheWatchSeesIt(t, server)
 		}},
@@ -187,9 +189,7 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(bootstrapped.Encrypted["join_keys[0]"], tofu.BootstrapKey.Value) {
-		t.Fatal("cluster.yaml has the bootstrap key in clear")
-	}
+	checkNothingPersonal(t, tofu.BootstrapKey.Value)
 
 	// the module's part of cluster.yaml, read strictly into the real type, so a
 	// renamed field fails here and not only in the cluster
@@ -214,11 +214,18 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	}
 	setClusterSecrets(t, map[string]string{"hoster.token": os.Getenv("HCLOUD_TOKEN"), registryPassword: password})
 	writeConfig(t, config, bootstrapped.Encrypted)
+	checkNothingPersonal(t, tofu.BootstrapKey.Value, os.Getenv("HCLOUD_TOKEN"), password)
 
 	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "never applied") {
 		t.Errorf("diff before the first apply:\n%s", diff)
 	}
 	mustClowder(t, "cluster", "apply")
+	// another token is named, its value not
+	setClusterSecrets(t, map[string]string{"hoster.token": "another token"})
+	writeConfig(t, config, bootstrapped.Encrypted)
+	if diff := mustClowder(t, "cluster", "diff"); diff != "the secret hoster.token differs\n" {
+		t.Errorf("diff after the token changed:\n%s", diff)
+	}
 	// encrypted anew, the same token is no change
 	setClusterSecrets(t, map[string]string{"hoster.token": os.Getenv("HCLOUD_TOKEN")})
 	writeConfig(t, config, bootstrapped.Encrypted)
@@ -228,6 +235,39 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	status := mustClowder(t, "cluster", "status")
 	if strings.Contains(status, "leader none") {
 		t.Errorf("the cluster has no leader:\n%s", status)
+	}
+}
+
+// checkNothingPersonal checks what the bootstrap leaves where a repository
+// would hold it: cluster.yaml alone in the cluster directory, none of the
+// values in clear; the credentials are in the user's config directory, for
+// the user alone.
+func checkNothingPersonal(t *testing.T, values ...string) {
+	t.Helper()
+	entries, err := os.ReadDir(clusterDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != clusterdir.ConfigFile {
+			t.Errorf("the cluster directory has %s", entry.Name())
+		}
+	}
+	config, err := os.ReadFile(filepath.Join(clusterDir(), clusterdir.ConfigFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, value := range values {
+		if strings.Contains(string(config), value) {
+			t.Errorf("cluster.yaml has value %d in clear", index)
+		}
+	}
+	credentials, err := os.Stat(credentialsFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := credentials.Mode().Perm(); mode != 0o600 {
+		t.Errorf("the credentials have the mode %o, want 600", mode)
 	}
 }
 
@@ -259,22 +299,21 @@ var (
 )
 
 // applyShop writes the stack's resources and secrets and applies them, each
-// secret encrypted anew (secret encrypt): password in a file of the stack's
-// directory, api-token on stdin. Then it waits until the stack's generation
-// runs with these secrets.
+// secret encrypted anew (secret encrypt): password in the stack's file,
+// api-token on stdin. Then it waits until the stack's generation runs with
+// these secrets.
 func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 	t.Helper()
 	if err := os.MkdirAll(stackDir("shop"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	before := stackInfo(t, "shop").generation // 0 before the first apply
+	// the file starts with the stack and its volumes; the password after
+	// them is encrypted anew each time
 	previous, _ := os.ReadFile(stackFile("shop"))
-	specChanged := before == 0 || string(previous) != shopStack(greeting)
-	if err := os.WriteFile(stackFile("shop"), []byte(shopStack(greeting)), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	specChanged := before == 0 || !strings.HasPrefix(string(previous), shopStack(greeting))
 	password := encryptSecret(t, "password", secrets["password"])
-	if err := os.WriteFile(filepath.Join(stackDir("shop"), "password.yaml"), []byte(password), 0o644); err != nil {
+	if err := os.WriteFile(stackFile("shop"), []byte(shopStack(greeting)+"---\n"+password), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	token := encryptSecret(t, "api-token", secrets["api-token"])
@@ -319,14 +358,16 @@ func runStack(t *testing.T, server host) {
 	server.must(t, "lvs --noheadings -o lv_name vg-fast | grep -qw "+data)
 	server.must(t, "lvs --noheadings -o lv_name vg-bulk | grep -qw "+scratch)
 	server.must(t, "drbdsetup status | grep -qw "+data)
-	rekeyAndDecrypt(t)
+	rekeyAndDecrypt(t, server, filepath.Join(workDir, "recovery-key"))
 }
 
 // rekeyAndDecrypt encrypts the values of the stack's files and of
 // cluster.yaml anew through the cluster, which changes nothing the cluster
-// keeps, and reads a value back with the recovery key, as in an emergency.
-func rekeyAndDecrypt(t *testing.T) {
+// keeps and recreates no container, and reads a value back with the
+// recovery key, as in an emergency.
+func rekeyAndDecrypt(t *testing.T, server host, recoveryKey string) {
 	t.Helper()
+	before := shopContainers(t, server)
 	mustClowder(t, "secret", "rekey", "-f", stackDir("shop"))
 	mustClowder(t, "secret", "rekey", "-f", clusterDir())
 	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "nothing to apply") {
@@ -335,19 +376,26 @@ func rekeyAndDecrypt(t *testing.T) {
 	if out := mustClowder(t, "apply", "-f", stackDir("shop")); !strings.Contains(out, "Secret default/password: unchanged") {
 		t.Errorf("the stack's files encrypted anew:\n%s", out)
 	}
-	out := mustClowder(t, "secret", "decrypt", "--identity", filepath.Join(workDir, "recovery-key"),
-		"-f", filepath.Join(stackDir("shop"), "password.yaml"))
+	checkUnchanged(t, before, shopContainers(t, server))
+	out := mustClowder(t, "secret", "decrypt", "--identity", recoveryKey, "-f", stackFile("shop"))
 	if want := "default/password\t" + firstSecrets["password"] + "\n"; out != want {
 		t.Errorf("decrypt: %q, want %q", out, want)
 	}
 }
 
 // refuseSecretsOutOfPlace applies what the cluster must refuse: a Secret in
-// clear on stdin, and a value of cluster.yaml (the hoster's token) copied
-// into a Secret, which a container would then read.
+// clear, in a file and on stdin, and a value of cluster.yaml (the hoster's
+// token) copied into a Secret, which a container would then read.
 func refuseSecretsOutOfPlace(t *testing.T) {
 	t.Helper()
 	clear := "apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: copied}\nspec: {value: s3cret}\n"
+	clearFile := filepath.Join(workDir, "clear.yaml")
+	if err := os.WriteFile(clearFile, []byte(clear), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clowder("apply", "-f", clearFile); err == nil || !strings.Contains(err.Error(), "write its value encrypted") {
+		t.Errorf("a Secret in clear in a file: %v", err)
+	}
 	if _, err := clowderWithInput(strings.NewReader(clear), "apply", "-f", "-"); err == nil ||
 		!strings.Contains(err.Error(), "write its value encrypted") {
 		t.Errorf("a Secret in clear on stdin: %v", err)
