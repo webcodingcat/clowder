@@ -145,6 +145,9 @@ loops that talk to the world outside.
   from `report-host`). After a change of leader they start again, so a new alert comes a
   little later rather than wrongly; one that is open stays until the loop that holds its
   condition has looked (`Conditions.Seen`). An agent that leads no more forgets them.
+- `wanted_test.go` and `conditions_test.go` check `wantedAlerts` and `Conditions` on a
+  state in memory: the thresholds, how long a condition must last, what keeps an open
+  alert; `alerts_test.go` checks the loop: delivery, retries and channels.
 
 | Alert | Severity | Raised | Resolved |
 |---|---|---|---|

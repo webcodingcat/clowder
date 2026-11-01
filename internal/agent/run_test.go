@@ -156,12 +156,14 @@ func (c *calls) waitFor(t *testing.T, line string) {
 }
 
 // fakeStorage stands in for the storage driver: every pool has 100 GiB,
-// dataPercent full, unless reading it fails (poolFails).
+// dataPercent full, unless reading it fails (poolFails). A trim fails while
+// trimFails is set.
 type fakeStorage struct {
 	calls
 	dir         string
 	dataPercent float64
 	poolFails   bool
+	trimFails   bool
 }
 
 func (f *fakeStorage) Ensure(_ context.Context, volume storage.Volume) error {
@@ -174,7 +176,19 @@ func (f *fakeStorage) Remove(_ context.Context, volume storage.Volume) error {
 	return nil
 }
 
-func (f *fakeStorage) Trim(context.Context, []storage.Volume) error { return nil }
+func (f *fakeStorage) Trim(_ context.Context, volumes []storage.Volume) error {
+	var lvs []string
+	for _, volume := range volumes {
+		lvs = append(lvs, volume.LV)
+	}
+	f.add("trim %s", strings.Join(lvs, " "))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.trimFails {
+		return errors.New("fstrim timed out")
+	}
+	return nil
+}
 
 func (f *fakeStorage) PoolUsage(context.Context, string) (int64, float64, float64, error) {
 	f.mu.Lock()

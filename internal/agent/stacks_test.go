@@ -507,26 +507,6 @@ func secretsLabel(t *testing.T, runner *stackRunner) string {
 	return label
 }
 
-func TestSecretLabelsAreKeyedAndUnambiguous(t *testing.T) {
-	digests := map[string]string{"a": "bc", "ab": "c", "x": "1"}
-	label := secretLabel([]byte("key"), digests, []string{"a", "x"})
-	if label != secretLabel([]byte("key"), digests, []string{"x", "a"}) {
-		t.Error("the order of the names changed the label")
-	}
-	for what, other := range map[string]string{
-		"another key":                    secretLabel([]byte("other"), digests, []string{"a", "x"}),
-		"another digest":                 secretLabel([]byte("key"), map[string]string{"a": "bc", "x": "2"}, []string{"a", "x"}),
-		"the same bytes split elsewhere": secretLabel([]byte("key"), digests, []string{"ab", "x"}),
-	} {
-		if other == label {
-			t.Errorf("%s gave the same label", what)
-		}
-	}
-	if strings.Contains(label, "bc") || len(label) != 64 {
-		t.Errorf("label %q", label)
-	}
-}
-
 func TestComposePsOutputIsRead(t *testing.T) {
 	containers, err := parsePs(`{"Service":"app","State":"running","Health":"healthy","Status":"Up 1 minute"}` + "\n" +
 		`{"Service":"db","State":"exited","Health":"","Status":"Exited (1)"}` + "\n")

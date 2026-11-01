@@ -2,7 +2,6 @@ package pki
 
 import (
 	"crypto/ed25519"
-	"crypto/tls"
 	"crypto/x509"
 	"net/netip"
 	"strings"
@@ -57,6 +56,12 @@ func TestVerifyTellsUsersAndHostsApart(t *testing.T) {
 	identity, err = Verify(ca.Certificate, host, notRevoked, testTime)
 	if err != nil || identity.Role != RoleHost || identity.HostID != 2 || identity.Name != "host-2" {
 		t.Errorf("host: %+v, %v", identity, err)
+	}
+	if err := host.VerifyHostname("10.77.0.3"); err != nil {
+		t.Errorf("the host certificate is not valid for the host's address: %v", err)
+	}
+	if err := host.VerifyHostname("10.9.9.9"); err == nil {
+		t.Error("the host certificate is valid for an address it does not have")
 	}
 }
 
@@ -148,71 +153,5 @@ func TestTrustProofNeedsTheBootstrapKey(t *testing.T) {
 	}
 	if CheckTrustProof([]byte("bootstrap"), newTestCA(t).CertificatePEM(), proof) {
 		t.Error("the proof checks for another CA")
-	}
-}
-
-// TestHostsTalkMutualTLS runs a TLS handshake between two hosts, both sides
-// checking the other's certificate against the CA, as the agents will.
-func TestHostsTalkMutualTLS(t *testing.T) {
-	// TLS checks against the real clock
-	ca, err := NewCA("prod", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := netip.MustParseAddr("127.0.0.1")
-	tlsCertificate := func(id int) tls.Certificate {
-		key, certificate := issued(t, func(public ed25519.PublicKey) ([]byte, error) {
-			return ca.IssueHost(public, id, []netip.Addr{address}, time.Now())
-		})
-		return tls.Certificate{Certificate: [][]byte{certificate.Raw}, PrivateKey: key, Leaf: certificate}
-	}
-	roots := x509.NewCertPool()
-	roots.AddCert(ca.Certificate)
-
-	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
-		Certificates: []tls.Certificate{tlsCertificate(0)},
-		ClientCAs:    roots,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		MinVersion:   tls.VersionTLS13,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = listener.Close() }()
-	peer := make(chan Identity, 1)
-	go func() {
-		connection, err := listener.Accept()
-		if err != nil {
-			peer <- Identity{}
-			return
-		}
-		defer func() { _ = connection.Close() }()
-		tlsConnection := connection.(*tls.Conn)
-		if err := tlsConnection.Handshake(); err != nil {
-			peer <- Identity{}
-			return
-		}
-		identity, _ := Verify(ca.Certificate, tlsConnection.ConnectionState().PeerCertificates[0], notRevoked, time.Now())
-		peer <- identity
-	}()
-
-	connection, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{
-		Certificates: []tls.Certificate{tlsCertificate(1)},
-		RootCAs:      roots,
-		MinVersion:   tls.VersionTLS13,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = connection.Close() }()
-	if err := connection.Handshake(); err != nil {
-		t.Fatal(err)
-	}
-	if got := <-peer; got.HostID != 1 || got.Role != RoleHost {
-		t.Errorf("the server saw %+v", got)
-	}
-	server := connection.ConnectionState().PeerCertificates[0]
-	if err := server.VerifyHostname("10.9.9.9"); err == nil {
-		t.Error("the host certificate is valid for an address it does not have")
 	}
 }

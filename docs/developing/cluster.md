@@ -191,6 +191,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   the revoked serials from the state, which keeps each until a while after it expired.
 - `TrustProof` (HMAC-SHA256 with the bootstrap key over the CA certificate) is how a CLI or a
   joining host trusts the CA on first contact.
+- `tls_test.go` puts both TLS configs before every peer they must refuse: none, a user, a
+  host of another CA, a stranger showing a host's certificate behind its own, a revoked, an
+  expired and a not yet valid host; and runs handshakes on 127.0.0.1.
 
 ## Raft (`internal/raftnode`) and the data key (`internal/datakey`)
 

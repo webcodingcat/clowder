@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -16,86 +15,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/notify"
 	"github.com/webcodingcat/clowder/internal/state"
 )
-
-func TestAThresholdRaisesAtItsValueAndClearsOnlyBelowItsClear(t *testing.T) {
-	open := func(severity string) *state.Alert { return &state.Alert{Severity: severity} }
-	for _, test := range []struct {
-		value int
-		open  *state.Alert
-		want  string // "" for no alert
-	}{
-		{79, nil, ""},
-		{80, nil, clusterspec.SeverityWarning},
-		{77, open(clusterspec.SeverityWarning), clusterspec.SeverityWarning}, // hovers at the threshold: stays
-		{74, open(clusterspec.SeverityWarning), ""},
-		{95, open(clusterspec.SeverityWarning), clusterspec.SeverityCritical},
-		{91, open(clusterspec.SeverityCritical), clusterspec.SeverityCritical},
-		{89, open(clusterspec.SeverityCritical), clusterspec.SeverityWarning}, // back to warning
-		{76, open(clusterspec.SeverityCritical), clusterspec.SeverityWarning},
-	} {
-		got, _ := leveled(test.value, test.open, poolLevels)
-		if got != test.want {
-			t.Errorf("%d %% with %+v open: %q, want %q", test.value, test.open, got, test.want)
-		}
-	}
-}
-
-func TestConditionsRaiseAlertsOnlyOnceTheyLasted(t *testing.T) {
-	current := &state.State{
-		Hosts: map[state.HostID]*state.Host{0: {
-			ID: 0, Name: "node0", Phase: state.Active, DockerDown: true, RootUsedPercent: 91,
-			Pools: map[string]state.Pool{"vg/thin": {SizeBytes: 1, DataPercent: 96, MetadataPercent: 10}},
-		}},
-		Stacks: map[string]*state.Stack{
-			"default/shop": {
-				Namespace: "default", Name: "shop", WaitReason: "no room", WaitingSince: time.Now().Add(-6 * time.Minute),
-			},
-			"default/blog": {
-				Namespace: "default", Name: "blog", WaitReason: "no room", WaitingSince: time.Now().Add(-time.Minute),
-			},
-		},
-	}
-	conditions := NewConditions()
-	conditions.Hold(dockerDownKey(0), true)
-	conditions.Hold(ingressNotHeld, true)
-	conditions.Hold(overCapacityKey(0), true)
-	keys := func(now time.Time) []string {
-		var keys []string
-		for key, alert := range wantedAlerts(current, conditions, now) {
-			keys = append(keys, key+"="+alert.Severity)
-		}
-		slices.Sort(keys)
-		return keys
-	}
-	soon := fmt.Sprint(keys(time.Now()))
-	want := "[over-capacity/node0=warning pool-use/node0/vg/thin/data=critical root-use/node0=warning stack-waiting/default/shop=warning]"
-	if soon != want {
-		t.Errorf("at once %s, want %s", soon, want)
-	}
-	later := keys(time.Now().Add(6 * time.Minute))
-	for _, key := range []string{"docker-down/node0=critical", "ingress-not-held=critical", "stack-waiting/default/blog=warning"} {
-		if !slices.Contains(later, key) {
-			t.Errorf("no %s after six minutes: %v", key, later)
-		}
-	}
-}
-
-func TestACertificateNotRenewedRaisesAnAlert(t *testing.T) {
-	now := time.Now()
-	current := &state.State{Certificates: map[string]*state.Certificate{
-		// 90 days, 30 days' window: alert with less than 15 days left
-		"old.example.com":   {Domain: "old.example.com", NotBefore: now.Add(-80 * 24 * time.Hour), NotAfter: now.Add(10 * 24 * time.Hour)},
-		"fresh.example.com": {Domain: "fresh.example.com", NotBefore: now.Add(-70 * 24 * time.Hour), NotAfter: now.Add(20 * 24 * time.Hour)},
-	}}
-	wanted := wantedAlerts(current, NewConditions(), now)
-	if _, ok := wanted["certificate-not-renewed/old.example.com"]; !ok || len(wanted) != 1 {
-		t.Errorf("alerts %v", wanted)
-	}
-	current.Config.Spec.ACME.RenewBefore = "100d"
-	if _, ok := wantedAlerts(current, NewConditions(), now)["renew-before-ignored"]; !ok {
-		t.Error("a renew_before longer than the lifetime raised no alert")
-	}
-}
 
 // fakeChannel keeps what it got; it fails while failing is set.
 type fakeChannel struct {

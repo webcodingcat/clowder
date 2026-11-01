@@ -98,7 +98,11 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   generation, a volume that outlives its stack, a volume that passes to the next stack only
   once the old one stopped (and waits while a stop fails), secrets written, changed and
   removed, the label changing with a secret, the secrets the containers came up with
-  reported. That docker compose fails on a missing secret file and
+  reported. `secrets_test.go` and `volumes_test.go` run the same way: a secret that does
+  not open keeps its stack down, only changed secret files are replaced, and a stack's
+  secrets go only once its containers stopped; each copy recorded once, a record that does
+  not read left alone, the weekly trim across restarts. That docker compose fails on a
+  missing secret file and
   recreates exactly the containers that changed is for the live tests: CI has no Docker
   daemon.
 
