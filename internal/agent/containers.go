@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/webcodingcat/clowder/internal/api"
-	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/supervisor"
@@ -20,21 +19,17 @@ import (
 // logIn logs Docker in to each private registry whose login changed.
 func (r *stackRunner) logIn(ctx context.Context, desired desiredState) {
 	for _, registry := range slices.Sorted(maps.Keys(desired.registries)) {
-		opened, err := r.open(desired.registries[registry])
+		login := desired.registries[registry]
+		password, err := r.open(login.Password)
 		if err != nil {
-			r.logger.Error("open a registry login", "registry", registry, "error", err)
+			r.logger.Error("open a registry's password", "registry", registry, "error", err)
 			continue
 		}
-		hash := sha256.Sum256(opened)
+		hash := sha256.Sum256([]byte(login.Username + "\n" + string(password)))
 		if r.logins[registry] == hash {
 			continue
 		}
-		var login clusterdir.RegistryLogin
-		if err := json.Unmarshal(opened, &login); err != nil {
-			r.logger.Error("read a registry login", "registry", registry, "error", err)
-			continue
-		}
-		if err := r.docker.Login(ctx, registry, login.Username, login.Password); err != nil {
+		if err := r.docker.Login(ctx, registry, login.Username, string(password)); err != nil {
 			r.logger.Error("log in to a registry", "registry", registry, "error", err)
 			continue
 		}

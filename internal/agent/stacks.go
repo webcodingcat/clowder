@@ -100,7 +100,7 @@ type desiredState struct {
 	volumes    map[string]*state.Volume
 	secrets    map[string]*state.Secret
 	hostNames  map[state.HostID]string
-	registries map[string]state.Sealed
+	registries map[string]state.RegistryLogin
 	// retired are the copies the cluster gave up, on any host
 	retired []state.RetiredCopy
 }
@@ -117,7 +117,7 @@ func readDesired(cluster stateReader, self state.HostID) (desiredState, error) {
 	}
 	desired := desiredState{
 		config: copied.Config.Spec, stacks: map[string]*state.Stack{}, volumes: copied.Volumes,
-		secrets: copied.Secrets, hostNames: map[state.HostID]string{}, registries: copied.Registries,
+		secrets: copied.Secrets, hostNames: map[state.HostID]string{}, registries: copied.RegistryLogins(),
 		retired: copied.Retired,
 	}
 	for _, stack := range copied.Stacks {

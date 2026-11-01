@@ -2,6 +2,7 @@ package state
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -210,6 +211,42 @@ func TestSecretsChangeByDigestWithinTheirLimits(t *testing.T) {
 	}
 	c.refuse(KindPutResource, UserActor("alice"), put("d", resource.MaxSecretBytes, "d"),
 		"the secrets of namespace default would be larger than 262144 bytes")
+}
+
+func TestTheCountOfSecretsHoldsForResourcesAndClusterYAMLAlike(t *testing.T) {
+	c := newCluster(t)
+	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	// cluster.yaml's one value and 999 resources make the 1000 allowed
+	for index := range resource.MaxClusterSecrets - 1 {
+		name := fmt.Sprintf("s%d", index)
+		c.mustApply(KindPutResource, UserActor("alice"),
+			putResource(resource.KindSecret, "default", name, SealedSecret{Value: sealedOf(1), Digest: name}))
+	}
+	c.refuse(KindPutResource, UserActor("alice"),
+		putResource(resource.KindSecret, "default", "one-more", SealedSecret{Value: sealedOf(1), Digest: "d"}),
+		"the cluster would have 1001 secrets, more than 1000")
+	c.refuse(KindApplyConfig, UserActor("alice"),
+		ApplyConfig{Spec: testConfig(), Secrets: testSecrets(), JoinKeys: []Sealed{sealedOf(16)}},
+		"cluster.yaml: the cluster would have 1001 secrets")
+}
+
+func TestClusterYAMLsValuesCountTowardsTheClustersSize(t *testing.T) {
+	c := newCluster(t)
+	// 64 values of 64 KiB are the 4 MiB the cluster may hold
+	secrets := map[string]Sealed{"hcloud-token": sealedOf(resource.MaxSecretBytes)}
+	for index := range 62 {
+		secrets[fmt.Sprintf("extra-%d", index)] = sealedOf(resource.MaxSecretBytes)
+	}
+	full := ApplyConfig{Spec: testConfig(), Secrets: secrets, JoinKeys: []Sealed{sealedOf(resource.MaxSecretBytes)}}
+	c.mustApply(KindApplyConfig, UserActor("alice"), full)
+	full.Registries = map[string]RegistryLogin{"ghcr.io": {Username: "robot", Password: sealedOf(1)}}
+	c.refuse(KindApplyConfig, UserActor("alice"), full, "the secrets of the cluster would be larger than 4194304 bytes")
+	c.refuse(KindPutResource, UserActor("alice"),
+		putResource(resource.KindSecret, "default", "token", SealedSecret{Value: sealedOf(1), Digest: "d"}),
+		"secret default/token: the secrets of the cluster would be larger")
+	secrets["hcloud-token"] = sealedOf(resource.MaxSecretBytes + 1)
+	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: secrets},
+		"a value of cluster.yaml is larger than 65536 bytes")
 }
 
 func TestClearSizeUndoesWhatSealingAdds(t *testing.T) {

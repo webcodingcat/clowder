@@ -12,14 +12,44 @@ import (
 // applied. JoinKeys is the whole list of valid bootstrap keys: a key left
 // out is invalid from now on.
 type ApplyConfig struct {
-	Hash       string             `json:"hash"`
-	Spec       clusterspec.Config `json:"spec"`
-	Secrets    map[string]Sealed  `json:"secrets"`
-	JoinKeys   []Sealed           `json:"join_keys"`
-	Registries map[string]Sealed  `json:"registries"`
+	Hash       string                   `json:"hash"`
+	Spec       clusterspec.Config       `json:"spec"`
+	Secrets    map[string]Sealed        `json:"secrets"`
+	JoinKeys   []Sealed                 `json:"join_keys"`
+	Registries map[string]RegistryLogin `json:"registries"`
 	// Files are the files next to cluster.yaml that it names, by their
 	// names in it (clusterspec.FileNames); none holds a secret.
 	Files map[string][]byte `json:"files,omitempty"`
+}
+
+// RegistryLogin is the login for one private image registry. The user name
+// is no secret; only the password is sealed.
+type RegistryLogin struct {
+	Username string `json:"username"`
+	Password Sealed `json:"password"`
+}
+
+// ValidJoinKeys are the bootstrap keys hosts may join with, and the first
+// user bootstrap with.
+func (s *State) ValidJoinKeys() []Sealed {
+	return s.JoinKeys
+}
+
+// RegistryLogins are the logins for private image registries, by registry.
+// The map is the state's: readers do not change it.
+func (s *State) RegistryLogins() map[string]RegistryLogin {
+	return s.Registries
+}
+
+// clusterValues are the sealed values cluster.yaml brings: its named
+// secrets, the join keys and the registries' passwords.
+func clusterValues(secrets map[string]Sealed, joinKeys []Sealed, registries map[string]RegistryLogin) []Sealed {
+	values := slices.Collect(maps.Values(secrets))
+	values = append(values, joinKeys...)
+	for _, login := range registries {
+		values = append(values, login.Password)
+	}
+	return values
 }
 
 // applyConfig refuses a cluster.yaml that a resource of the cluster would
@@ -37,6 +67,10 @@ func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 		if _, ok := payload.Secrets[name]; !ok {
 			return fmt.Errorf("secret %s is used in cluster.yaml but missing", name)
 		}
+	}
+	err := checkSecretLimits(s.Secrets, clusterValues(payload.Secrets, payload.JoinKeys, payload.Registries))
+	if err != nil {
+		return fmt.Errorf("cluster.yaml: %w", err)
 	}
 	spec := payload.Spec.WithDefaults()
 	for _, id := range slices.Sorted(maps.Keys(s.Stacks)) {

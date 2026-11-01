@@ -40,9 +40,12 @@ type State struct {
 	// ClusterSecrets are the secrets cluster.yaml names (the hoster's
 	// token, the alert channels'), by name.
 	ClusterSecrets map[string]Sealed `json:"cluster_secrets,omitempty"`
-	JoinKeys       []Sealed          `json:"join_keys,omitempty"`
-	Registries     map[string]Sealed `json:"registries,omitempty"`
-	Hosts          map[HostID]*Host  `json:"hosts,omitempty"`
+	// JoinKeys and Registries are read only through ValidJoinKeys and
+	// RegistryLogins. Both fields are to move into ClusterSecrets; then only
+	// the two functions change, not the code that reads them.
+	JoinKeys   []Sealed                 `json:"join_keys,omitempty"`
+	Registries map[string]RegistryLogin `json:"registries,omitempty"`
+	Hosts      map[HostID]*Host         `json:"hosts,omitempty"`
 	// Ingress is the host that should hold the Floating IP; the leader keeps
 	// the hoster's routing in line with it.
 	Ingress *HostID `json:"ingress,omitempty"`

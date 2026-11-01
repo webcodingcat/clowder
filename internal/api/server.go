@@ -26,10 +26,15 @@ import (
 // for the leader.
 const waitTimeout = 10 * time.Second
 
-// maxRequestBytes bounds every request body: an apply with all the secrets
-// a namespace may have (resource.MaxNamespaceSecretBytes) fits with room to
-// spare.
-const maxRequestBytes = 1 << 20
+// MaxRequestBytes bounds every request body. The largest is an apply of a
+// directory: every resource of every namespace in one request, and with
+// them every secret of the cluster, at most resource.MaxClusterSecretBytes
+// (4 MiB) in clear. Encrypted for the cluster (internal/secretvalue), a
+// value grows to 1.84 times its size and by less than 1 KiB, so all of them
+// take 4 MiB × 1.84 + resource.MaxClusterSecrets × 1 KiB, about 8.4 MiB;
+// the rest is for stacks and volumes. Clients that send more values (a
+// rekey) split them by it.
+const MaxRequestBytes = 16 << 20
 
 // Cluster is what the server needs from the agent's Raft member.
 type Cluster interface {
@@ -164,7 +169,7 @@ func (s *Server) TLSConfig() *tls.Config {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBytes)
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -540,5 +545,12 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
+	// a body over MaxRequestBytes fails where it is read, wrapped as a bad
+	// request; it is one place for every handler to say so
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		status = http.StatusRequestEntityTooLarge
+		err = fmt.Errorf("the request is larger than %d bytes", MaxRequestBytes)
+	}
 	writeJSON(w, status, Error{Message: err.Error()})
 }

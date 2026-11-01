@@ -3,8 +3,10 @@ package cli
 import (
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
@@ -47,6 +49,10 @@ func newApplyResources(g *globals) *cobra.Command {
 				return err
 			}
 			result, err := client.ApplyResources(cmd.Context(), api.ApplyRequest{Resources: objects}, dryRun)
+			var statusError *api.StatusError
+			if errors.As(err, &statusError) && statusError.Status == http.StatusRequestEntityTooLarge {
+				return fmt.Errorf("%w; apply the directories of the namespaces one at a time", err)
+			}
 			if err != nil {
 				return err
 			}

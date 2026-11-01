@@ -63,12 +63,14 @@ func (v VolumeSpec) CheckUnchanged(wanted VolumeSpec) error {
 		v.Class, units.FormatSize(int64(v.Size)), v.Replicas)
 }
 
-// The limits of the secrets' values, in clear: every apply writes them into
-// the Raft log, and every snapshot holds them.
+// The limits of the secrets, their values in clear: every apply writes them
+// into the Raft log, and every snapshot holds them. The cluster's count
+// both the resources and cluster.yaml's values.
 const (
 	MaxSecretBytes          = 64 << 10
 	MaxNamespaceSecretBytes = 256 << 10
 	MaxClusterSecretBytes   = 4 << 20
+	MaxClusterSecrets       = 1000
 )
 
 // SecretSpec is a secret as the user writes it: one value, as text (binary

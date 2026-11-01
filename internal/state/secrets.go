@@ -2,6 +2,8 @@ package state
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/webcodingcat/clowder/internal/resource"
 )
@@ -13,9 +15,8 @@ func findSecret(s *State, id string) *Meta {
 	return nil
 }
 
-// putSecret stores a secret's sealed value. The limits are on the values in
-// clear (ClearSize): per value, per namespace and in the cluster, as every
-// apply writes them into the Raft log and every snapshot holds them.
+// putSecret stores a secret's sealed value, within the limits of
+// checkSecretLimits.
 func putSecret(s *State, id string, payload PutResource) (*Meta, error) {
 	spec, err := decodeSpec[SealedSecret](payload.Kind, id, payload.Spec)
 	if err != nil {
@@ -25,41 +26,74 @@ func putSecret(s *State, id string, payload PutResource) (*Meta, error) {
 	if exists && stored.Spec.Digest == spec.Digest {
 		return nil, errUnchanged
 	}
-	size := ClearSize(spec.Value)
-	switch {
+	switch size := ClearSize(spec.Value); {
 	case spec.Digest == "":
 		return nil, fmt.Errorf("secret %s has no digest", id)
 	case size < 0:
 		return nil, fmt.Errorf("secret %s: the value is not sealed", id)
 	case size == 0:
 		return nil, fmt.Errorf("secret %s is empty", id)
-	case size > resource.MaxSecretBytes:
-		return nil, fmt.Errorf("secret %s is larger than %d bytes", id, resource.MaxSecretBytes)
 	}
-	inNamespace, inCluster := size, size
-	for otherID, other := range s.Secrets {
-		if otherID == id {
-			continue
+	put := &Secret{Meta: Meta{Namespace: payload.Namespace, Name: payload.Name, Owner: payload.Owner}, Spec: spec}
+	if exists {
+		put.Meta = stored.Meta
+	}
+	secrets := maps.Clone(s.Secrets)
+	secrets[id] = put
+	err = checkSecretLimits(secrets, clusterValues(s.ClusterSecrets, s.JoinKeys, s.Registries))
+	if err != nil {
+		return nil, fmt.Errorf("secret %s: %w", id, err)
+	}
+	s.Secrets[id] = put
+	return &put.Meta, nil
+}
+
+// checkSecretLimits holds the limits on the secrets the cluster would keep:
+// the namespaces' and the values of cluster.yaml. Every apply writes them
+// into the Raft log and every snapshot holds them, so they are limited in
+// clear (ClearSize) per value, per namespace and in the cluster, and in
+// number. put-resource and apply-config both ask it, so neither can pass
+// what the other refuses.
+func checkSecretLimits(secrets map[string]*Secret, cluster []Sealed) error {
+	if count := len(secrets) + len(cluster); count > resource.MaxClusterSecrets {
+		return fmt.Errorf("the cluster would have %d secrets, more than %d (cluster.yaml's values count too)",
+			count, resource.MaxClusterSecrets)
+	}
+	inCluster := 0
+	inNamespace := map[string]int{}
+	add := func(what string, value Sealed) (int, error) {
+		// what is too short to be sealed counts as nothing: putSecret
+		// refuses such a resource, and the API seals cluster.yaml's values
+		size := max(ClearSize(value), 0)
+		if size > resource.MaxSecretBytes {
+			return 0, fmt.Errorf("%s is larger than %d bytes", what, resource.MaxSecretBytes)
 		}
-		inCluster += ClearSize(other.Spec.Value)
-		if other.Namespace == payload.Namespace {
-			inNamespace += ClearSize(other.Spec.Value)
+		inCluster += size
+		return size, nil
+	}
+	for _, id := range slices.Sorted(maps.Keys(secrets)) {
+		secret := secrets[id]
+		size, err := add("secret "+id, secret.Spec.Value)
+		if err != nil {
+			return err
+		}
+		inNamespace[secret.Namespace] += size
+	}
+	for _, value := range cluster {
+		if _, err := add("a value of cluster.yaml", value); err != nil {
+			return err
 		}
 	}
-	switch {
-	case inNamespace > resource.MaxNamespaceSecretBytes:
-		return nil, fmt.Errorf("secret %s: the secrets of namespace %s would be larger than %d bytes",
-			id, payload.Namespace, resource.MaxNamespaceSecretBytes)
-	case inCluster > resource.MaxClusterSecretBytes:
-		return nil, fmt.Errorf("secret %s: the secrets of the cluster would be larger than %d bytes",
-			id, resource.MaxClusterSecretBytes)
+	for _, namespace := range slices.Sorted(maps.Keys(inNamespace)) {
+		if inNamespace[namespace] > resource.MaxNamespaceSecretBytes {
+			return fmt.Errorf("the secrets of namespace %s would be larger than %d bytes",
+				namespace, resource.MaxNamespaceSecretBytes)
+		}
 	}
-	if !exists {
-		stored = &Secret{Meta: Meta{Namespace: payload.Namespace, Name: payload.Name, Owner: payload.Owner}}
-		s.Secrets[id] = stored
+	if inCluster > resource.MaxClusterSecretBytes {
+		return fmt.Errorf("the secrets of the cluster would be larger than %d bytes", resource.MaxClusterSecretBytes)
 	}
-	stored.Spec = spec
-	return &stored.Meta, nil
+	return nil
 }
 
 // removeSecret refuses a secret a stack names: the stack could not start

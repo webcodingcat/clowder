@@ -210,7 +210,7 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 // joinKeys opens the valid bootstrap keys.
 func (s *Server) joinKeys() ([][]byte, error) {
 	var sealed []state.Sealed
-	s.config.Cluster.Read(func(current *state.State) { sealed = slices.Clone(current.JoinKeys) })
+	s.config.Cluster.Read(func(current *state.State) { sealed = slices.Clone(current.ValidJoinKeys()) })
 	var keys [][]byte
 	for _, key := range sealed {
 		opened, err := s.config.Keys.Open(key)

@@ -224,7 +224,7 @@ func (s *State) makeMaps() {
 		s.Secrets = map[string]*Secret{}
 	}
 	if s.Registries == nil {
-		s.Registries = map[string]Sealed{}
+		s.Registries = map[string]RegistryLogin{}
 	}
 	if s.Hosts == nil {
 		s.Hosts = map[HostID]*Host{}

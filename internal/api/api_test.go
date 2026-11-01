@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/clusterdir"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/datakey"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -436,6 +438,43 @@ func TestTheClientNamesAClusterOfAnotherCA(t *testing.T) {
 	if err := client.Stream(context.Background(), "/v1/watch?kind=stack&allNamespaces=true", io.Discard); err == nil ||
 		!strings.Contains(err.Error(), "belongs to another cluster") {
 		t.Errorf("stream: %v", err)
+	}
+}
+
+func TestARegistrysPasswordIsSealedAndItsUserIsNot(t *testing.T) {
+	cluster := newTestCluster(t)
+	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	apply := ClusterApply{
+		Spec: clusterspec.Config{
+			Name: "test", Seeds: []string{"10.0.0.2"},
+			Hoster:         clusterspec.Hoster{Type: "hetzner", Token: clusterspec.SecretRef{Secret: "hcloud-token"}},
+			Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.11"},
+			StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
+		},
+		Secrets:    map[string]string{"hcloud-token": "token"},
+		Registries: map[string]clusterdir.RegistryLogin{"ghcr.io": {Username: "robot", Password: "the password"}},
+	}
+	if _, err := client.Put(context.Background(), "/v1/cluster", apply); err != nil {
+		t.Fatal(err)
+	}
+	var login state.RegistryLogin
+	cluster.clusters[0].Read(func(current *state.State) { login = current.RegistryLogins()["ghcr.io"] })
+	password, err := cluster.apis[0].config.Keys.Open(login.Password)
+	if err != nil || login.Username != "robot" || string(password) != "the password" {
+		t.Errorf("login %s with %q, %v", login.Username, password, err)
+	}
+}
+
+func TestARequestOverTheLimitIsNamedAsSuch(t *testing.T) {
+	// a small limit in place of MaxRequestBytes (ServeHTTP's): reading 16 MiB
+	// takes seconds with the race detector
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/apply", strings.NewReader(`{"resources": []}`))
+	request.Body = http.MaxBytesReader(recorder, request.Body, 4)
+	var decoded ApplyRequest
+	writeError(recorder, http.StatusBadRequest, decodeStrict(request.Body, &decoded))
+	if recorder.Code != http.StatusRequestEntityTooLarge || !strings.Contains(recorder.Body.String(), "larger than 16777216 bytes") {
+		t.Errorf("answer %d: %s", recorder.Code, recorder.Body)
 	}
 }
 

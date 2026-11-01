@@ -79,7 +79,7 @@ func (s *Server) sealApply(apply ClusterApply) (state.ApplyConfig, error) {
 	}
 	payload := state.ApplyConfig{
 		Hash: hash, Spec: apply.Spec, Files: apply.Files,
-		Secrets: map[string]state.Sealed{}, Registries: map[string]state.Sealed{},
+		Secrets: map[string]state.Sealed{}, Registries: map[string]state.RegistryLogin{},
 	}
 	for name, value := range apply.Secrets {
 		if payload.Secrets[name], err = s.config.Keys.Seal([]byte(value)); err != nil {
@@ -94,13 +94,11 @@ func (s *Server) sealApply(apply ClusterApply) (state.ApplyConfig, error) {
 		payload.JoinKeys = append(payload.JoinKeys, sealed)
 	}
 	for registry, login := range apply.Registries {
-		encoded, err := json.Marshal(login)
+		password, err := s.config.Keys.Seal([]byte(login.Password))
 		if err != nil {
 			return payload, err
 		}
-		if payload.Registries[registry], err = s.config.Keys.Seal(encoded); err != nil {
-			return payload, err
-		}
+		payload.Registries[registry] = state.RegistryLogin{Username: login.Username, Password: password}
 	}
 	return payload, nil
 }

@@ -69,8 +69,11 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   - A secret's value is sealed; the API computes its digest. The limits are on the values
     in clear (`resource.MaxSecretBytes`, per namespace, in the cluster), which the state
     reads from the sealed length (`ClearSize`: age adds a header of fixed length and a tag
-    per 64 KiB); a test in `datakey` holds that against real sealing. A secret a stack
-    names cannot be deleted.
+    per 64 KiB); a test in `datakey` holds that against real sealing. The cluster also
+    holds at most `resource.MaxClusterSecrets`. One function holds them all
+    (`checkSecretLimits`), for the resources and `cluster.yaml`'s values together, and
+    both `put-resource` and `apply-config` ask it. A secret a stack names cannot be
+    deleted.
   - **A stack's spec** is stored normalized (`stackspec.Normalize`). The state reads it
     itself, so nothing derived travels with the command. `putStack`:
     - runs `stackspec.Check` and resolves the priorities with `cluster.yaml`'s categories;
@@ -141,8 +144,11 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   one stack per volume, nothing deleted that a stack names, a removed host's certificate
   revoked.
 - **Secrets** arrive sealed (`Sealed`, age for the data key); `state` never sees them in
-  clear. Those `cluster.yaml` names are `ClusterSecrets`, the namespaces' `Secrets`. A
-  stack names at most `MaxStackSecrets`. Who can read a secret: API, below.
+  clear. Those `cluster.yaml` names are `ClusterSecrets`, the namespaces' `Secrets`. The
+  join keys and the registries' logins (the user in clear, the password sealed) are read
+  through `ValidJoinKeys` and `RegistryLogins`, so their readers stay when they become
+  cluster secrets. A stack names at most `MaxStackSecrets`. Who can read a secret: API,
+  below.
 - `Copy` gives a deep copy without the audit, for work too slow for the state's lock (the
   placement weighs every stack) or that keeps parts of the state (the agent's stacks).
 - Snapshots are gzip-compressed JSON (`WriteSnapshot`, `ReadSnapshot`). The audit keeps the
@@ -186,7 +192,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   each call is checked against the CA and the state's revocation list, so a revoked
   certificate is refused at once on every agent. User routes take user certificates,
   `/v1/internal/*` only host certificates. Every request body is limited
-  (`maxRequestBytes`).
+  (`MaxRequestBytes`, its comment works out why 16 MiB); a larger one answers 413, and
+  `apply` then advises to apply the namespaces' directories one at a time.
 - **Any agent answers.** Reads come from its own copy of the state; writes it commits as the
   leader or forwards to the leader's `/v1/internal/propose`. A write answers with its Raft
   index (`X-Clowder-Index`); the client sends it on with later reads (`X-Clowder-Min-Index`),

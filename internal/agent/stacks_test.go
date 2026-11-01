@@ -390,6 +390,32 @@ func TestAStackWaitsWhileAStackThatFailedToStopHoldsItsVolume(t *testing.T) {
 	}
 }
 
+func TestDockerLogsInOnceForEachRegistryLogin(t *testing.T) {
+	runner, cluster, docker, _ := newTestRunner(t)
+	login := func(password string) {
+		t.Helper()
+		sealed, err := cluster.keys.Seal([]byte(password))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var applied state.ApplyConfig
+		cluster.Read(func(current *state.State) {
+			applied = state.ApplyConfig{Spec: current.Config.Spec, Secrets: maps.Clone(current.ClusterSecrets)}
+		})
+		applied.Registries = map[string]state.RegistryLogin{"ghcr.io": {Username: "robot", Password: sealed}}
+		cluster.apply(state.KindApplyConfig, state.UserActor("alice"), applied)
+	}
+	login("first")
+	runner.pass(context.Background())
+	login("first") // sealed anew, the same login
+	runner.pass(context.Background())
+	login("second")
+	runner.pass(context.Background())
+	if docker.count("login ghcr.io robot first") != 1 || docker.count("login ghcr.io robot second") != 1 {
+		t.Errorf("docker %q", docker.lines)
+	}
+}
+
 func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
 	password := runner.files.secretFile(shopProject, "db-password")

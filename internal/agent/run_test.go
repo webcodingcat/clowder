@@ -273,7 +273,10 @@ func (f *fakeDocker) ComposeLogs(_ context.Context, _, _ string, _ bool, out io.
 	return err
 }
 
-func (f *fakeDocker) Login(context.Context, string, string, string) error { return nil }
+func (f *fakeDocker) Login(_ context.Context, registry, username, password string) error {
+	f.add("login %s %s %s", registry, username, password)
+	return nil
+}
 
 func (f *fakeDocker) Containers(context.Context, string) ([]docker.Container, error) {
 	f.mu.Lock()
