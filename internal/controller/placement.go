@@ -71,7 +71,12 @@ func (p *placer) place(ctx context.Context) time.Duration {
 	// each push-out is the new lists of the stacks it touches, by stack
 	for _, pushOut := range decisions.PushOuts {
 		p.logger.Warn("pushing out services: the host's stacks reserve more than it offers", "pushed_out", pushOut)
-		p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: pushOut})
+		if err := commit(ctx, p.propose, state.KindSetPushedOut, state.SetPushedOut{Stacks: pushOut}); err != nil {
+			// the placements below count on the room it frees; the next
+			// pass plans again
+			p.logger.Error("place the stacks", "command", state.KindSetPushedOut, "error", err)
+			return 0
+		}
 	}
 	p.writeWaitReasons(ctx, copied, decisions.Waiting)
 	for _, placement := range decisions.Placements {
@@ -93,9 +98,10 @@ func (p *placer) commitOrLog(ctx context.Context, kind string, payload any) {
 // noteOverCapacity holds the condition of each host over capacity and logs
 // it once.
 func (p *placer) noteOverCapacity(copied *state.State, hosts []state.HostID) {
-	for id, host := range copied.Hosts {
+	for _, id := range slices.Sorted(maps.Keys(copied.Hosts)) {
 		if p.conditions.Hold(overCapacityKey(id), slices.Contains(hosts, id)) {
-			p.logger.Warn("host over capacity: its highest priority alone reserves more than it offers", "host", host.Name)
+			p.logger.Warn("host over capacity: its highest priority alone reserves more than it offers",
+				"host", copied.Hosts[id].Name)
 		}
 	}
 }

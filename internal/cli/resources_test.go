@@ -193,7 +193,7 @@ func TestResourcesApplyFromADirectoryReadBackAndGo(t *testing.T) {
 
 	// a volume goes only with --with-data, and without it nothing goes
 	if _, err := runWithInput(t, "", "--cluster", cluster, "delete", "-f", files); err == nil ||
-		!strings.Contains(err.Error(), "volume shop/data goes with its data; delete it with --with-data") {
+		!strings.Contains(err.Error(), "deleting volume shop/data deletes its data; confirm with --with-data") {
 		t.Errorf("delete -f without --with-data: %v", err)
 	}
 	if _, err := run(t, "--cluster", cluster, "get", "secret", "shop/token"); err != nil {

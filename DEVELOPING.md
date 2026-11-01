@@ -659,7 +659,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   without the header again, or one document each; a name filters on the client. After a
   410, or when the agent ends the stream, it lists afresh and goes on. `delete -f`
   deletes the resources of files in the reverse order of an apply, with the namespaces the
-  files name (no `-n`). A volume goes with its data, so a delete that names one needs
+  files name (no `-n`). Deleting a volume deletes its data, so a delete that names one needs
   `--with-data` (`DeleteRequest.WithData`). The API refuses the whole request without it,
   before anything goes: a delete of a directory would otherwise take the stack and stop at
   its volume.
@@ -870,7 +870,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   a waiting stack gets room before a pushed-out service does. The 60 s are kept in the
   leader's memory and start again after a change of leader.
 - `controller.RunPlacement` runs on every agent but acts only on the leader. It plans on a
-  copy of the state (`State.Copy`), outside the lock Raft's `Apply` waits for. Per placement
+  copy of the state (`State.Copy`), outside the lock Raft's `Apply` waits for. It first
+  writes the push-outs of hosts over capacity; if one fails, it places nothing in that
+  pass, since the placements count on the room it frees. Per placement
   it writes what the stack pushes out (`set-pushed-out`, one command for every stack it
   touches), then the volumes (`put-volume`), then the stack's host and `starting`
   (`set-stack-status`). If the leader changes in between, the services stay pushed out

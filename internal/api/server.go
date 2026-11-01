@@ -284,8 +284,12 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 // alertTest sends a test alert to every channel, from this agent.
 func (s *Server) alertTest(w http.ResponseWriter, r *http.Request) {
 	results, err := s.config.Alerts.Test(r.Context())
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	switch {
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	case len(results) == 0: // the cluster's config is in the way, not the request
+		writeError(w, http.StatusConflict, errors.New("cluster.yaml names no alert channel"))
 		return
 	}
 	writeJSON(w, http.StatusOK, results)

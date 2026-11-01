@@ -178,7 +178,7 @@ func (s *Server) deleteResources(w http.ResponseWriter, r *http.Request) {
 		return ref.Kind == resource.KindVolume
 	}); index >= 0 && !request.WithData {
 		volume := request.Resources[index]
-		writeError(w, http.StatusBadRequest, fmt.Errorf("volume %s goes with its data; delete it with --with-data",
+		writeError(w, http.StatusBadRequest, fmt.Errorf("deleting volume %s deletes its data; confirm with --with-data",
 			names.ID(volume.Namespace, volume.Name)))
 		return
 	}

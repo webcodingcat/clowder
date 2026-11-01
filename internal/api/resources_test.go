@@ -285,7 +285,7 @@ func TestTheLeaderDecidesNotAFollowerThatIsBehind(t *testing.T) {
 	err = client.Act(ctx, "/v1/delete", DeleteRequest{Resources: []resource.Ref{
 		{Kind: resource.KindNamespace, Name: "shop"}, {Kind: resource.KindVolume, Namespace: "default", Name: "data"},
 	}}, &result)
-	if statusOf(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "volume default/data goes with its data") {
+	if statusOf(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "deleting volume default/data deletes its data") {
 		t.Errorf("a volume without with_data: %v", err)
 	}
 	result, err = client.DeleteResources(ctx, DeleteRequest{Resources: []resource.Ref{

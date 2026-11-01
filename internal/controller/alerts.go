@@ -405,7 +405,8 @@ type TestResult struct {
 }
 
 // Test sends a test alert to every channel, whatever its min_severity, at
-// once and from this agent, and tells how each took it.
+// once and from this agent, and tells how each took it: no result when
+// cluster.yaml names no channel.
 func (a *Alerts) Test(ctx context.Context) ([]TestResult, error) {
 	var copied *state.State
 	var err error
@@ -414,8 +415,8 @@ func (a *Alerts) Test(ctx context.Context) ([]TestResult, error) {
 		return nil, err
 	}
 	config := copied.Config.Spec
-	if config.Alerts == nil || len(config.Alerts.Channels) == 0 {
-		return nil, fmt.Errorf("cluster.yaml names no alert channel")
+	if config.Alerts == nil {
+		return nil, nil
 	}
 	message := notify.Message{
 		Cluster: config.Name, Event: notify.Test, Key: "test", Kind: "test", Severity: clusterspec.SeverityInfo,

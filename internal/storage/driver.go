@@ -44,7 +44,7 @@ type Driver struct {
 
 // Volume is one copy of a volume on this host.
 type Volume struct {
-	// ID is "<stack>/<volume>".
+	// ID is "<namespace>/<volume>" (names.ID).
 	ID string
 	// LV is the logical volume's name, Pool the thin pool ("vg/thin"). The
 	// name holds the generation, and so does the mount point VolumesDir/<LV>.

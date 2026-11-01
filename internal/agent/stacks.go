@@ -151,8 +151,9 @@ func (r *stackRunner) reconcile(ctx context.Context) {
 // pass brings this host once to what the state says. The stacks that left
 // stop first, before the others come up, so a volume passes from a stack
 // that went to the next only once the first has stopped: two databases on
-// one file system would ruin it. A stack whose volume a stack that failed
-// to stop may still hold waits for the next pass.
+// one file system would ruin it. If a leaving stack fails to stop, it may
+// still use its volumes; a stack that names one of them waits for the next
+// pass.
 func (r *stackRunner) pass(ctx context.Context) {
 	desired, err := readDesired(r.cluster, r.host.ID)
 	if err != nil {
@@ -185,8 +186,8 @@ func (r *stackRunner) forgetApplied() {
 
 // apply runs one stack: its volumes, its rendered Compose file, compose up
 // unless all of it came up before, then the status, with the secrets the
-// containers came up with. held are the LVs that stacks which failed to
-// stop may still hold (stopLeavers).
+// containers came up with. held are the LVs still in use: stacks that
+// failed to stop keep them (stopLeavers).
 func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *state.Stack, held heldVolumes) error {
 	secrets, err := r.openSecrets(desired, stack)
 	if err != nil {
