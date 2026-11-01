@@ -73,6 +73,8 @@ func (s serviceRef) String() string {
 // room is what the services of the stacks on the hosts take, as the
 // decisions of a plan change it: a pushed-out service takes nothing.
 type room struct {
+	// current is the state the plan starts from; the plan's own decisions
+	// are in pushedOut and placed
 	current  *state.State
 	defaults resources // a service's reservation without its own
 	reserve  resources // what each host keeps for itself
@@ -117,10 +119,10 @@ func newRoom(current *state.State) *room {
 		reserve: readResources(config.SystemReserve), pushedOut: map[string]map[string]bool{},
 		placed: map[string]state.HostID{}, effective: map[string]map[string]int{},
 	}
-	for name, stack := range current.Stacks {
-		r.pushedOut[name] = map[string]bool{}
+	for id, stack := range current.Stacks {
+		r.pushedOut[id] = map[string]bool{}
 		for _, service := range stack.PushedOut {
-			r.pushedOut[name][service] = true
+			r.pushedOut[id][service] = true
 		}
 	}
 	return r
@@ -128,11 +130,11 @@ func newRoom(current *state.State) *room {
 
 // hostOf is where a stack runs or is planned to: false for a stack that
 // has no host or does not run there yet or any more.
-func (r *room) hostOf(name string) (state.HostID, bool) {
-	if host, ok := r.placed[name]; ok {
+func (r *room) hostOf(id string) (state.HostID, bool) {
+	if host, ok := r.placed[id]; ok {
 		return host, true
 	}
-	stack := r.current.Stacks[name]
+	stack := r.current.Stacks[id]
 	if stack.Host == nil || (stack.Status != state.StackStarting && stack.Status != state.StackRunning) {
 		return 0, false
 	}
@@ -147,7 +149,8 @@ func (r *room) capacity(host state.HostID) resources {
 }
 
 // reservation is what a service takes: its own reservations, else the
-// cluster's default.
+// cluster's default. State.Services keeps a reservation left out as 0, so
+// one written as 0 takes the default too: no service reserves nothing.
 func (r *room) reservation(ref serviceRef) resources {
 	service := r.current.Stacks[ref.stack].Services[ref.service]
 	taken := resources{service.MemoryBytes, milli(service.CPUs)}
@@ -164,13 +167,13 @@ func (r *room) reservation(ref serviceRef) resources {
 // there that are not pushed out, sorted.
 func (r *room) running(host state.HostID) []serviceRef {
 	var refs []serviceRef
-	for _, name := range slices.Sorted(maps.Keys(r.current.Stacks)) {
-		if on, ok := r.hostOf(name); !ok || on != host {
+	for _, id := range slices.Sorted(maps.Keys(r.current.Stacks)) {
+		if on, ok := r.hostOf(id); !ok || on != host {
 			continue
 		}
-		for _, service := range slices.Sorted(maps.Keys(r.current.Stacks[name].Services)) {
-			if !r.pushedOut[name][service] {
-				refs = append(refs, serviceRef{name, service})
+		for _, service := range slices.Sorted(maps.Keys(r.current.Stacks[id].Services)) {
+			if !r.pushedOut[id][service] {
+				refs = append(refs, serviceRef{id, service})
 			}
 		}
 	}
@@ -201,8 +204,8 @@ func (r *room) priority(ref serviceRef) int {
 // effectiveOf works out the effective priorities of a stack's services.
 // The categories come from the current cluster.yaml, so a changed category
 // counts without a new apply; the state keeps every category a stack names.
-func (r *room) effectiveOf(name string) map[string]int {
-	stack := r.current.Stacks[name]
+func (r *room) effectiveOf(id string) map[string]int {
+	stack := r.current.Stacks[id]
 	priorities := r.current.Config.Spec.WithDefaults().Priorities
 	effective := map[string]int{}
 	var resolve func(service string, seen map[string]bool) int
@@ -361,12 +364,12 @@ type stackFit struct {
 // priority first. Each takes free room or pushes out running services below
 // its own priority; one that finds no room even so starts pushed out, with
 // what depends on it. A reason says the stack does not fit at all: its
-// first service finds no room. Nothing changes until commit.
-func (r *room) fitStack(name string, host state.HostID) (stackFit, string) {
-	stack := r.current.Stacks[name]
+// first service finds no room. Nothing changes until accept.
+func (r *room) fitStack(id string, host state.HostID) (stackFit, string) {
+	stack := r.current.Stacks[id]
 	var order []serviceRef
 	for service := range stack.Services {
-		order = append(order, serviceRef{name, service})
+		order = append(order, serviceRef{id, service})
 	}
 	r.startOrder(order)
 	free := r.free(host)
@@ -396,40 +399,40 @@ func (r *room) fitStack(name string, host state.HostID) (stackFit, string) {
 		free = freeAfter.minus(need)
 	}
 	for _, service := range slices.Sorted(maps.Keys(ownOut)) {
-		fit.own = append(fit.own, serviceRef{name, service})
+		fit.own = append(fit.own, serviceRef{id, service})
 	}
 	return fit, ""
 }
 
-// commit makes a planned fit part of the plan: the stack is on its host,
+// accept makes a planned fit part of the plan: the stack is on its host,
 // the services it pushes out are out, and so are its own that found no
 // room. It returns the pushed-out lists to write; the new stack's is always
 // among them, so a list left from an earlier leader is replaced.
-func (r *room) commit(name string, fit stackFit) map[string][]string {
-	r.placed[name] = fit.host
-	clear(r.pushedOut[name])
-	lists := map[string][]string{name: {}}
+func (r *room) accept(id string, fit stackFit) map[string][]string {
+	r.placed[id] = fit.host
+	clear(r.pushedOut[id])
+	lists := map[string][]string{id: {}}
 	r.pushOut(append(slices.Clone(fit.pushed), fit.own...), lists)
 	return lists
 }
 
-// restartable is the pushed-out service that may come back first: of the
+// comingBack is the pushed-out service that may come back first: of the
 // services whose dependencies all run, highest effective priority first,
 // the first whose reservation with a margin fits its host's free room.
-func (r *room) restartable() (serviceRef, bool) {
+func (r *room) comingBack() (serviceRef, bool) {
 	var candidates []serviceRef
-	for _, name := range slices.Sorted(maps.Keys(r.current.Stacks)) {
-		if _, ok := r.hostOf(name); !ok {
+	for _, id := range slices.Sorted(maps.Keys(r.current.Stacks)) {
+		if _, ok := r.hostOf(id); !ok {
 			continue
 		}
-		stack := r.current.Stacks[name]
-		for _, service := range slices.Sorted(maps.Keys(r.pushedOut[name])) {
+		stack := r.current.Stacks[id]
+		for _, service := range slices.Sorted(maps.Keys(r.pushedOut[id])) {
 			ready := true
 			for _, dependency := range stack.Services[service].DependsOn {
-				ready = ready && !r.pushedOut[name][dependency]
+				ready = ready && !r.pushedOut[id][dependency]
 			}
 			if ready {
-				candidates = append(candidates, serviceRef{name, service})
+				candidates = append(candidates, serviceRef{id, service})
 			}
 		}
 	}

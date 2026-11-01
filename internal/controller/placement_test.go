@@ -217,7 +217,7 @@ func TestAServicePushedOutComesBackAfterItFitAMinute(t *testing.T) {
 	})
 
 	deleteResource(l, resource.KindStack, "web")
-	if again := placement.place(context.Background()); again <= 0 || again > restartAfter {
+	if again := placement.place(context.Background()); again <= 0 || again > comeBackAfter {
 		t.Errorf("look again in %v", again)
 	}
 	l.Read(func(current *state.State) {
@@ -225,7 +225,7 @@ func TestAServicePushedOutComesBackAfterItFitAMinute(t *testing.T) {
 			t.Error("app came back before it fit a minute")
 		}
 	})
-	placement.fittingSince = time.Now().Add(-restartAfter) // a minute went by
+	placement.fittingSince = time.Now().Add(-comeBackAfter) // a minute went by
 	placement.place(context.Background())
 	l.Read(func(current *state.State) {
 		if len(current.Stacks["default/shop"].PushedOut) != 0 {

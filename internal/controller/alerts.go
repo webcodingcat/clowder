@@ -188,7 +188,7 @@ func (a *Alerts) pass(ctx context.Context) {
 	wanted := wantedAlerts(copied, a.conditions, now)
 	for _, key := range slices.Sorted(maps.Keys(copied.Alerts)) {
 		if _, ok := wanted[key]; !ok {
-			a.commit(ctx, state.KindResolveAlert, state.ResolveAlert{Key: key})
+			a.commitOrLog(ctx, state.KindResolveAlert, state.ResolveAlert{Key: key})
 		}
 	}
 	for _, key := range slices.Sorted(maps.Keys(wanted)) {
@@ -199,7 +199,7 @@ func (a *Alerts) pass(ctx context.Context) {
 		if open == nil {
 			a.logger.Warn("alert", "key", key, "severity", alert.Severity, "subject", alert.Subject)
 		}
-		if a.commit(ctx, state.KindPutAlert, alert) && open == nil {
+		if a.commitOrLog(ctx, state.KindPutAlert, alert) && open == nil {
 			a.raisedHere[key] = true
 		}
 	}
@@ -215,9 +215,9 @@ func (a *Alerts) pass(ctx context.Context) {
 	a.deliver(ctx, copied, now)
 }
 
-// commit writes one command and tells whether it committed; a failure is
-// logged, and the next pass tries again.
-func (a *Alerts) commit(ctx context.Context, kind string, payload any) bool {
+// commitOrLog writes one command and tells whether it committed; a failure
+// is logged, and the next pass tries again.
+func (a *Alerts) commitOrLog(ctx context.Context, kind string, payload any) bool {
 	if err := commit(ctx, a.propose, kind, payload); err != nil {
 		a.logger.Error("raise the alerts", "command", kind, "error", err)
 		return false

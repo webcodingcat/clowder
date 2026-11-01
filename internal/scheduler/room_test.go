@@ -160,26 +160,26 @@ func TestAPushedOutServiceComesBackWhenItFitsWithAMargin(t *testing.T) {
 			current := roomCluster(test.capacity)
 			running(current, "shop", shop(), "cache")
 			got := "none"
-			if restart := Plan(current).Restart; restart != nil {
-				got = fmt.Sprintf("%s/%s %v", restart.Stack, restart.Service, restart.PushedOut)
+			if back := Plan(current).ComeBack; back != nil {
+				got = fmt.Sprintf("%s/%s %v", back.Stack, back.Service, back.PushedOut)
 			}
 			if got != test.want {
-				t.Errorf("restart %s, want %s", got, test.want)
+				t.Errorf("coming back %s, want %s", got, test.want)
 			}
 		})
 	}
 }
 
-func TestRestartsGoByPriorityAndDependencies(t *testing.T) {
+func TestServicesComeBackByPriorityAndDependencies(t *testing.T) {
 	current := roomCluster(1000)
 	// 700M free: big (600, 800M) does not fit, app waits for db, so db
 	// (300M at 900) comes first
 	running(current, "shop", map[string]state.Service{
 		"db": service(900, 300), "app": service(950, 100, "db"), "big": service(600, 800), "small": service(100, 100),
 	}, "db", "app", "big", "small")
-	restart := Plan(current).Restart
-	if restart == nil || restart.Service != "db" || fmt.Sprint(restart.PushedOut) != "[app big small]" {
-		t.Errorf("restart %+v", restart)
+	back := Plan(current).ComeBack
+	if back == nil || back.Service != "db" || fmt.Sprint(back.PushedOut) != "[app big small]" {
+		t.Errorf("coming back %+v", back)
 	}
 }
 
@@ -188,7 +188,7 @@ func TestAWaitingStackGetsRoomBeforeAPushedOutService(t *testing.T) {
 	running(current, "shop", shop(), "cache")
 	pending(current, map[string]state.Service{"web": service(800, 300)})
 	decisions := Plan(current)
-	if len(decisions.Placements) != 1 || decisions.Restart != nil {
+	if len(decisions.Placements) != 1 || decisions.ComeBack != nil {
 		t.Errorf("decisions %+v", decisions)
 	}
 	// shop's list is rewritten only when the new stack touches it: cache

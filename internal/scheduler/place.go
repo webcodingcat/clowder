@@ -41,8 +41,8 @@ type Waiting struct {
 	Reason string
 }
 
-// Restart brings one pushed-out service back.
-type Restart struct {
+// ComeBack brings one pushed-out service back.
+type ComeBack struct {
 	Stack, Service string
 	// PushedOut is the stack's list without the service.
 	PushedOut []string
@@ -58,10 +58,10 @@ type Decisions struct {
 	OverCapacity []state.HostID
 	Placements   []Placement
 	Waiting      []Waiting
-	// Restart is the pushed-out service that fits again first, if any; it
+	// ComeBack is the pushed-out service that fits again first, if any; it
 	// comes only when the plan places nothing and pushes nothing out, so a
 	// waiting stack gets room before a pushed-out service does.
-	Restart *Restart
+	ComeBack *ComeBack
 }
 
 // Plan makes hosts over capacity fit, places the volumes that placed stacks
@@ -80,8 +80,8 @@ func Plan(current *state.State) Decisions {
 		}
 	}
 	var unplaced []*state.Stack
-	for _, name := range slices.Sorted(maps.Keys(current.Stacks)) {
-		stack := current.Stacks[name]
+	for _, id := range slices.Sorted(maps.Keys(current.Stacks)) {
+		stack := current.Stacks[id]
 		if stack.Host == nil {
 			unplaced = append(unplaced, stack)
 			continue
@@ -104,10 +104,10 @@ func Plan(current *state.State) Decisions {
 	if len(decisions.PushOuts) > 0 || slices.ContainsFunc(decisions.Placements, func(p Placement) bool { return p.Place }) {
 		return decisions
 	}
-	if ref, ok := planner.room.restartable(); ok {
+	if ref, ok := planner.room.comingBack(); ok {
 		pushedOut := slices.DeleteFunc(slices.Clone(current.Stacks[ref.stack].PushedOut),
 			func(service string) bool { return service == ref.service })
-		decisions.Restart = &Restart{Stack: ref.stack, Service: ref.service, PushedOut: pushedOut}
+		decisions.ComeBack = &ComeBack{Stack: ref.stack, Service: ref.service, PushedOut: pushedOut}
 	}
 	return decisions
 }
@@ -204,7 +204,7 @@ func (p *planner) place(stack *state.Stack) (Placement, string) {
 		}
 		return Placement{
 			Stack: stack.ID(), Host: fit.host, Place: true, Volumes: volumes,
-			PushedOut: p.room.commit(stack.ID(), fit),
+			PushedOut: p.room.accept(stack.ID(), fit),
 		}, ""
 	}
 	if len(reasons) == 0 {

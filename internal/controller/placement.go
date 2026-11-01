@@ -11,10 +11,10 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// restartAfter is how long a pushed-out service must fit before it comes
+// comeBackAfter is how long a pushed-out service must fit before it comes
 // back. The free room changes only with the state, so this bridges only a
 // short dip, such as a stack being replaced.
-const restartAfter = 60 * time.Second
+const comeBackAfter = 60 * time.Second
 
 // placer is the leader's placement and what it keeps in memory between
 // passes; a new leader starts afresh.
@@ -71,7 +71,7 @@ func (p *placer) place(ctx context.Context) time.Duration {
 	// each push-out is the new lists of the stacks it touches, by stack
 	for _, pushOut := range decisions.PushOuts {
 		p.logger.Warn("pushing out services: the host's stacks reserve more than it offers", "pushed_out", pushOut)
-		p.commit(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: pushOut})
+		p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: pushOut})
 	}
 	p.writeWaitReasons(ctx, copied, decisions.Waiting)
 	for _, placement := range decisions.Placements {
@@ -79,12 +79,12 @@ func (p *placer) place(ctx context.Context) time.Duration {
 			p.logger.Error("place a stack", "stack", placement.Stack, "error", err)
 		}
 	}
-	return p.restart(ctx, decisions.Restart)
+	return p.comeBack(ctx, decisions.ComeBack)
 }
 
-// commit writes one command; a failure is logged, and the next pass plans
-// again.
-func (p *placer) commit(ctx context.Context, kind string, payload any) {
+// commitOrLog writes one command; a failure is logged, and the next pass
+// plans again.
+func (p *placer) commitOrLog(ctx context.Context, kind string, payload any) {
 	if err := commit(ctx, p.propose, kind, payload); err != nil {
 		p.logger.Error("place the stacks", "command", kind, "error", err)
 	}
@@ -119,14 +119,14 @@ func (p *placer) writeWaitReasons(ctx context.Context, copied *state.State, wait
 		if reason != "" {
 			p.logger.Warn("stack waits for a place", "stack", id, "reason", reason)
 		}
-		p.commit(ctx, state.KindSetStackWaitReason, state.SetStackWaitReason{ID: id, Reason: reason})
+		p.commitOrLog(ctx, state.KindSetStackWaitReason, state.SetStackWaitReason{ID: id, Reason: reason})
 	}
 }
 
 // write commits one placement: what the stack pushes out first, then the
 // volumes, then the stack's host, so the agent finds the volumes when it
 // sees the stack. If the leader changes in between, the services stay
-// pushed out without the new stack, and come back by the restart rule.
+// pushed out without the new stack, and come back (comeBack).
 func (p *placer) write(ctx context.Context, placement scheduler.Placement) error {
 	if placement.PushedOut != nil {
 		err := commit(ctx, p.propose, state.KindSetPushedOut, state.SetPushedOut{Stacks: placement.PushedOut})
@@ -148,25 +148,25 @@ func (p *placer) write(ctx context.Context, placement scheduler.Placement) error
 	})
 }
 
-// restart brings a pushed-out service back once it has fit for
-// restartAfter, one service per decision: its return changes the free
+// comeBack brings a pushed-out service back once it has fit for
+// comeBackAfter, one service per decision: its return changes the free
 // room, so the next one's wait starts again. It tells how long until the
 // service will have fit long enough, or 0.
-func (p *placer) restart(ctx context.Context, restart *scheduler.Restart) time.Duration {
-	if restart == nil {
+func (p *placer) comeBack(ctx context.Context, back *scheduler.ComeBack) time.Duration {
+	if back == nil {
 		p.fitting = ""
 		return 0
 	}
-	name := restart.Stack + "/" + restart.Service
+	name := back.Stack + "/" + back.Service
 	now := time.Now()
 	if p.fitting != name {
 		p.fitting, p.fittingSince = name, now
 	}
-	if left := restartAfter - now.Sub(p.fittingSince); left > 0 {
+	if left := comeBackAfter - now.Sub(p.fittingSince); left > 0 {
 		return left
 	}
-	p.logger.Info("bringing a pushed-out service back", "stack", restart.Stack, "service", restart.Service)
-	p.commit(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: map[string][]string{restart.Stack: restart.PushedOut}})
+	p.logger.Info("bringing a pushed-out service back", "stack", back.Stack, "service", back.Service)
+	p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: map[string][]string{back.Stack: back.PushedOut}})
 	p.fitting = ""
 	return 0
 }

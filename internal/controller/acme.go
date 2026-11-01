@@ -128,13 +128,13 @@ func (r *acmeRunner) pass(ctx context.Context) {
 	// a pass orders one domain after the other, so no order of this leader
 	// is in progress now: what is left is from a leader that stopped
 	for _, token := range slices.Sorted(maps.Keys(copied.Challenges)) {
-		r.commit(ctx, state.KindDeleteACMEChallenge, state.DeleteACMEChallenge{Token: token})
+		r.commitOrLog(ctx, state.KindDeleteACMEChallenge, state.DeleteACMEChallenge{Token: token})
 	}
 	domains := routeDomains(copied)
 	for _, domain := range slices.Sorted(maps.Keys(copied.Certificates)) {
 		if !slices.Contains(domains, domain) {
 			r.logger.Info("deleting the certificate of a domain no stack names", "domain", domain)
-			r.commit(ctx, state.KindDeleteCertificate, state.DeleteCertificate{Domain: domain})
+			r.commitOrLog(ctx, state.KindDeleteCertificate, state.DeleteCertificate{Domain: domain})
 		}
 	}
 
@@ -198,9 +198,9 @@ func (r *acmeRunner) failed(domain string, now time.Time, err error) {
 	r.logger.Warn("ordering a certificate failed", "domain", domain, "error", err, "retry_in", backoff)
 }
 
-// commit writes a command that needs no answer; a failure is logged, and
-// the next pass tries again.
-func (r *acmeRunner) commit(ctx context.Context, kind string, payload any) {
+// commitOrLog writes a command that needs no answer; a failure is logged,
+// and the next pass tries again.
+func (r *acmeRunner) commitOrLog(ctx context.Context, kind string, payload any) {
 	if err := commit(ctx, r.propose, kind, payload); err != nil {
 		r.logger.Warn("keep the certificates", "command", kind, "error", err)
 	}
@@ -434,7 +434,7 @@ func (r *acmeRunner) authorize(ctx context.Context, client *acme.Client, url, do
 		// also when the order's context ended
 		cleanUp, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanUpTimeout)
 		defer cancel()
-		r.commit(cleanUp, state.KindDeleteACMEChallenge, state.DeleteACMEChallenge{Token: challenge.Token})
+		r.commitOrLog(cleanUp, state.KindDeleteACMEChallenge, state.DeleteACMEChallenge{Token: challenge.Token})
 	}()
 	if err := r.selfCheck(ctx, floatingIP, domain, challenge.Token, keyAuthorization); err != nil {
 		return err
