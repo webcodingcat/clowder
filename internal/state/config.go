@@ -84,27 +84,27 @@ func checkClusterSecrets(spec clusterspec.Config, secrets map[string]SealedSecre
 // no longer pass: a storage class a volume has, a priority category a
 // stack names, a stack's place in stacks.privileged. The state checks it
 // itself, in the log's order, so no resource can slip in between.
-func applyConfig(s *State, _ Command, payload ApplyConfig) error {
+func applyConfig(s *State, _ Command, payload ApplyConfig) (func(), error) {
 	if problems := clusterspec.Check(payload.Spec); len(problems) > 0 {
-		return problems
+		return nil, problems
 	}
 	if problems := clusterspec.CheckFiles(payload.Spec, payload.Files); len(problems) > 0 {
-		return problems
+		return nil, problems
 	}
 	if err := checkClusterSecrets(payload.Spec, payload.Secrets); err != nil {
-		return fmt.Errorf("cluster.yaml: %w", err)
+		return nil, fmt.Errorf("cluster.yaml: %w", err)
 	}
 	if err := checkSecretLimits(s.Secrets, payload.Secrets); err != nil {
-		return fmt.Errorf("cluster.yaml: %w", err)
+		return nil, fmt.Errorf("cluster.yaml: %w", err)
 	}
 	spec := payload.Spec.WithDefaults()
 	for _, id := range slices.Sorted(maps.Keys(s.Stacks)) {
 		stack := s.Stacks[id]
 		if stack.Spec.Privileged() && !slices.Contains(spec.Stacks.Privileged, id) {
-			return fmt.Errorf("stack %s asks for privileges, so it must stay in stacks.privileged", id)
+			return nil, fmt.Errorf("stack %s asks for privileges, so it must stay in stacks.privileged", id)
 		}
 		if _, err := servicesOf(stack.Spec, spec.Priorities); err != nil {
-			return fmt.Errorf("cluster.yaml would break stack %s: %w", id, err)
+			return nil, fmt.Errorf("cluster.yaml would break stack %s: %w", id, err)
 		}
 	}
 	// a volume's class, and the class each copy is in (a fallback of it)
@@ -116,7 +116,7 @@ func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 		}
 		for _, class := range classes {
 			if _, ok := spec.StorageClasses[class]; !ok {
-				return fmt.Errorf("volume %s has storage class %s, so the class must stay", id, class)
+				return nil, fmt.Errorf("volume %s has storage class %s, so the class must stay", id, class)
 			}
 		}
 	}
@@ -125,7 +125,8 @@ func applyConfig(s *State, _ Command, payload ApplyConfig) error {
 	for _, name := range clusterspec.FileNames(payload.Spec) {
 		files[name] = payload.Files[name]
 	}
-	s.Config = ClusterConfig{Revision: s.Config.Revision + 1, Spec: spec, Files: files}
-	s.ClusterSecrets = payload.Secrets
-	return nil
+	return func() {
+		s.Config = ClusterConfig{Revision: s.Config.Revision + 1, Spec: spec, Files: files}
+		s.ClusterSecrets = payload.Secrets
+	}, nil
 }

@@ -34,22 +34,23 @@ type PutAlert struct {
 	Message  string `json:"message"`
 }
 
-func applyPutAlert(s *State, cmd Command, payload PutAlert) error {
+func applyPutAlert(s *State, cmd Command, payload PutAlert) (func(), error) {
 	switch {
 	case payload.Key == "" || payload.Kind == "" || payload.Subject == "":
-		return errors.New("an alert needs a key, a kind and a subject")
+		return nil, errors.New("an alert needs a key, a kind and a subject")
 	case !slices.Contains(clusterspec.Severities, payload.Severity):
-		return fmt.Errorf("alert %s: severity %q is not info, warning or critical", payload.Key, payload.Severity)
+		return nil, fmt.Errorf("alert %s: severity %q is not info, warning or critical", payload.Key, payload.Severity)
 	}
 	since := cmd.At
 	if open, ok := s.Alerts[payload.Key]; ok {
 		since = open.Since
 	}
-	s.Alerts[payload.Key] = &Alert{
-		Key: payload.Key, Kind: payload.Kind, Severity: payload.Severity, Subject: payload.Subject,
-		Message: payload.Message, Since: since,
-	}
-	return nil
+	return func() {
+		s.Alerts[payload.Key] = &Alert{
+			Key: payload.Key, Kind: payload.Kind, Severity: payload.Severity, Subject: payload.Subject,
+			Message: payload.Message, Since: since,
+		}
+	}, nil
 }
 
 // ResolveAlert closes an alert whose condition is gone.
@@ -57,7 +58,6 @@ type ResolveAlert struct {
 	Key string `json:"key"`
 }
 
-func applyResolveAlert(s *State, _ Command, payload ResolveAlert) error {
-	delete(s.Alerts, payload.Key)
-	return nil
+func applyResolveAlert(s *State, _ Command, payload ResolveAlert) (func(), error) {
+	return func() { delete(s.Alerts, payload.Key) }, nil
 }

@@ -150,6 +150,7 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 		JoinKey: state.SealedSecret{Value: state.Sealed("j"), Digest: "d"},
 		Host: state.Host{
 			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
+			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
 	cluster.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{

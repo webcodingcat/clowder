@@ -247,7 +247,8 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	// no time here: the leader stamps its own (proposeHere)
 	cmd, err := state.NewCommand(state.KindAddUser, time.Time{}, state.UserActor(request.User),
 		state.AddUser{
-			Name: request.User, Serial: pki.Serial(certificate), First: true, RecoveryRecipient: request.RecoveryRecipient,
+			Name: request.User, Serial: pki.Serial(certificate), NotAfter: certificate.NotAfter,
+			First: true, RecoveryRecipient: request.RecoveryRecipient,
 		})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)

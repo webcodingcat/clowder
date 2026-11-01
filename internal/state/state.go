@@ -59,7 +59,9 @@ type State struct {
 	// Certificates are the HTTP routes' certificates by domain.
 	Certificates map[string]*Certificate `json:"certificates,omitempty"`
 	Users        map[string]*User        `json:"users,omitempty"`
-	Revoked      map[string]time.Time    `json:"revoked,omitempty"` // certificate serial -> when
+	// Revoked are the revoked certificates by serial, each until a while
+	// after it expired (revoke).
+	Revoked map[string]Revocation `json:"revoked,omitempty"`
 	// Namespaces hold the other resources; the bootstrap makes names.Default.
 	Namespaces map[string]*Namespace `json:"namespaces,omitempty"`
 	Stacks     map[string]*Stack     `json:"stacks,omitempty"`  // names.ID: "<namespace>/<stack>"
@@ -129,10 +131,11 @@ type Host struct {
 	WGPublicKey   string     `json:"wg_public_key"`
 	// CertificateSerial is the host certificate; removing the host revokes it,
 	// so a removed host leaves Raft and the API at once.
-	CertificateSerial string    `json:"certificate_serial"`
-	Voter             bool      `json:"voter"`
-	Phase             HostPhase `json:"phase"`
-	Capacity          Resources `json:"capacity"`
+	CertificateSerial   string    `json:"certificate_serial"`
+	CertificateNotAfter time.Time `json:"certificate_not_after"`
+	Voter               bool      `json:"voter"`
+	Phase               HostPhase `json:"phase"`
+	Capacity            Resources `json:"capacity"`
 	// Pools are the host's thin pools by name ("vg/thin"), as it reported
 	// them; storage classes name pools.
 	Pools map[string]Pool `json:"pools,omitempty"`
@@ -164,8 +167,16 @@ type Pool struct {
 // User may use the CLI with the certificates listed here.
 type User struct {
 	Name string `json:"name"`
-	// Serials of the user's certificates; removing the user revokes them.
-	Serials []string `json:"serials,omitempty"`
+	// Serials are the user's certificates, each with when it expires;
+	// removing the user revokes them.
+	Serials map[string]time.Time `json:"serials,omitempty"`
+}
+
+// Revocation is a revoked certificate: when it was revoked, and when it
+// expires.
+type Revocation struct {
+	At       time.Time `json:"at"`
+	NotAfter time.Time `json:"not_after"`
 }
 
 // Meta is what every resource has besides its spec and status.

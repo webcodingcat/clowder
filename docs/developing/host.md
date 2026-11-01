@@ -30,8 +30,10 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   4. It tells systemd `READY=1` and feeds the watchdog as long as the state's lock answers.
 
   When it stops, it ends its loops and waits for them, at most `loopsTimeout`: a host tool
-  left behind on a suspended volume must not hold up the stop. Only then do the resolver
-  and the Raft member close (`stopLoops`).
+  left behind on a suspended volume must not hold up the stop. Only once every loop ended do
+  the resolver and the Raft member close (`stopLoops`). A loop left behind may still use
+  them, so then they stay open and the agent exits with an error: the end of the process
+  closes them, and systemd restarts the agent. Raft's log is on disk and survives that.
 - `HostParts` are what the agent changes on its host (the network, the storage driver and
   Docker) and the hoster's API. `clowderd run` passes the real ones, the tests fakes.
 - **Reconcilers** run after a change of the state and every `reconcileInterval`, to repair

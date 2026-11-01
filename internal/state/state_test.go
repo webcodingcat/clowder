@@ -27,6 +27,14 @@ import (
 
 var testTime = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 
+// testExpiry is when the tests' certificates expire.
+var testExpiry = testTime.AddDate(10, 0, 0)
+
+// addUser is the command that gives a user a certificate.
+func addUser(name, serial string) AddUser {
+	return AddUser{Name: name, Serial: serial, NotAfter: testExpiry}
+}
+
 // cluster is a state under test with its next Raft index.
 type cluster struct {
 	t     *testing.T
@@ -48,18 +56,31 @@ func newCluster(t *testing.T) *cluster {
 
 func testHost(id HostID) Host {
 	return Host{
-		ID:                id,
-		Name:              "node" + strconv.Itoa(int(id)),
-		Underlay:          netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
-		WGPublicKey:       "wg-key",
-		CertificateSerial: "serial-" + strconv.Itoa(int(id)),
+		ID:                  id,
+		Name:                "node" + strconv.Itoa(int(id)),
+		Underlay:            netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
+		WGPublicKey:         "wg-key",
+		CertificateSerial:   "serial-" + strconv.Itoa(int(id)),
+		CertificateNotAfter: testExpiry,
 	}
 }
 
-// changes applies a command and returns what Apply returns.
+// changes applies a command and returns what Apply returns. A command the
+// test may see refused must leave the state as it was.
 func (c *cluster) changes(kind, actor string, payload any) ([]Change, error) {
 	c.t.Helper()
-	cmd, err := NewCommand(kind, testTime, actor, payload)
+	before := c.handled()
+	changes, err := c.applyAt(testTime, kind, actor, payload)
+	if after := c.handled(); err != nil && after != before {
+		c.t.Errorf("%s: the refused command changed the state:\nbefore %s\nafter  %s", kind, before, after)
+	}
+	return changes, err
+}
+
+// applyAt applies a command of the given time.
+func (c *cluster) applyAt(at time.Time, kind, actor string, payload any) ([]Change, error) {
+	c.t.Helper()
+	cmd, err := NewCommand(kind, at, actor, payload)
 	if err != nil {
 		c.t.Fatal(err)
 	}
@@ -74,9 +95,12 @@ func (c *cluster) apply(kind, actor string, payload any) error {
 	return err
 }
 
+// mustApply applies a command that must pass. It skips the check of
+// changes, which encodes the state twice: tests fill it with a thousand
+// commands.
 func (c *cluster) mustApply(kind, actor string, payload any) {
 	c.t.Helper()
-	if err := c.apply(kind, actor, payload); err != nil {
+	if _, err := c.applyAt(testTime, kind, actor, payload); err != nil {
 		c.t.Fatal(err)
 	}
 }
@@ -93,17 +117,26 @@ func (c *cluster) encoded() string {
 	return string(encoded)
 }
 
-// refuse applies a command that must fail and must leave the state as it
-// was.
+// handled returns what the handlers may change as JSON: the state without
+// the index and the audit, which only Apply writes.
+func (c *cluster) handled() string {
+	c.t.Helper()
+	copied := *c.state
+	copied.Index, copied.Audit = 0, nil
+	encoded, err := json.Marshal(copied)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return string(encoded)
+}
+
+// refuse applies a command that must fail (and so leave the state as it
+// was, which changes checks).
 func (c *cluster) refuse(kind, actor string, payload any, wantError string) {
 	c.t.Helper()
-	before := c.encoded()
 	err := c.apply(kind, actor, payload)
 	if err == nil || !strings.Contains(err.Error(), wantError) {
 		c.t.Errorf("%s: want an error with %q, got %v", kind, wantError, err)
-	}
-	if after := c.encoded(); after != before {
-		c.t.Errorf("%s: the refused command changed the state:\nbefore %s\nafter  %s", kind, before, after)
 	}
 }
 
@@ -121,7 +154,7 @@ func TestBootstrapMakesHostZeroTheActiveVoter(t *testing.T) {
 
 func TestNothingButTheBootstrapRunsOnAnEmptyState(t *testing.T) {
 	state := &State{}
-	cmd, err := NewCommand(KindAddUser, testTime, LeaderActor, AddUser{Name: "alice", Serial: "1"})
+	cmd, err := NewCommand(KindAddUser, testTime, LeaderActor, addUser("alice", "1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,32 +302,46 @@ func TestTheIngressIsAnActiveHostWithAServerRef(t *testing.T) {
 
 func TestOnlyOneFirstUserAndItBringsTheRecoveryKey(t *testing.T) {
 	c := newCluster(t)
-	c.refuse(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1", First: true}, "recovery key's recipient")
-	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1", First: true, RecoveryRecipient: "age1first"})
+	first := AddUser{Name: "alice", Serial: "a1", NotAfter: testExpiry, First: true}
+	c.refuse(KindAddUser, LeaderActor, first, "recovery key's recipient")
+	first.RecoveryRecipient = "age1first"
+	c.mustApply(KindAddUser, LeaderActor, first)
 	if c.state.RecoveryRecipient != "age1first" {
 		t.Errorf("recovery recipient %q", c.state.RecoveryRecipient)
 	}
-	c.refuse(KindAddUser, LeaderActor, AddUser{Name: "bob", Serial: "b1", First: true, RecoveryRecipient: "age1b"},
-		"first user already")
-	c.refuse(KindAddUser, LeaderActor, AddUser{Name: "bob", Serial: "b1", RecoveryRecipient: "age1b"},
-		"recovery key's recipient")
+	second := AddUser{Name: "bob", Serial: "b1", NotAfter: testExpiry, First: true, RecoveryRecipient: "age1b"}
+	c.refuse(KindAddUser, LeaderActor, second, "first user already")
+	second.First = false
+	c.refuse(KindAddUser, LeaderActor, second, "recovery key's recipient")
+}
+
+func TestACertificateComesWithItsExpiry(t *testing.T) {
+	c := newCluster(t)
+	c.refuse(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"}, "no expiry")
+	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
+	c.refuse(KindRecoverUser, UserActor("alice"), RecoverUser{Name: "alice", Serial: "a2"}, "no expiry")
+	host := testHost(1)
+	host.CertificateNotAfter = time.Time{}
+	c.refuse(KindAddHost, LeaderActor, AddHost{Host: host}, "no expiry")
 }
 
 func TestARecoveredUserKeepsOnlyTheNewCertificate(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"})
-	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a2"})
-	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "bob", Serial: "b1"})
-	c.refuse(KindRecoverUser, UserActor("carol"), RecoverUser{Name: "carol", Serial: "c1"}, "no user carol")
-	c.refuse(KindRecoverUser, UserActor("alice"), RecoverUser{Name: "alice", Serial: "b1"}, "used already")
+	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
+	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a2"))
+	c.mustApply(KindAddUser, LeaderActor, addUser("bob", "b1"))
+	c.refuse(KindRecoverUser, UserActor("carol"), RecoverUser{Name: "carol", Serial: "c1", NotAfter: testExpiry},
+		"no user carol")
+	c.refuse(KindRecoverUser, UserActor("alice"), RecoverUser{Name: "alice", Serial: "b1", NotAfter: testExpiry},
+		"used already")
 
-	c.mustApply(KindRecoverUser, UserActor("alice"), RecoverUser{Name: "alice", Serial: "a3"})
-	if serials := c.state.Users["alice"].Serials; len(serials) != 1 || serials[0] != "a3" {
+	c.mustApply(KindRecoverUser, UserActor("alice"), RecoverUser{Name: "alice", Serial: "a3", NotAfter: testExpiry})
+	if serials := c.state.Users["alice"].Serials; len(serials) != 1 || !serials["a3"].Equal(testExpiry) {
 		t.Errorf("alice keeps only a3: %v", serials)
 	}
 	for _, serial := range []string{"a1", "a2"} {
-		if at, ok := c.state.Revoked[serial]; !ok || !at.Equal(testTime) {
-			t.Errorf("%s not revoked at the command's time: %v", serial, at)
+		if want := (Revocation{At: testTime, NotAfter: testExpiry}); c.state.Revoked[serial] != want {
+			t.Errorf("%s: revoked %v, want %v", serial, c.state.Revoked[serial], want)
 		}
 	}
 	if _, revoked := c.state.Revoked["b1"]; revoked || len(c.state.Users["bob"].Serials) != 1 {
@@ -302,9 +349,52 @@ func TestARecoveredUserKeepsOnlyTheNewCertificate(t *testing.T) {
 	}
 }
 
+func TestARevocationGoesAWhileAfterItsCertificateExpired(t *testing.T) {
+	c := newCluster(t)
+	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1", NotAfter: testTime})
+	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a2"))
+	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a3"))
+	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a4"))
+	c.mustApply(KindRevoke, LeaderActor, Revoke{Serial: "a1"})
+
+	// a revocation at the command's time, not the clock's
+	revokeAt := func(serial string, at time.Time) {
+		t.Helper()
+		if _, err := c.applyAt(at, KindRevoke, LeaderActor, Revoke{Serial: serial}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	revokeAt("a2", testTime.Add(revokedKept))
+	if _, kept := c.state.Revoked["a1"]; !kept {
+		t.Error("a1 went as soon as it expired; a host whose clock runs behind still takes it")
+	}
+	revokeAt("a3", testTime.Add(revokedKept+time.Second))
+	if _, kept := c.state.Revoked["a1"]; kept {
+		t.Error("a1 stays on the list long after it expired")
+	}
+	if len(c.state.Revoked) != 2 {
+		t.Errorf("the certificates that did not expire went too: %v", c.state.Revoked)
+	}
+}
+
+func TestOnlyACertificateTheStateKnowsIsRevoked(t *testing.T) {
+	c := newCluster(t)
+	c.refuse(KindRevoke, LeaderActor, Revoke{Serial: "unknown"}, "no user or host")
+	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
+	c.mustApply(KindRevoke, LeaderActor, Revoke{Serial: testHost(1).CertificateSerial})
+	c.refuse(KindRevoke, LeaderActor, Revoke{Serial: testHost(1).CertificateSerial}, "revoked already")
+	// removing the host after its certificate was revoked keeps the first
+	// revocation
+	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 1, Phase: Removed})
+	if revocation := c.state.Revoked[testHost(1).CertificateSerial]; revocation.NotAfter != testExpiry {
+		t.Errorf("the host's certificate: %v", revocation)
+	}
+}
+
 func TestANewRecoveryKeyReplacesTheOld(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1", First: true, RecoveryRecipient: "age1first"})
+	c.mustApply(KindAddUser, LeaderActor,
+		AddUser{Name: "alice", Serial: "a1", NotAfter: testExpiry, First: true, RecoveryRecipient: "age1first"})
 	c.refuse(KindSetRecoveryRecipient, UserActor("alice"), SetRecoveryRecipient{Recipient: "AGE-SECRET-KEY-1X"}, "no age key")
 	c.mustApply(KindSetRecoveryRecipient, UserActor("alice"), SetRecoveryRecipient{Recipient: "age1second"})
 	if c.state.RecoveryRecipient != "age1second" {
@@ -314,24 +404,24 @@ func TestANewRecoveryKeyReplacesTheOld(t *testing.T) {
 
 func TestRemovingAUserRevokesTheirCertificates(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"})
-	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a2"})
-	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "bob", Serial: "b1"})
-	c.refuse(KindAddUser, LeaderActor, AddUser{Name: "carol", Serial: "a1"}, "used already")
+	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
+	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a2"))
+	c.mustApply(KindAddUser, LeaderActor, addUser("bob", "b1"))
+	c.refuse(KindAddUser, LeaderActor, addUser("carol", "a1"), "used already")
 
 	c.mustApply(KindRevoke, UserActor("alice"), Revoke{Serial: "a1"})
-	if serials := c.state.Users["alice"].Serials; len(serials) != 1 || serials[0] != "a2" {
+	if serials := c.state.Users["alice"].Serials; len(serials) != 1 || serials["a2"].IsZero() {
 		t.Errorf("alice keeps only a2: %v", serials)
 	}
-	c.refuse(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"}, "used already")
+	c.refuse(KindAddUser, LeaderActor, addUser("alice", "a1"), "used already")
 
 	c.mustApply(KindRemoveUser, UserActor("bob"), RemoveUser{Name: "alice"})
 	if _, ok := c.state.Users["alice"]; ok {
 		t.Error("alice is still a user")
 	}
 	for _, serial := range []string{"a1", "a2"} {
-		if at, ok := c.state.Revoked[serial]; !ok || !at.Equal(testTime) {
-			t.Errorf("%s not revoked at the command's time: %v", serial, at)
+		if want := (Revocation{At: testTime, NotAfter: testExpiry}); c.state.Revoked[serial] != want {
+			t.Errorf("%s: revoked %v, want %v", serial, c.state.Revoked[serial], want)
 		}
 	}
 }
@@ -733,7 +823,7 @@ func TestTheAuditKeepsTheLastEntries(t *testing.T) {
 func TestSnapshotsGiveTheSameState(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
-	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"})
+	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
 	c.putShop(shopSpec())
 
 	var buffer bytes.Buffer
@@ -749,7 +839,7 @@ func TestSnapshotsGiveTheSameState(t *testing.T) {
 		t.Errorf("restored state differs:\n%s\n%s", copied.encoded(), c.encoded())
 	}
 	// the restored state goes on taking commands
-	copied.mustApply(KindAddUser, LeaderActor, AddUser{Name: "bob", Serial: "b1"})
+	copied.mustApply(KindAddUser, LeaderActor, addUser("bob", "b1"))
 }
 
 func TestSnapshotsOfUnknownVersionsAreRefused(t *testing.T) {
@@ -768,7 +858,7 @@ func TestTwoAgentsApplyingTheSameLogAgree(t *testing.T) {
 	for _, c := range []*cluster{first, second} {
 		c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
 		c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(2)})
-		c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"})
+		c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
 		c.mustApply(KindRemoveUser, LeaderActor, RemoveUser{Name: "alice"})
 		_ = c.apply(KindRevoke, LeaderActor, Revoke{Serial: "a1"}) // refused on both
 	}
@@ -807,7 +897,8 @@ func TestRemovingAHostRevokesItsCertificate(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
 	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 1, Phase: Removed})
-	if at, revoked := c.state.Revoked[testHost(1).CertificateSerial]; !revoked || !at.Equal(testTime) {
+	want := Revocation{At: testTime, NotAfter: testExpiry}
+	if revocation := c.state.Revoked[testHost(1).CertificateSerial]; revocation != want {
 		t.Errorf("the removed host's certificate is not revoked: %v", c.state.Revoked)
 	}
 }

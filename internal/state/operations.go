@@ -89,23 +89,23 @@ type StartOperation struct {
 	TakeOver  bool      `json:"take_over,omitempty"`
 }
 
-func applyStartOperation(s *State, _ Command, payload StartOperation) error {
+func applyStartOperation(s *State, _ Command, payload StartOperation) (func(), error) {
 	operation := payload.Operation
 	switch {
 	case operation.ID == "" || operation.Kind == "":
-		return errors.New("the operation needs an ID and a kind")
+		return nil, errors.New("the operation needs an ID and a kind")
 	case len(operation.Locks) == 0:
-		return fmt.Errorf("operation %s locks nothing", operation.ID)
+		return nil, fmt.Errorf("operation %s locks nothing", operation.ID)
 	}
 	if _, exists := s.Operations[operation.ID]; exists {
-		return fmt.Errorf("operation %s exists already", operation.ID)
+		return nil, fmt.Errorf("operation %s exists already", operation.ID)
 	}
 	if err := s.checkLiveHost(operation.Owner); err != nil {
-		return err
+		return nil, err
 	}
 	for _, lock := range operation.Locks {
 		if !validLock(lock) {
-			return fmt.Errorf("operation %s: lock %q is neither stack/<stack ID> nor volume/<volume ID>",
+			return nil, fmt.Errorf("operation %s: lock %q is neither stack/<stack ID> nor volume/<volume ID>",
 				operation.ID, lock)
 		}
 	}
@@ -114,20 +114,21 @@ func applyStartOperation(s *State, _ Command, payload StartOperation) error {
 		holder, held := s.Locks[lock]
 		switch {
 		case held && !payload.TakeOver:
-			return &LockedError{Lock: lock, Operation: holder}
+			return nil, &LockedError{Lock: lock, Operation: holder}
 		case held:
 			holders[holder] = true
 		}
 	}
-	for _, holder := range slices.Sorted(maps.Keys(holders)) {
-		s.finish(holder, OpFailed, "taken over by "+operation.ID)
-	}
 	operation.Step, operation.State, operation.Error = 0, OpRunning, ""
-	s.Operations[operation.ID] = &operation
-	for _, lock := range operation.Locks {
-		s.Locks[lock] = operation.ID
-	}
-	return nil
+	return func() {
+		for _, holder := range slices.Sorted(maps.Keys(holders)) {
+			s.finish(holder, OpFailed, "taken over by "+operation.ID)
+		}
+		s.Operations[operation.ID] = &operation
+		for _, lock := range operation.Locks {
+			s.Locks[lock] = operation.ID
+		}
+	}, nil
 }
 
 // AdvanceOperation records a confirmed step and who runs the next one.
@@ -140,19 +141,20 @@ type AdvanceOperation struct {
 	RollingBack bool `json:"rolling_back,omitempty"`
 }
 
-func applyAdvanceOperation(s *State, _ Command, payload AdvanceOperation) error {
+func applyAdvanceOperation(s *State, _ Command, payload AdvanceOperation) (func(), error) {
 	operation, err := s.unfinished(payload.ID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := s.checkLiveHost(payload.Owner); err != nil {
-		return err
+		return nil, err
 	}
-	if payload.RollingBack {
-		operation.State = OpRollingBack
-	}
-	operation.Step, operation.Owner, operation.Deadline = payload.Step, payload.Owner, payload.Deadline
-	return nil
+	return func() {
+		if payload.RollingBack {
+			operation.State = OpRollingBack
+		}
+		operation.Step, operation.Owner, operation.Deadline = payload.Step, payload.Owner, payload.Deadline
+	}, nil
 }
 
 // FinishOperation ends an operation and frees its locks.
@@ -162,16 +164,15 @@ type FinishOperation struct {
 	Error  string `json:"error,omitempty"`
 }
 
-func applyFinishOperation(s *State, _ Command, payload FinishOperation) error {
+func applyFinishOperation(s *State, _ Command, payload FinishOperation) (func(), error) {
 	if _, err := s.unfinished(payload.ID); err != nil {
-		return err
+		return nil, err
 	}
 	outcome := OpDone
 	if payload.Failed {
 		outcome = OpFailed
 	}
-	s.finish(payload.ID, outcome, payload.Error)
-	return nil
+	return func() { s.finish(payload.ID, outcome, payload.Error) }, nil
 }
 
 // unfinished returns an operation that is still running or rolling back.

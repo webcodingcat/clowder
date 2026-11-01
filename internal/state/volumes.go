@@ -24,7 +24,7 @@ func findVolume(s *State, id string) *Meta {
 // putVolumeResource makes a volume. It is placed together with the first
 // stack that names it, on that stack's host; until then it waits
 // (VolumePending).
-func putVolumeResource(s *State, id string, payload PutResource) (*Meta, error) {
+func putVolumeResource(s *State, id string, payload PutResource) (func() *Meta, error) {
 	spec, err := decodeSpec[resource.VolumeSpec](payload.Kind, id, payload.Spec)
 	if err != nil {
 		return nil, err
@@ -49,8 +49,10 @@ func putVolumeResource(s *State, id string, payload PutResource) (*Meta, error) 
 		Meta: Meta{Namespace: payload.Namespace, Name: payload.Name, Owner: payload.Owner},
 		Spec: spec, DataGeneration: generation, Status: VolumePending,
 	}
-	s.Volumes[id] = volume
-	return &volume.Meta, nil
+	return func() *Meta {
+		s.Volumes[id] = volume
+		return &volume.Meta
+	}, nil
 }
 
 // nextDataGeneration is a new volume's: one above the highest retired copy
@@ -90,19 +92,20 @@ func (s *State) checkFreeLV(id string, generation int64) error {
 
 // removeVolumeResource refuses a volume a stack names; otherwise it
 // retires the volume's copies, which their hosts remove with the data.
-func removeVolumeResource(s *State, id string) error {
+func removeVolumeResource(s *State, id string) (func(), error) {
 	volume := s.Volumes[id]
 	if stack := s.stackNaming(volume.Namespace, volume.Name, "", func(stack *Stack) []string {
 		return stack.Spec.VolumeNames()
 	}); stack != "" {
-		return fmt.Errorf("volume %s is stack %s's; change or delete the stack first", id, stack)
+		return nil, fmt.Errorf("volume %s is stack %s's; change or delete the stack first", id, stack)
 	}
 	if err := s.checkUnlocked(volumeLock(id), ""); err != nil {
-		return err
+		return nil, err
 	}
-	s.retire(volume, nil)
-	delete(s.Volumes, id)
-	return nil
+	return func() {
+		s.retire(volume, nil)
+		delete(s.Volumes, id)
+	}, nil
 }
 
 // PutVolume replaces a volume's record: where its copies are and how they
@@ -118,39 +121,39 @@ type PutVolume struct {
 // hosts remove them, data and all. So a placed volume keeps at least one
 // copy, and never goes back to pending: only the volume's delete gives up
 // all of its data.
-func applyPutVolume(s *State, _ Command, payload PutVolume) error {
+func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 	volume := payload.Volume
 	id := volume.ID()
 	old, ok := s.Volumes[id]
 	switch {
 	case !ok:
-		return fmt.Errorf("no volume %s", id)
+		return nil, fmt.Errorf("no volume %s", id)
 	case volume.Spec != old.Spec:
-		return fmt.Errorf("volume %s: its spec changes only with an apply", id)
+		return nil, fmt.Errorf("volume %s: its spec changes only with an apply", id)
 	case old.Status != VolumePending && (volume.Status == VolumePending || len(volume.Copies) == 0):
-		return fmt.Errorf("volume %s holds data: it keeps a copy until it is deleted", id)
+		return nil, fmt.Errorf("volume %s holds data: it keeps a copy until it is deleted", id)
 	}
 	volume.Meta = old.Meta
 	if sameJSON(*old, volume) {
-		return errUnchanged
+		return nil, errUnchanged
 	}
 	if err := s.checkUnlocked(volumeLock(id), payload.Operation); err != nil {
-		return err
+		return nil, err
 	}
 	if err := checkVolume(volume); err != nil {
-		return err
+		return nil, err
 	}
 	if volume.DataGeneration < old.DataGeneration {
-		return fmt.Errorf("volume %s: data generation %d is older than %d",
+		return nil, fmt.Errorf("volume %s: data generation %d is older than %d",
 			id, volume.DataGeneration, old.DataGeneration)
 	}
 	if volume.Minor != nil {
 		if *volume.Minor < 0 || *volume.Minor > MaxMinor {
-			return fmt.Errorf("volume %s: minor %d is not from 0 to %d", id, *volume.Minor, MaxMinor)
+			return nil, fmt.Errorf("volume %s: minor %d is not from 0 to %d", id, *volume.Minor, MaxMinor)
 		}
 		for _, otherID := range slices.Sorted(maps.Keys(s.Volumes)) {
 			if other := s.Volumes[otherID]; otherID != id && other.Minor != nil && *other.Minor == *volume.Minor {
-				return fmt.Errorf("volume %s: minor %d belongs to %s", id, *volume.Minor, otherID)
+				return nil, fmt.Errorf("volume %s: minor %d belongs to %s", id, *volume.Minor, otherID)
 			}
 		}
 	}
@@ -159,17 +162,18 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) error {
 	placed := map[HostID]bool{}
 	for _, volumeCopy := range volume.Copies {
 		if err := s.checkLiveHost(&volumeCopy.Host); err != nil {
-			return fmt.Errorf("volume %s: %w", id, err)
+			return nil, fmt.Errorf("volume %s: %w", id, err)
 		}
 		if placed[volumeCopy.Host] {
-			return fmt.Errorf("volume %s: two copies on host %d", id, volumeCopy.Host)
+			return nil, fmt.Errorf("volume %s: two copies on host %d", id, volumeCopy.Host)
 		}
 		placed[volumeCopy.Host] = true
 	}
-	s.retire(old, &volume)
-	s.Volumes[id] = &volume
-	s.changed(resource.KindVolume, &volume.Meta)
-	return nil
+	return func() {
+		s.retire(old, &volume)
+		s.Volumes[id] = &volume
+		s.changed(resource.KindVolume, &volume.Meta)
+	}, nil
 }
 
 // retire records the copies of old as retired, except those that kept,
@@ -192,17 +196,16 @@ type ForgetCopy struct {
 	Copy RetiredCopy `json:"copy"`
 }
 
-func applyForgetCopy(s *State, cmd Command, payload ForgetCopy) error {
+func applyForgetCopy(s *State, cmd Command, payload ForgetCopy) (func(), error) {
 	if cmd.Actor != HostActor(payload.Copy.Host) {
-		return fmt.Errorf("only host %d itself forgets its copies", payload.Copy.Host)
+		return nil, fmt.Errorf("only host %d itself forgets its copies", payload.Copy.Host)
 	}
 	index := slices.Index(s.Retired, payload.Copy)
 	if index < 0 {
-		return fmt.Errorf("no retired copy of %s (data generation %d) on host %d",
+		return nil, fmt.Errorf("no retired copy of %s (data generation %d) on host %d",
 			payload.Copy.Volume, payload.Copy.DataGeneration, payload.Copy.Host)
 	}
-	s.Retired = slices.Delete(s.Retired, index, index+1)
-	return nil
+	return func() { s.Retired = slices.Delete(s.Retired, index, index+1) }, nil
 }
 
 // checkVolume holds what a volume's record must be on its own: the state is

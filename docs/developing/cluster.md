@@ -8,11 +8,14 @@ Raft, the API and the CLI, and the placement.
 Every agent holds the same `State` and applies the same `Command`s in Raft's order.
 
 - **Deterministic.** `Apply` uses no clock (a command carries the leader's time in `At`), no
-  randomness and no I/O; lint bans the clock from the package (forbidigo). A handler checks
-  everything before it changes anything, so a refused command leaves no trace; the state's
-  `Index` follows the log either way. The tests hold every handler to it: their `refuse`
-  compares the whole state before and after each refusal, so a test of a new refusal
-  checks it too.
+  randomness and no I/O; lint bans the clock from the package (forbidigo).
+- **A refused command leaves no trace.** A handler only reads the state: it checks the
+  command and returns the change it makes as a function, which `Apply` runs only when the
+  handler returned no error. The change cannot fail, so nothing can refuse a command half
+  way through. That costs nothing, where working on a copy of the state would copy all of
+  it at every command (see `Copy`). The state's `Index` follows the log either way. The
+  tests check what the types cannot, that the checks change nothing: every command a test
+  may see refused (`apply`, `changes`, `refuse`) is compared with the state before it.
 - **Commands.** A command has a kind, a payload of the type with the same name (`AddHost`,
   `PutResource`, ...) and an actor (`leader`, `host/<id>`, `user/<name>`) that the API takes from
   the caller's certificate. Which actor may send which kind is the API's check. The state
@@ -44,7 +47,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | `Volume.DataGeneration` | a volume's data: a restore or a class move makes a new LV (`-g<N>`) |
 
   - `put-resource` and `delete-resource` carry the kind; `resourceKinds` holds each kind's
-    `find`, `put` and `remove`. A handler checks in a fixed order:
+    `find`, `put` and `remove`, where `put` and `remove` return their change like a
+    handler. A handler checks in a fixed order:
     1. `Authorize`: may this actor do this to this kind in this namespace? It allows
        everything until users get permissions. It sits in the state so that the leader
        decides, not the agent that took the request.
@@ -153,6 +157,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   exactly when replicated (a pending volume has neither copy nor minor), one copy per host,
   one stack per volume, nothing deleted that a stack names, a removed host's certificate
   revoked.
+- **Revocations.** `Revoked` holds each revoked certificate with when it expires, which the
+  state knows from the command that recorded the certificate (`AddUser`, `RecoverUser`,
+  the host's `CertificateNotAfter`); `revoke` puts it there. The list grows only there, so
+  `revoke` also drops the certificates that expired more than `revokedKept` before the
+  command: no handshake takes them any more, and the margin covers a host whose clock runs
+  behind. It goes by the command's `At`, so every agent drops the same. The command
+  `revoke` takes only a serial the state knows, a user's or a host's.
 - **Secrets** arrive sealed (`Sealed`, age for the data key); `state` never sees them in
   clear. Those of `cluster.yaml` are `ClusterSecrets`, by name (`clusterspec.SecretPlaces`),
   each with a digest; the namespaces' are `Secrets`. Readers find a value through the
@@ -177,7 +188,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   name its common name (`host-<id>` or the user's name).
 - Keys are Ed25519 and never leave the machine that made them: the CA signs public keys.
 - Certificates end by revocation, not expiry: hosts may stay off for months. `Verify` takes
-  the revoked serials from the state.
+  the revoked serials from the state, which keeps each until a while after it expired.
 - `TrustProof` (HMAC-SHA256 with the bootstrap key over the CA certificate) is how a CLI or a
   joining host trusts the CA on first contact.
 

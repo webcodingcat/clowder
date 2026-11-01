@@ -43,13 +43,12 @@ type PutACMEAccount struct {
 	Account ACMEAccount `json:"account"`
 }
 
-func applyPutACMEAccount(s *State, _ Command, payload PutACMEAccount) error {
+func applyPutACMEAccount(s *State, _ Command, payload PutACMEAccount) (func(), error) {
 	account := payload.Account
 	if account.Directory == "" || account.URL == "" || len(account.Key) == 0 {
-		return errors.New("an account needs its directory, URL and key")
+		return nil, errors.New("an account needs its directory, URL and key")
 	}
-	s.ACMEAccount = &account
-	return nil
+	return func() { s.ACMEAccount = &account }, nil
 }
 
 // base64URL is what RFC 8555 allows in a token and a key authorization.
@@ -62,15 +61,15 @@ type PutACMEChallenge struct {
 	KeyAuthorization string `json:"key_authorization"`
 }
 
-func applyPutACMEChallenge(s *State, _ Command, payload PutACMEChallenge) error {
+func applyPutACMEChallenge(s *State, _ Command, payload PutACMEChallenge) (func(), error) {
 	// the token becomes part of a URL path; RFC 8555 makes the key
 	// authorization the token, a dot and the account key's thumbprint
 	thumbprint, ok := strings.CutPrefix(payload.KeyAuthorization, payload.Token+".")
 	if !base64URL.MatchString(payload.Token) || !ok || !base64URL.MatchString(thumbprint) {
-		return fmt.Errorf("token %q with key authorization %q is not an HTTP-01 answer", payload.Token, payload.KeyAuthorization)
+		return nil, fmt.Errorf("token %q with key authorization %q is not an HTTP-01 answer",
+			payload.Token, payload.KeyAuthorization)
 	}
-	s.Challenges[payload.Token] = payload.KeyAuthorization
-	return nil
+	return func() { s.Challenges[payload.Token] = payload.KeyAuthorization }, nil
 }
 
 // DeleteACMEChallenge removes an answer once its order ended.
@@ -78,9 +77,8 @@ type DeleteACMEChallenge struct {
 	Token string `json:"token"`
 }
 
-func applyDeleteACMEChallenge(s *State, _ Command, payload DeleteACMEChallenge) error {
-	delete(s.Challenges, payload.Token)
-	return nil
+func applyDeleteACMEChallenge(s *State, _ Command, payload DeleteACMEChallenge) (func(), error) {
+	return func() { delete(s.Challenges, payload.Token) }, nil
 }
 
 // PutCertificate records a domain's new certificate, replacing the one it
@@ -89,18 +87,17 @@ type PutCertificate struct {
 	Certificate Certificate `json:"certificate"`
 }
 
-func applyPutCertificate(s *State, _ Command, payload PutCertificate) error {
+func applyPutCertificate(s *State, _ Command, payload PutCertificate) (func(), error) {
 	certificate := payload.Certificate
 	switch {
 	case !names.ValidDomain(certificate.Domain) || certificate.Domain != strings.ToLower(certificate.Domain):
-		return fmt.Errorf("%q is not a domain in lowercase", certificate.Domain)
+		return nil, fmt.Errorf("%q is not a domain in lowercase", certificate.Domain)
 	case len(certificate.Key) == 0 || len(certificate.Chain) == 0:
-		return fmt.Errorf("the certificate of %s needs its key and chain", certificate.Domain)
+		return nil, fmt.Errorf("the certificate of %s needs its key and chain", certificate.Domain)
 	case !certificate.NotAfter.After(certificate.NotBefore):
-		return fmt.Errorf("the certificate of %s ends before it starts", certificate.Domain)
+		return nil, fmt.Errorf("the certificate of %s ends before it starts", certificate.Domain)
 	}
-	s.Certificates[certificate.Domain] = &certificate
-	return nil
+	return func() { s.Certificates[certificate.Domain] = &certificate }, nil
 }
 
 // DeleteCertificate removes the certificate of a domain no stack names.
@@ -108,7 +105,6 @@ type DeleteCertificate struct {
 	Domain string `json:"domain"`
 }
 
-func applyDeleteCertificate(s *State, _ Command, payload DeleteCertificate) error {
-	delete(s.Certificates, payload.Domain)
-	return nil
+func applyDeleteCertificate(s *State, _ Command, payload DeleteCertificate) (func(), error) {
+	return func() { delete(s.Certificates, payload.Domain) }, nil
 }

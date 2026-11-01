@@ -220,7 +220,7 @@ func (s *Server) recoverUser(w http.ResponseWriter, r *http.Request) {
 	// it, and the command's kind tells the audit that it was a recovery.
 	// No time here: the leader stamps its own (proposeHere).
 	cmd, err := state.NewCommand(state.KindRecoverUser, time.Time{}, state.UserActor(request.User),
-		state.RecoverUser{Name: request.User, Serial: pki.Serial(certificate)})
+		state.RecoverUser{Name: request.User, Serial: pki.Serial(certificate), NotAfter: certificate.NotAfter})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

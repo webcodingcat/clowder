@@ -110,8 +110,14 @@ func bootstrapCommand(t *testing.T) state.Command {
 		JoinKey: state.SealedSecret{Value: state.Sealed("join"), Digest: "d"},
 		Host: state.Host{
 			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
+			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
+}
+
+// addUser is the command that gives a user a certificate.
+func addUser(t *testing.T, name, serial string) state.Command {
+	return command(t, state.KindAddUser, state.AddUser{Name: name, Serial: serial, NotAfter: time.Now().AddDate(1, 0, 0)})
 }
 
 func users(node *Node) []string {
@@ -136,11 +142,11 @@ func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
 	if _, err := node.Propose(ctx, bootstrapCommand(t)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := node.Propose(ctx, command(t, state.KindAddUser, state.AddUser{Name: "alice", Serial: "a1"})); err != nil {
+	if _, err := node.Propose(ctx, addUser(t, "alice", "a1")); err != nil {
 		t.Fatal(err)
 	}
 	// a refused command comes back as the state's error
-	_, err := node.Propose(ctx, command(t, state.KindAddUser, state.AddUser{Name: "bob", Serial: "a1"}))
+	_, err := node.Propose(ctx, addUser(t, "bob", "a1"))
 	var refused *state.Refused
 	if !errors.As(err, &refused) {
 		t.Errorf("want a refusal for a used serial, got %v", err)
@@ -149,7 +155,7 @@ func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
 	if err := node.raft.Snapshot().Error(); err != nil {
 		t.Fatal(err)
 	}
-	index, err := node.Propose(ctx, command(t, state.KindAddUser, state.AddUser{Name: "carol", Serial: "c1"}))
+	index, err := node.Propose(ctx, addUser(t, "carol", "c1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +256,7 @@ func TestThreeHostsReplicateOverMutualTLS(t *testing.T) {
 	if _, err := nodes[0].Propose(ctx, bootstrapCommand(t)); err != nil {
 		t.Fatal(err)
 	}
-	index, err := nodes[0].Propose(ctx, command(t, state.KindAddUser, state.AddUser{Name: "alice", Serial: "a1"}))
+	index, err := nodes[0].Propose(ctx, addUser(t, "alice", "a1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +273,7 @@ func TestThreeHostsReplicateOverMutualTLS(t *testing.T) {
 	if id, ok := nodes[2].Leader(); !ok || id != 0 {
 		t.Errorf("host 2 sees leader %d (%v)", id, ok)
 	}
-	if _, err := nodes[1].Propose(ctx, command(t, state.KindAddUser, state.AddUser{Name: "bob", Serial: "b1"})); err == nil {
+	if _, err := nodes[1].Propose(ctx, addUser(t, "bob", "b1")); err == nil {
 		t.Error("a follower committed a command")
 	}
 }

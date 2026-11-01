@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -334,27 +335,47 @@ func clowderWithInput(t *testing.T, input string, args ...string) (string, error
 	return out.String(), err
 }
 
+// closeCounter counts its closes, for what the loops use.
+type closeCounter struct{ closed atomic.Int32 }
+
+func (c *closeCounter) Close() error {
+	c.closed.Add(1)
+	return nil
+}
+
 func TestStoppingWaitsForTheLoopsButNotForever(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx, stop := context.WithCancel(context.Background())
 	var loops sync.WaitGroup
+	var used closeCounter
 	ended := false
 	loops.Go(func() {
 		<-ctx.Done()
 		time.Sleep(20 * time.Millisecond) // a pass finishing its last step
+		if used.closed.Load() > 0 {
+			t.Error("closed what the loop uses before it ended")
+		}
 		ended = true
 	})
-	if !stopLoops(stop, &loops, time.Second, logger) || !ended {
-		t.Error("stopped before the loop ended")
+	if err := stopLoops(stop, &loops, time.Second, logger, &used); err != nil || !ended {
+		t.Errorf("stopped before the loop ended: %v", err)
+	}
+	if used.closed.Load() != 1 {
+		t.Errorf("closed what the loops use %d times, want once", used.closed.Load())
 	}
 
-	// a loop that hangs (a host tool left behind) does not hold up the stop
+	// a loop that hangs (a host tool left behind) does not hold up the
+	// stop, and keeps what it uses open
 	hung := make(chan struct{})
 	defer close(hung)
 	var stuck sync.WaitGroup
+	var stillUsed closeCounter
 	stuck.Go(func() { <-hung })
-	if stopLoops(func() {}, &stuck, 20*time.Millisecond, logger) {
-		t.Error("a hung loop counted as ended")
+	if err := stopLoops(func() {}, &stuck, 20*time.Millisecond, logger, &stillUsed); !errors.Is(err, errLoopsLeft) {
+		t.Errorf("a hung loop: want errLoopsLeft, got %v", err)
+	}
+	if stillUsed.closed.Load() != 0 {
+		t.Error("closed what a hung loop still uses")
 	}
 }
 

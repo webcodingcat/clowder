@@ -17,7 +17,7 @@ func findSecret(s *State, id string) *Meta {
 
 // putSecret stores a secret's sealed value, within the limits of
 // checkSecretLimits.
-func putSecret(s *State, id string, payload PutResource) (*Meta, error) {
+func putSecret(s *State, id string, payload PutResource) (func() *Meta, error) {
 	spec, err := decodeSpec[SealedSecret](payload.Kind, id, payload.Spec)
 	if err != nil {
 		return nil, err
@@ -44,8 +44,10 @@ func putSecret(s *State, id string, payload PutResource) (*Meta, error) {
 	if err != nil {
 		return nil, fmt.Errorf("secret %s: %w", id, err)
 	}
-	s.Secrets[id] = put
-	return &put.Meta, nil
+	return func() *Meta {
+		s.Secrets[id] = put
+		return &put.Meta
+	}, nil
 }
 
 // checkSecretLimits holds the limits on the secrets the cluster would keep:
@@ -98,15 +100,14 @@ func checkSecretLimits(secrets map[string]*Secret, cluster map[string]SealedSecr
 
 // removeSecret refuses a secret a stack names: the stack could not start
 // again without it.
-func removeSecret(s *State, id string) error {
+func removeSecret(s *State, id string) (func(), error) {
 	secret := s.Secrets[id]
 	if stack := s.stackNaming(secret.Namespace, secret.Name, "", func(stack *Stack) []string {
 		return stack.Spec.SecretNames()
 	}); stack != "" {
-		return fmt.Errorf("secret %s is stack %s's; change or delete the stack first", id, stack)
+		return nil, fmt.Errorf("secret %s is stack %s's; change or delete the stack first", id, stack)
 	}
-	delete(s.Secrets, id)
-	return nil
+	return func() { delete(s.Secrets, id) }, nil
 }
 
 // The length of what age adds when it seals for the cluster's one X25519

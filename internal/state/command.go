@@ -98,10 +98,12 @@ func NewCommand(kind string, at time.Time, actor string, payload any) (Command, 
 	return Command{Version: CommandVersion, Kind: kind, At: at.UTC(), Actor: actor, Payload: encoded}, nil
 }
 
-// handler applies one kind of command. It checks everything first and
-// changes the state only when the command is valid, so a refused command
-// leaves no trace.
-type handler func(s *State, cmd Command) error
+// handler checks one kind of command against the state and returns the
+// change it makes, which Apply runs only for a valid command. The change
+// cannot fail: everything that can refuse the command runs before it, in
+// the handler, which only reads the state. So a refused command leaves no
+// trace, without the cost of working on a copy of the state.
+type handler func(s *State, cmd Command) (change func(), err error)
 
 var handlers = map[string]handler{
 	KindBootstrap:            decoded(applyBootstrap),
@@ -138,11 +140,11 @@ var handlers = map[string]handler{
 // decoded turns a function of a typed payload into a handler. Unknown fields
 // are ignored: a command of the next release may carry fields this one does
 // not know yet.
-func decoded[Payload any](apply func(s *State, cmd Command, payload Payload) error) handler {
-	return func(s *State, cmd Command) error {
+func decoded[Payload any](apply func(s *State, cmd Command, payload Payload) (func(), error)) handler {
+	return func(s *State, cmd Command) (func(), error) {
 		var payload Payload
 		if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
-			return fmt.Errorf("read the payload: %w", err)
+			return nil, fmt.Errorf("read the payload: %w", err)
 		}
 		return apply(s, cmd, payload)
 	}
@@ -182,16 +184,16 @@ func (s *State) Apply(index uint64, cmd Command) ([]Change, error) {
 		return nil, fmt.Errorf("%s: %w", cmd.Kind, ErrNotBootstrapped)
 	}
 	s.makeMaps()
-	err := apply(s, cmd)
+	change, err := apply(s, cmd)
 	switch {
 	case errors.Is(err, errUnchanged):
 		// no audit entry: a GitOps loop applies the same files every few
 		// minutes, and would push the real changes out
 		return nil, nil
 	case err != nil:
-		s.changes = nil
 		return nil, &CommandError{Kind: cmd.Kind, Err: err}
 	}
+	change()
 	s.Audit = append(s.Audit, AuditEntry{Index: index, At: cmd.At, Actor: cmd.Actor, Kind: cmd.Kind})
 	if extra := len(s.Audit) - auditSize; extra > 0 {
 		s.Audit = slices.Delete(s.Audit, 0, extra)
@@ -215,7 +217,7 @@ func (e *CommandError) Unwrap() error { return e.Err }
 
 // errUnchanged is a handler's answer to a command that would write what is
 // there already: Apply takes it as applied, and the command leaves no trace,
-// not even in the audit. A handler returns it before it changes anything.
+// not even in the audit.
 var errUnchanged = errors.New("unchanged")
 
 // makeMaps creates the maps that are still nil (a fresh state, or one read
@@ -243,7 +245,7 @@ func (s *State) makeMaps() {
 		s.Users = map[string]*User{}
 	}
 	if s.Revoked == nil {
-		s.Revoked = map[string]time.Time{}
+		s.Revoked = map[string]Revocation{}
 	}
 	if s.Namespaces == nil {
 		s.Namespaces = map[string]*Namespace{}

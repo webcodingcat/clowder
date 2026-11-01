@@ -256,7 +256,10 @@ func newACMERunner(t *testing.T, ca *fakeCA) (*acmeRunner, *leader) {
 	l.apply(state.KindBootstrap, state.LeaderActor, state.Bootstrap{
 		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
 		JoinKey: state.SealedSecret{Value: state.Sealed("j"), Digest: "d"},
-		Host:    state.Host{ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0"},
+		Host: state.Host{
+			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
+			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
+		},
 	})
 	l.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
 		Spec: clusterspec.Config{

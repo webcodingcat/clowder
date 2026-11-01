@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/hoster"
@@ -38,6 +39,7 @@ func withServers(l *leader) {
 		l.apply(state.KindAddHost, state.LeaderActor, state.AddHost{Host: state.Host{
 			ID: id, Name: "node" + string(rune('0'+id)), Underlay: netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
 			WGPublicKey: "wg", CertificateSerial: "s" + string(rune('0'+id)), ServerRef: "4" + string(rune('0'+id)),
+			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		}})
 		l.apply(state.KindSetHostPhase, state.LeaderActor, state.SetHostPhase{Host: id, Phase: state.Active})
 	}

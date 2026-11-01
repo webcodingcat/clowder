@@ -155,9 +155,10 @@ func createKeys(files Files, host Host) (state.ClusterKeys, state.Host, error) {
 	}
 	entry := state.Host{
 		ID: host.ID, Name: host.Name, ServerRef: host.ServerRef, Underlay: host.Underlay,
-		PublicAddress:     host.PublicAddress,
-		WGPublicKey:       base64.StdEncoding.EncodeToString(wireGuardKey.PublicKey().Bytes()),
-		CertificateSerial: pki.Serial(certificate),
+		PublicAddress:       host.PublicAddress,
+		WGPublicKey:         base64.StdEncoding.EncodeToString(wireGuardKey.PublicKey().Bytes()),
+		CertificateSerial:   pki.Serial(certificate),
+		CertificateNotAfter: certificate.NotAfter,
 	}
 	return keys, entry, nil
 }

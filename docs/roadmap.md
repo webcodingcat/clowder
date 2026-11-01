@@ -41,8 +41,6 @@ They do no harm on a single host.
 - A placement is several commands in a row (push-outs, volumes, the stack's host). A new
   leader repairs what one left half done in its next pass; with failover, one command per
   placement would leave fewer states between.
-- `State.Revoked` keeps every revoked serial; with many hosts and users it should drop
-  those of certificates long expired.
 - `storage.Ensure` promotes a resource with `--force` when this host has no `primary`
   marker. That is right for a new volume on one host; after a failover it would force an
   outdated copy. Whether a volume was ever initialised must come from the state, not a

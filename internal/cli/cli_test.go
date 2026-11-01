@@ -107,7 +107,10 @@ func startCluster(t *testing.T) string {
 	cmd, err := state.NewCommand(state.KindBootstrap, time.Now(), state.LeaderActor, state.Bootstrap{
 		Keys:    state.ClusterKeys{CACertificate: ca.CertificatePEM(), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
 		JoinKey: state.SealedSecret{Value: state.Sealed("join"), Digest: "d"},
-		Host:    state.Host{ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0"},
+		Host: state.Host{
+			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
+			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +184,7 @@ func startCluster(t *testing.T) string {
 		t.Fatal(err)
 	}
 	addAlice, err := state.NewCommand(state.KindAddUser, time.Now(), state.LeaderActor,
-		state.AddUser{Name: "alice", Serial: pki.Serial(parsed)})
+		state.AddUser{Name: "alice", Serial: pki.Serial(parsed), NotAfter: parsed.NotAfter})
 	if err != nil {
 		t.Fatal(err)
 	}

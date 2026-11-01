@@ -332,7 +332,7 @@ func TestABatchCarriesOnlyUsersResourceCommands(t *testing.T) {
 	cluster := newTestCluster(t)
 	host1 := cluster.client(cluster.hostCertificate(1), testVersion, 0)
 	cmd, err := state.NewCommand(state.KindAddUser, time.Time{}, state.UserActor("alice"),
-		state.AddUser{Name: "mallory", Serial: "m1"})
+		state.AddUser{Name: "mallory", Serial: "m1", NotAfter: time.Now().AddDate(1, 0, 0)})
 	if err != nil {
 		t.Fatal(err)
 	}

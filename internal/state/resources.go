@@ -85,13 +85,17 @@ type DeleteResource struct {
 type resourceKind struct {
 	// find returns the resource's Meta, or nil if there is none.
 	find func(s *State, id string) *Meta
+	// put and remove only read the state and return their change, as a
+	// handler does, so a refused command leaves no trace.
+	//
 	// put decodes the spec and compares it with the stored one first: for
-	// an equal one it returns errUnchanged and changes nothing. Then it
-	// checks the spec against the state and stores it, returning the
-	// stored Meta.
-	put func(s *State, id string, payload PutResource) (*Meta, error)
-	// remove checks that nothing uses the resource, then removes it.
-	remove func(s *State, id string) error
+	// an equal one it returns errUnchanged. Then it checks the spec against
+	// the state and returns the change that stores it; the change returns
+	// the stored Meta, for the handler to count the generation.
+	put func(s *State, id string, payload PutResource) (store func() *Meta, err error)
+	// remove checks that nothing uses the resource, then returns the change
+	// that removes it.
+	remove func(s *State, id string) (func(), error)
 }
 
 var resourceKinds = map[string]resourceKind{
@@ -106,58 +110,63 @@ var resourceKinds = map[string]resourceKind{
 // rest. So a channel learns nothing of another channel's spec, only that the
 // resource is another's; and an unchanged resource passes even where the
 // state has moved on since.
-func applyPutResource(s *State, cmd Command, payload PutResource) error {
+func applyPutResource(s *State, cmd Command, payload PutResource) (func(), error) {
 	kind, ok := resourceKinds[payload.Kind]
 	if !ok {
-		return fmt.Errorf("no kind of resource %q", payload.Kind)
+		return nil, fmt.Errorf("no kind of resource %q", payload.Kind)
 	}
 	if err := Authorize(cmd.Actor, VerbPut, payload.Kind, payload.Namespace); err != nil {
-		return err
+		return nil, err
 	}
 	id, err := s.resourceID(payload.Kind, payload.Namespace, payload.Name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if payload.Owner == "" {
-		return fmt.Errorf("%s %s needs an owner", payload.Kind, id)
+		return nil, fmt.Errorf("%s %s needs an owner", payload.Kind, id)
 	}
 	if err := checkOwner(kind.find(s, id), payload.Kind, id, payload.Owner); err != nil {
-		return err
+		return nil, err
 	}
-	meta, err := kind.put(s, id, payload)
+	store, err := kind.put(s, id, payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	meta.Generation++
-	s.changed(payload.Kind, meta)
-	return nil
+	return func() {
+		meta := store()
+		meta.Generation++
+		s.changed(payload.Kind, meta)
+	}, nil
 }
 
-func applyDeleteResource(s *State, cmd Command, payload DeleteResource) error {
+func applyDeleteResource(s *State, cmd Command, payload DeleteResource) (func(), error) {
 	kind, ok := resourceKinds[payload.Kind]
 	if !ok {
-		return fmt.Errorf("no kind of resource %q", payload.Kind)
+		return nil, fmt.Errorf("no kind of resource %q", payload.Kind)
 	}
 	if err := Authorize(cmd.Actor, VerbDelete, payload.Kind, payload.Namespace); err != nil {
-		return err
+		return nil, err
 	}
 	id, err := s.resourceID(payload.Kind, payload.Namespace, payload.Name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	stored := kind.find(s, id)
 	if stored == nil {
-		return fmt.Errorf("no %s %s", payload.Kind, id)
+		return nil, fmt.Errorf("no %s %s", payload.Kind, id)
 	}
 	if err := checkOwner(stored, payload.Kind, id, payload.Owner); err != nil {
-		return err
+		return nil, err
 	}
 	meta := *stored
-	if err := kind.remove(s, id); err != nil {
-		return err
+	remove, err := kind.remove(s, id)
+	if err != nil {
+		return nil, err
 	}
-	s.deleted(payload.Kind, meta)
-	return nil
+	return func() {
+		remove()
+		s.deleted(payload.Kind, meta)
+	}, nil
 }
 
 // resourceID is a resource's key in its map: a namespace's name, else
@@ -214,7 +223,7 @@ func findNamespace(s *State, id string) *Meta {
 // putNamespace makes a namespace; it has no spec, so an existing one is
 // unchanged. Its owner owns only the namespace: any channel may put
 // resources into it.
-func putNamespace(s *State, id string, payload PutResource) (*Meta, error) {
+func putNamespace(s *State, id string, payload PutResource) (func() *Meta, error) {
 	spec, err := decodeSpec[map[string]json.RawMessage](payload.Kind, id, payload.Spec)
 	if err != nil {
 		return nil, err
@@ -225,18 +234,20 @@ func putNamespace(s *State, id string, payload PutResource) (*Meta, error) {
 	if _, ok := s.Namespaces[id]; ok {
 		return nil, errUnchanged
 	}
-	namespace := &Namespace{Meta: Meta{Name: id, Owner: payload.Owner}}
-	s.Namespaces[id] = namespace
-	return &namespace.Meta, nil
+	return func() *Meta {
+		namespace := &Namespace{Meta: Meta{Name: id, Owner: payload.Owner}}
+		s.Namespaces[id] = namespace
+		return &namespace.Meta
+	}, nil
 }
 
 // removeNamespace refuses names.Default and a namespace that holds
 // resources: nothing cascades, the user empties it first. Retired copies
 // of its volumes do not count; they stay in the state until their hosts
 // removed them, also for a namespace made again under the same name.
-func removeNamespace(s *State, id string) error {
+func removeNamespace(s *State, id string) (func(), error) {
 	if id == names.Default {
-		return fmt.Errorf("namespace %s belongs to the cluster", id)
+		return nil, fmt.Errorf("namespace %s belongs to the cluster", id)
 	}
 	inNamespace := func(resourceID string) bool {
 		namespace, _, _ := names.SplitID(resourceID)
@@ -251,11 +262,11 @@ func removeNamespace(s *State, id string) error {
 		{resource.KindSecret, slices.Sorted(maps.Keys(s.Secrets))},
 	} {
 		if index := slices.IndexFunc(held.ids, inNamespace); index >= 0 {
-			return fmt.Errorf("namespace %s still holds %s %s; delete what it holds first", id, held.kind, held.ids[index])
+			return nil, fmt.Errorf("namespace %s still holds %s %s; delete what it holds first",
+				id, held.kind, held.ids[index])
 		}
 	}
-	delete(s.Namespaces, id)
-	return nil
+	return func() { delete(s.Namespaces, id) }, nil
 }
 
 // sameJSON tells whether two values encode alike. The state compares what

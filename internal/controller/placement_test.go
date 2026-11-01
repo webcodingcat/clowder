@@ -80,7 +80,7 @@ func newLeader(t *testing.T, poolSize int64) *leader {
 		JoinKey: state.SealedSecret{Value: state.Sealed("j"), Digest: "d"},
 		Host: state.Host{
 			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg",
-			CertificateSerial: "s0",
+			CertificateSerial: "s0", CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
 	l.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{

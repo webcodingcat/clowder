@@ -179,6 +179,7 @@ func newTestCluster(t *testing.T) *testCluster {
 func bootstrappedState(t *testing.T) *state.State {
 	t.Helper()
 	current := &state.State{}
+	notAfter := time.Now().AddDate(1, 0, 0) // of the certificates
 	apply := func(index uint64, kind string, payload any) {
 		cmd, err := state.NewCommand(kind, time.Now(), state.LeaderActor, payload)
 		if err != nil {
@@ -191,12 +192,16 @@ func bootstrappedState(t *testing.T) *state.State {
 	apply(1, state.KindBootstrap, state.Bootstrap{
 		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
 		JoinKey: state.SealedSecret{Value: state.Sealed("join"), Digest: "d"},
-		Host:    state.Host{ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0"},
+		Host: state.Host{
+			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
+			CertificateNotAfter: notAfter,
+		},
 	})
 	apply(2, state.KindAddHost, state.AddHost{Host: state.Host{
 		ID: 1, Name: "node1", Underlay: netip.MustParseAddr("10.0.0.3"), WGPublicKey: "wg", CertificateSerial: "s1",
+		CertificateNotAfter: notAfter,
 	}})
-	apply(3, state.KindAddUser, state.AddUser{Name: "alice", Serial: "a1"})
+	apply(3, state.KindAddUser, state.AddUser{Name: "alice", Serial: "a1", NotAfter: notAfter})
 	return current
 }
 
@@ -317,7 +322,7 @@ func TestCallersAreCheckedOnEveryCall(t *testing.T) {
 	ctx := context.Background()
 	revoked := cluster.userCertificate("bob")
 	cluster.clusters[0].Read(func(current *state.State) {
-		current.Revoked[pki.Serial(revoked.Leaf)] = time.Now()
+		current.Revoked[pki.Serial(revoked.Leaf)] = state.Revocation{At: time.Now(), NotAfter: revoked.Leaf.NotAfter}
 	})
 	tests := []struct {
 		name   string
@@ -384,7 +389,7 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 		},
 		{
 			"a user's write it forwards", state.KindAddUser, state.UserActor("alice"),
-			state.AddUser{Name: "alice", Serial: "a2"},
+			state.AddUser{Name: "alice", Serial: "a2", NotAfter: time.Now().AddDate(1, 0, 0)},
 			true,
 		},
 		{
@@ -394,12 +399,12 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 		},
 		{
 			"a command as the leader", state.KindAddUser, state.LeaderActor,
-			state.AddUser{Name: "mallory", Serial: "m1"},
+			state.AddUser{Name: "mallory", Serial: "m1", NotAfter: time.Now().AddDate(1, 0, 0)},
 			false,
 		},
 		{
 			"a user's write as itself", state.KindAddUser, state.HostActor(1),
-			state.AddUser{Name: "mallory", Serial: "m2"},
+			state.AddUser{Name: "mallory", Serial: "m2", NotAfter: time.Now().AddDate(1, 0, 0)},
 			false,
 		},
 		{

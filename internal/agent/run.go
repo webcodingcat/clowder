@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -51,7 +52,7 @@ type HostParts struct {
 // it leads, the placement of stacks, the Floating IP and the certificates.
 // It tells systemd when it serves and keeps its watchdog fed while the
 // state answers.
-func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger) error {
+func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger) (err error) {
 	if files.SecretsDir == "" {
 		return errors.New("run needs a directory for the stacks' secrets")
 	}
@@ -70,22 +71,21 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = node.Close() }() // the log is on disk; nothing is lost
 	resolver, err := parts.Network.StartResolver()
 	if err != nil {
+		_ = node.Close() // the log is on disk; nothing is lost
 		return err
 	}
-	defer func() { _ = resolver.Close() }() // stopping: nothing to keep
+	reconcilers, stopReconcilers := context.WithCancel(ctx)
+	var loops sync.WaitGroup
+	defer func() {
+		err = errors.Join(err, stopLoops(stopReconcilers, &loops, loopsTimeout, logger, resolver, node))
+	}()
 
 	agent, err := newWorkers(files, host, credentials, node, parts, logger)
 	if err != nil {
 		return err
 	}
-	reconcilers, stopReconcilers := context.WithCancel(ctx)
-	// deferred after the resolver and the Raft node, so it runs before they
-	// close: no loop uses them any more then
-	var loops sync.WaitGroup
-	defer stopLoops(stopReconcilers, &loops, loopsTimeout, logger)
 	agent.startLoops(reconcilers, &loops, notCaughtUp)
 	servers, serveErrors, err := agent.serve()
 	if err != nil {
@@ -220,6 +220,8 @@ func (w *workers) startLoops(ctx context.Context, loops *sync.WaitGroup, notCaug
 		if notCaughtUp != nil && !waitForState(ctx, node, logger) {
 			return
 		}
+		// this loop still counts in loops, so loops.Wait cannot have
+		// returned yet: adding to it from here is allowed
 		loops.Go(func() { reporter.run(ctx) })
 		loops.Go(func() { w.traefik.run(ctx) })
 		w.runner.reconcile(ctx)
@@ -283,11 +285,19 @@ func (a alertsAPI) Failures() []api.AlertFailure {
 	return answers
 }
 
+// errLoopsLeft ends the agent when a loop did not end in time.
+var errLoopsLeft = errors.New("a loop did not end in time; the process ends with it")
+
 // stopLoops ends the agent's loops and waits for them, at most timeout: a
 // pass ends its host tools by their timeouts, and one left behind on a
-// suspended DRBD volume does not hold up the stop. It tells whether all
-// ended.
-func stopLoops(stop context.CancelFunc, loops *sync.WaitGroup, timeout time.Duration, logger *slog.Logger) bool {
+// suspended DRBD volume does not hold up the stop. Once all ended, it closes
+// what they use (the resolver, the Raft member). A loop left behind may
+// still use them, so then it closes nothing and returns errLoopsLeft: the
+// process ends right after, which closes them for good, and systemd sees
+// the failure. Raft's log survives that; it is on disk.
+func stopLoops(stop context.CancelFunc, loops *sync.WaitGroup, timeout time.Duration, logger *slog.Logger,
+	used ...io.Closer,
+) error {
 	stop()
 	ended := make(chan struct{})
 	go func() {
@@ -296,11 +306,14 @@ func stopLoops(stop context.CancelFunc, loops *sync.WaitGroup, timeout time.Dura
 	}()
 	select {
 	case <-ended:
-		return true
 	case <-time.After(timeout):
-		logger.Warn("stopping before every loop ended", "after", timeout)
-		return false
+		logger.Error("stopping before every loop ended", "after", timeout)
+		return errLoopsLeft
 	}
+	for _, closer := range used {
+		_ = closer.Close() // stopping: nothing to keep
+	}
+	return nil
 }
 
 // waitForState tries until ctx ends to catch the state up with the Raft
