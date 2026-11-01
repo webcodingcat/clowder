@@ -58,6 +58,49 @@ func (s *State) serialInUse(serial string) bool {
 	return false
 }
 
+// RecoverUser gives a user who lost their credentials a new certificate,
+// after a code from a host proved it (clowder user recover). It revokes
+// every other certificate of the user in the same command: a stolen
+// laptop is locked out with it.
+type RecoverUser struct {
+	Name   string `json:"name"`
+	Serial string `json:"serial"`
+}
+
+func applyRecoverUser(s *State, cmd Command, payload RecoverUser) error {
+	user, ok := s.Users[payload.Name]
+	switch {
+	case !ok:
+		return fmt.Errorf("no user %s", payload.Name)
+	case payload.Serial == "":
+		return errors.New("the certificate has no serial")
+	case s.serialInUse(payload.Serial):
+		return fmt.Errorf("serial %s is used already", payload.Serial)
+	}
+	for _, serial := range user.Serials {
+		s.Revoked[serial] = cmd.At
+	}
+	user.Serials = []string{payload.Serial}
+	return nil
+}
+
+// SetRecoveryRecipient puts a new recovery key in place of the old one
+// (clowder recovery rotate): values encrypted from now on are for it.
+type SetRecoveryRecipient struct {
+	Recipient string `json:"recipient"`
+}
+
+func applySetRecoveryRecipient(s *State, _ Command, payload SetRecoveryRecipient) error {
+	switch {
+	case !strings.HasPrefix(payload.Recipient, "age1"):
+		return errors.New("the recovery key's recipient is no age key (age1...)")
+	case payload.Recipient == s.RecoveryRecipient:
+		return errUnchanged
+	}
+	s.RecoveryRecipient = payload.Recipient
+	return nil
+}
+
 // RemoveUser removes a user and revokes all their certificates.
 type RemoveUser struct {
 	Name string `json:"name"`

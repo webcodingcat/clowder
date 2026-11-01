@@ -101,6 +101,9 @@ type Server struct {
 	// does not wait for them
 	streams    context.Context
 	endStreams context.CancelFunc
+	// recoveries counts the tries at the recovery's routes, which come
+	// without a certificate
+	recoveries limiter
 }
 
 // NewServer sets up the routes.
@@ -119,6 +122,7 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("PUT /v1/cluster", pki.RoleUser, server.applyCluster)
 	server.handle("GET /v1/encryption", pki.RoleUser, server.encryption)
 	server.handle("POST /v1/encryption/rekey", pki.RoleUser, server.rekey)
+	server.handle("POST /v1/recovery/rotate", pki.RoleUser, server.rotateRecovery)
 	server.handle("POST /v1/apply", pki.RoleUser, server.applyResources)
 	server.handle("POST /v1/delete", pki.RoleUser, server.deleteResources)
 	server.handle("GET /v1/resources/{kind}", pki.RoleUser, server.listResources)
@@ -137,6 +141,8 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/internal/stacks/{project}/logs", pki.RoleHost, server.localLogs)
 	server.handleOpen("GET /v1/bootstrap", server.bootstrapOffer)
 	server.handleOpen("POST /v1/bootstrap", server.bootstrap)
+	server.handleOpen("GET /v1/recover/offer", server.limited(server.recoverOffer))
+	server.handleOpen("POST /v1/recover", server.limited(server.recoverUser))
 	return server
 }
 
@@ -208,7 +214,8 @@ func (s *Server) handle(pattern string, role pki.Role, handler http.HandlerFunc)
 }
 
 // handleOpen registers a route callers reach without a certificate: the
-// bootstrap, which proves itself with the bootstrap key instead.
+// bootstrap, which proves itself with the bootstrap key instead, and the
+// recovery, which proves itself with a code from a host.
 func (s *Server) handleOpen(pattern string, handler http.HandlerFunc) {
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		if s.checkVersion(w, r) {
@@ -419,7 +426,9 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 // its route does.
 var userKinds = map[string]bool{
 	state.KindApplyConfig: true, state.KindSetHostPhase: true, state.KindRestartStack: true,
-	state.KindAddUser: true, // the bootstrap's first user
+	state.KindAddUser:              true, // the bootstrap's first user
+	state.KindRecoverUser:          true, // a user back with a code from a host
+	state.KindSetRecoveryRecipient: true,
 }
 
 // hostKinds are what a host reports about itself. advance-operation joins

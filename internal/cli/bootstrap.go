@@ -58,8 +58,8 @@ func newBootstrap(g *globals) *cobra.Command {
 			// before a recovery key is made: nobody may hold two and not know
 			// which one counts
 			if cluster.Bootstrapped {
-				return errors.New("the cluster has its first user already. If that was an earlier try of " +
-					"yours, the recovery key it gave out is the one that counts")
+				return fmt.Errorf("the cluster has its first user already. If that was an earlier try of "+
+					"yours, the recovery key it gave out is the one that counts; %s", accessByCode(user, name, seed))
 			}
 			recovery, err := age.GenerateX25519Identity()
 			if err != nil {
@@ -85,7 +85,8 @@ func newBootstrap(g *globals) *cobra.Command {
 			// is lost, while cluster.yaml can be written by hand
 			credentials := clusterdir.Credentials{User: user, CA: cluster.CAPEM, Certificate: certificatePEM, Key: string(keyPEM)}
 			if err := clusterdir.WriteCredentials(name, credentials); err != nil {
-				return err
+				return fmt.Errorf("%w. The cluster has %s as its first user and the recovery key just made counts; "+
+					"%s, and write cluster.yaml after the README's example", err, user, accessByCode(user, name, seed))
 			}
 			certificate, err := tls.X509KeyPair([]byte(certificatePEM), keyPEM)
 			if err != nil {
@@ -99,7 +100,8 @@ func newBootstrap(g *globals) *cobra.Command {
 			// a guard against a fault of clowder's own: a second bootstrap
 			// stops above, or the cluster refuses it
 			if encryption.Recovery != recovery.Recipient().String() {
-				return fmt.Errorf("the cluster's recovery key is %s, not the one just made", encryption.Recovery)
+				return fmt.Errorf("the cluster's recovery key is %s, not the one just made; "+
+					"make a new one with clowder recovery rotate and a code from a host", encryption.Recovery)
 			}
 			joinKey, err := secretvalue.Encrypt(secretvalue.Value{For: secretvalue.Cluster, Bytes: []byte(bootstrapKey)},
 				recipients...)
@@ -127,6 +129,12 @@ func newBootstrap(g *globals) *cobra.Command {
 		_ = command.MarkFlagRequired(flag) // the flags exist; this cannot fail
 	}
 	return command
+}
+
+// accessByCode says how a user of the cluster gets in without credentials.
+func accessByCode(user, cluster, seed string) string {
+	return fmt.Sprintf("get access with a code from a host: clowderd user recovery-code %s, as root there, "+
+		"then clowder user recover %s --code <code> --name %s --seed %s", user, user, cluster, seed)
 }
 
 // confirmChars is how much of the recovery key the user types back: enough

@@ -1,6 +1,6 @@
 // Package agent is the clowderd process: the daemon (run) and the commands
-// that run on a host (check, init; later join, recover). Only clowderd
-// imports it.
+// that run on a host (check, init, user recovery-code; later join,
+// recover). Only clowderd imports it.
 package agent
 
 import (
@@ -32,7 +32,7 @@ func NewRoot() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newVersion(), newCheck(), newInit(), newRun())
+	root.AddCommand(newVersion(), newCheck(), newInit(), newRun(), newUser())
 	return root
 }
 

@@ -29,33 +29,35 @@ type Command struct {
 
 // The kinds of commands. Each has a payload type of the same name.
 const (
-	KindBootstrap           = "bootstrap"
-	KindApplyConfig         = "apply-config"
-	KindAddHost             = "add-host"
-	KindSetHostPhase        = "set-host-phase"
-	KindReportHost          = "report-host"
-	KindSetIngress          = "set-ingress"
-	KindPutACMEAccount      = "put-acme-account"
-	KindPutACMEChallenge    = "put-acme-challenge"
-	KindDeleteACMEChallenge = "delete-acme-challenge"
-	KindPutCertificate      = "put-certificate"
-	KindDeleteCertificate   = "delete-certificate"
-	KindAddUser             = "add-user"
-	KindRemoveUser          = "remove-user"
-	KindRevoke              = "revoke"
-	KindPutResource         = "put-resource"
-	KindDeleteResource      = "delete-resource"
-	KindRestartStack        = "restart-stack"
-	KindSetStackStatus      = "set-stack-status"
-	KindSetStackWaitReason  = "set-stack-wait-reason"
-	KindSetPushedOut        = "set-pushed-out"
-	KindPutAlert            = "put-alert"
-	KindResolveAlert        = "resolve-alert"
-	KindPutVolume           = "put-volume"
-	KindForgetCopy          = "forget-copy"
-	KindStartOperation      = "start-operation"
-	KindAdvanceOperation    = "advance-operation"
-	KindFinishOperation     = "finish-operation"
+	KindBootstrap            = "bootstrap"
+	KindApplyConfig          = "apply-config"
+	KindAddHost              = "add-host"
+	KindSetHostPhase         = "set-host-phase"
+	KindReportHost           = "report-host"
+	KindSetIngress           = "set-ingress"
+	KindPutACMEAccount       = "put-acme-account"
+	KindPutACMEChallenge     = "put-acme-challenge"
+	KindDeleteACMEChallenge  = "delete-acme-challenge"
+	KindPutCertificate       = "put-certificate"
+	KindDeleteCertificate    = "delete-certificate"
+	KindAddUser              = "add-user"
+	KindRecoverUser          = "recover-user"
+	KindSetRecoveryRecipient = "set-recovery-recipient"
+	KindRemoveUser           = "remove-user"
+	KindRevoke               = "revoke"
+	KindPutResource          = "put-resource"
+	KindDeleteResource       = "delete-resource"
+	KindRestartStack         = "restart-stack"
+	KindSetStackStatus       = "set-stack-status"
+	KindSetStackWaitReason   = "set-stack-wait-reason"
+	KindSetPushedOut         = "set-pushed-out"
+	KindPutAlert             = "put-alert"
+	KindResolveAlert         = "resolve-alert"
+	KindPutVolume            = "put-volume"
+	KindForgetCopy           = "forget-copy"
+	KindStartOperation       = "start-operation"
+	KindAdvanceOperation     = "advance-operation"
+	KindFinishOperation      = "finish-operation"
 )
 
 // LeaderActor is the leader acting on its own (its control loops).
@@ -102,33 +104,35 @@ func NewCommand(kind string, at time.Time, actor string, payload any) (Command, 
 type handler func(s *State, cmd Command) error
 
 var handlers = map[string]handler{
-	KindBootstrap:           decoded(applyBootstrap),
-	KindApplyConfig:         decoded(applyConfig),
-	KindAddHost:             decoded(applyAddHost),
-	KindSetHostPhase:        decoded(applySetHostPhase),
-	KindReportHost:          decoded(applyReportHost),
-	KindSetIngress:          decoded(applySetIngress),
-	KindPutACMEAccount:      decoded(applyPutACMEAccount),
-	KindPutACMEChallenge:    decoded(applyPutACMEChallenge),
-	KindDeleteACMEChallenge: decoded(applyDeleteACMEChallenge),
-	KindPutCertificate:      decoded(applyPutCertificate),
-	KindDeleteCertificate:   decoded(applyDeleteCertificate),
-	KindAddUser:             decoded(applyAddUser),
-	KindRemoveUser:          decoded(applyRemoveUser),
-	KindRevoke:              decoded(applyRevoke),
-	KindPutResource:         decoded(applyPutResource),
-	KindDeleteResource:      decoded(applyDeleteResource),
-	KindRestartStack:        decoded(applyRestartStack),
-	KindSetStackStatus:      decoded(applySetStackStatus),
-	KindSetStackWaitReason:  decoded(applySetStackWaitReason),
-	KindSetPushedOut:        decoded(applySetPushedOut),
-	KindPutAlert:            decoded(applyPutAlert),
-	KindResolveAlert:        decoded(applyResolveAlert),
-	KindPutVolume:           decoded(applyPutVolume),
-	KindForgetCopy:          decoded(applyForgetCopy),
-	KindStartOperation:      decoded(applyStartOperation),
-	KindAdvanceOperation:    decoded(applyAdvanceOperation),
-	KindFinishOperation:     decoded(applyFinishOperation),
+	KindBootstrap:            decoded(applyBootstrap),
+	KindApplyConfig:          decoded(applyConfig),
+	KindAddHost:              decoded(applyAddHost),
+	KindSetHostPhase:         decoded(applySetHostPhase),
+	KindReportHost:           decoded(applyReportHost),
+	KindSetIngress:           decoded(applySetIngress),
+	KindPutACMEAccount:       decoded(applyPutACMEAccount),
+	KindPutACMEChallenge:     decoded(applyPutACMEChallenge),
+	KindDeleteACMEChallenge:  decoded(applyDeleteACMEChallenge),
+	KindPutCertificate:       decoded(applyPutCertificate),
+	KindDeleteCertificate:    decoded(applyDeleteCertificate),
+	KindAddUser:              decoded(applyAddUser),
+	KindRecoverUser:          decoded(applyRecoverUser),
+	KindSetRecoveryRecipient: decoded(applySetRecoveryRecipient),
+	KindRemoveUser:           decoded(applyRemoveUser),
+	KindRevoke:               decoded(applyRevoke),
+	KindPutResource:          decoded(applyPutResource),
+	KindDeleteResource:       decoded(applyDeleteResource),
+	KindRestartStack:         decoded(applyRestartStack),
+	KindSetStackStatus:       decoded(applySetStackStatus),
+	KindSetStackWaitReason:   decoded(applySetStackWaitReason),
+	KindSetPushedOut:         decoded(applySetPushedOut),
+	KindPutAlert:             decoded(applyPutAlert),
+	KindResolveAlert:         decoded(applyResolveAlert),
+	KindPutVolume:            decoded(applyPutVolume),
+	KindForgetCopy:           decoded(applyForgetCopy),
+	KindStartOperation:       decoded(applyStartOperation),
+	KindAdvanceOperation:     decoded(applyAdvanceOperation),
+	KindFinishOperation:      decoded(applyFinishOperation),
 }
 
 // decoded turns a function of a typed payload into a handler. Unknown fields

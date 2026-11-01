@@ -280,6 +280,38 @@ func TestOnlyOneFirstUserAndItBringsTheRecoveryKey(t *testing.T) {
 		"recovery key's recipient")
 }
 
+func TestARecoveredUserKeepsOnlyTheNewCertificate(t *testing.T) {
+	c := newCluster(t)
+	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"})
+	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a2"})
+	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "bob", Serial: "b1"})
+	c.refuse(KindRecoverUser, UserActor("carol"), RecoverUser{Name: "carol", Serial: "c1"}, "no user carol")
+	c.refuse(KindRecoverUser, UserActor("alice"), RecoverUser{Name: "alice", Serial: "b1"}, "used already")
+
+	c.mustApply(KindRecoverUser, UserActor("alice"), RecoverUser{Name: "alice", Serial: "a3"})
+	if serials := c.state.Users["alice"].Serials; len(serials) != 1 || serials[0] != "a3" {
+		t.Errorf("alice keeps only a3: %v", serials)
+	}
+	for _, serial := range []string{"a1", "a2"} {
+		if at, ok := c.state.Revoked[serial]; !ok || !at.Equal(testTime) {
+			t.Errorf("%s not revoked at the command's time: %v", serial, at)
+		}
+	}
+	if _, revoked := c.state.Revoked["b1"]; revoked || len(c.state.Users["bob"].Serials) != 1 {
+		t.Error("bob's certificate went with alice's")
+	}
+}
+
+func TestANewRecoveryKeyReplacesTheOld(t *testing.T) {
+	c := newCluster(t)
+	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1", First: true, RecoveryRecipient: "age1first"})
+	c.refuse(KindSetRecoveryRecipient, UserActor("alice"), SetRecoveryRecipient{Recipient: "AGE-SECRET-KEY-1X"}, "no age key")
+	c.mustApply(KindSetRecoveryRecipient, UserActor("alice"), SetRecoveryRecipient{Recipient: "age1second"})
+	if c.state.RecoveryRecipient != "age1second" {
+		t.Errorf("recovery recipient %q", c.state.RecoveryRecipient)
+	}
+}
+
 func TestRemovingAUserRevokesTheirCertificates(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"})

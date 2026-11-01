@@ -137,6 +137,14 @@ func startCluster(t *testing.T) string {
 	if current.Keys.AgeIdentity, err = (ageKeys{dataKey}).Seal([]byte(clusterKey.String())); err != nil {
 		t.Fatal(err)
 	}
+	// and the CA's key, with which the agent issues a recovered user's certificate
+	caKey, err := ca.KeyPEM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Keys.CAKey, err = (ageKeys{dataKey}).Seal(caKey); err != nil {
+		t.Fatal(err)
+	}
 	recovery, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
@@ -168,6 +176,18 @@ func startCluster(t *testing.T) string {
 	userCertificate, userKey := issue(func(public ed25519.PublicKey) ([]byte, error) {
 		return ca.IssueUser(public, "alice", time.Now())
 	})
+	parsed, err := pki.ParseCertificate(userCertificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addAlice, err := state.NewCommand(state.KindAddUser, time.Now(), state.LeaderActor,
+		state.AddUser{Name: "alice", Serial: pki.Serial(parsed)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.Propose(context.Background(), addAlice); err != nil {
+		t.Fatal(err)
+	}
 	home := t.TempDir() // no credentials of the developer join in
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)

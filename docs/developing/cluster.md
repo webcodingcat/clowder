@@ -23,7 +23,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | Who | Commands |
   |---|---|
   | `clowderd init` | `bootstrap` |
-  | the user | `apply-config`, `add-user` (the first user), `set-host-phase` (host actions), `put-resource` and `delete-resource` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack` |
+  | the user | `apply-config`, `add-user` (the first user), `recover-user` and `set-recovery-recipient` (with a code from a host), `set-host-phase` (host actions), `put-resource` and `delete-resource` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack` |
   | the placement, the stack's host | `put-volume`, `set-stack-status`, `set-stack-wait-reason`, `set-pushed-out` |
   | the Floating IP's loop | `set-ingress` |
   | the ACME loop | `put-acme-account`, `put-acme-challenge`, `delete-acme-challenge`, `put-certificate`, `delete-certificate` |
@@ -216,7 +216,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   and the agent waits until it has applied it.
 - **Who speaks.** The actor of a command is the caller of the first agent; its time (`At`) is
   the leader's clock. `/v1/internal/propose` takes two things only: a user's command that a
-  follower forwards (`userKinds`, exactly the kinds the user routes and the bootstrap make),
+  follower forwards (`userKinds`, exactly the kinds the user routes, the bootstrap and the
+  recovery make),
   and a host's report about itself (`hostKinds`); `/v1/internal/changes` takes a user's
   resource commands only (Resources, below). The leader's own commands (operations,
   placements, new hosts) are made on the leader and never come in from outside; a host never
@@ -394,6 +395,34 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   credentials (`clusterdir.WriteCredentials`), checks that the cluster's recovery
   recipient is the key it made, and writes `cluster.yaml` with the bootstrap key encrypted
   (`clusterdir.Create`).
+- **A code from a host** gives access back (`internal/recoverycode`, `api/recover.go`): root
+  on a host runs `clowderd user recovery-code <user>`, which reads only the data key, so it
+  works while the agent is down. The code is the first 80 bits of an HMAC over the user and
+  the quarter of an hour, with a key derived from the data key (`recoverycode.Purpose`), in
+  Crockford's base32: case, `O`/`0`, `I`/`L`/`1` and hyphens do not matter. Every agent
+  checks it alone, against the windows of the last 15 minutes and, in the last minute of
+  one, the next (a host's clock a little ahead); nothing is stored, and a code may be used
+  more than once while it lasts: whoever has one is root on a host anyway.
+- **`user recover <user> --code`** (`cli/recover.go`) makes a key pair, then asks
+  `GET /v1/recover/offer?user=` for the CA with a `pki.TrustProof` made with each code the
+  agent takes, and trusts the CA only if one matches the code typed in
+  (`api.FindClusterByCode`). `POST /v1/recover`, over TLS checked against that CA, brings
+  the user, the public key and the code; the agent checks the code, issues the certificate
+  and commits `recover-user`, which revokes every other certificate of the user: a stolen
+  laptop is locked out. As with the bootstrap, the agent sets the actor to the recovered
+  user (`user/<name>`), so the audit shows a recovery as `recover-user` by that user. A
+  user that does not exist gets the same offer and the same refusal as a wrong code, so the
+  routes tell nobody which users there are. Name and seeds come from the cluster directory,
+  or from `--name` and `--seed` without one.
+- **Both routes come without a certificate,** so each agent takes at most `triesPerSender`
+  tries a minute per sender and `triesInAll` in all, in memory (`api/limit.go`); then 429.
+  A sender is its IPv4 address, or for IPv6 its /64.
+- **`recovery rotate --code`** needs the user's credentials and their own code: stolen
+  credentials alone cannot swap the recovery key. The CLI makes the new key and hands it
+  over as the bootstrap does, then `POST /v1/recovery/rotate` commits
+  `set-recovery-recipient`. Values encrypted afterwards are for the new key; `secret rekey`
+  brings the files to it. Old ciphertext, in the Git history say, stays readable with the
+  old key.
 - The tests run real HTTPS servers: a follower forwarding to the leader, refused callers, the
   CLI against an agent with a cluster directory and credentials in a temporary config
   directory.

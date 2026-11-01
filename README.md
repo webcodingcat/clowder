@@ -43,6 +43,14 @@ characters (`--recovery-out <file>` writes it to a file instead). Keep it in you
 manager and offline. If the cluster is lost, the recovery key still opens the values in
 your files (`secret decrypt`) and moves them to a new cluster (`secret rekey --identity`).
 
+Lost your credentials, or your laptop? Get a code as root on a host (the Hetzner console
+works without SSH): `clowderd user recovery-code me`. Then
+`clowder user recover me --code <code>` gives you new credentials (outside the cluster
+directory, add `--name prod --seed <address>`) and locks every other certificate of yours
+out. The code is valid for 15 to 30 minutes. With your credentials and such a code,
+`clowder recovery rotate --code <code>` replaces the recovery key; then encrypt your files
+for it with `clowder secret rekey -f <directory>`.
+
 The bootstrap writes `cluster.yaml` into the current directory. Fill it in from
 `tofu output cluster_yaml`, add the hoster's token, then run `clowder cluster apply`:
 

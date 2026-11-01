@@ -94,18 +94,13 @@ type TrustedCluster struct {
 // FindCluster asks the agent at seed for its CA and trusts it only if it
 // proves it knows the bootstrap key.
 func FindCluster(ctx context.Context, seed string, bootstrapKey []byte, version string) (*TrustedCluster, error) {
-	// first contact: nothing to check the agent against yet; the proof does it
-	unchecked := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		InsecureSkipVerify: true, // the trust proof below decides
-		MinVersion:         tls.VersionTLS13,
-	}}}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+Address(seed)+"/v1/bootstrap", nil)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set(VersionHeader, version)
 	var offer BootstrapOffer
-	if err := send(unchecked, request, &offer); err != nil {
+	if err := send(uncheckedClient(), request, &offer); err != nil {
 		return nil, fmt.Errorf("ask %s for its CA: %w", seed, err)
 	}
 	if !slices.ContainsFunc(offer.Proofs, func(proof []byte) bool {
@@ -128,9 +123,6 @@ func FindCluster(ctx context.Context, seed string, bootstrapKey []byte, version 
 func (c *TrustedCluster) Bootstrap(ctx context.Context, user string, public ed25519.PublicKey,
 	recoveryRecipient string,
 ) (string, error) {
-	checked := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
-		TLSClientConfig: pki.ClientTLSToHosts(tls.Certificate{}, c.CA, nil),
-	}}
 	signed := BootstrapRequest{User: user, PublicKey: public, RecoveryRecipient: recoveryRecipient, Time: time.Now().UTC()}
 	signed.Sign(c.bootstrapKey)
 	body, err := json.Marshal(signed)
@@ -144,10 +136,28 @@ func (c *TrustedCluster) Bootstrap(ctx context.Context, user string, public ed25
 	}
 	request.Header.Set(VersionHeader, c.version)
 	var answer BootstrapAnswer
-	if err := send(checked, request, &answer); err != nil {
+	if err := send(checkedClient(c.CA), request, &answer); err != nil {
 		return "", fmt.Errorf("get the first certificate from %s: %w", c.seed, err)
 	}
 	return answer.Certificate, nil
+}
+
+// uncheckedClient is for a first contact without a certificate (bootstrap,
+// recovery): there is nothing to check the agent against yet, so a trust
+// proof in its answer decides.
+func uncheckedClient() *http.Client {
+	return &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		InsecureSkipVerify: true, // the caller checks the trust proof
+		MinVersion:         tls.VersionTLS13,
+	}}}
+}
+
+// checkedClient talks without a certificate to agents of a CA a trust
+// proof made trustworthy.
+func checkedClient(ca *x509.Certificate) *http.Client {
+	return &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
+		TLSClientConfig: pki.ClientTLSToHosts(tls.Certificate{}, ca, nil),
+	}}
 }
 
 // bootstrapOffer answers the first contact.
