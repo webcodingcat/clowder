@@ -216,10 +216,11 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 		mounted[name] = compose.MountedVolume{Dir: r.storage.MountPoint(volume), Name: volume.LV}
 	}
 	// Rendered before any volume is made, so a stack that cannot run leaves
-	// nothing behind. The parse error is not needed: cluster.yaml's check
-	// refuses a Floating IP that does not parse, and before the first apply
-	// it is empty, the zero address, which Render refuses.
-	floatingIP, _ := netip.ParseAddr(desired.config.Ingress.FloatingIP)
+	// nothing behind. Before the first cluster apply there is no Floating IP.
+	floatingIP, err := netip.ParseAddr(desired.config.Ingress.FloatingIP)
+	if err != nil {
+		return fmt.Errorf("the Floating IP of cluster.yaml: %w", err)
+	}
 	rendered, err := compose.Render(stack.Name, stack.Spec, compose.Target{
 		Namespace: stack.Namespace, FloatingIP: floatingIP, NodeAddress: r.host.NodeAddress,
 		Resolver: network.Resolver, Volumes: mounted, SecretsDir: r.files.secretFilesDir(project),

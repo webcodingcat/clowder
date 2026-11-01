@@ -178,6 +178,8 @@ func (s *Server) bootstrapOffer(w http.ResponseWriter, _ *http.Request) {
 
 // bootstrap issues the first user's certificate.
 func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
+	// not strict: a CLI of the next release may send a field this agent does
+	// not know, and the MAC covers every field the bootstrap reads
 	var request BootstrapRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("read the request: %w", err))

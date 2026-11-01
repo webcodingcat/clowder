@@ -66,7 +66,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	if err := parts.Network.SetUpInterface(ctx, host.NodeAddress); err != nil {
 		return err
 	}
-	node, caughtUp, err := openNode(ctx, files, host, credentials, logger)
+	node, notCaughtUp, err := openNode(ctx, files, host, credentials, logger)
 	if err != nil {
 		return err
 	}
@@ -77,7 +77,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	}
 	defer func() { _ = resolver.Close() }() // stopping: nothing to keep
 
-	running, err := newWorkers(files, host, credentials, node, parts, logger)
+	agent, err := newWorkers(files, host, credentials, node, parts, logger)
 	if err != nil {
 		return err
 	}
@@ -86,8 +86,8 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	// close: no loop uses them any more then
 	var loops sync.WaitGroup
 	defer stopLoops(stopReconcilers, &loops, loopsTimeout, logger)
-	running.startLoops(reconcilers, &loops, caughtUp)
-	servers, serveErrors, err := running.serve()
+	agent.startLoops(reconcilers, &loops, notCaughtUp)
+	servers, serveErrors, err := agent.serve()
 	if err != nil {
 		return err
 	}
@@ -98,7 +98,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	}
 
 	err = watch(ctx, node, serveErrors, logger)
-	running.server.EndStreams() // Shutdown would wait for them
+	agent.server.EndStreams() // Shutdown would wait for them
 	shutdown, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	for _, server := range servers {
@@ -110,9 +110,10 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 // openNode opens this host's Raft member and waits a while for its state to
 // catch up with the log, so the agent answers from the state as the log has
 // it, not from an empty one. A host without quorum starts anyway after
-// catchUpTimeout, and says so; caughtUp is why it did not catch up, if so.
+// catchUpTimeout, and says so; notCaughtUp is why it did not catch up, nil
+// when it did.
 func openNode(ctx context.Context, files Files, host Host, credentials credentials, logger *slog.Logger) (
-	node *raftnode.Node, caughtUp error, err error,
+	node *raftnode.Node, notCaughtUp error, err error,
 ) {
 	node, err = raftnode.Open(raftnode.Config{
 		Dir: files.raftDir(), ID: host.ID, Bind: host.raftAddress(), Advertise: host.raftAddress(),
@@ -123,10 +124,10 @@ func openNode(ctx context.Context, files Files, host Host, credentials credentia
 	}
 	catchUp, cancel := context.WithTimeout(ctx, catchUpTimeout)
 	defer cancel()
-	if caughtUp = node.CatchUp(catchUp); caughtUp != nil {
-		logger.Warn("serving before the state caught up with the Raft log", "error", caughtUp)
+	if notCaughtUp = node.CatchUp(catchUp); notCaughtUp != nil {
+		logger.Warn("serving before the state caught up with the Raft log", "error", notCaughtUp)
 	}
-	return node, caughtUp, nil
+	return node, notCaughtUp, nil
 }
 
 // workers are the parts of the agent that run in loops or answer the API,
@@ -194,9 +195,10 @@ func newWorkers(files Files, host Host, credentials credentials, node *raftnode.
 	return w, nil
 }
 
-// startLoops starts every loop of the agent; each ends with ctx. caughtUp
-// is openNode's: whether the state lagged at the start.
-func (w *workers) startLoops(ctx context.Context, loops *sync.WaitGroup, caughtUp error) {
+// startLoops starts every loop of the agent; each ends with ctx.
+// notCaughtUp is openNode's: why the state lagged at the start, nil if it
+// did not.
+func (w *workers) startLoops(ctx context.Context, loops *sync.WaitGroup, notCaughtUp error) {
 	node, logger, open := w.node, w.logger, w.credentials.dataKey.Open
 	loops.Go(func() { reconcileNetwork(ctx, node, w.parts.Network, logger) })
 	loops.Go(func() { w.runner.supervisor.Run(ctx, compose.LabelStack) })
@@ -215,7 +217,7 @@ func (w *workers) startLoops(ctx context.Context, loops *sync.WaitGroup, caughtU
 		// so containers start only once the state caught up: the stacks and
 		// Traefik. The report waits too: it compares with the state. Both
 		// are loops of their own, started from here, so they wait.
-		if caughtUp != nil && !waitForState(ctx, node, logger) {
+		if notCaughtUp != nil && !waitForState(ctx, node, logger) {
 			return
 		}
 		loops.Go(func() { reporter.run(ctx) })

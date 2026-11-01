@@ -90,14 +90,13 @@ func Plan(current *state.State) Decisions {
 	}
 	// by the highest effective priority of their services, from the
 	// current categories like every other priority here
-	highest := func(stack *state.Stack) int {
-		value := 0
+	highest := map[string]int{}
+	for _, stack := range unplaced {
 		for service := range stack.Services {
-			value = max(value, planner.room.priority(serviceRef{stack.ID(), service}))
+			highest[stack.ID()] = max(highest[stack.ID()], planner.room.priority(serviceRef{stack.ID(), service}))
 		}
-		return value
 	}
-	slices.SortStableFunc(unplaced, func(a, b *state.Stack) int { return cmp.Compare(highest(b), highest(a)) })
+	slices.SortStableFunc(unplaced, func(a, b *state.Stack) int { return cmp.Compare(highest[b.ID()], highest[a.ID()]) })
 	for _, stack := range unplaced {
 		decisions.add(planner.decide(stack))
 	}

@@ -24,6 +24,9 @@ formatters can fix.
   what. Doc comments are sentences; other comments may be short lowercase fragments.
 - Imports in three groups: standard library, others, this module (`goimports` with the local
   prefix sorts them).
+- JSON and YAML names: what users write and read as resources (`resource.Object`, the
+  specs, the statuses `get` shows) is camelCase, as in Kubernetes; everything else
+  (commands, the state, snapshots, the API's other bodies, `cluster.yaml`) is snake_case.
 - Errors: wrap with `fmt.Errorf("what was tried: %w", err)`; compare with `errors.Is` and
   `errors.As`. Messages start lowercase and have no trailing period.
 - Logging: `log/slog` with key–value pairs (`"host", name`), never `fmt.Print` for logs.

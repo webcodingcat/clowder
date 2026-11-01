@@ -92,8 +92,9 @@ spec:
     -----END AGE ENCRYPTED FILE-----
 ```
 
-The value is bound to this Secret: renamed or copied elsewhere, the cluster refuses it.
-Only the cluster opens it; a value encrypted anew is no change.
+The value is bound to this Secret: if you rename the Secret or copy the value into another
+one, the cluster refuses it. Only the cluster can open the value. If you encrypt the same
+value again, the cluster sees no change and recreates no container.
 
 - A stack's spec knows only what clowder runs: a field it does not have is an error.
 - A volume outlives its stack. Deleting a volume deletes its data, so `clowder delete`

@@ -56,8 +56,15 @@ func Run(ctx context.Context, timeout time.Duration, name string, args ...string
 func hostTool(ctx context.Context, name string, args ...string) *exec.Cmd {
 	process := exec.CommandContext(ctx, name, args...)
 	process.Env = append(os.Environ(), "LC_ALL=C")
+	// a child the tool leaves running (a daemon it forks) may keep its
+	// output open after the tool is killed; past this, Go closes it, so only
+	// a process in state D can hold the waiting goroutine
+	process.WaitDelay = waitDelay
 	return process
 }
+
+// waitDelay is how long a killed tool's output may stay open.
+const waitDelay = 5 * time.Second
 
 // Stream runs a command that writes for as long as it runs (logs that
 // follow), passing its output on as it comes. It has no timeout: ctx ends

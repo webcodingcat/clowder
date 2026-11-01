@@ -117,6 +117,9 @@ What follows from there:
 | pushed out, coming back | a service stopped to make room for one of higher priority; it comes back once there is room again |
 | retired copy | a volume's copy the state gave up (the volume deleted, moved or restored); its host removes it, and only then is the data gone |
 | leavers, held | on a host: the stacks that left it and stop first; the volumes such a stack still uses because its stop failed, which no other stack may take yet |
+| pass | one run of a loop that brings its part of the host or the cluster to what the state says; a loop runs a pass at every change of the state and every 30 s |
+| room | what a host offers its services (memory, CPUs) less what they reserve: the scheduler's one measure |
+| desired | what the state wants on this host, read once per pass; the agent compares the host with it |
 ## The two binaries
 
 | Binary | Package | Runs on | Does |
@@ -151,7 +154,8 @@ Packages in *italics* do not exist yet.
   services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
   changes the host. Their clients sit beside it: `hoster` (with `hoster/hetzner`),
   `notify`, and `x/crypto/acme`; depguard keeps them out of the CLI, the state and the
-  scheduler.
+  scheduler. The agent starts its loops, so `agent` imports `controller`, never the
+  other way round; it also takes `controller.Propose` for the commands it writes itself.
 - **Changes the host**: `agent`, `supervisor`, `raftnode` (Raft over mTLS), `datakey` (the
   key file), `command` (host tools with a timeout) and the drivers `network`, `storage`,
   `docker`, `ingress` (Traefik's files; it renders, the agent writes).

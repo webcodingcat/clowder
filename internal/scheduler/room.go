@@ -96,13 +96,13 @@ type HostRoom struct {
 // Rooms is the room of each host that is not removed, as the scheduler
 // counts it for placing (/metrics shows it).
 func Rooms(current *state.State) map[state.HostID]HostRoom {
-	r := newRoom(current)
+	counted := newRoom(current)
 	rooms := map[state.HostID]HostRoom{}
 	for id, host := range current.Hosts {
 		if host.Phase == state.Removed {
 			continue
 		}
-		offered, free := r.capacity(id), r.free(id)
+		offered, free := counted.capacity(id), counted.free(id)
 		reserved := offered.minus(free)
 		rooms[id] = HostRoom{
 			OfferedMemory: offered.memory, ReservedMemory: reserved.memory,
