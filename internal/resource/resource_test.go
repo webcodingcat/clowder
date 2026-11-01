@@ -17,15 +17,14 @@ func TestAVolumeNeedsAClassASizeAndReplicasFromZeroToThree(t *testing.T) {
 	}
 }
 
-func TestASecretHasAValueOfLimitedSize(t *testing.T) {
-	if err := (SecretSpec{Value: "s3cret"}).Check(); err != nil {
+func TestASecretTravelsEncrypted(t *testing.T) {
+	if err := (SecretSpec{Encrypted: testArmor}).Check(); err != nil {
 		t.Error(err)
 	}
-	if err := (SecretSpec{}).Check(); err == nil {
-		t.Error("an empty secret passed")
-	}
-	if err := (SecretSpec{Value: strings.Repeat("x", MaxSecretBytes+1)}).Check(); err == nil {
-		t.Error("a secret too large passed")
+	for _, refused := range []string{"", "s3cret"} {
+		if err := (SecretSpec{Encrypted: refused}).Check(); err == nil || strings.Contains(err.Error(), "s3cret") {
+			t.Errorf("%q: %v", refused, err)
+		}
 	}
 }
 

@@ -29,8 +29,8 @@ func newApplyResources(g *globals) *cobra.Command {
 		Use:   "apply -f <file|directory|->",
 		Short: "Create or change resources: namespaces, volumes, secrets, stacks",
 		Long: "Applies the resources of a YAML file, of the YAML files of a directory, or of stdin (-),\n" +
-			"namespaces first, stacks last. A secret may come in a SOPS file of its own (*.sops.yaml), which is\n" +
-			"decrypted with your age key. A resource applied as it is changes nothing. A resource\n" +
+			"namespaces first, stacks last. A Secret's value stands encrypted in spec.value, tagged !secret\n" +
+			"(clowder secret encrypt writes the Secret). A resource applied as it is changes nothing. A resource\n" +
 			"the cluster refuses stops the apply: those after it are not tried, as they usually need it.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

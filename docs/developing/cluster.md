@@ -294,13 +294,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   (`resource.ParseDocuments`: clowder's resources only, or a file of other documents, never
   both; another apiVersion of clowder's is an error). A directory's YAML files are read,
   not those below it; hidden files, other files and files of other documents are skipped
-  and named on stderr, and a cluster directory is refused. A SOPS file (by its content:
-  the key `sops`) of a resource (SOPS keeps the keys, so `apiVersion` shows) is decrypted
-  with the user's age key (`clusterdir.DecryptSOPS`) and must hold exactly one `Secret`,
-  so `sopsage` keeps every value encrypted; a SOPS file of anything else, such as the
-  cluster's secrets, is skipped unopened. A `Secret` in clear in a file is refused: such a
-  file ends up in a repository or a backup. In clear, a secret comes only on stdin. A
-  resource without a namespace is in `default`. The resources go namespaces first, then
+  and named on stderr, and a cluster directory is refused. A `Secret`'s value stands
+  encrypted in `spec.value`, tagged `!secret` (`resource.ParseDocuments` takes it out
+  before it turns YAML into JSON, and refuses `!secret` anywhere else); the CLI sends it as
+  it is (`SecretSpec.Encrypted`). A `Secret` in clear is refused, in a file and on stdin:
+  the CLI never handles a value in clear. `secret encrypt [<namespace>/]<name>` writes a
+  Secret, its value encrypted for the recipients the cluster names and for the Secret's
+  ID. A resource without a namespace is in `default`. The resources go namespaces first, then
   volumes and secrets, then stacks, in one request (`applyRank`); each result is printed,
   and one not applied, deleted or unchanged makes the command fail. `--dry-run` checks
   everything and changes nothing.
@@ -325,7 +325,11 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   `RestartRequest`). The list of stacks, also as JSON for scripts
   and the live tests, is `get stacks`; its table shows a priority that comes from
   `cluster.yaml`'s default as `(default)`.
-- **Who can read a secret:** whoever may apply it, or decrypt the SOPS file it came in;
+- **A Secret's value** the agent that takes the request opens with the cluster's age key
+  (`openValue`) and refuses unless it was encrypted for the Secret's ID: a value copied
+  from another Secret or from `cluster.yaml` (the hoster's token, which a container would
+  then read) does not pass. Then `sealSecret` as before.
+- **Who can read a secret:** whoever holds the recovery key (the values in the files);
   every host (a stack must start anywhere); and, until there are permissions, every user of
   the cluster, through a stack that names it or one named in `stacks.privileged`, as such a
   container reaches the secrets and the data key on its host.

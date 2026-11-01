@@ -135,10 +135,6 @@ on a host (`compose.Render`).
   the yaml-language-server need `customTags: ["!secret scalar"]`.
 - `Create` writes the `cluster.yaml` of `cluster bootstrap`: name, seed, the bootstrap
   key encrypted, and as comments what the first `cluster apply` still needs.
-- `DecryptSOPS` decrypts a SOPS file of a `Secret` resource with the user's age key, as
-  SOPS finds it. It refuses a file with values left in clear (a rule like
-  `unencrypted_suffix`). `WriteSOPS` writes one (the live tests). `testdata/test-age-key.txt`
-  is a test-only key for the fixtures.
 - **The user's credentials** (`credentials.go`) are not in the cluster directory, which a
   team shares in a repository, but in the user's config directory
   (`os.UserConfigDir()/clowder/clusters/<name>/credentials.yaml`, `CredentialsPath`): the
@@ -164,9 +160,10 @@ on a host (`compose.Render`).
 
 ## SOPS files (`internal/sopsage`)
 
-The SOPS library brings the SDKs of every cloud KMS along (the CLI grew from 2.5 to 44 MB),
-so `sopsage` implements the part of the SOPS format clowder needs: YAML files with age keys,
-read and written.
+Nothing uses it any more: values stand encrypted in the files themselves (Encrypted values,
+below), and the package goes in the next step. It was this: the SOPS library brings the
+SDKs of every cloud KMS along (the CLI grew from 2.5 to 44 MB), so `sopsage` implements the
+part of the SOPS format clowder needed: YAML files with age keys, read and written.
 
 - `Decrypt` opens the data key with one of the identities, decrypts every value (AES-256-GCM,
   the key path as additional data) and checks the MAC; `Encrypt` writes what `sops encrypt`
@@ -187,8 +184,8 @@ read and written.
 
 A secret's value can stand in a YAML file encrypted, tagged `!secret`: age's ASCII armor
 in a literal block scalar, for two recipients, the cluster's age key and the recovery key.
-`cluster.yaml`'s values are such; the `Secret` resources are to follow, in place of their
-SOPS files. The CLI never opens a value: `clowder secret encrypt --cluster-yaml` encrypts
+`cluster.yaml`'s values are such, and a `Secret`'s (in `spec.value`). The CLI never opens
+a value: `clowder secret encrypt` (a Secret, or `--cluster-yaml`) encrypts
 for the recipients the cluster names (`GET /v1/encryption`, asked each time, never kept
 in a file someone could change), and only the cluster opens them.
 

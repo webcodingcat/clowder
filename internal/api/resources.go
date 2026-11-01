@@ -237,7 +237,16 @@ func (s *Server) putCommand(actor string, object resource.Object) (state.Command
 		if err != nil {
 			return state.Command{}, err
 		}
-		sealed, err := s.sealSecret(names.ID(payload.Namespace, payload.Name), secret.Value)
+		identity, err := s.clusterIdentity()
+		if err != nil {
+			return state.Command{}, err
+		}
+		id := names.ID(payload.Namespace, payload.Name)
+		value, err := openValue(identity, "secret "+id, secret.Encrypted, id)
+		if err != nil {
+			return state.Command{}, err
+		}
+		sealed, err := s.sealSecret(id, value)
 		if err != nil {
 			return state.Command{}, err
 		}
@@ -259,8 +268,8 @@ func (s *Server) putCommand(actor string, object resource.Object) (state.Command
 // its ID and value, with a key derived from the data key. A plain hash would
 // give a short password away; with the ID inside, two secrets of the same
 // value have different digests.
-func (s *Server) sealSecret(id, value string) (state.SealedSecret, error) {
-	sealed, err := s.config.Keys.Seal([]byte(value))
+func (s *Server) sealSecret(id string, value []byte) (state.SealedSecret, error) {
+	sealed, err := s.config.Keys.Seal(value)
 	if err != nil {
 		return state.SealedSecret{}, fmt.Errorf("seal secret %s: %w", id, err)
 	}
@@ -268,7 +277,7 @@ func (s *Server) sealSecret(id, value string) (state.SealedSecret, error) {
 	if err != nil {
 		return state.SealedSecret{}, err
 	}
-	return state.SealedSecret{Value: sealed, Digest: digest.HMAC(key, []byte(id), []byte(value))}, nil
+	return state.SealedSecret{Value: sealed, Digest: digest.HMAC(key, []byte(id), value)}, nil
 }
 
 // decide has the leader run a batch: here if this agent leads, else on the

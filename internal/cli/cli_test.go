@@ -122,6 +122,20 @@ func startCluster(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// the cluster's own age key, sealed as init does, and a recovery key:
+	// what secret encrypt encrypts for and the agent opens with
+	clusterKey, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Keys.AgeIdentity, err = (ageKeys{dataKey}).Seal([]byte(clusterKey.String())); err != nil {
+		t.Fatal(err)
+	}
+	recovery, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.RecoveryRecipient = recovery.Recipient().String()
 	host := &oneHost{state: current, changed: make(chan struct{})}
 	host.changes.Reset(current.Index)
 	agent := api.NewServer(api.ServerConfig{
@@ -145,20 +159,14 @@ func startCluster(t *testing.T) string {
 	}
 	writeYAML(t, filepath.Join(dir, clusterdir.ConfigFile), config)
 
-	identity, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
 	userCertificate, userKey := issue(func(public ed25519.PublicKey) ([]byte, error) {
 		return ca.IssueUser(public, "alice", time.Now())
 	})
-	home := t.TempDir() // no key or credentials of the developer join in
+	home := t.TempDir() // no credentials of the developer join in
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", home)
 	t.Setenv("AppData", home)
-	t.Setenv("SOPS_AGE_KEY", identity.String())
-	t.Setenv("SOPS_AGE_KEY_FILE", "")
 	err = clusterdir.WriteCredentials(config.Name, clusterdir.Credentials{
 		User: "alice", CA: string(ca.CertificatePEM()), Certificate: string(userCertificate), Key: string(userKey),
 	})

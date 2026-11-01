@@ -12,21 +12,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 )
 
-// useTestKey points SOPS at the test key in testdata.
-func useTestKey(t *testing.T) {
-	t.Helper()
-	key, err := filepath.Abs(filepath.Join("testdata", "test-age-key.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("SOPS_AGE_KEY_FILE", key)
-	// no SSH key of the developer's home joins in
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("SOPS_AGE_KEY", "")
-}
-
 // withConfig writes the example's cluster.yaml, changed, into a directory
 // of its own.
 func withConfig(t *testing.T, change func(content string) string) string {
@@ -93,23 +78,6 @@ func TestASecretStandsOnlyWhereOneMay(t *testing.T) {
 				t.Errorf("got %v, want %q", err, test.want)
 			}
 		})
-	}
-}
-
-func TestSOPSFilesAreDecryptedWithTheUsersAgeKey(t *testing.T) {
-	useTestKey(t)
-	file := filepath.Join("testdata", "secret.sops.yaml")
-	sealed, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cleartext, err := DecryptSOPS(file, sealed)
-	if err != nil || !strings.Contains(string(cleartext), "test-hcloud-token") {
-		t.Errorf("decrypted %q, %v", cleartext, err)
-	}
-	t.Setenv("SOPS_AGE_KEY_FILE", filepath.Join(t.TempDir(), "missing.txt"))
-	if _, err := DecryptSOPS(file, sealed); err == nil || !strings.Contains(err.Error(), "age key") {
-		t.Errorf("want a hint about the age key, got %v", err)
 	}
 }
 

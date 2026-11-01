@@ -9,13 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-
-	"filippo.io/age"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/resource"
-	"github.com/webcodingcat/clowder/internal/sopsage"
 )
 
 func TestKindsAndNamespacesAreNamedAsWithKubectl(t *testing.T) {
@@ -80,8 +76,9 @@ func TestAWrongCallEndsWithTwoAndARefusalWithOne(t *testing.T) {
 }
 
 // writeFiles writes the files of a directory of resources: plain YAML, a
-// secret in a SOPS file of its own, and files apply skips.
-func writeFiles(t *testing.T) string {
+// Secret as secret encrypt writes it for the cluster, and files apply
+// skips.
+func writeFiles(t *testing.T, cluster string) string {
 	t.Helper()
 	dir := t.TempDir()
 	write := func(name, content string) {
@@ -103,27 +100,14 @@ metadata: {name: shop}
 	write("compose.yaml", "services: {web: {image: nginx}}\n")
 	write(".hidden.yaml", "apiVersion: clowder/v1\nkind: Namespace\nmetadata: {name: hidden}\n")
 	write("notes.txt", "not YAML\n")
-	identity, err := age.ParseX25519Identity(os.Getenv("SOPS_AGE_KEY"))
+	token, err := runWithInput(t, "s3cret\n", "--cluster", cluster, "secret", "encrypt", "shop/token")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("secret encrypt: %v\n%s", err, token)
 	}
-	sealed, err := sopsage.Encrypt([]byte("apiVersion: clowder/v1\nkind: Secret\nmetadata: {namespace: shop, name: token}\n"+
-		"spec: {value: s3cret}\n"), []string{identity.Recipient().String()}, time.Now())
-	if err != nil {
-		t.Fatal(err)
+	if strings.Contains(token, "s3cret") || !strings.Contains(token, "metadata: {namespace: shop, name: token}") {
+		t.Fatalf("secret encrypt wrote:\n%s", token)
 	}
-	write("token.sops.yaml", string(sealed))
-	// another SOPS file, such as the cluster's secrets, sealed for someone
-	// else: skipped, not opened
-	other, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stackSecrets, err := sopsage.Encrypt([]byte("db-password: x\n"), []string{other.Recipient().String()}, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	write("secrets.sops.yaml", string(stackSecrets))
+	write("token.yaml", token)
 	return dir
 }
 
@@ -142,7 +126,7 @@ func runWithInput(t *testing.T, input string, args ...string) (string, error) {
 
 func TestResourcesApplyFromADirectoryReadBackAndGo(t *testing.T) {
 	cluster := startCluster(t)
-	files := writeFiles(t)
+	files := writeFiles(t, cluster)
 	out, err := runWithInput(t, "", "--cluster", cluster, "apply", "-f", files)
 	if err != nil {
 		t.Fatalf("apply: %v\n%s", err, out)
@@ -152,7 +136,6 @@ func TestResourcesApplyFromADirectoryReadBackAndGo(t *testing.T) {
 		"skipped " + filepath.Join(files, "compose.yaml") + ": no resource of clowder's",
 		"skipped " + filepath.Join(files, ".hidden.yaml") + ": hidden",
 		"skipped " + filepath.Join(files, "notes.txt") + ": not a YAML file",
-		"skipped " + filepath.Join(files, "secrets.sops.yaml") + ": no resource of clowder's",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("no %q in:\n%s", want, out)
@@ -253,21 +236,40 @@ metadata: {name: shop}
 	}
 }
 
-func TestASecretInClearIsTakenOnlyFromStdin(t *testing.T) {
+func TestASecretInClearIsRefusedFromFilesAndStdin(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "token.yaml")
 	secret := "apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: token}\nspec: {value: s3cret}\n"
 	if err := os.WriteFile(path, []byte(secret), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, from := range []string{dir, path} {
-		if _, err := readResources(from, nil, io.Discard); err == nil ||
-			!strings.Contains(err.Error(), path+" holds Secret token in clear") {
+	for _, from := range []string{dir, path, "-"} {
+		_, err := readResources(from, strings.NewReader(secret), io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "secret token: write its value encrypted") ||
+			strings.Contains(err.Error(), "s3cret") {
 			t.Errorf("%s: %v", from, err)
 		}
 	}
-	if objects, err := readResources("-", strings.NewReader(secret), io.Discard); err != nil || len(objects) != 1 {
-		t.Errorf("stdin: %v, %v", objects, err)
+}
+
+func TestAValueEncryptedForAnotherSecretIsRefused(t *testing.T) {
+	cluster := startCluster(t)
+	token, err := runWithInput(t, "s3cret", "--cluster", cluster, "secret", "encrypt", "shop/token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the same value, renamed: it stays bound to shop/token
+	renamed := strings.Replace(token, "name: token", "name: copied", 1)
+	out, err := runWithInput(t, "apiVersion: clowder/v1\nkind: Namespace\nmetadata: {name: shop}\n---\n"+renamed,
+		"--cluster", cluster, "apply", "-f", "-")
+	if ExitCode(err) != 1 || !strings.Contains(out, "the value is for shop/token, not for shop/copied") {
+		t.Errorf("exit code %d (%v)\n%s", ExitCode(err), err, out)
+	}
+	if _, err := run(t, "--cluster", cluster, "secret", "encrypt"); ExitCode(err) != 2 {
+		t.Errorf("secret encrypt of nothing: %v", err)
+	}
+	if _, err := run(t, "--cluster", cluster, "secret", "encrypt", "a/b", "--cluster-yaml"); ExitCode(err) != 2 {
+		t.Errorf("secret encrypt of both: %v", err)
 	}
 }
 
@@ -299,19 +301,6 @@ func TestFilesOfTheWrongSortAreRefused(t *testing.T) {
 	if _, err := runWithInput(t, "services: {}\n", "--cluster", cluster, "apply", "-f", "-"); err == nil ||
 		!strings.Contains(err.Error(), "holds no resource of clowder's") {
 		t.Errorf("stdin of other documents: %v", err)
-	}
-	identity, err := age.ParseX25519Identity(os.Getenv("SOPS_AGE_KEY"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sealed, err := sopsage.Encrypt([]byte("apiVersion: clowder/v1\nkind: Namespace\nmetadata: {name: shop}\n"),
-		[]string{identity.Recipient().String()}, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runWithInput(t, string(sealed), "--cluster", cluster, "apply", "-f", "-"); err == nil ||
-		!strings.Contains(err.Error(), "a SOPS file holds exactly one Secret") {
-		t.Errorf("a SOPS file of a namespace: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(cluster, clusterdir.ConfigFile)); err != nil {
 		t.Fatal(err)

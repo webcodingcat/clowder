@@ -213,15 +213,15 @@ func volumeDocument(name, class, size string, replicas int) string {
 	return document(resource.KindVolume, name, fmt.Sprintf("class: %s\nsize: %s\nreplicas: %d", class, size, replicas))
 }
 
-// secretResource is a Secret resource of the namespace default, for
-// yaml.Marshal: its value is quoted as YAML needs it.
-func secretResource(name, value string) map[string]any {
-	return map[string]any{
-		"apiVersion": resource.APIVersion,
-		"kind":       resource.KindSecret,
-		"metadata":   map[string]string{"name": name},
-		"spec":       map[string]string{"value": value},
+// encryptSecret is a Secret of the namespace default with its value
+// encrypted for it, as clowder secret encrypt writes it.
+func encryptSecret(t *testing.T, name, value string) string {
+	t.Helper()
+	secret, err := clowderWithInput(strings.NewReader(value), "secret", "encrypt", name)
+	if err != nil {
+		t.Fatal(err)
 	}
+	return secret
 }
 
 // createAndApply writes a stack's resources (the stack and its volumes) to

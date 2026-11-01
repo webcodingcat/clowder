@@ -11,6 +11,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/secretvalue"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -24,6 +25,18 @@ func object(kind, namespace, name, spec string) resource.Object {
 		written.Spec = json.RawMessage(spec)
 	}
 	return written
+}
+
+// secretObject is a Secret as the CLI sends it: its value encrypted for the
+// cluster, for the place forID (its own ID, but for the tests that copy a
+// value from elsewhere).
+func (c *testCluster) secretObject(namespace, name, value, forID string) resource.Object {
+	c.t.Helper()
+	spec, err := json.Marshal(resource.SecretSpec{Encrypted: encrypt(c.t, c.recipients, forID, value)})
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return object(resource.KindSecret, namespace, name, string(spec))
 }
 
 // withStorageClass gives every agent's state the storage class fast.
@@ -51,12 +64,12 @@ func TestAnApplyGoesInOrderAndStopsAtTheFirstRefusal(t *testing.T) {
 	shop := ApplyRequest{Resources: []resource.Object{
 		object(resource.KindNamespace, "", "shop", ""),
 		object(resource.KindVolume, "shop", "data", `{"class": "fast", "size": "1024M", "replicas": 1}`),
-		object(resource.KindSecret, "shop", "token", `{"value": "s3cret"}`),
+		cluster.secretObject("shop", "token", "s3cret", "shop/token"),
 	}}
 	refused := shop
 	refused.Resources = append(slices.Clone(shop.Resources),
 		object(resource.KindVolume, "shop", "logs", `{"class": "slow", "size": "1G", "replicas": 1}`),
-		object(resource.KindSecret, "shop", "later", `{"value": "x"}`))
+		cluster.secretObject("shop", "later", "x", "shop/later"))
 	result, err := client.ApplyResources(ctx, refused, false)
 	if err != nil {
 		t.Fatal(err)
@@ -123,6 +136,23 @@ func TestASpecIsReadStrictly(t *testing.T) {
 	}
 }
 
+func TestASecretTakesOnlyAValueEncryptedForIt(t *testing.T) {
+	cluster := newTestCluster(t)
+	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	for forID, want := range map[string]string{
+		secretvalue.Cluster: "the value is for cluster, not for default/token", // the hoster's token, copied
+		"shop/token":        "the value is for shop/token, not for default/token",
+	} {
+		result, err := client.ApplyResources(context.Background(), ApplyRequest{Resources: []resource.Object{
+			cluster.secretObject("default", "token", "s3cret", forID),
+		}}, false)
+		if err != nil || result.Results[0].Outcome != Refused || !strings.Contains(result.Results[0].Message, want) ||
+			strings.Contains(result.Results[0].Message, "s3cret") {
+			t.Errorf("a value for %s: %+v, %v", forID, result, err)
+		}
+	}
+}
+
 func TestResourcesReadBackAsTheyApplyAndSecretsWithoutTheirValue(t *testing.T) {
 	cluster := newTestCluster(t)
 	withStorageClass(cluster)
@@ -131,8 +161,8 @@ func TestResourcesReadBackAsTheyApplyAndSecretsWithoutTheirValue(t *testing.T) {
 	if _, err := client.ApplyResources(ctx, ApplyRequest{Resources: []resource.Object{
 		object(resource.KindNamespace, "", "shop", ""),
 		object(resource.KindVolume, "shop", "data", `{"class": "fast", "size": "1024M", "replicas": 1}`),
-		object(resource.KindSecret, "shop", "token", `{"value": "s3cret"}`),
-		object(resource.KindSecret, "default", "token", `{"value": "s3cret"}`),
+		cluster.secretObject("shop", "token", "s3cret", "shop/token"),
+		cluster.secretObject("default", "token", "s3cret", "default/token"),
 	}}, false); err != nil {
 		t.Fatal(err)
 	}

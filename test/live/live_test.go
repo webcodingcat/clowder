@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"filippo.io/age"
 	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/clusterdir"
@@ -101,28 +100,13 @@ const (
 	manyStacks         = 20
 )
 
-// TestMain gives the test its own age key: the CLI and the test read the
-// SOPS files with it.
 func TestMain(m *testing.M) {
 	if workDir == "" || clowderBinary == "" {
 		fmt.Fprintln(os.Stderr, "set LIVE_DIR and CLOWDER; bin/dev live does")
 		os.Exit(2)
 	}
-	identity, err := age.GenerateX25519Identity()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if err := os.Setenv("SOPS_AGE_KEY", identity.String()); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	recipient = identity.Recipient().String()
 	os.Exit(m.Run())
 }
-
-// recipient is the public half of the test's age key.
-var recipient string
 
 // TestOneHost runs a host's way from the first boot to a deleted stack. The
 // steps build on each other, so the first failure ends the test.
@@ -274,10 +258,10 @@ var (
 	secondSecrets = map[string]string{"password": "second pa$$word", "api-token": "tok$en 'two'"}
 )
 
-// applyShop writes the stack's resources and secrets and applies them:
-// password from a SOPS file of its own in the stack's directory, which the
-// apply of the directory decrypts, api-token on stdin. Then it waits until
-// the stack's generation runs with these secrets.
+// applyShop writes the stack's resources and secrets and applies them, each
+// secret encrypted anew (secret encrypt): password in a file of the stack's
+// directory, api-token on stdin. Then it waits until the stack's generation
+// runs with these secrets.
 func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 	t.Helper()
 	if err := os.MkdirAll(stackDir("shop"), 0o755); err != nil {
@@ -289,15 +273,12 @@ func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 	if err := os.WriteFile(stackFile("shop"), []byte(shopStack(greeting)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	passwordFile := filepath.Join(stackDir("shop"), "password.sops.yaml")
-	if err := clusterdir.WriteSOPS(passwordFile, secretResource("password", secrets["password"]), recipient); err != nil {
+	password := encryptSecret(t, "password", secrets["password"])
+	if err := os.WriteFile(filepath.Join(stackDir("shop"), "password.yaml"), []byte(password), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	token, err := yaml.Marshal(secretResource("api-token", secrets["api-token"]))
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := clowderWithInput(bytes.NewReader(token), "apply", "-f", "-")
+	token := encryptSecret(t, "api-token", secrets["api-token"])
+	output, err := clowderWithInput(strings.NewReader(token), "apply", "-f", "-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,6 +302,7 @@ func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 // runStack applies the stack and checks the container: its image from the
 // private registry, its secrets, its volume, both pools.
 func runStack(t *testing.T, server host) {
+	refuseSecretsOutOfPlace(t)
 	applyShop(t, "", firstSecrets)
 	mustClowder(t, "stack", "ps", "shop")
 
@@ -337,6 +319,27 @@ func runStack(t *testing.T, server host) {
 	server.must(t, "lvs --noheadings -o lv_name vg-fast | grep -qw "+data)
 	server.must(t, "lvs --noheadings -o lv_name vg-bulk | grep -qw "+scratch)
 	server.must(t, "drbdsetup status | grep -qw "+data)
+}
+
+// refuseSecretsOutOfPlace applies what the cluster must refuse: a Secret in
+// clear on stdin, and a value of cluster.yaml (the hoster's token) copied
+// into a Secret, which a container would then read.
+func refuseSecretsOutOfPlace(t *testing.T) {
+	t.Helper()
+	clear := "apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: copied}\nspec: {value: s3cret}\n"
+	if _, err := clowderWithInput(strings.NewReader(clear), "apply", "-f", "-"); err == nil ||
+		!strings.Contains(err.Error(), "write its value encrypted") {
+		t.Errorf("a Secret in clear on stdin: %v", err)
+	}
+	block, err := clowderWithInput(strings.NewReader("the hoster's token"), "secret", "encrypt", "--cluster-yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	copied := "apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: copied}\nspec:\n  value: " + block
+	if output, err := clowderWithInput(strings.NewReader(copied), "apply", "-f", "-"); err == nil ||
+		!strings.Contains(output, "the value is for cluster, not for default/copied") {
+		t.Errorf("a value of cluster.yaml as a Secret: %v\n%s", err, output)
+	}
 }
 
 func checkSecrets(t *testing.T, server host, want map[string]string) {

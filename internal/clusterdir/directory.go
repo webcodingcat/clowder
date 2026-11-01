@@ -1,9 +1,7 @@
 // Package clusterdir reads a cluster directory (cluster.yaml, whose types
 // and checks are clusterspec's, with its values encrypted in it) and the
 // user's credentials, which live apart from it in the user's config
-// directory. It is portable (Linux, macOS, Windows). The SOPS files of
-// Secret resources are decrypted here too, with the user's age key as SOPS
-// finds it (SOPS_AGE_KEY_FILE, SOPS_AGE_KEY or SOPS's default path).
+// directory. It is portable (Linux, macOS, Windows).
 package clusterdir
 
 import (
@@ -13,13 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/secretvalue"
-	"github.com/webcodingcat/clowder/internal/sopsage"
 )
 
 // File names inside a cluster directory.
@@ -110,30 +106,6 @@ func checkSecretPlaces(config clusterspec.Config, encrypted map[string]string) e
 		return problems
 	}
 	return nil
-}
-
-// DecryptSOPS decrypts a SOPS file of a Secret resource with the user's age
-// key, as sops finds it; file names it in messages. It refuses a file with
-// values left in clear (a rule like unencrypted_suffix): such a value would
-// sit in the repository in clear.
-func DecryptSOPS(file string, sealed []byte) ([]byte, error) {
-	identities, err := sopsage.LoadIdentities()
-	if err != nil {
-		return nil, fmt.Errorf("load the age key for %s: %w", file, err)
-	}
-	cleartext, err := sopsage.Decrypt(sealed, identities)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt %s (is your age key set up for SOPS?): %w", file, err)
-	}
-	inClear, err := sopsage.LeftInClear(sealed)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", file, err)
-	}
-	if len(inClear) > 0 {
-		return nil, fmt.Errorf("%s keeps %s in clear; encrypt every value (no unencrypted_suffix)",
-			file, strings.Join(inClear, ", "))
-	}
-	return cleartext, nil
 }
 
 // decodeStrict decodes YAML and refuses keys the target does not know, so a

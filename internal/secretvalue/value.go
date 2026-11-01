@@ -30,6 +30,9 @@ import (
 // Tag is the YAML tag of an encrypted value.
 const Tag = "!secret"
 
+// ArmorHeader starts every value's armor.
+const ArmorHeader = armor.Header
+
 // Cluster is what a value in cluster.yaml is for. A secret's ID always holds
 // a "/", so the two never meet.
 const Cluster = "cluster"

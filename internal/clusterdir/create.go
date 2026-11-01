@@ -6,12 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
-
-	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/secretvalue"
-	"github.com/webcodingcat/clowder/internal/sopsage"
 )
 
 // NewDirectory is what clowder cluster bootstrap writes into an empty
@@ -71,23 +67,6 @@ func Create(directory NewDirectory) error {
 		return fmt.Errorf("create the cluster directory: %w", err)
 	}
 	return os.WriteFile(filepath.Join(directory.Path, ConfigFile), []byte(configTemplate(directory)), 0o644)
-}
-
-// WriteSOPS encrypts a value as YAML for the recipient, as sops would; for
-// the SOPS files of Secret resources.
-func WriteSOPS(path string, value any, recipient string) error {
-	plain, err := yaml.Marshal(value)
-	if err != nil {
-		return err
-	}
-	sealed, err := sopsage.Encrypt(plain, []string{recipient}, time.Now())
-	if err != nil {
-		return fmt.Errorf("encrypt %s: %w", filepath.Base(path), err)
-	}
-	if err := os.WriteFile(path, sealed, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	return nil
 }
 
 // configTemplate is cluster.yaml for the user to finish.

@@ -78,15 +78,29 @@ spec:
       http: {host: shop.example.com, port: 8080}
 ```
 
-The secret goes in a SOPS file of its own, `db-password.sops.yaml` (`kind: Secret`,
-`spec: {value: ...}`), which `clowder apply` decrypts with your age key.
+The secret's value stands encrypted in the same files; `clowder secret encrypt
+shop/db-password` asks for it and writes the whole Secret:
+
+```yaml
+apiVersion: clowder/v1
+kind: Secret
+metadata: {namespace: shop, name: db-password}
+spec:
+  value: !secret |
+    -----BEGIN AGE ENCRYPTED FILE-----
+    ...
+    -----END AGE ENCRYPTED FILE-----
+```
+
+The value is bound to this Secret: renamed or copied elsewhere, the cluster refuses it.
+Only the cluster opens it; a value encrypted anew is no change.
 
 - A stack's spec knows only what clowder runs: a field it does not have is an error.
 - A volume outlives its stack. Deleting a volume deletes its data, so `clowder delete`
   takes one only with `--with-data`.
-- clowder refuses a secret written in clear in a file. A secret in clear can only come on
-  stdin (`clowder apply -f -`). The cluster keeps secrets sealed.
-- These can read a secret: whoever may apply it or decrypt its file, and every host of the
+- clowder refuses a secret written in clear, in a file and on stdin alike. The cluster
+  keeps secrets sealed.
+- These can read a secret: whoever holds the recovery key, every host of the
   cluster. Until clowder has permissions, every user can too, through a stack that names
   the secret or a stack with privileges (`stacks.privileged` in `cluster.yaml`).
 

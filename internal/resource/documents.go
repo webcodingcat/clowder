@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/webcodingcat/clowder/internal/secretvalue"
 )
 
 // clowderVersions starts the apiVersion of every document of clowder's, in
@@ -22,23 +23,24 @@ const clowderVersions = "clowder/"
 // both is an error, and so is a resource of another apiVersion of
 // clowder's. A resource is read strictly: a field it does not have is an
 // error.
+//
+// A Secret's value stands encrypted, tagged !secret, in spec.value
+// (secretvalue); it is the one place for it. The object's spec carries it
+// as SecretSpec.Encrypted, still encrypted: only the cluster opens it.
 func ParseDocuments(data []byte) ([]Object, error) {
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	// the values come out first: turning YAML into JSON would drop their tag
+	documents, err := secretvalue.Extract(data)
+	if err != nil {
+		return nil, err
+	}
 	var objects []Object
 	others := 0
-	for index := 1; ; index++ {
-		var document yaml.Node
-		err := decoder.Decode(&document)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("document %d: %w", index, err)
-		}
+	for position, extracted := range documents {
+		index, document := position+1, extracted.Node
 		if len(document.Content) == 0 || document.Content[0].Tag == "!!null" {
 			continue // an empty document, as after a trailing ---
 		}
-		encoded, err := jsonOf(&document)
+		encoded, err := jsonOf(document)
 		if err != nil {
 			return nil, fmt.Errorf("document %d: %w", index, err)
 		}
@@ -61,12 +63,45 @@ func ParseDocuments(data []byte) ([]Object, error) {
 		if err != nil {
 			return nil, fmt.Errorf("document %d: %w", index, err)
 		}
+		if err := takeValue(&object, extracted.Secrets); err != nil {
+			return nil, fmt.Errorf("document %d: %w", index, err)
+		}
 		objects = append(objects, object)
 	}
 	if len(objects) > 0 && others > 0 {
 		return nil, errors.New("the file mixes clowder's resources with other documents; keep them apart")
 	}
 	return objects, nil
+}
+
+// secretValuePath is the one place a resource may hold a value tagged
+// !secret: a Secret's spec.value.
+const secretValuePath = "spec.value"
+
+// takeValue puts a Secret's encrypted value into its spec, as the API takes
+// it, and refuses a value tagged !secret anywhere else, or a Secret's value
+// in clear: such a file would end up in a repository, a backup, an
+// editor's history.
+func takeValue(object *Object, encrypted map[string]string) error {
+	armored, ok := encrypted[secretValuePath]
+	switch {
+	case object.Kind != KindSecret && len(encrypted) > 0:
+		return fmt.Errorf("%s %s: !secret is allowed only in a Secret's %s", object.Kind, object.Metadata.Name,
+			secretValuePath)
+	case object.Kind != KindSecret:
+		return nil
+	case !ok:
+		return fmt.Errorf("secret %s: write its value encrypted, tagged !secret (clowder secret encrypt)",
+			object.Metadata.Name)
+	case len(encrypted) > 1:
+		return fmt.Errorf("secret %s: !secret is allowed only in %s", object.Metadata.Name, secretValuePath)
+	}
+	spec, err := json.Marshal(SecretSpec{Encrypted: armored})
+	if err != nil {
+		return err
+	}
+	object.Spec = spec
+	return nil
 }
 
 // decodeObject reads a resource from JSON, strictly.

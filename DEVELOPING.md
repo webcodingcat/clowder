@@ -62,12 +62,12 @@ Follow `clowder apply -f shop/` from the user's machine to the running container
 step names the file and function to read; the package's section explains the rules.
 
 1. **The CLI reads the files.** `cli/resources.go` `newApplyResources` calls
-   `cli/files.go` `readResources`: the YAML files of the directory, a secret in a SOPS file
-   of its own. `applyRank` sorts them: namespaces, then volumes and secrets, then stacks.
+   `cli/files.go` `readResources`: the YAML files of the directory, a secret's value
+   encrypted in them. `applyRank` sorts them: namespaces, then volumes and secrets, then stacks.
    `api.Client.ApplyResources` sends them in one request (`POST /v1/apply`).
 2. **Any agent takes the request.** `api/resources.go` `applyResources` turns each
-   resource into a `put-resource` command (`putCommand`): it reads the spec strictly and
-   seals a secret's value.
+   resource into a `put-resource` command (`putCommand`): it reads the spec strictly, and
+   opens a secret's value with the cluster's key and seals it.
 3. **The leader decides.** `decide` hands the commands to the leader
    (`internalChanges` on a follower). `runChanges` tries each on a copy of the state and
    proposes only those that change something.
@@ -117,7 +117,6 @@ What follows from there:
 | pushed out, coming back | a service stopped to make room for one of higher priority; it comes back once there is room again |
 | retired copy | a volume's copy the state gave up (the volume deleted, moved or restored); its host removes it, and only then is the data gone |
 | leavers, held | on a host: the stacks that left it and stop first; the volumes such a stack still uses because its stop failed, which no other stack may take yet |
-
 ## The two binaries
 
 | Binary | Package | Runs on | Does |

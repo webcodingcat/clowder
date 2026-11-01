@@ -13,6 +13,8 @@ import (
 	"golang.org/x/term"
 
 	"github.com/webcodingcat/clowder/internal/api"
+	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/secretvalue"
 )
 
@@ -29,14 +31,27 @@ const blockIndent = "    "
 func newEncrypt(g *globals) *cobra.Command {
 	var forClusterYAML bool
 	command := &cobra.Command{
-		Use:   "encrypt --cluster-yaml",
-		Short: "Encrypt a value for cluster.yaml",
-		Long: "Encrypts a value for the cluster and the recovery key and prints it tagged !secret, to\n" +
-			"put after a key of cluster.yaml (indent the armor deeper than the key). Only the cluster\n" +
-			"opens it. The value is asked for without echo on a terminal, else read from stdin, without\n" +
-			"one line end at its end. The recipients come from the cluster each time.",
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Use:   "encrypt [<namespace>/]<name> | --cluster-yaml",
+		Short: "Encrypt a value for a Secret or for cluster.yaml",
+		Long: "Encrypts a value for the cluster and the recovery key. Given a secret's name (without a\n" +
+			"namespace in default), it prints the whole Secret to apply; with --cluster-yaml the value\n" +
+			"tagged !secret, to put after a key of cluster.yaml (indent the armor deeper than the key).\n" +
+			"The value is bound to its place: only that Secret, or cluster.yaml, takes it. Only the\n" +
+			"cluster opens it. The value is asked for without echo on a terminal, else read from stdin,\n" +
+			"without one line end at its end. The recipients come from the cluster each time.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if forClusterYAML == (len(args) == 1) {
+				return usage("name a secret ([<namespace>/]<name>) or give --cluster-yaml, one of the two")
+			}
+			place, namespace, name := secretvalue.Cluster, "", ""
+			if !forClusterYAML {
+				var err error
+				if namespace, name, err = secretName(args[0]); err != nil {
+					return err
+				}
+				place = names.ID(namespace, name)
+			}
 			client, _, err := g.connect()
 			if err != nil {
 				return err
@@ -49,18 +64,38 @@ func newEncrypt(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			armored, err := secretvalue.Encrypt(secretvalue.Value{For: secretvalue.Cluster, Bytes: value}, recipients...)
+			armored, err := secretvalue.Encrypt(secretvalue.Value{For: place, Bytes: value}, recipients...)
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprint(cmd.OutOrStdout(), secretvalue.Block(armored, blockIndent))
+			out := secretvalue.Block(armored, blockIndent)
+			if !forClusterYAML {
+				out = fmt.Sprintf("apiVersion: %s\nkind: %s\nmetadata: {namespace: %s, name: %s}\nspec:\n  value: %s",
+					resource.APIVersion, resource.KindSecret, namespace, name, out)
+			}
+			_, err = fmt.Fprint(cmd.OutOrStdout(), out)
 			return err
 		},
 	}
 	// not --cluster: that names the cluster directory, for every command
 	command.Flags().BoolVar(&forClusterYAML, "cluster-yaml", false, "a value for cluster.yaml")
-	_ = command.MarkFlagRequired("cluster-yaml") // the flag exists; this cannot fail
 	return command
+}
+
+// secretName reads [<namespace>/]<name>: without a namespace, default, as
+// get and delete take it.
+func secretName(text string) (namespace, name string, err error) {
+	namespace, name, ok := strings.Cut(text, "/")
+	if !ok {
+		namespace, name = names.Default, text
+	}
+	switch {
+	case !names.ValidNamespace(namespace):
+		return "", "", usage("namespace %q: %s", namespace, names.NamespaceRule)
+	case !names.Valid(name):
+		return "", "", usage("secret %q: %s", name, names.Rule)
+	}
+	return namespace, name, nil
 }
 
 // clusterRecipients asks the cluster whom every value is encrypted for: its

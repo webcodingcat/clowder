@@ -7,7 +7,9 @@ package resource
 import (
 	"errors"
 	"fmt"
+	"strings"
 
+	"github.com/webcodingcat/clowder/internal/secretvalue"
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
@@ -73,20 +75,20 @@ const (
 	MaxClusterSecrets       = 1000
 )
 
-// SecretSpec is a secret as the user writes it: one value, as text (binary
-// data the user writes in base64 and decodes). The cluster keeps it sealed.
+// SecretSpec is a secret as it travels to the cluster: one value, still
+// encrypted (secretvalue's armor, for the secret's ID), as the user's file
+// has it tagged !secret in spec.value. In the file the field is value, as
+// that is what stands there; on the wire it is encrypted, as that is what
+// it carries. The cluster opens it, checks what it is for and seals it;
+// the size of the value in clear is the state's to hold.
 type SecretSpec struct {
-	Value string `yaml:"value" json:"value"`
+	Encrypted string `json:"encrypted"`
 }
 
-// Check tells what is wrong with the spec on its own. No message names the
-// value.
+// Check tells what is wrong with the spec on its own.
 func (s SecretSpec) Check() error {
-	switch {
-	case s.Value == "":
-		return errors.New("value is required")
-	case len(s.Value) > MaxSecretBytes:
-		return fmt.Errorf("the value is larger than %d bytes", MaxSecretBytes)
+	if !strings.HasPrefix(s.Encrypted, secretvalue.ArmorHeader) {
+		return errors.New("the value is not encrypted (clowder secret encrypt)")
 	}
 	return nil
 }

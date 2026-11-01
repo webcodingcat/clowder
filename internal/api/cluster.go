@@ -99,7 +99,7 @@ func (s *Server) applyCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	payload := state.ApplyConfig{Spec: apply.Spec, Files: apply.Files, Secrets: map[string]state.SealedSecret{}}
 	for _, name := range slices.Sorted(maps.Keys(apply.Encrypted)) {
-		value, err := openClusterValue(identity, name, apply.Encrypted[name])
+		value, err := openValue(identity, name, apply.Encrypted[name], secretvalue.Cluster)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
@@ -116,15 +116,17 @@ func (s *Server) applyCluster(w http.ResponseWriter, r *http.Request) {
 	s.write(w, r, state.KindApplyConfig, payload)
 }
 
-// openClusterValue opens a value of cluster.yaml and checks that it was
-// encrypted for cluster.yaml: a Secret's value copied there is refused.
-func openClusterValue(identity age.Identity, name, armored string) ([]byte, error) {
+// openValue opens a value found at place and checks that it was encrypted
+// for want: cluster.yaml's (secretvalue.Cluster) or a Secret's ID. A value
+// copied from another place, the hoster's token into a Secret a container
+// reads, is refused.
+func openValue(identity age.Identity, place, armored, want string) ([]byte, error) {
 	opened, err := secretvalue.Open(armored, identity)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", name, err)
+		return nil, fmt.Errorf("%s: %w", place, err)
 	}
-	if opened.For != secretvalue.Cluster {
-		return nil, fmt.Errorf("%s: the value is for %s, not for cluster.yaml", name, opened.For)
+	if opened.For != want {
+		return nil, fmt.Errorf("%s: the value is for %s, not for %s", place, opened.For, want)
 	}
 	return opened.Bytes, nil
 }
