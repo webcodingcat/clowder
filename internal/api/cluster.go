@@ -72,13 +72,82 @@ func (s *Server) cluster(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) encryption(w http.ResponseWriter, _ *http.Request) {
-	identity, err := s.clusterIdentity()
+	identity, recovery, err := s.recipients()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	answer := Encryption{Cluster: identity.Recipient().String()}
-	s.config.Cluster.Read(func(current *state.State) { answer.Recovery = current.RecoveryRecipient })
+	writeJSON(w, http.StatusOK, Encryption{Cluster: identity.Recipient().String(), Recovery: recovery.String()})
+}
+
+// recipients are the cluster's age key, which opens the values, and the
+// recovery key's recipient: every value is encrypted for both.
+func (s *Server) recipients() (*age.X25519Identity, *age.X25519Recipient, error) {
+	identity, err := s.clusterIdentity()
+	if err != nil {
+		return nil, nil, err
+	}
+	var recovery string
+	s.config.Cluster.Read(func(current *state.State) { recovery = current.RecoveryRecipient })
+	if recovery == "" {
+		return nil, nil, errors.New("the cluster has no recovery key")
+	}
+	recoveryRecipient, err := age.ParseX25519Recipient(recovery)
+	if err != nil {
+		return nil, nil, fmt.Errorf("the cluster's recovery key: %w", err)
+	}
+	return identity, recoveryRecipient, nil
+}
+
+// RekeyRequest is the body of POST /v1/encryption/rekey: values as
+// secretvalue's armor, each with the place it stands at in its file.
+type RekeyRequest struct {
+	Values []PlacedValue `json:"values"`
+}
+
+// PlacedValue is a value and what it must be for where it stands: a
+// Secret's ID, or secretvalue.Cluster in cluster.yaml.
+type PlacedValue struct {
+	For       string `json:"for"`
+	Encrypted string `json:"encrypted"`
+}
+
+// RekeyAnswer is the values of a RekeyRequest encrypted anew, in its order.
+type RekeyAnswer struct {
+	Values []string `json:"values"`
+}
+
+// rekey encrypts values anew for the cluster's recipients now, each for the
+// place it was for, so every value reaches the recovery key: one made by
+// hand with age may lack it, and after a new recovery key all do. A value
+// not meant for where it stands is refused, as an apply would refuse it.
+// The cluster opens the values and answers only with ciphertext; no value
+// leaves it in clear. It changes nothing in the state, so only the log
+// tells who rekeyed.
+func (s *Server) rekey(w http.ResponseWriter, r *http.Request) {
+	var request RekeyRequest
+	if err := decodeStrict(r.Body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	identity, recoveryRecipient, err := s.recipients()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	answer := RekeyAnswer{Values: make([]string, len(request.Values))}
+	for index, value := range request.Values {
+		opened, err := secretvalue.OpenFor(value.Encrypted, value.For, identity)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("value %d: %w", index+1, err))
+			return
+		}
+		if answer.Values[index], err = secretvalue.Encrypt(opened, identity.Recipient(), recoveryRecipient); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	s.config.Logger.Info("values rekeyed", "actor", actorOf(identityOf(r)), "values", len(request.Values))
 	writeJSON(w, http.StatusOK, answer)
 }
 
@@ -99,12 +168,12 @@ func (s *Server) applyCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	payload := state.ApplyConfig{Spec: apply.Spec, Files: apply.Files, Secrets: map[string]state.SealedSecret{}}
 	for _, name := range slices.Sorted(maps.Keys(apply.Encrypted)) {
-		value, err := openValue(identity, name, apply.Encrypted[name], secretvalue.Cluster)
+		value, err := secretvalue.OpenFor(apply.Encrypted[name], secretvalue.Cluster, identity)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, err)
+			writeError(w, http.StatusBadRequest, fmt.Errorf("%s: %w", name, err))
 			return
 		}
-		if payload.Secrets[name], err = SealClusterSecret(s.config.Keys, name, value); err != nil {
+		if payload.Secrets[name], err = SealClusterSecret(s.config.Keys, name, value.Bytes); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -114,21 +183,6 @@ func (s *Server) applyCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.write(w, r, state.KindApplyConfig, payload)
-}
-
-// openValue opens a value found at place and checks that it was encrypted
-// for want: cluster.yaml's (secretvalue.Cluster) or a Secret's ID. A value
-// copied from another place, the hoster's token into a Secret a container
-// reads, is refused.
-func openValue(identity age.Identity, place, armored, want string) ([]byte, error) {
-	opened, err := secretvalue.Open(armored, identity)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", place, err)
-	}
-	if opened.For != want {
-		return nil, fmt.Errorf("%s: the value is for %s, not for %s", place, opened.For, want)
-	}
-	return opened.Bytes, nil
 }
 
 // SealClusterSecret seals a value of cluster.yaml for the state, with its

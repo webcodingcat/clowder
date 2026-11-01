@@ -319,6 +319,27 @@ func runStack(t *testing.T, server host) {
 	server.must(t, "lvs --noheadings -o lv_name vg-fast | grep -qw "+data)
 	server.must(t, "lvs --noheadings -o lv_name vg-bulk | grep -qw "+scratch)
 	server.must(t, "drbdsetup status | grep -qw "+data)
+	rekeyAndDecrypt(t)
+}
+
+// rekeyAndDecrypt encrypts the values of the stack's files and of
+// cluster.yaml anew through the cluster, which changes nothing the cluster
+// keeps, and reads a value back with the recovery key, as in an emergency.
+func rekeyAndDecrypt(t *testing.T) {
+	t.Helper()
+	mustClowder(t, "secret", "rekey", "-f", stackDir("shop"))
+	mustClowder(t, "secret", "rekey", "-f", clusterDir())
+	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "nothing to apply") {
+		t.Errorf("cluster.yaml encrypted anew:\n%s", diff)
+	}
+	if out := mustClowder(t, "apply", "-f", stackDir("shop")); !strings.Contains(out, "Secret default/password: unchanged") {
+		t.Errorf("the stack's files encrypted anew:\n%s", out)
+	}
+	out := mustClowder(t, "secret", "decrypt", "--identity", filepath.Join(workDir, "recovery-key"),
+		"-f", filepath.Join(stackDir("shop"), "password.yaml"))
+	if want := "default/password\t" + firstSecrets["password"] + "\n"; out != want {
+		t.Errorf("decrypt: %q, want %q", out, want)
+	}
 }
 
 // refuseSecretsOutOfPlace applies what the cluster must refuse: a Secret in

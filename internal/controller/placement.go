@@ -66,12 +66,13 @@ func (p *placer) place(ctx context.Context) time.Duration {
 	}
 	decisions := scheduler.Plan(copied)
 	p.noteOverCapacity(copied, decisions.OverCapacity)
-	// each push-out is the new lists of the stacks it touches, by stack
+	// A push-out holds, for each stack it touches, the stack's new list of
+	// pushed-out services. If one fails, nothing is placed in this pass:
+	// the placements count on the room it frees. A placement that fails, by
+	// contrast, stands alone, so the others still go.
 	for _, pushOut := range decisions.PushOuts {
 		p.logger.Warn("pushing out services: the host's stacks reserve more than it offers", "pushed_out", pushOut)
 		if err := commit(ctx, p.propose, state.KindSetPushedOut, state.SetPushedOut{Stacks: pushOut}); err != nil {
-			// the placements below count on the room it frees; the next
-			// pass plans again
 			p.logger.Error("place the stacks", "command", state.KindSetPushedOut, "error", err)
 			return 0
 		}

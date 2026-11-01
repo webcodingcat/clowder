@@ -362,6 +362,24 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   cluster.
 - **`GET /v1/encryption`** names the recipients every value is encrypted for: the
   cluster's age key and the recovery key (`State.RecoveryRecipient`).
+- **`secret rekey -f <file|directory>`** (`cli/rekey.go`) brings every value of the files
+  to these recipients: a value made by hand with `age` may lack the recovery key, and after
+  a new recovery key every value does. `fileValues` (`cli/values.go`) reads the values and
+  what each must be for: in a file named `cluster.yaml`, `cluster`; in any other file, read
+  as apply reads it, its Secret's ID. The cluster encrypts them anew
+  (`POST /v1/encryption/rekey`, in requests below `MaxRequestBytes`), refuses one meant for
+  another place as an apply would (`secretvalue.OpenFor`), answers only with ciphertext,
+  and logs who asked: nothing goes into the state. `secretvalue.Rewrite` puts the
+  new armor in place, the file written whole or not at all. With `--identity`, the CLI
+  opens the values itself with the recovery key, checks the same, and encrypts them for
+  the cluster it talks to: the way to a new cluster when the old one is lost. A refused
+  file stops the run; the files reported before it are done.
+- **`secret decrypt --identity <file|-> -f <file>`** (`cli/decrypt.go`) is for an
+  emergency and needs no cluster: one line per value, where it is (a Secret's ID, else the
+  path in `cluster.yaml`), a tab, the value. A value that is not printable text, has a
+  space at either end, or starts like a marker shows as `base64:`; one that does not open
+  or is meant for another place shows as `error:` with the reason, and the command fails
+  after printing every line.
 - **The first user** has no certificate yet (`cluster bootstrap`). `GET /v1/bootstrap` gives
   the CA certificate with a `pki.TrustProof` for each valid bootstrap key, and the CLI trusts
   the CA only if one matches its key (`api.FindCluster`). The offer also says whether the

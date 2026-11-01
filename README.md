@@ -40,8 +40,8 @@ clowder cluster bootstrap me --name prod --seed "$(tofu output -raw public_addre
 
 The bootstrap shows the cluster's **recovery key** once and asks you to type its last 8
 characters (`--recovery-out <file>` writes it to a file instead). Keep it in your password
-manager and offline. With it, you can read the values in your files if the cluster is
-lost.
+manager and offline. If the cluster is lost, the recovery key still opens the values in
+your files (`secret decrypt`) and moves them to a new cluster (`secret rekey --identity`).
 
 The bootstrap writes `cluster.yaml` into the current directory. Fill it in from
 `tofu output cluster_yaml`, add the hoster's token, then run `clowder cluster apply`:
@@ -115,6 +115,8 @@ Put both in a directory and run `clowder apply -f shop/`. Then:
 | `clowder stack restart shop/web [app]` | recreates services with their images pulled again |
 | `clowder delete -f shop/ --with-data` | deletes the resources; a volume only with `--with-data` |
 | `clowder cluster status` | the hosts, the leader and the open alerts |
+| `clowder secret rekey -f shop/` | encrypts the values in files again, for the cluster's current keys |
+| `clowder secret decrypt --identity <key> -f <file>` | in an emergency, reads the values with the recovery key |
 
 Good to know:
 

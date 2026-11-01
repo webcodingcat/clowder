@@ -96,6 +96,23 @@ func (c *Client) change(ctx context.Context, path string, request any, dryRun bo
 	return result, nil
 }
 
+// Rekey has the cluster encrypt values anew for its recipients now
+// (POST /v1/encryption/rekey).
+func (c *Client) Rekey(ctx context.Context, values []PlacedValue) ([]string, error) {
+	encoded, err := json.Marshal(RekeyRequest{Values: values})
+	if err != nil {
+		return nil, fmt.Errorf("encode the request: %w", err)
+	}
+	var answer RekeyAnswer
+	if err := c.do(ctx, http.MethodPost, "/v1/encryption/rekey", encoded, &answer); err != nil {
+		return nil, err
+	}
+	if len(answer.Values) != len(values) {
+		return nil, fmt.Errorf("the cluster answered %d values for %d", len(answer.Values), len(values))
+	}
+	return answer.Values, nil
+}
+
 // DiffCluster asks the cluster what applying cluster.yaml would change,
 // with every check of a real apply (PUT /v1/cluster?dryRun=true).
 func (c *Client) DiffCluster(ctx context.Context, apply ClusterApply) (ClusterDiff, error) {

@@ -16,6 +16,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/digest"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/secretvalue"
 	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -121,8 +122,9 @@ const secretResourcePurpose = "clowder secret resource digest"
 
 // changeBatch is an apply or a delete as the agent that took it hands it to
 // the leader: each resource's command in order, or why it has none. The
-// leader decides on its own state; a follower's may be behind and would
-// answer unchanged or refused for what has changed since.
+// leader decides, on its own state. A follower's state may be behind: it
+// could answer "unchanged" or "refused" for a resource that has changed
+// since.
 type changeBatch struct {
 	DryRun  bool          `json:"dry_run,omitempty"`
 	Changes []batchChange `json:"changes"`
@@ -242,11 +244,13 @@ func (s *Server) putCommand(actor string, object resource.Object) (state.Command
 			return state.Command{}, err
 		}
 		id := names.ID(payload.Namespace, payload.Name)
-		value, err := openValue(identity, "secret "+id, secret.Encrypted, id)
+		// a value copied from another place, the hoster's token into a
+		// Secret a container reads, is refused
+		value, err := secretvalue.OpenFor(secret.Encrypted, id, identity)
 		if err != nil {
-			return state.Command{}, err
+			return state.Command{}, fmt.Errorf("secret %s: %w", id, err)
 		}
-		sealed, err := s.sealSecret(id, value)
+		sealed, err := s.sealSecret(id, value.Bytes)
 		if err != nil {
 			return state.Command{}, err
 		}

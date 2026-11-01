@@ -73,6 +73,12 @@ func (h *oneHost) WaitIndex(context.Context, uint64) error { return nil }
 func (h *oneHost) IsLeader() bool                          { return true }
 func (h *oneHost) Leader() (state.HostID, bool)            { return 0, true }
 
+// recoveryKeyFile is where startCluster puts the cluster's recovery key, in
+// the test's home.
+func recoveryKeyFile() string {
+	return filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "recovery-key")
+}
+
 // startCluster runs an agent's API with one host and writes a cluster
 // directory for alice that points at it.
 func startCluster(t *testing.T) string {
@@ -167,6 +173,9 @@ func startCluster(t *testing.T) string {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", home)
 	t.Setenv("AppData", home)
+	if err := os.WriteFile(recoveryKeyFile(), []byte(recovery.String()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	err = clusterdir.WriteCredentials(config.Name, clusterdir.Credentials{
 		User: "alice", CA: string(ca.CertificatePEM()), Certificate: string(userCertificate), Key: string(userKey),
 	})

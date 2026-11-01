@@ -51,7 +51,10 @@ cloud-init's status and the journals of `clowder-setup` and `clowderd`.
    trusts the registry's CA (`/etc/docker/certs.d`), and the test pushes its image there,
    then logs out, so only the agent's login pulls it.
 3. A stack runs from the private registry with a replicated and a plain volume, a secret
-   file and a secret variable, applied as resources (`clowder apply -f`).
+   file and a secret variable, applied as resources (`clowder apply -f`), each secret
+   encrypted with `secret encrypt`. A Secret in clear and the hoster's token as a Secret
+   are refused. `secret rekey` of the stack's files and of `cluster.yaml` changes nothing
+   the cluster keeps, and `secret decrypt` reads a value back with the recovery key.
 4. The same files applied again answer `unchanged` and recreate nothing.
 5. A dry run of a new namespace with its stack answers as a real apply and makes nothing.
 6. `stack restart` recreates the unchanged stack's container, and `get stacks --watch`,

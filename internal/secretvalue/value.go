@@ -11,8 +11,7 @@
 // No error carries a value: a file may be read with a wrong key or be
 // broken, and the message goes to a terminal or a log.
 //
-// cluster.yaml's values are such values; the Secret resources are to be
-// next, in place of their SOPS files (internal/sopsage).
+// cluster.yaml's values and every Secret's value are such values.
 package secretvalue
 
 import (
@@ -83,8 +82,23 @@ func Encrypt(value Value, recipients ...age.Recipient) (string, error) {
 	return strings.TrimRight(armored.String(), "\n") + "\n", nil
 }
 
+// OpenFor opens the value found at a place, want: a Secret's ID or Cluster.
+// It refuses a value meant for another place, such as the hoster's token
+// copied into a Secret.
+func OpenFor(armored, want string, identities ...age.Identity) (Value, error) {
+	opened, err := Open(armored, identities...)
+	if err != nil {
+		return Value{}, err
+	}
+	if opened.For != want {
+		return Value{}, fmt.Errorf("the value is for %s, not for %s", opened.For, want)
+	}
+	return opened, nil
+}
+
 // Open decrypts armor with one of the identities. Whether the value is for
-// the place it was found at is the caller's to check (Value.For).
+// the place it was found at is the caller's to check (Value.For), or
+// OpenFor's.
 func Open(armored string, identities ...age.Identity) (Value, error) {
 	reader, err := age.Decrypt(armor.NewReader(strings.NewReader(armored)), identities...)
 	if err != nil {

@@ -80,8 +80,8 @@ type State struct {
 }
 
 // ClusterKeys are the keys init creates. The CA certificate is public; its
-// key and the cluster's age identity (for SOPS files in GitOps sources) are
-// sealed.
+// key and the cluster's age identity (what every value tagged !secret is
+// encrypted for) are sealed.
 type ClusterKeys struct {
 	CACertificate []byte `json:"ca_certificate"`
 	CAKey         Sealed `json:"ca_key"`

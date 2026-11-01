@@ -194,8 +194,9 @@ var errVolumeHeld = errors.New("a stack that failed to stop may still use a volu
 
 // apply runs one stack: its volumes, its rendered Compose file, compose up
 // unless all of it came up before, then the status, with the secrets the
-// containers came up with. held are the LVs still in use: stacks that
-// failed to stop keep them (stopLeavers).
+// containers came up with. held are the LVs that may still be in use: a
+// stack that failed to stop (stopLeavers) may still write to them, so no
+// other stack may take them yet.
 func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *state.Stack, held heldVolumes) error {
 	secrets, err := r.openSecrets(desired, stack)
 	if err != nil {

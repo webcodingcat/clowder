@@ -130,6 +130,54 @@ func TestADiffNamesWhatAnApplyWouldChange(t *testing.T) {
 	}
 }
 
+func TestRekeyKeepsEachValueAndItsPlace(t *testing.T) {
+	cluster := newTestCluster(t)
+	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	values := []PlacedValue{
+		{For: "shop/token", Encrypted: encrypt(t, cluster.recipients, "shop/token", "s3cret")},
+		{For: secretvalue.Cluster, Encrypted: encrypt(t, cluster.recipients, secretvalue.Cluster, "the hoster's token")},
+	}
+	rekeyed, err := client.Rekey(context.Background(), values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := cluster.apis[0].clusterIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, want := range []string{"s3cret", "the hoster's token"} {
+		if rekeyed[index] == values[index].Encrypted {
+			t.Errorf("value %d is not encrypted anew", index+1)
+		}
+		for _, key := range []age.Identity{identity, cluster.recovery} {
+			opened, err := secretvalue.OpenFor(rekeyed[index], values[index].For, key)
+			if err != nil {
+				t.Errorf("value %d: %v", index+1, err)
+			} else if string(opened.Bytes) != want {
+				t.Errorf("value %d is %q, want %q", index+1, opened.Bytes, want)
+			}
+		}
+	}
+	stranger, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := PlacedValue{For: "shop/token", Encrypted: encrypt(t, []age.Recipient{stranger.Recipient()}, "shop/token", "s3cret")}
+	_, err = client.Rekey(context.Background(), []PlacedValue{values[0], other})
+	if statusOf(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "value 2") {
+		t.Errorf("a value of another cluster: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "s3cret") {
+		t.Errorf("the error shows the value: %v", err)
+	}
+	// the hoster's token copied into a Secret is not encrypted anew for it
+	moved := PlacedValue{For: "shop/token", Encrypted: values[1].Encrypted}
+	_, err = client.Rekey(context.Background(), []PlacedValue{moved})
+	if statusOf(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "the value is for cluster, not for shop/token") {
+		t.Errorf("a value out of place: %v", err)
+	}
+}
+
 func TestChangedKeysNameWhatCameWentOrChanged(t *testing.T) {
 	applied := map[string][]byte{"same.pem": []byte("a"), "changed.pem": []byte("a"), "gone.pem": []byte("a")}
 	next := map[string][]byte{"same.pem": []byte("a"), "changed.pem": []byte("b"), "new.pem": []byte("a")}

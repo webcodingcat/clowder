@@ -82,7 +82,7 @@ func Stream(ctx context.Context, out io.Writer, name string, args ...string) err
 
 // RunWithInput is Run with input on the command's standard input.
 func RunWithInput(ctx context.Context, timeout time.Duration, input, name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	toolCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	type result struct {
 		output []byte
@@ -91,7 +91,7 @@ func RunWithInput(ctx context.Context, timeout time.Duration, input, name string
 	done := make(chan result, 1)
 	go func() {
 		var stderr strings.Builder
-		process := hostTool(ctx, name, args...)
+		process := hostTool(toolCtx, name, args...)
 		process.Stdin = strings.NewReader(input)
 		process.Stderr = &stderr
 		output, err := process.Output()
@@ -107,7 +107,12 @@ func RunWithInput(ctx context.Context, timeout time.Duration, input, name string
 			return string(finished.output), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), finished.err)
 		}
 		return string(finished.output), nil
-	case <-ctx.Done():
-		return "", fmt.Errorf("%s %s: no answer within %s: %w", name, strings.Join(args, " "), timeout, ctx.Err())
+	case <-toolCtx.Done():
+		if ctx.Err() != nil {
+			// the caller gave up (the agent stops) or ran out of its own
+			// time, not the tool
+			return "", fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), ctx.Err())
+		}
+		return "", fmt.Errorf("%s %s: no answer within %s: %w", name, strings.Join(args, " "), timeout, toolCtx.Err())
 	}
 }

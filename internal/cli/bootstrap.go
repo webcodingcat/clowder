@@ -59,8 +59,7 @@ func newBootstrap(g *globals) *cobra.Command {
 			// which one counts
 			if cluster.Bootstrapped {
 				return errors.New("the cluster has its first user already. If that was an earlier try of " +
-					"yours, the recovery key it gave out is the one that counts; access comes back with a code " +
-					"from a host (clowderd user recovery-code, clowder user recover)")
+					"yours, the recovery key it gave out is the one that counts")
 			}
 			recovery, err := age.GenerateX25519Identity()
 			if err != nil {
@@ -100,8 +99,7 @@ func newBootstrap(g *globals) *cobra.Command {
 			// a guard against a fault of clowder's own: a second bootstrap
 			// stops above, or the cluster refuses it
 			if encryption.Recovery != recovery.Recipient().String() {
-				return fmt.Errorf("the cluster's recovery key is %s, not the one just made; "+
-					"make a new one with clowder recovery rotate and a code from a host", encryption.Recovery)
+				return fmt.Errorf("the cluster's recovery key is %s, not the one just made", encryption.Recovery)
 			}
 			joinKey, err := secretvalue.Encrypt(secretvalue.Value{For: secretvalue.Cluster, Bytes: []byte(bootstrapKey)},
 				recipients...)

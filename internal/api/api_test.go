@@ -121,6 +121,8 @@ type testCluster struct {
 	// recipients are the cluster's age key and a recovery key: what
 	// cluster.yaml's values are encrypted for
 	recipients []age.Recipient
+	// recovery is the recovery key, which opens every value
+	recovery *age.X25519Identity
 }
 
 func newTestCluster(t *testing.T) *testCluster {
@@ -145,6 +147,7 @@ func newTestCluster(t *testing.T) *testCluster {
 		t.Fatal(err)
 	}
 	c.recipients = []age.Recipient{clusterIdentity.Recipient(), recovery.Recipient()}
+	c.recovery = recovery
 	sealedIdentity, err := keys.Seal([]byte(clusterIdentity.String()))
 	if err != nil {
 		t.Fatal(err)

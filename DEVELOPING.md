@@ -120,6 +120,7 @@ What follows from there:
 | pass | one run of a loop that brings its part of the host or the cluster to what the state says; a loop runs a pass at every change of the state and every 30 s |
 | room | what a host offers its services (memory, CPUs) less what they reserve: the scheduler's one measure |
 | desired | what the state wants on this host, read once per pass; the agent compares the host with it |
+
 ## The two binaries
 
 | Binary | Package | Runs on | Does |

@@ -9,13 +9,14 @@ clowder is built in phases; each ends with live tests on HLab
 | 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | done, passes the live tests |
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done, passes the live tests |
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
+| 1d | encrypted values (`!secret`), access and recovery, still on one host | in progress: values in `cluster.yaml` and Secrets, `secret encrypt`, `rekey`, `decrypt`; next `recovery rotate` and `user recover` |
 | 2 | three hosts: replication, failover with fencing | |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
 Phase 1c made namespaces, volumes, secrets and stacks resources in the state, the API,
-the agent and the CLI (`apply`, `get` with `--watch`, `delete`, `stack restart`). Next is
-phase 2.
+the agent and the CLI (`apply`, `get` with `--watch`, `delete`, `stack restart`). Phase 1d
+is under way; phase 2 follows it.
 
 Until `v1.0.0`, the state and `cluster.yaml` may change between releases without a way
 to upgrade a running cluster.

@@ -100,6 +100,8 @@ func Plan(current *state.State) Decisions {
 	for _, stack := range unplaced {
 		decisions.add(planner.decide(stack))
 	}
+	// a pushed-out service comes back only in a pass that changes nothing
+	// else: a waiting stack gets the room first
 	if len(decisions.PushOuts) > 0 || slices.ContainsFunc(decisions.Placements, func(p Placement) bool { return p.Place }) {
 		return decisions
 	}

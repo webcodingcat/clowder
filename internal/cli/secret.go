@@ -20,7 +20,7 @@ import (
 
 func newSecret(g *globals) *cobra.Command {
 	secret := &cobra.Command{Use: "secret", Short: "Values encrypted for the cluster"}
-	secret.AddCommand(newEncrypt(g))
+	secret.AddCommand(newEncrypt(g), newRekey(g), newDecrypt())
 	return secret
 }
 
