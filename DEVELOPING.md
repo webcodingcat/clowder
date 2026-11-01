@@ -12,7 +12,8 @@ the package you change. The sections:
 - What users write: [Namespaces and names](#namespaces-and-names-internalnames),
   [Stack specs](#stack-specs-internalstackspec), [Rendering](#rendering-internalcompose),
   [Cluster config and directory](#cluster-config-internalclusterspec-and-directory-internalclusterdir),
-  [SOPS files](#sops-files-internalsopsage).
+  [SOPS files](#sops-files-internalsopsage),
+  [Encrypted values](#encrypted-values-internalsecretvalue).
 - The cluster: [Cluster state](#cluster-state-internalstate),
   [Certificates](#certificates-internalpki),
   [Raft and the data key](#raft-internalraftnode-and-the-data-key-internaldatakey),
@@ -143,7 +144,8 @@ The package layout is planned for the whole of v1; packages appear as the phases
 Packages in *italics* do not exist yet.
 
 - **Portable**: `cli`, `api`, `clusterspec` (`cluster.yaml`'s types and checks),
-  `clusterdir` (the cluster directory's files), `sopsage`, `pki`, `compose`, `units`,
+  `clusterdir` (the cluster directory's files), `sopsage`, `secretvalue` (values tagged
+  `!secret`), `yamlpath` (the names of places in YAML), `pki`, `compose`, `units`,
   `names` (the rules for the names users give, and the names on the host made of them),
   `buildinfo`, `logging`, `atomicfile` (files written whole or not at all), `metrics`
   (Prometheus' text format), `stackspec` (a stack's schema), `resource` (the kinds of
@@ -319,6 +321,34 @@ read and written.
 - `testdata/plain*.sops.yaml` were written by the real sops from `testdata/plain.yaml`.
   `bin/dev test-sops` runs `cross_test.go` (build tag `sops`) against Alpine's sops in both
   directions.
+
+## Encrypted values (`internal/secretvalue`)
+
+A secret's value can stand in a YAML file encrypted, tagged `!secret`: age's ASCII armor
+in a literal block scalar. The CLI and the agent do not use it yet; it is to replace the
+SOPS files.
+
+- **The envelope.** What age encrypts is JSON, `{"v":1,"for":"<place>","value":"<Base64>"}`.
+  `for` is the place the value is for (a secret's ID, or `cluster` for `cluster.yaml`), so
+  whoever opens it can refuse a value copied elsewhere; `Open` returns it and the caller
+  checks. The value is Base64: no escaping that changes its size, any bytes. A higher `v`
+  is refused as written by a newer clowder.
+- **Before decoding.** yaml.v3 decodes an unknown tag as a string in places, and turning
+  YAML into JSON drops it. So `Extract` reads the node tree first: it takes each value out
+  by its path (`internal/yamlpath`: `hoster.token`, `join_keys[0]`,
+  `registries["ghcr.io"].password`), puts the path in its place as a plain string, and the
+  caller decodes as before. It knows paths, not kinds of files: which paths may hold a
+  value, the caller checks.
+- **Only `!secret |`** (also `|-`, `|+`), on one line, with the armor below. Quoted, plain,
+  folded and indented-indicator forms, anchors and tags on keys, mappings or lists are
+  refused: only a block on lines of its own can be replaced in place.
+- **`Rewrite`** replaces the armor of each value with new armor and leaves everything else
+  of the file as it is (comments, indentation, other documents, CRLF line ends). yaml.v3
+  gives a node's first line only, so `locate` finds the block's end by its indentation, as
+  YAML does, and checks the lines it found against the value YAML read before it cuts.
+  Golden file: `testdata/rewrite.yaml`, `bin/dev test ./internal/secretvalue -update`.
+- No error message carries a value: `Open` drops json's messages, which quote the text
+  they choke on.
 
 ## Cluster state (`internal/state`)
 
