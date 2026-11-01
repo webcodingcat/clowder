@@ -59,9 +59,7 @@ func RunPlacement(ctx context.Context, cluster Cluster, propose Propose, conditi
 func (p *placer) place(ctx context.Context) time.Duration {
 	// Plan weighs every stack on every host: too slow for the state's lock,
 	// which Raft's Apply waits for
-	var copied *state.State
-	var err error
-	p.cluster.Read(func(current *state.State) { copied, err = current.Copy() })
+	copied, err := p.cluster.SharedCopy()
 	if err != nil {
 		p.logger.Error("place the stacks", "error", err)
 		return 0

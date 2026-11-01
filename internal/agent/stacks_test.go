@@ -42,6 +42,12 @@ func (c *testCluster) Read(use func(current *state.State)) {
 	use(c.state)
 }
 
+func (c *testCluster) SharedCopy() (*state.State, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.Copy()
+}
+
 func (c *testCluster) Changed() <-chan struct{} { return make(chan struct{}) }
 
 func (c *testCluster) propose(_ context.Context, cmd state.Command) (uint64, error) {

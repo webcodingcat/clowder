@@ -195,6 +195,13 @@ func (n *Node) Read(use func(current *state.State)) {
 	n.fsm.read(use)
 }
 
+// SharedCopy returns a copy of the state to read outside the lock, the same
+// one for every caller until the next change. Nobody may change it; a
+// caller that would, makes its own copy (State.Copy under Read).
+func (n *Node) SharedCopy() (*state.State, error) {
+	return n.fsm.sharedCopy()
+}
+
 // WaitIndex returns once this member has applied index: a read after a
 // write through another member sees the write.
 func (n *Node) WaitIndex(ctx context.Context, index uint64) error {

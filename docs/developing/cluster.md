@@ -22,7 +22,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   `set-host-phase` (host actions), `put-resource` and `delete-resource` (the user, through
   `/v1/apply` and `/v1/delete`, decided on the leader), `restart-stack` (`stack restart`),
   `put-volume`, `set-stack-status`, `set-stack-wait-reason` and `set-pushed-out`
-  (placement, the stack's host), `set-ingress` (the ingress loop), `put-acme-account`,
+  (placement, the stack's host), `set-ingress` (the Floating IP's loop), `put-acme-account`,
   `put-acme-challenge`, `delete-acme-challenge`, `put-certificate` and
   `delete-certificate` (the ACME loop), `put-alert` and `resolve-alert` (the alerts), `report-host` and `forget-copy` (each agent). The other
   kinds (hosts joining, operations, users beyond the first) are there for the next steps;
@@ -155,7 +155,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   stack names at most `MaxStackSecrets`. Who can read a secret: API,
   below.
 - `Copy` gives a deep copy without the audit, for work too slow for the state's lock (the
-  placement weighs every stack) or that keeps parts of the state (the agent's stacks).
+  placement weighs every stack) or that keeps parts of the state (the agent's stacks). The
+  loops do not copy themselves: `raftnode.Node.SharedCopy` makes one copy per change, which
+  every loop reads and none changes; a dry run, which applies commands to its copy, makes
+  its own.
 - Snapshots are gzip-compressed JSON (`WriteSnapshot`, `ReadSnapshot`). The audit keeps the
   last `auditSize` commands, finished operations the last `keptFinished`.
 
@@ -407,7 +410,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   a waiting stack gets room before a pushed-out service does. The 60 s are kept in the
   leader's memory and start again after a change of leader.
 - `controller.RunPlacement` runs on every agent but acts only on the leader. It plans on a
-  copy of the state (`State.Copy`), outside the lock Raft's `Apply` waits for. It first
+  copy of the state (`SharedCopy`), outside the lock Raft's `Apply` waits for. It first
   writes the push-outs of hosts over capacity; if one fails, it places nothing in that
   pass, since the placements count on the room it frees. Per placement
   it writes what the stack pushes out (`set-pushed-out`, one command for every stack it

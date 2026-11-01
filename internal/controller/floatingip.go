@@ -22,19 +22,20 @@ type ConnectHoster func(config clusterspec.Hoster, token string) (hoster.Hoster,
 // hosterTimeout bounds one look at the hoster, an assignment included.
 const hosterTimeout = 2 * time.Minute
 
-// RunIngress keeps the Floating IP on the ingress host while this agent
+// RunFloatingIP keeps the Floating IP on the ingress host while this agent
 // leads, until ctx ends: at a change of the state and every interval, but
 // it reads the hoster's API at most once per interval (Hetzner allows 3600
 // requests an hour; this takes about 120). While it fails, it holds the
-// condition ingressNotHeld, which the alerts turn into an alert.
-func RunIngress(ctx context.Context, cluster Cluster, propose Propose, open Open, connect ConnectHoster,
+// condition ingressNotHeld, which the alerts turn into an alert. Traefik,
+// which answers on the Floating IP, is internal/ingress's.
+func RunFloatingIP(ctx context.Context, cluster Cluster, propose Propose, open Open, connect ConnectHoster,
 	conditions *Conditions, logger *slog.Logger,
 ) {
 	var next time.Time // when the API may be read again
 	for {
 		changed := cluster.Changed()
 		if cluster.IsLeader() && !time.Now().Before(next) {
-			asked, err := holdIngress(ctx, cluster, propose, open, connect, logger)
+			asked, err := holdFloatingIP(ctx, cluster, propose, open, connect, logger)
 			if asked {
 				next = time.Now().Add(interval)
 			}
@@ -60,15 +61,14 @@ func RunIngress(ctx context.Context, cluster Cluster, propose Propose, open Open
 	}
 }
 
-// holdIngress records the ingress host when it changes, then routes the
+// holdFloatingIP records the ingress host when it changes, then routes the
 // Floating IP to it if the hoster has it elsewhere (moved by hand, or the
 // host is new). It tells whether it asked the hoster's API, which counts
 // against the API's limit.
-func holdIngress(ctx context.Context, cluster Cluster, propose Propose, open Open, connect ConnectHoster,
+func holdFloatingIP(ctx context.Context, cluster Cluster, propose Propose, open Open, connect ConnectHoster,
 	logger *slog.Logger,
 ) (asked bool, err error) {
-	var copied *state.State
-	cluster.Read(func(current *state.State) { copied, err = current.Copy() })
+	copied, err := cluster.SharedCopy()
 	if err != nil {
 		return false, err
 	}

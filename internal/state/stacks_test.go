@@ -21,7 +21,20 @@ func (c *cluster) putShop(spec stackspec.Spec) {
 	c.mustApply(KindPutResource, UserActor("alice"), putResource(resource.KindStack, "default", "shop", spec))
 }
 
-func TestAStackIsPutAndReportedByItsHost(t *testing.T) {
+// runningShop puts default/shop, places it on host 0 and has the host
+// report it running with the secrets it came up with.
+func (c *cluster) runningShop(applied map[string]string) *Stack {
+	c.t.Helper()
+	c.putShop(shopSpec())
+	host := HostID(0)
+	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackStarting, Host: &host})
+	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{
+		ID: "default/shop", Status: StackRunning, Host: &host, Generation: 1, AppliedSecrets: applied,
+	})
+	return c.state.Stacks["default/shop"]
+}
+
+func TestAStackIsPutOnceAndOnlyByItsChannel(t *testing.T) {
 	c := newCluster(t)
 	c.putShop(shopSpec())
 	stack := c.state.Stacks["default/shop"]
@@ -40,22 +53,30 @@ func TestAStackIsPutAndReportedByItsHost(t *testing.T) {
 	gitops := putResource(resource.KindStack, "default", "shop", shopSpec())
 	gitops.Owner = GitOpsOwner("main")
 	c.refuse(KindPutResource, LeaderActor, gitops, "belongs to cli")
+}
 
+func TestOnlyItsHostReportsAStackWhereItIs(t *testing.T) {
+	c := newCluster(t)
+	c.putShop(shopSpec())
 	host := HostID(0)
 	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &host},
 		"only its host")
-	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackStarting, Host: &host})
-	if !stack.LastMove.Equal(testTime) {
-		t.Errorf("placing a stack is a move: %v", stack.LastMove)
+	stack := c.runningShop(map[string]string{"token": "d1"})
+	if stack.Status != StackRunning || !maps.Equal(stack.AppliedSecrets, map[string]string{"token": "d1"}) {
+		t.Errorf("reported %+v", stack)
 	}
-	applied := map[string]string{"token": "d1"}
-	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{
-		ID: "default/shop", Status: StackRunning, Host: &host, Generation: 1, AppliedSecrets: applied,
-	})
-	if !maps.Equal(stack.AppliedSecrets, applied) {
-		t.Errorf("applied secrets %v", stack.AppliedSecrets)
-	}
-	// a new generation of a running stack starts until its host reports it
+	c.refuse(KindSetStackStatus, HostActor(1), SetStackStatus{ID: "default/shop", Status: StackPending, Host: &host},
+		"only its host")
+	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackPending}, "only where it is")
+	gone := HostID(7)
+	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &gone}, "not a member")
+	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: "dancing"}, "unknown status")
+}
+
+func TestANewGenerationStartsUntilItsHostReportsIt(t *testing.T) {
+	c := newCluster(t)
+	stack := c.runningShop(nil)
+	host := *stack.Host
 	changed := shopSpec()
 	changed.Services["app"] = stackspec.Service{Image: "y"}
 	c.putShop(changed)
@@ -71,12 +92,6 @@ func TestAStackIsPutAndReportedByItsHost(t *testing.T) {
 		SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &host, Generation: 2}); err != nil || len(changes) != 0 {
 		t.Errorf("the same report: changes %v, %v", changes, err)
 	}
-	c.refuse(KindSetStackStatus, HostActor(1), SetStackStatus{ID: "default/shop", Status: StackStopped, Host: &host},
-		"only its host")
-	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackPending}, "only where it is")
-	gone := HostID(7)
-	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &gone}, "not a member")
-	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: "dancing"}, "unknown status")
 }
 
 func TestTheStateReadsTheStackSpecItself(t *testing.T) {

@@ -54,9 +54,11 @@ type Storage interface {
 	MountPoint(volume storage.Volume) string
 }
 
-// stateReader is what the agent's loops need from the Raft member.
+// stateReader is what the agent's loops need from the Raft member. A loop
+// reads the state through SharedCopy and changes nothing of it.
 type stateReader interface {
 	Read(use func(current *state.State))
+	SharedCopy() (*state.State, error)
 	Changed() <-chan struct{}
 }
 
@@ -109,9 +111,7 @@ type desiredState struct {
 // made under the lock Raft's Apply waits for, which a pass then works on
 // outside it.
 func readDesired(cluster stateReader, self state.HostID) (desiredState, error) {
-	var copied *state.State
-	var err error
-	cluster.Read(func(current *state.State) { copied, err = current.Copy() })
+	copied, err := cluster.SharedCopy()
 	if err != nil {
 		return desiredState{}, err
 	}
@@ -148,12 +148,12 @@ func (r *stackRunner) reconcile(ctx context.Context) {
 	}
 }
 
-// pass brings this host once to what the state says. The stacks that left
-// stop first, before the others come up, so a volume passes from a stack
-// that went to the next only once the first has stopped: two databases on
-// one file system would ruin it. If a leaving stack fails to stop, it may
-// still use its volumes; a stack that names one of them waits for the next
-// pass.
+// pass brings this host once to what the state says. First it stops the
+// stacks that left this host, then it brings up the others. A volume that
+// passes from one stack to another must never be used by both at once:
+// two databases on one file system would ruin it. If a stack fails to stop,
+// it may still use its volumes, and a stack that names one of them waits
+// for the next pass.
 func (r *stackRunner) pass(ctx context.Context) {
 	desired, err := readDesired(r.cluster, r.host.ID)
 	if err != nil {

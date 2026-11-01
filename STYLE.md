@@ -16,7 +16,9 @@ formatters can fix.
 - English throughout.
 - Readable before short: descriptive names (`host`, `volume`, `stack`, not `h`, `v`, `s`);
   single letters only for loop variables, receivers and one-line closures. Understandable
-  abbreviations (`cfg`, `ip`, `cmd`, IDs like `hostID`) are fine.
+  abbreviations (`cfg`, `ip`, `cmd`, IDs like `hostID`) are fine. One exception: a test's
+  fixture that the whole test works through, as a receiver would be (`c :=
+  newCluster(t)` in the state's tests, `l` for the controller's leader).
 - One job per function; no `Run()` that only calls `run()`.
 - Comments and doc comments say why (DRBD's or the kernel's behavior, a caveat); the code says
   what. Doc comments are sentences; other comments may be short lowercase fragments.

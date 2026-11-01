@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -51,8 +52,18 @@ func TestResourceFilesMatchTheGoldenFiles(t *testing.T) {
 type fakeHost struct {
 	commands []string
 	// existing are the things that are there: "lv", "metadata", "fs",
-	// "mounted", "primary".
+	// "mounted", "primary", "other device" (mounted at the copy's place).
 	existing map[string]bool
+}
+
+// lvs lists the volume group's LVs: its thin pool, another volume's LV and
+// the copy's if it is there.
+func (f *fakeHost) lvs() string {
+	names := "  thin\n  clw-shop-pgdata-g10\n"
+	if f.existing["lv"] {
+		names += "  clw-shop-pgdata-g1\n"
+	}
+	return names
 }
 
 func (f *fakeHost) run(_ context.Context, _ time.Duration, name string, args ...string) (string, error) {
@@ -60,8 +71,8 @@ func (f *fakeHost) run(_ context.Context, _ time.Duration, name string, args ...
 	f.commands = append(f.commands, line)
 	// the exit codes the tools use for "not there"
 	switch {
-	case name == "lvs" && !f.existing["lv"]:
-		return "", &command.ExitError{Code: 5}
+	case name == "lvs":
+		return f.lvs(), nil
 	case name == "lvcreate":
 		f.existing["lv"] = true
 	case name == "lvremove":
@@ -75,6 +86,8 @@ func (f *fakeHost) run(_ context.Context, _ time.Duration, name string, args ...
 	case name == "mkfs.ext4":
 		f.existing["fs"] = true
 	case name == "findmnt" && !f.existing["mounted"]:
+		return "", &command.ExitError{Code: 1}
+	case name == "findmnt" && slices.Contains(args, "--source") && f.existing["other device"]:
 		return "", &command.ExitError{Code: 1}
 	case name == "mount":
 		f.existing["mounted"] = true
@@ -300,6 +313,38 @@ func TestAForeignFileSystemIsNotTouched(t *testing.T) {
 	}
 	if err := driver.Ensure(context.Background(), volume); err == nil || !strings.Contains(err.Error(), "holds xfs") {
 		t.Errorf("want a refusal, got %v", err)
+	}
+}
+
+func TestAnotherDeviceAtTheMountPointStopsEnsure(t *testing.T) {
+	host := &fakeHost{existing: map[string]bool{}}
+	driver := newDriver(t, host)
+	volume := replicated()
+	volume.Resource = nil
+	if err := driver.Ensure(context.Background(), volume); err != nil {
+		t.Fatal(err)
+	}
+	host.existing["other device"] = true
+	host.commands = nil
+	if err := driver.Ensure(context.Background(), volume); err == nil || !strings.Contains(err.Error(), "another device") {
+		t.Errorf("want a refusal, got %v", err)
+	}
+	if host.ran("mkdir") {
+		t.Error("data/ was made on another device")
+	}
+}
+
+func TestAnLVOfASimilarNameIsNotTheCopys(t *testing.T) {
+	// the volume group holds clw-shop-pgdata-g10, not -g1
+	host := &fakeHost{existing: map[string]bool{}}
+	driver := newDriver(t, host)
+	volume := replicated()
+	volume.Resource = nil
+	if err := driver.Ensure(context.Background(), volume); err != nil {
+		t.Fatal(err)
+	}
+	if !host.ran("lvcreate") {
+		t.Error("the copy's LV was taken as there")
 	}
 }
 

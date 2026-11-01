@@ -147,9 +147,7 @@ func (a *Alerts) RunHeartbeat(ctx context.Context) {
 // heartbeat calls the heartbeat's URL once and tells how long until the
 // next call; false without a heartbeat in cluster.yaml.
 func (a *Alerts) heartbeat(ctx context.Context) (time.Duration, bool) {
-	var copied *state.State
-	var err error
-	a.cluster.Read(func(current *state.State) { copied, err = current.Copy() })
+	copied, err := a.cluster.SharedCopy()
 	if err != nil {
 		a.logger.Error("call the heartbeat", "error", err)
 		return 0, false
@@ -171,9 +169,7 @@ func (a *Alerts) heartbeat(ctx context.Context) (time.Duration, bool) {
 // pass brings the open alerts in line with what the cluster shows, then
 // tells the channels.
 func (a *Alerts) pass(ctx context.Context) {
-	var copied *state.State
-	var err error
-	a.cluster.Read(func(current *state.State) { copied, err = current.Copy() })
+	copied, err := a.cluster.SharedCopy()
 	if err != nil {
 		a.logger.Error("raise the alerts", "error", err)
 		return
@@ -408,9 +404,7 @@ type TestResult struct {
 // once and from this agent, and tells how each took it: no result when
 // cluster.yaml names no channel.
 func (a *Alerts) Test(ctx context.Context) ([]TestResult, error) {
-	var copied *state.State
-	var err error
-	a.cluster.Read(func(current *state.State) { copied, err = current.Copy() })
+	copied, err := a.cluster.SharedCopy()
 	if err != nil {
 		return nil, err
 	}

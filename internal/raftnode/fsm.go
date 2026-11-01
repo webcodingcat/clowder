@@ -24,6 +24,11 @@ type fsm struct {
 	// changed is closed and replaced after every applied entry, to wake up
 	// those waiting for an index.
 	changed chan struct{}
+	// shared is a copy of the state for the loops to read, made once per
+	// change and dropped at the next (sharedCopy); sharedMu guards it among
+	// readers, who hold mu only to read
+	sharedMu sync.Mutex
+	shared   *state.State
 }
 
 func newFSM() *fsm {
@@ -40,6 +45,7 @@ func (f *fsm) Apply(entry *raft.Log) any {
 	defer f.mu.Unlock()
 	changes, err := f.state.ApplyEntry(entry.Index, entry.Data)
 	f.changes.Add(changes)
+	f.shared = nil
 	return err
 }
 
@@ -74,6 +80,7 @@ func (f *fsm) Restore(snapshotFile io.ReadCloser) error {
 	f.state = restored
 	// what came before the snapshot is in it, not in the ring
 	f.changes.Reset(restored.Index)
+	f.shared = nil
 	f.mu.Unlock()
 	f.wake()
 	return nil
@@ -92,6 +99,24 @@ func (f *fsm) read(use func(current *state.State)) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	use(f.state)
+}
+
+// sharedCopy returns a copy of the state that every caller shares until the
+// next change: the loops that wake at a change each read the state without
+// the lock, and one copy serves them all. Nobody may change it.
+func (f *fsm) sharedCopy() (*state.State, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	f.sharedMu.Lock()
+	defer f.sharedMu.Unlock()
+	if f.shared == nil {
+		copied, err := f.state.Copy()
+		if err != nil {
+			return nil, err
+		}
+		f.shared = copied
+	}
+	return f.shared, nil
 }
 
 // waitFor returns once the state has applied index.

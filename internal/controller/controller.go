@@ -10,9 +10,11 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Cluster is what the loops need from the agent's Raft member.
+// Cluster is what the loops need from the agent's Raft member. A loop
+// reads the state through SharedCopy and changes nothing of it.
 type Cluster interface {
 	Read(use func(current *state.State))
+	SharedCopy() (*state.State, error)
 	Changed() <-chan struct{}
 	IsLeader() bool
 }

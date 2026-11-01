@@ -63,7 +63,7 @@ loops that talk to the world outside.
   SDK would bring Prometheus' client and more into clowderd. It finds the Floating IP among
   the project's (the API cannot look one up by its address) and waits for each action to
   finish. Its errors carry the API's message, never the token.
-- `controller.RunIngress` acts only on the leader. The ingress host (`State.Ingress`,
+- `controller.RunFloatingIP` (`floatingip.go`) acts only on the leader. The ingress host (`State.Ingress`,
   `set-ingress`) is the recorded one while it is active and has a server ref, so the
   Floating IP never switches back by itself; otherwise the first of
   `ingress.preferred_hosts` that can, else the one with the lowest ID that can. At a change
@@ -141,7 +141,7 @@ loops that talk to the world outside.
   tried also while the cluster has no leader.
 - **Conditions** that the state does not show are held in memory (`controller.Conditions`)
   with the time they began, by the loop that sees them: the Floating IP not held (the
-  ingress loop), a host over capacity (the placement), Docker not answering (the alerts,
+  Floating IP's loop), a host over capacity (the placement), Docker not answering (the alerts,
   from `report-host`). After a change of leader they start again, so a new alert comes a
   little later rather than wrongly; one that is open stays until the loop that holds its
   condition has looked (`Conditions.Seen`). An agent that leads no more forgets them.

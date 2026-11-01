@@ -84,12 +84,11 @@ The secret goes in a SOPS file of its own, `db-password.sops.yaml` (`kind: Secre
 - A stack's spec knows only what clowder runs: a field it does not have is an error.
 - A volume outlives its stack. Deleting a volume deletes its data, so `clowder delete`
   takes one only with `--with-data`.
-- A secret in a file in clear is refused; in clear it comes only on stdin
-  (`clowder apply -f -`). The cluster keeps secrets sealed.
-- Who can read a secret: whoever may apply it or decrypt its file, every host of the
-  cluster, and, until clowder has permissions, every user, through a stack that names it
-  or one that `cluster.yaml` allows privileges (`stacks.privileged`, as
-  `<namespace>/<stack>`).
+- clowder refuses a secret written in clear in a file. A secret in clear can only come on
+  stdin (`clowder apply -f -`). The cluster keeps secrets sealed.
+- These can read a secret: whoever may apply it or decrypt its file, and every host of the
+  cluster. Until clowder has permissions, every user can too, through a stack that names
+  the secret or a stack with privileges (`stacks.privileged` in `cluster.yaml`).
 
 Names of namespaces, stacks, services, volumes and secrets are lowercase letters, digits
 and `-`, at most 63 characters; `_` is not allowed.

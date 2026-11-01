@@ -63,9 +63,7 @@ func (m *metricsSource) collect(ctx context.Context) (*metrics.Set, error) {
 	set := metrics.NewSet()
 	// a copy, not the state under its lock: the scrape asks Docker, and
 	// Raft's Apply waits for the lock
-	var copied *state.State
-	var err error
-	m.cluster.Read(func(current *state.State) { copied, err = current.Copy() })
+	copied, err := m.cluster.SharedCopy()
 	if err != nil {
 		return nil, err
 	}

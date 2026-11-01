@@ -31,6 +31,14 @@ func (l *leader) Read(use func(current *state.State)) {
 	use(l.state)
 }
 
+// SharedCopy copies afresh each time: what the tests check is that the
+// loops read the copy, not the state under its lock.
+func (l *leader) SharedCopy() (*state.State, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.state.Copy()
+}
+
 func (l *leader) Changed() <-chan struct{} {
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -201,7 +201,7 @@ func (w *workers) startLoops(ctx context.Context, loops *sync.WaitGroup, caughtU
 	loops.Go(func() { reconcileNetwork(ctx, node, w.parts.Network, logger) })
 	loops.Go(func() { w.runner.supervisor.Run(ctx, compose.LabelStack) })
 	loops.Go(func() { controller.RunPlacement(ctx, node, w.propose, w.conditions, logger) })
-	loops.Go(func() { controller.RunIngress(ctx, node, w.propose, open, w.parts.Hoster, w.conditions, logger) })
+	loops.Go(func() { controller.RunFloatingIP(ctx, node, w.propose, open, w.parts.Hoster, w.conditions, logger) })
 	loops.Go(func() { w.alerts.Run(ctx) })
 	loops.Go(func() { w.alerts.RunHeartbeat(ctx) })
 	loops.Go(func() { controller.RunACME(ctx, node, w.propose, w.credentials.dataKey, logger) })

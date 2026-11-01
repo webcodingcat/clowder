@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -97,11 +98,8 @@ func volumeGroup(pool string) string {
 // timeout, a missing binary, a device not ready) stops Ensure: guessing
 // "missing" there could create over or format real data.
 const (
-	// lvs: no such LV, but also LVM's general failure (no such volume
-	// group, a lock); in those, the lvcreate that follows fails too, so
-	// nothing is made over data
-	lvsNotFound   = 5
-	blkidNotFound = 2 // blkid: no file system on the device
+	blkidNotFound   = 2 // blkid: no file system on the device
+	findmntNotFound = 1 // findmnt: nothing mounted that matches
 )
 
 // Markers in StateDir. They let Ensure pick up after a crash at any point:
@@ -144,17 +142,16 @@ func (d Driver) ensureLV(ctx context.Context, volume Volume) error {
 	return d.setMarker(volume.LV, "created", volume.ID)
 }
 
-// lvExists tells whether the copy's LV exists; only lvs's own "not found"
-// means no, any other failure is an error.
+// lvExists tells whether the copy's LV exists: it looks for the name among
+// the LVs of its volume group. lvs has no exit code of its own for a
+// missing LV (5 is any failure, a missing volume group or a lock too), so
+// any failure is an error, never "missing".
 func (d Driver) lvExists(ctx context.Context, volume Volume) (bool, error) {
-	_, err := d.Run(ctx, shortTimeout, "lvs", volumeGroup(volume.Pool)+"/"+volume.LV)
-	if code, ok := command.ExitCode(err); err != nil && ok && code == lvsNotFound {
-		return false, nil
-	}
+	output, err := d.Run(ctx, shortTimeout, "lvs", "--noheadings", "--options", "lv_name", volumeGroup(volume.Pool))
 	if err != nil {
 		return false, fmt.Errorf("look for the LV of %s: %w", volume.ID, err)
 	}
-	return true, nil
+	return slices.Contains(strings.Fields(output), volume.LV), nil
 }
 
 // ensureResource writes the resource file and brings the resource up as
@@ -256,7 +253,17 @@ func (d Driver) ensureMounted(ctx context.Context, volume Volume, device string)
 	if err != nil {
 		return err
 	}
-	if !isMounted {
+	if isMounted {
+		// what is there must be this copy's device: another one's data
+		// would reach the containers as if it were the volume's
+		_, err := d.Run(ctx, shortTimeout, "findmnt", "--noheadings", "--source", device, "--mountpoint", mountPoint)
+		if code, exited := command.ExitCode(err); exited && code == findmntNotFound {
+			return fmt.Errorf("%s has another device mounted, not %s: a human must look", mountPoint, device)
+		}
+		if err != nil {
+			return fmt.Errorf("look what is mounted for %s: %w", volume.ID, err)
+		}
+	} else {
 		// the agent touches the mount point only while nothing is mounted
 		// there: a mounted volume's root could hang on suspended DRBD
 		if err := os.MkdirAll(mountPoint, 0o700); err != nil {
@@ -273,11 +280,10 @@ func (d Driver) ensureMounted(ctx context.Context, volume Volume, device string)
 	return nil
 }
 
-// mounted tells whether a file system is mounted at mountPoint; findmnt
-// exits with 1 when none is.
+// mounted tells whether a file system is mounted at mountPoint.
 func (d Driver) mounted(ctx context.Context, mountPoint string) (bool, error) {
 	_, err := d.Run(ctx, shortTimeout, "findmnt", "--noheadings", "--mountpoint", mountPoint)
-	if code, exited := command.ExitCode(err); exited && code == 1 {
+	if code, exited := command.ExitCode(err); exited && code == findmntNotFound {
 		return false, nil
 	}
 	if err != nil {

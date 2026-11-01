@@ -54,7 +54,7 @@ func holdOnce(t *testing.T, l *leader, fake *fakeHoster) {
 		}
 		return fake, nil
 	}
-	asked, err := holdIngress(context.Background(), l, l.propose, open, connect, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	asked, err := holdFloatingIP(context.Background(), l, l.propose, open, connect, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil || !asked {
 		t.Fatalf("asked the API %v, %v", asked, err)
 	}

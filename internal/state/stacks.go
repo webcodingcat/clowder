@@ -253,7 +253,7 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) error {
 		return fmt.Errorf("no stack %s", payload.ID)
 	}
 	switch payload.Status {
-	case StackPending, StackStarting, StackRunning, StackWaitingForHost, StackStopped:
+	case StackPending, StackStarting, StackRunning:
 	default:
 		return fmt.Errorf("stack %s: unknown status %q", payload.ID, payload.Status)
 	}
@@ -269,9 +269,6 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) error {
 	}
 	if stack.Status == payload.Status && samePlace(stack.Host, payload.Host) && maps.Equal(stack.AppliedSecrets, applied) {
 		return errUnchanged
-	}
-	if !samePlace(stack.Host, payload.Host) {
-		stack.LastMove = cmd.At
 	}
 	stack.Status, stack.Host, stack.AppliedSecrets = payload.Status, payload.Host, applied
 	s.changed(resource.KindStack, &stack.Meta)

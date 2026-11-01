@@ -124,9 +124,11 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   system: those it leaves to a
   human. A crash between `lvcreate` and its marker leaves an empty LV that a human must look
   at.
-- **It never guesses.** Only a tool's own exit code means "not there" (`lvs` 5, `blkid` 2,
-  `findmnt` 1). Any other failure, a timeout or a device not ready, stops `Ensure`, so a
-  guess never creates over or formats real data.
+- **It never guesses.** Only a tool's own answer means "not there": `blkid`'s exit code 2,
+  `findmnt`'s 1, and for an LV its name missing from the volume group's list (`lvs` has no
+  exit code of its own for that). Any other failure, a timeout or a device not ready, stops
+  `Ensure`, so a guess never creates over or formats real data. A mount point with another
+  device mounted stops it too: that data would reach the containers as the volume's.
 - **The mount guard:** containers get `data/`, which exists only in the mounted file system,
   so a container whose volume is not mounted fails to start instead of writing to the root
   file system.

@@ -234,7 +234,7 @@ func checkVolume(volume Volume) error {
 		return fmt.Errorf("volume %s: a DRBD minor exactly when it has replicas", id)
 	}
 	switch volume.Status {
-	case VolumePending, VolumeOK, VolumeDegraded, VolumeResyncing, VolumeRestorePending:
+	case VolumePending, VolumeOK:
 		return nil
 	default:
 		return fmt.Errorf("volume %s: unknown status %q", id, volume.Status)
