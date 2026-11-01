@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -48,10 +49,10 @@ func newCluster(t *testing.T) *cluster {
 func testHost(id HostID) Host {
 	return Host{
 		ID:                id,
-		Name:              "node" + string(rune('0'+id)),
+		Name:              "node" + strconv.Itoa(int(id)),
 		Underlay:          netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
 		WGPublicKey:       "wg-key",
-		CertificateSerial: "serial-" + string(rune('0'+id)),
+		CertificateSerial: "serial-" + strconv.Itoa(int(id)),
 	}
 }
 

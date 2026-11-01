@@ -20,6 +20,9 @@ type Cluster interface {
 // Propose commits a command (api.Server.Propose).
 type Propose func(ctx context.Context, cmd state.Command) (uint64, error)
 
+// Open unseals a secret of the state (datakey.Key.Open).
+type Open func(sealed state.Sealed) ([]byte, error)
+
 // interval is how often the loops look without a change of the state.
 const interval = 30 * time.Second
 

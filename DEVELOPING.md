@@ -177,6 +177,11 @@ volume in its own loops and never waits for a process that does. Work on volumes
 snapshot, copy) runs in separate processes that the agent watches for progress. Health
 reports never depend on a volume.
 
+One exception holds until phase 2: `storage.Ensure` runs `mkfs` and `mkdir data/` from the
+stack runner's loop, each through `internal/command` with its timeout, so a hang leaves the
+process behind, not the agent; but a long `mkfs` holds up the other stacks of that pass. The
+roadmap's gaps of phase 2 name the change (a stack or volume worked on apart).
+
 ## Logging and errors
 
 - `internal/logging` sets up `log/slog`: JSON on stderr for the agent (systemd passes it to

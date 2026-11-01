@@ -97,7 +97,10 @@ func volumeGroup(pool string) string {
 // timeout, a missing binary, a device not ready) stops Ensure: guessing
 // "missing" there could create over or format real data.
 const (
-	lvsNotFound   = 5 // lvs: no such LV
+	// lvs: no such LV, but also LVM's general failure (no such volume
+	// group, a lock); in those, the lvcreate that follows fails too, so
+	// nothing is made over data
+	lvsNotFound   = 5
 	blkidNotFound = 2 // blkid: no file system on the device
 )
 

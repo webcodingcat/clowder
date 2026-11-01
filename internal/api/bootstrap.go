@@ -183,6 +183,15 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("read the request: %w", err))
 		return
 	}
+	// first, before any key is opened: after the bootstrap, every request
+	// here ends at once. The state decides (AddUser.First); this spares the
+	// work. The offer tells anyone as much.
+	var hasUsers bool
+	s.config.Cluster.Read(func(current *state.State) { hasUsers = len(current.Users) > 0 })
+	if hasUsers {
+		writeError(w, http.StatusConflict, errors.New("the cluster has its first user already; users add others"))
+		return
+	}
 	if age := time.Since(request.Time); age > bootstrapMaxAge || age < -bootstrapMaxAge {
 		writeError(w, http.StatusUnauthorized, errors.New("the request is too old (or a clock is off by minutes)"))
 		return
@@ -198,13 +207,6 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := pki.CheckUserName(request.User); err != nil {
 		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	// the state decides (AddUser.First); this only spares issuing a certificate
-	var hasUsers bool
-	s.config.Cluster.Read(func(current *state.State) { hasUsers = len(current.Users) > 0 })
-	if hasUsers {
-		writeError(w, http.StatusConflict, errors.New("the cluster has its first user already; users add others"))
 		return
 	}
 	if len(request.PublicKey) != ed25519.PublicKeySize {

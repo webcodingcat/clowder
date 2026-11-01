@@ -341,7 +341,8 @@ func (r *room) fitOverCapacity(host state.HostID) (lists map[string][]string, ov
 	for _, ref := range running {
 		highest = max(highest, r.priority(ref))
 	}
-	// push out until nothing more is needed: the free room is back at zero
+	// victims pushes out until need fits into the free room; with a need
+	// of nothing, that is until the free room is no longer below zero
 	nothing := resources{}
 	victims, _, ok := r.victims(host, highest, nothing, free, nil)
 	if !ok {

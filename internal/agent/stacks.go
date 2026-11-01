@@ -375,6 +375,8 @@ func (r *stackRunner) describe(desired desiredState, id string) (storage.Volume,
 			if err != nil {
 				return storage.Volume{}, err
 			}
+			// a pool is "<volume group>/<thin pool>"; the LV's device is in
+			// the volume group
 			group, _, _ := strings.Cut(peerPool, "/")
 			node.Disk = "/dev/" + group + "/" + lv
 		}

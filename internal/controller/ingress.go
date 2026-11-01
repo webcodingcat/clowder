@@ -15,9 +15,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Open unseals a secret of the state (datakey.Key.Open).
-type Open func(sealed state.Sealed) ([]byte, error)
-
 // ConnectHoster makes the client of the hoster cluster.yaml names, with
 // its token in clear (hoster.New).
 type ConnectHoster func(config clusterspec.Hoster, token string) (hoster.Hoster, error)
