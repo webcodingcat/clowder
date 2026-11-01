@@ -597,7 +597,7 @@ func changeSecrets(t *testing.T, server host) {
 
 // missingSecretFile runs compose up with the agent's files and a secret file
 // gone: compose must fail rather than start the container without the
-// secret, which the agent relies on (DEVELOPING.md, The agent). The agent is
+// secret, which the agent relies on (docs/developing/host.md, The agent). The agent is
 // stopped meanwhile, so neither it nor its supervisor acts on what compose
 // does; the containers keep running (KillMode=process). Started again, the
 // agent writes the secrets anew and brings the stack up as after a boot.

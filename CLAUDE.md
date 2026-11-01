@@ -6,7 +6,8 @@ two binaries: `clowder` (the CLI; Linux, macOS, Windows) and `clowderd` (the age
 
 Everything in this repo is English. Read these before changing code:
 
-- @DEVELOPING.md – how the code fits together, its rules, how to build and test.
+- @DEVELOPING.md – how the code fits together, its rules, how to build and test; it points
+  to the part of `docs/developing/` about the package you change.
 - @STYLE.md – the standards and the rules this project adds to them.
 
 ## Commands

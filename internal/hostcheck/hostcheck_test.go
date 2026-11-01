@@ -37,8 +37,8 @@ func (f fakeHost) Addresses() ([]netip.Addr, error) {
 	return f.addresses, nil
 }
 
-// goodHost is a host with the operator base as DEVELOPING.md describes it:
-// every check passes.
+// goodHost is a host with the operator base as docs/developing/host.md
+// describes it: every check passes.
 func goodHost() fakeHost {
 	return fakeHost{
 		files: map[string]string{

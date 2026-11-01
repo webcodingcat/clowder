@@ -44,8 +44,8 @@ func pending(current *state.State, services map[string]state.Service) {
 	}
 }
 
-// shop is DEVELOPING.md's example: db at 900, app at 700 depending on it,
-// cache at 200, 300M each.
+// shop is a stack of three: db at 900, app at 700 depending on it, cache at
+// 200, 300M each.
 func shop() map[string]state.Service {
 	return map[string]state.Service{"db": service(900, 300), "app": service(700, 300, "db"), "cache": service(200, 300)}
 }

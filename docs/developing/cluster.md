@@ -1,0 +1,394 @@
+# The cluster
+
+Part of [DEVELOPING.md](../../DEVELOPING.md): the replicated state, the certificates,
+Raft, the API and the CLI, and the placement.
+
+## Cluster state (`internal/state`)
+
+Every agent holds the same `State` and applies the same `Command`s in Raft's order.
+
+- **Deterministic.** `Apply` uses no clock (a command carries the leader's time in `At`), no
+  randomness and no I/O; lint bans the clock from the package (forbidigo). A handler checks
+  everything before it changes anything, so a refused command leaves no trace; the state's
+  `Index` follows the log either way.
+- **Commands.** A command has a kind, a payload of the type with the same name (`AddHost`,
+  `PutResource`, ...) and an actor (`leader`, `host/<id>`, `user/<name>`) that the API takes from
+  the caller's certificate. Which actor may send which kind is the API's check. The state
+  checks only what it alone can tell: a host reports only about itself and never moves
+  another host, and about a stack only while it runs there, without moving it.
+- **In use so far:** `bootstrap` (init), `apply-config`, `add-user` (the first user),
+  `set-host-phase` (host actions), `put-resource` and `delete-resource` (the user, through
+  `/v1/apply` and `/v1/delete`, decided on the leader), `restart-stack` (`stack restart`),
+  `put-volume`, `set-stack-status`, `set-stack-wait-reason` and `set-pushed-out`
+  (placement, the stack's host), `set-ingress` (the ingress loop), `put-acme-account`,
+  `put-acme-challenge`, `delete-acme-challenge`, `put-certificate` and
+  `delete-certificate` (the ACME loop), `put-alert` and `resolve-alert` (the alerts), `report-host` and `forget-copy` (each agent). The other
+  kinds (hosts joining, operations, users beyond the first) are there for the next steps;
+  they are tested, but nothing sends them yet.
+- **Resources** (phase 1c): namespaces (`Namespaces`), and by `<namespace>/<name>` stacks
+  (`Stacks`), volumes (`Volumes`) and secrets (`Secrets`), each with a `Meta`. The kinds
+  and their specs are in `internal/resource` (a stack's in `internal/stackspec`), which the
+  CLI and the API share. Three counters, each with one job:
+
+  | Counter | Counts |
+  |---|---|
+  | `Meta.Generation` | the changes of a resource's spec |
+  | `Meta.ResourceVersion` | the index of the command that last changed the resource, spec or status |
+  | `Volume.DataGeneration` | a volume's data: a restore or a class move makes a new LV (`-g<N>`) |
+
+  - `put-resource` and `delete-resource` carry the kind; `resourceKinds` holds each kind's
+    `find`, `put` and `remove`. A handler checks in a fixed order: `Authorize` (the actor,
+    the verb, the kind, the namespace; it allows everything until users get permissions,
+    and sits here so that the leader decides, not the agent that took the request), the
+    owner (another channel is refused, even for a spec that would change nothing), whether
+    anything changes, then the rest.
+  - **Unchanged is not a change.** A spec equal to the stored one (a secret's by its
+    digest, as the same value seals differently every time; a stack's normalized) changes
+    nothing: not `Generation`, not `ResourceVersion`, and leaves no audit entry, so a GitOps
+    loop that applies the same files restarts nothing and keeps the audit. The status
+    commands (`put-volume`, `set-stack-status`, `set-stack-wait-reason`, `set-pushed-out`)
+    that write what is there change nothing either. They answer with `errUnchanged`, which
+    `Apply` takes as applied without a trace.
+  - **The state checks against `cluster.yaml` itself**, in the log's order: a stack's
+    priority categories and privileges, a volume's storage class; `apply-config` refuses
+    what a resource of the cluster would no longer pass. No check happens outside the state
+    that a later command could make stale, so no revision travels with a command.
+  - `Apply` returns the resources a command changed (`[]Change`, with the command's index
+    as their `ResourceVersion`); a handler records each with `changed` or `deleted`.
+  - A namespace's owner owns only the namespace; any channel may put resources into it.
+    `default` belongs to no channel and cannot be deleted. A namespace goes only when it
+    holds nothing; nothing cascades.
+  - A volume is made `pending`, without a copy and without a DRBD minor: the placement
+    places it with the first stack that names it. Its class must be in `cluster.yaml`. Its
+    spec cannot change yet. A new volume starts one `DataGeneration` above the retired
+    copies of a deleted one of the same ID, and the state refuses an LV name a volume or a
+    retired copy has already (the name holds only 32 bits of a hash). `put-volume` changes
+    a volume's copies and status, never its `Meta` or spec. A volume serves one stack; one
+    a stack names cannot be deleted, and a deleted stack leaves its volumes, with their
+    data, for the next stack that names them.
+  - A secret's value is sealed; the API computes its digest. The limits are on the values
+    in clear (`resource.MaxSecretBytes`, per namespace, in the cluster), which the state
+    reads from the sealed length (`ClearSize`: age adds a header of fixed length and a tag
+    per 64 KiB); a test in `datakey` holds that against real sealing. A secret a stack
+    names cannot be deleted.
+  - **A stack's spec** is stored normalized (`stackspec.Normalize`). The state reads it
+    itself, so nothing derived travels with the command. `putStack`:
+    - runs `stackspec.Check` and resolves the priorities with `cluster.yaml`'s categories;
+    - checks privileges against `stacks.privileged`;
+    - refuses a published port or HTTP route that another stack has, and volumes or
+      secrets its namespace lacks;
+    - keeps what the scheduler needs of each service (`Stack.Services`: the priority as
+      written, the reservations, the dependencies).
+  - **A stack's status.** A new stack is `pending`. A changed one that runs is `starting`
+    until its host reports the new generation up. A host's `set-stack-status` names the
+    generation and the restart times it ran with; one about an older generation or other
+    restart times is refused, so a report from before an apply or a restart cannot mark
+    the stack `running`. With `running` the host
+    reports the digests of the secrets its containers came up with (`AppliedSecrets`).
+  - **`restart-stack`** records the time of a restart per service (`Stack.Restarted`): for
+    the services named (none: all) and every service that depends on one of them
+    (`stackspec.Spec.WithDependents`), since a dependency holds only when a container
+    starts. It changes no spec, so the generation stays; a running stack is `starting`
+    again. Any channel may restart a stack, whoever owns it, so an operator can restart one
+    that GitOps applies. Who may is `Authorize`'s (verb `restart`).
+  - **`set-stack-wait-reason`** records why the placement finds no place for a stack or a
+    volume it names (`WaitReason`). It changes nothing else, so it never unplaces a stack
+    that runs. The state is the placement's memory of the reason: it writes a change once,
+    also after a change of leader, and clears it when the stack no longer waits.
+- **Retired copies.** A volume copy's data goes only when the state says so:
+  `delete-resource` of a volume, and a `put-volume` that changes the data generation or
+  takes a copy off a host each add the copies they give up to `Retired` (volume, data
+  generation, host). The host removes those and forgets each with `forget-copy`; a removed
+  host's go with it. A copy that is merely missing from the state stays: a bug in the
+  placement must not cost data.
+- **Host phases** (`phaseChanges`; L = the leader, on its own or for a user; H = the host
+  itself):
+
+  ```
+  joining ─L→ passive ─L→ active ⇄L draining
+     └──────L──────────────↗  │ L        │ L
+                         failed ←────────┘
+             active ←H── failed ─L→ fenced ─H→ recovering ─H→ active
+                                    fenced ⇄L disabled (flapping brake)
+  any phase ─L→ removed
+  ```
+
+  In words: a new host joins as `joining`; the leader makes it `passive` (waiting) or
+  `active` (running stacks), and drains it for maintenance and back. A host that stops
+  answering is `failed`; it comes back `active` by itself, or the leader powers it off
+  (`fenced`) before its stacks start elsewhere. A fenced host that is back recovers
+  (`recovering`, then `active`); one that fails again and again is `disabled` until a user
+  enables it. Any host can be `removed`.
+
+- **Versions.** Until `v1.0.0` the state, the commands and `cluster.yaml` change freely:
+  no cluster runs in production, so there are no migrations and no gates, and
+  `CommandVersion` and `SnapshotVersion` stay at 1. **From `v1.0.0`** these rules hold:
+  - A release reads its own `CommandVersion` and `SnapshotVersion` and the one before.
+  - Payload fields are added, not changed. Unknown fields are ignored, so an agent of the
+    release before drops a new field from its state. A field that later commands depend
+    on therefore needs a gate on `State.MinVersion`.
+  - An agent of the release before refuses a new command kind ("unknown command"), so its
+    state misses that command. A kind may come without a gate only if what it changes may
+    differ between agents for a while, as the display-only `set-stack-wait-reason`.
+  - The json tags of `clusterspec.Config` are part of this format.
+- **Locks.** Operations hold locks (`stack/<namespace>/<stack>`, `volume/<volume ID>`); a
+  change to a locked stack or volume is refused with a `LockedError`, unless the holding
+  operation makes it (`Operation` in the payload). Only failover takes locks over
+  (`TakeOver`).
+- **Invariants** the state holds itself, as the last place to catch a wrong command: one
+  first user, valid names (`internal/names`), volumes with 0 to 3 replicas and a DRBD minor
+  exactly when replicated (a pending volume has neither copy nor minor), one copy per host,
+  one stack per volume, nothing deleted that a stack names, a removed host's certificate
+  revoked.
+- **Secrets** arrive sealed (`Sealed`, age for the data key); `state` never sees them in
+  clear. Those `cluster.yaml` names are `ClusterSecrets`, the namespaces' `Secrets`. A
+  stack names at most `MaxStackSecrets`. Who can read a secret: API, below.
+- `Copy` gives a deep copy without the audit, for work too slow for the state's lock (the
+  placement weighs every stack) or that keeps parts of the state (the agent's stacks).
+- Snapshots are gzip-compressed JSON (`WriteSnapshot`, `ReadSnapshot`). The audit keeps the
+  last `auditSize` commands, finished operations the last `keptFinished`.
+
+## Certificates (`internal/pki`)
+
+- The cluster CA issues host certificates (server and client, valid for the host's addresses)
+  and user certificates (client). The role is the certificate's organizational unit, the
+  name its common name (`host-<id>` or the user's name).
+- Keys are Ed25519 and never leave the machine that made them: the CA signs public keys.
+- Certificates end by revocation, not expiry: hosts may stay off for months. `Verify` takes
+  the revoked serials from the state.
+- `TrustProof` (HMAC-SHA256 with the bootstrap key over the CA certificate) is how a CLI or a
+  joining host trusts the CA on first contact.
+
+## Raft (`internal/raftnode`) and the data key (`internal/datakey`)
+
+- `raftnode` runs hashicorp/raft: log and stable store in BoltDB, a snapshot every
+  `snapshotThreshold` entries, the state of `internal/state` as the replicated machine.
+  Raft's own log lines go through `log/slog`.
+- Raft speaks mutual TLS on the node address: both sides show a host certificate of the
+  cluster CA that is not revoked. Users' certificates and other clusters' hosts fail the
+  handshake, and removing a host revokes its certificate, so it leaves Raft and the API at
+  once. `pki.ClientTLSToHosts` and `pki.ServerTLSForHosts` are the one way hosts are checked,
+  by Raft and by the API alike: the chain and the role, not the name.
+- `Propose` commits a command through the leader and returns its index, or the state's
+  refusal. `Read` gives the current state under a lock; nothing may keep it, as `Apply`
+  changes it in place. `WaitIndex` lets a read follow a write made through another member.
+  `Changes` answers the watch from the member's ring of changes (API, The watch).
+- `Bootstrap` makes the first host a cluster of its own; on a member with a log it does
+  nothing. `AddMember` is for joins.
+- The data key is an age identity in a file only root reads. `Seal` and `Open` turn secrets
+  into `state.Sealed` and back; joining hosts get the key with their join answer.
+- The tests run real members on 127.0.0.1: a restart from disk, three hosts over mTLS,
+  strangers refused.
+
+## API (`internal/api`) and the CLI (`internal/cli`)
+
+- **Every call is checked.** Every agent serves `/v1` with mutual TLS (`agent.APIPort`), and
+  each call is checked against the CA and the state's revocation list, so a revoked
+  certificate is refused at once on every agent. User routes take user certificates,
+  `/v1/internal/*` only host certificates. Every request body is limited
+  (`maxRequestBytes`).
+- **Any agent answers.** Reads come from its own copy of the state; writes it commits as the
+  leader or forwards to the leader's `/v1/internal/propose`. A write answers with its Raft
+  index (`X-Clowder-Index`); the client sends it on with later reads (`X-Clowder-Min-Index`),
+  and the agent waits until it has applied it.
+- **Who speaks.** The actor of a command is the caller of the first agent; its time (`At`) is
+  the leader's clock. `/v1/internal/propose` takes two things only: a user's command that a
+  follower forwards (`userKinds`, exactly the kinds the user routes and the bootstrap make),
+  and a host's report about itself (`hostKinds`); `/v1/internal/changes` takes a user's
+  resource commands only (Resources, below). The leader's own commands (operations,
+  placements, new hosts) are made on the leader and never come in from outside; a host never
+  speaks for another host or for the leader.
+- A refusal of the state is HTTP 409 with its reason; a write that did not commit is 503.
+- **Resources** (`resources.go`; the CLI's `apply`, `get` and `delete` below):
+  - `POST /v1/apply` (`ApplyRequest`) and `POST /v1/delete` (`DeleteRequest`) take
+    resources in order and answer per resource (`ChangeResult`): `applied` or `deleted`,
+    `unchanged`,
+    `refused` (the state's no), `failed` (did not commit: no leader, no quorum; try again),
+    and `not-tried` after a refusal or failure, since what follows usually needs it. No
+    transaction: a repeat converges. They are the only way to change resources; every
+    user's change is the channel `cli`. Requests are read strictly, so a typo is an error,
+    not an empty request; the internal routes read leniently, as an agent of the next
+    release may send fields this one does not know.
+  - The agent that took the request turns each resource into its `put-resource`
+    (`putCommand`): the spec read strictly (`resource.DecodeVolumeSpec`, a field the kind
+    does not have is an error; `replicas` has no default), a secret's value sealed and its
+    digest computed (`sealSecret`: `digest.HMAC` over the ID and the value, with a key
+    `Keys.Derive` gives for "clowder secret resource digest", apart from the containers'
+    labels).
+  - **The leader decides** (`decide`): a follower hands the commands on as a batch to
+    `/v1/internal/changes`, since its own state may be behind and would answer
+    `unchanged` or `refused` for what has changed since. `runChanges` applies each command
+    to a copy of the leader's state first (`State.Copy`), with every check of the state: a
+    refusal answers at once, an unchanged resource is not proposed (no Raft entry), and
+    `?dryRun=true` ends there and answers what a real apply would, with index 0, so a
+    volume in a namespace the same request makes passes too. Only a change is proposed;
+    the state checks it once more as it commits.
+  - `GET /v1/resources/{kind}` lists the resources of `?namespace=` or of
+    `?allNamespaces=true` (no default, so no reader gets the wrong namespace by
+    accident), with the state's index it read at (for the watch); `GET
+    /v1/resources/{kind}/{namespace}/{name}` and `/v1/resources/namespace/{name}` read one.
+    The kind is written in lower case. A secret shows its digest, never its value; any
+    other resource a read answers applies again as it is (`resource.Metadata`'s owner,
+    generation and resource version and the status are the cluster's, an apply ignores
+    them).
+  - **The watch** (`watch.go`): `GET /v1/watch?kind=&namespace=|allNamespaces=true&since=`
+    streams the changes of a kind after `since`, the index of the client's list, one JSON
+    object per line (`WatchEvent`: the resource, its resource version, whether it is gone).
+    Spec and status changes are both events. The client reads a resource itself when it
+    needs it.
+    - Every agent keeps the last `state.ChangeRingSize` changes (`state.ChangeRing`),
+      filled only from the Raft log (`raftnode`'s `fsm.Apply`), so a dry run never reaches
+      it. Hosts' reports about themselves are no change, so on a quiet cluster the ring
+      covers hours.
+    - The ring knows the index it is complete from: the snapshot the agent started from or
+      installed, or the oldest change it dropped. A `since` before that answers 410, and
+      the client lists afresh, as with Kubernetes. So a client that listed on one agent
+      can watch on another.
+    - A `since` this agent has not applied yet waits at most `watchWaitTimeout`, then
+      answers 504: a follower cut off from the leader would wait forever.
+    - The stream runs until the client stops. It ends early when the ring dropped changes
+      the client has not read yet; the client lists afresh then too, and says so. The
+      agent's stop ends it (`Server.EndStreams`, as for logs that follow): `Shutdown`
+      would wait for it.
+- **JSON names.** What users write and read as resources (`resource.Object`, the specs and
+  the statuses `get` shows) is camelCase, as in the files users apply; everything else
+  (commands, the state, snapshots, the other bodies of the API, `cluster.yaml`) is
+  snake_case.
+- `api.HostActions` lists the user's host actions with the phases they start from; the server
+  checks them and the CLI makes its subcommands from them.
+- CLI and agent refuse each other more than one minor version apart (`X-Clowder-Version`,
+  `buildinfo.Compatible`); development builds and callers without a version talk to
+  everything.
+- **The client** tries the seeds of `cluster.yaml` in turn and trusts any host certificate of
+  the cluster's CA, whatever name the seed has. A read goes on to the next seed after any
+  network error; a write only if it never left (`httptrace`), since one that was sent may
+  have committed without an answer.
+- **The CLI** finds the cluster directory (`--cluster`, `$CLOWDER_CLUSTER`, the working
+  directory) and by its `name` the user's credentials, then talks to the cluster with the
+  user's certificate. An agent whose certificate is of another CA than the credentials'
+  is named as such (`foreignCA`: a cluster of the same name, or set up anew) instead of
+  with x509's words alone: `cluster status|apply|diff|schema`,
+  `host list|drain|undrain|remove|enable`, `apply`, `get`, `delete`, `stack ps|logs|restart`.
+- **Exit codes**, for every command: 0 when it did what was asked, 2 for a wrong call
+  (`usageError`: an unknown command, flags or arguments that do not fit; `checkArgs` makes
+  every command's argument errors one, and gives each command of commands a `RunE` that
+  shows its help and takes an unknown command as a wrong call, where cobra would end as
+  if done), 1 for anything else (refused, missing, not reachable). A refusal shows the
+  state's reason without the command's kind (`state.CommandError`).
+- **`apply -f <file|directory|->`** (`resources.go`, `files.go`) reads YAML documents
+  (`resource.ParseDocuments`: clowder's resources only, or a file of other documents, never
+  both; another apiVersion of clowder's is an error). A directory's YAML files are read,
+  not those below it; hidden files, other files and files of other documents are skipped
+  and named on stderr, and a cluster directory is refused. A SOPS file (by its content:
+  the key `sops`) of a resource (SOPS keeps the keys, so `apiVersion` shows) is decrypted
+  with the user's age key (`clusterdir.DecryptSOPS`) and must hold exactly one `Secret`,
+  so `sopsage` keeps every value encrypted; a SOPS file of anything else, such as the
+  cluster's secrets, is skipped unopened. A `Secret` in clear in a file is refused: such a
+  file ends up in a repository or a backup. In clear, a secret comes only on stdin. A
+  resource without a namespace is in `default`. The resources go namespaces first, then
+  volumes and secrets, then stacks, in one request (`applyRank`); each result is printed,
+  and one not applied, deleted or unchanged makes the command fail. `--dry-run` checks
+  everything and changes nothing.
+- **`get <kind> [[<namespace>/]<name>]`** and **`delete <kind> [<namespace>/]<name>`**
+  take a kind singular or plural, and the namespace as kubectl does: `-n`, or in the name
+  (`shop/data`), else `default`; `-A` lists every namespace. Where both name one, they must
+  agree; a namespace takes neither (`selectFlags.resolve`, with a table test of every
+  combination). `get` prints a table, or `-o yaml` (documents in the API's field order,
+  which `apply` takes again; a secret shows only its digest) or `-o json`. `get --watch`
+  (`watch.go`) lists, then shows each resource that changes, until Ctrl+C: a table's rows
+  without the header again, or one document each; a name filters on the client. After a
+  410, or when the agent ends the stream, it lists afresh and goes on. `delete -f`
+  deletes the resources of files in the reverse order of an apply, with the namespaces the
+  files name (no `-n`). Deleting a volume deletes its data, so a delete that names one needs
+  `--with-data` (`DeleteRequest.WithData`). The API refuses the whole request without it,
+  before anything goes: a delete of a directory would otherwise take the stack and stop at
+  its volume.
+- **`stack ps|logs [<namespace>/]<stack>`** (`stack.go`) ask the stack's host
+  (`GET /v1/stacks/{namespace}/{name}/ps|logs`, then `/v1/internal/stacks/<project>/...`,
+  `names.Project`), wherever the CLI came in. **`stack restart [<namespace>/]<stack>
+  [<service>...]`** sends `restart-stack` (`POST /v1/stacks/{namespace}/{name}/restart`,
+  `RestartRequest`). The list of stacks, also as JSON for scripts
+  and the live tests, is `get stacks`; its table shows a priority that comes from
+  `cluster.yaml`'s default as `(default)`.
+- **Who can read a secret:** whoever may apply it, or decrypt the SOPS file it came in;
+  every host (a stack must start anywhere); and, until there are permissions, every user of
+  the cluster, through a stack that names it or one named in `stacks.privileged`, as such a
+  container reaches the secrets and the data key on its host.
+- **`cluster apply`** sends `cluster.yaml` with the secrets of `secrets.sops.yaml` in clear
+  inside mutual TLS; the agent seals them before they go into the state. Its hash covers
+  both, so `cluster diff` tells changed fields of `cluster.yaml` from changed secrets without
+  the cluster showing any secret.
+- **The first user** has no certificate yet (`cluster bootstrap`). `GET /v1/bootstrap` gives
+  the CA certificate with a `pki.TrustProof` for each valid bootstrap key, and the CLI trusts
+  the CA only if one matches its key. `POST /v1/bootstrap`, over TLS checked against that CA,
+  carries the user's public key with an HMAC of the bootstrap key and a time
+  (`bootstrapMaxAge`). It works once: when the cluster has a user, users add the others. The
+  CLI then writes the credentials (`clusterdir.WriteCredentials`) and the cluster directory
+  (`clusterdir.Create`).
+- The tests run real HTTPS servers: a follower forwarding to the leader, refused callers, the
+  CLI against an agent with a cluster directory and credentials in a temporary config
+  directory.
+
+## Placement (`internal/scheduler`, `internal/controller`)
+
+- `scheduler.Plan` reads the state and returns its decisions: what hosts over capacity push
+  out, where pending stacks go (highest priority first), why the others wait, and which
+  pushed-out service may come back. A volume is placed with the first stack that names it,
+  on that stack's host, and must fit its pool there (`Fits`: without overcommit, the pool's
+  volumes and the new one stay within the pool less its reserve, a class's fallbacks
+  included); a placed volume stays where its copy is, so a stack that names one goes only
+  to that host. Volumes, DRBD minors and room are taken only for a stack that fits.
+- **Room, one measure for everything.** A host offers what it reported (memory, CPUs) less
+  `system_reserve` (default 512M, 0.25). Each service of a stack on it that is `starting` or
+  `running` takes its reservations (`resources.reserve`, default `defaults.reservations`,
+  128M and 0.1), unless it is pushed out. Nothing measures what containers really use. The
+  state keeps what the scheduler needs of each service (`Stack.Services`: the priority as
+  written, the reservations, `dependsOn`).
+- **Priorities.** A service's effective priority is the lowest of its own (else the
+  stack's) and of everything it depends on: stopping a service stops what depends on it, so
+  a running service never depends on a pushed-out one. Categories are resolved with the
+  current `cluster.yaml` at every pass (`Priorities.Resolve`), so a changed category counts
+  without a new apply; pending stacks are placed by their highest service's. Only
+  `dependsOn` within a stack counts: a service another stack imports (with imports, phase
+  4) may be pushed out, and that stack loses it as it would lose any service it does not
+  own.
+- **Waiting.** `Stack.WaitingSince` is set with the first wait reason and kept while only
+  its text changes; it is in the state so the alert for a stack that waits too long
+  survives a change of leader.
+- **Placing.** A new stack goes to the active host where all of it fits with the least
+  memory left. If none has room, it goes to the first host where it fits by pushing out
+  (`fitStack`):
+  - Its services go one by one: highest effective priority first, and at equal priority
+    what others depend on first.
+  - Each takes free room, or pushes out services of any stack below its own priority,
+    lowest first, each with what depends on it.
+  - A service that finds no room even so starts pushed out, with what depends on it
+    within the stack. The stack waits only if its first service finds no room.
+
+  So a stack's `cache` at 200 never pushes out another stack's service at 500 because the
+  stack's `api` is at 800. The new stack's own list is written afresh at every placement,
+  so one left by an earlier leader is replaced.
+- **Over capacity** (a raised `system_reserve`, a stack whose new generation reserves more):
+  services below the host's highest effective priority go, lowest first, until the rest
+  fits; services at that priority never go for this. If that is not enough, nothing goes and
+  the leader raises the alert `over-capacity`.
+- **Coming back.** A pushed-out service whose dependencies all run comes back once its
+  reservations and 5 % more fit its host's free room for 60 s: highest effective priority
+  first, but one that does not fit does not block a smaller one. One service per decision,
+  since its return changes the room, and only in a pass that places and pushes out nothing:
+  a waiting stack gets room before a pushed-out service does. The 60 s are kept in the
+  leader's memory and start again after a change of leader.
+- `controller.RunPlacement` runs on every agent but acts only on the leader. It plans on a
+  copy of the state (`State.Copy`), outside the lock Raft's `Apply` waits for. It first
+  writes the push-outs of hosts over capacity; if one fails, it places nothing in that
+  pass, since the placements count on the room it frees. Per placement
+  it writes what the stack pushes out (`set-pushed-out`, one command for every stack it
+  touches), then the volumes (`put-volume`), then the stack's host and `starting`
+  (`set-stack-status`). If the leader changes in between, the services stay pushed out
+  without the new stack and come back by the rule above. The stack's host does the rest.
+- **On the host** a pushed-out service is left out of `compose up` (`--scale <service>=0`,
+  which also removes its running container), and the supervisor's rule for it is "no
+  restart". Only the leader changes `Stack.PushedOut`; a host's status report no longer
+  carries it. A new generation drops services it no longer has. Whether compose
+  up leaves the rest running is checked by the live tests: `bin/dev test-tools` has no
+  Docker daemon.

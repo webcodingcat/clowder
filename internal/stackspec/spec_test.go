@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// shop is the example of DEVELOPING.md: a database and an app in front.
+// shop is the example of the README: a database and an app in front.
 const shop = `
 priority: high
 services:

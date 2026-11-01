@@ -49,8 +49,8 @@ They do no harm on a single host.
 - A stack whose placed volumes sit on different hosts (left by deleted stacks) waits; on
   one host it cannot happen.
 - The ACME self-check asks the Floating IP, which reaches the leader's own Traefik; with
-  several hosts it must ask the ingress host instead (DEVELOPING.md, Certificates of the
-  routes).
+  several hosts it must ask the ingress host instead
+  ([Certificates of the routes](developing/loops.md#certificates-of-the-routes-controlleracmego)).
 - A Prometheus in a stack or outside the cluster cannot reach `/metrics` yet: only the
   hosts reach the node address. The way in (through Traefik, or a permission for certain
   stacks) comes when one is needed.
