@@ -33,6 +33,17 @@ func TestRunReturnsTheOutput(t *testing.T) {
 	}
 }
 
+func TestToolsRunInTheCLocale(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sh")
+	}
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	output, err := Run(context.Background(), time.Second, "sh", "-c", "echo $LC_ALL")
+	if err != nil || output != "C\n" {
+		t.Errorf("%q, %v", output, err)
+	}
+}
+
 func TestRunGivesUpOnAHangingCommand(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses sleep")

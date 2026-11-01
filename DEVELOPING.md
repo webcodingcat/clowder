@@ -114,6 +114,9 @@ What follows from there:
 | channel, owner | the way a resource came in: `cli` (`clowder apply`) or, later, a GitOps source; a resource's owner is the channel that made it, and only that channel changes it |
 | sealed | encrypted with the cluster's data key before it goes into the state |
 | generation | of a resource: counts the changes of its spec; an apply that changes nothing does not count. A volume's data generation grows with a restore or class move and is part of its LV's name |
+| pushed out, coming back | a service stopped to make room for one of higher priority; it comes back once there is room again |
+| retired copy | a volume's copy the state gave up (the volume deleted, moved or restored); its host removes it, and only then is the data gone |
+| leavers, held | on a host: the stacks that left it and stop first; the volumes such a stack still uses because its stop failed, which no other stack may take yet |
 
 ## The two binaries
 

@@ -33,7 +33,10 @@ func (s *State) WriteSnapshot(out io.Writer) error {
 
 // Copy is a deep copy of the state without its audit, for work too slow to
 // do under the state's lock (parsing Compose files) or that keeps parts of
-// it. It goes through JSON, the way snapshots do.
+// it. It goes through JSON, the way snapshots do: simple, and it costs as
+// much as the whole state at every agent's pass and every apply. That is
+// fine for a small cluster; one with many secrets or certificates would
+// want a cheaper copy.
 func (s *State) Copy() (*State, error) {
 	withoutAudit := *s
 	withoutAudit.Audit = nil

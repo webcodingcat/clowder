@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -49,12 +50,21 @@ func Run(ctx context.Context, timeout time.Duration, name string, args ...string
 	return RunWithInput(ctx, timeout, "", name, args...)
 }
 
+// hostTool is a tool's process in the C locale: clowder parses what tools
+// print (lvs's sizes and percentages, findmnt) and matches their messages,
+// and a host's locale must change neither, such as a decimal comma.
+func hostTool(ctx context.Context, name string, args ...string) *exec.Cmd {
+	process := exec.CommandContext(ctx, name, args...)
+	process.Env = append(os.Environ(), "LC_ALL=C")
+	return process
+}
+
 // Stream runs a command that writes for as long as it runs (logs that
 // follow), passing its output on as it comes. It has no timeout: ctx ends
 // it. Only for tools that touch no volume, as it waits for the process.
 func Stream(ctx context.Context, out io.Writer, name string, args ...string) error {
 	var stderr strings.Builder
-	process := exec.CommandContext(ctx, name, args...)
+	process := hostTool(ctx, name, args...)
 	process.Stdout = out
 	process.Stderr = &stderr
 	if err := process.Run(); err != nil && ctx.Err() == nil {
@@ -74,7 +84,7 @@ func RunWithInput(ctx context.Context, timeout time.Duration, input, name string
 	done := make(chan result, 1)
 	go func() {
 		var stderr strings.Builder
-		process := exec.CommandContext(ctx, name, args...)
+		process := hostTool(ctx, name, args...)
 		process.Stdin = strings.NewReader(input)
 		process.Stderr = &stderr
 		output, err := process.Output()

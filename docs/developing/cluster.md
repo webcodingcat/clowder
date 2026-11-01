@@ -10,7 +10,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **Deterministic.** `Apply` uses no clock (a command carries the leader's time in `At`), no
   randomness and no I/O; lint bans the clock from the package (forbidigo). A handler checks
   everything before it changes anything, so a refused command leaves no trace; the state's
-  `Index` follows the log either way.
+  `Index` follows the log either way. The tests hold every handler to it: their `refuse`
+  compares the whole state before and after each refusal, so a test of a new refusal
+  checks it too.
 - **Commands.** A command has a kind, a payload of the type with the same name (`AddHost`,
   `PutResource`, ...) and an actor (`leader`, `host/<id>`, `user/<name>`) that the API takes from
   the caller's certificate. Which actor may send which kind is the API's check. The state

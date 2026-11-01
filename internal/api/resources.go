@@ -360,6 +360,7 @@ func (s *Server) runChanges(ctx context.Context, batch changeBatch) ChangeResult
 		result := ResourceResult{Kind: each.Ref.Kind, Namespace: each.Ref.Namespace, Name: each.Ref.Name, Outcome: NotTried}
 		switch {
 		case stopped:
+			// stays NotTried: what follows a refusal or failure usually needs it
 		case err != nil:
 			result.Outcome, result.Message = Failed, err.Error()
 		default:
@@ -469,11 +470,12 @@ func selectNamespace(w http.ResponseWriter, r *http.Request, kind string) (names
 	selected := namespaceSelection{
 		namespace: r.URL.Query().Get("namespace"), all: r.URL.Query().Get("allNamespaces") == "true",
 	}
+	exactlyOne := (selected.namespace != "") != selected.all
 	switch {
 	case !resource.Namespaced(kind) && (selected.namespace != "" || selected.all):
 		writeError(w, http.StatusBadRequest, fmt.Errorf("a %s lives in no namespace", kind))
 		return selected, false
-	case resource.Namespaced(kind) && (selected.namespace == "") == !selected.all:
+	case resource.Namespaced(kind) && !exactlyOne:
 		writeError(w, http.StatusBadRequest, errors.New("name either namespace= or allNamespaces=true"))
 		return selected, false
 	}

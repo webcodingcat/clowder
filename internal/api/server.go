@@ -420,9 +420,10 @@ var userKinds = map[string]bool{
 	state.KindAddUser: true, // the bootstrap's first user
 }
 
-// hostKinds are what a host reports about itself.
+// hostKinds are what a host reports about itself. advance-operation joins
+// them with the operations that hosts carry out (phase 2).
 var hostKinds = map[string]bool{
-	state.KindReportHost: true, state.KindSetHostPhase: true, state.KindAdvanceOperation: true,
+	state.KindReportHost: true, state.KindSetHostPhase: true,
 	state.KindSetStackStatus: true, state.KindForgetCopy: true,
 }
 

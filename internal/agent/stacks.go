@@ -163,7 +163,11 @@ func (r *stackRunner) pass(ctx context.Context) {
 	r.logIn(ctx, desired)
 	held := r.stopLeavers(ctx, desired)
 	for _, project := range slices.Sorted(maps.Keys(desired.stacks)) {
-		if err := r.apply(ctx, desired, desired.stacks[project], held); err != nil {
+		err := r.apply(ctx, desired, desired.stacks[project], held)
+		switch {
+		case errors.Is(err, errVolumeHeld): // it waits, at every pass until the stop works
+			r.logger.Info("a stack waits for its volume", "stack", desired.stacks[project].ID(), "reason", err)
+		case err != nil:
 			r.logger.Error("run a stack", "stack", desired.stacks[project].ID(), "error", err)
 		}
 	}
@@ -184,6 +188,10 @@ func (r *stackRunner) forgetApplied() {
 	}
 }
 
+// errVolumeHeld is apply's answer for a stack that must wait: a stack that
+// failed to stop may still use one of its volumes.
+var errVolumeHeld = errors.New("a stack that failed to stop may still use a volume")
+
 // apply runs one stack: its volumes, its rendered Compose file, compose up
 // unless all of it came up before, then the status, with the secrets the
 // containers came up with. held are the LVs still in use: stacks that
@@ -202,7 +210,7 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 			return err
 		}
 		if holder, ok := held.holder(volume.LV); ok {
-			return fmt.Errorf("volume %s may still be held by %s, which failed to stop; waiting for it", name, holder)
+			return fmt.Errorf("%w: volume %s, by %s", errVolumeHeld, name, holder)
 		}
 		volumes[name] = volume
 		mounted[name] = compose.MountedVolume{Dir: r.storage.MountPoint(volume), Name: volume.LV}

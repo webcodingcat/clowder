@@ -32,8 +32,8 @@ without a way to upgrade a running cluster. On one host, what runs today:
 - Every service reserves memory and CPUs (`resources.reserve`, else
   `defaults.reservations`), and a stack goes only where its reservations fit. When a host is
   full, a new stack's services push out services of lower priority (`priority`, a number or
-  a category of `priorities`), with what depends on them; they come back once there is room
-  again for a minute.
+  a category of `priorities`), with what depends on them. They come back after there has
+  been room for them for a minute.
 - A service with `http: {host, port}` gets requests for that host on the
   Floating IP through Traefik, only to containers that run and are healthy; the client's
   address arrives in `X-Forwarded-For`. The cluster gets a certificate for the host from

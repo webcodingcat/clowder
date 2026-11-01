@@ -101,10 +101,11 @@ var resourceKinds = map[string]resourceKind{
 	resource.KindStack:     {find: findStack, put: putStack, remove: removeStack},
 }
 
-// applyPutResource checks in a fixed order: who may, whose the resource is,
-// whether anything changes, and only then the rest; so a channel learns
-// nothing of another's spec (only that the resource is another's), and an
-// unchanged resource passes even where its state has moved on since.
+// applyPutResource checks in a fixed order: whether the actor may, which
+// channel owns the resource, whether anything changes, and only then the
+// rest. So a channel learns nothing of another channel's spec, only that the
+// resource is another's; and an unchanged resource passes even where the
+// state has moved on since.
 func applyPutResource(s *State, cmd Command, payload PutResource) error {
 	kind, ok := resourceKinds[payload.Kind]
 	if !ok {
@@ -267,9 +268,10 @@ func sameJSON(a, b any) bool {
 	return errA == nil && errB == nil && bytes.Equal(encodedA, encodedB)
 }
 
-// stackNaming is the first stack, by ID, that names a volume or secret of
-// its namespace; "" for none. The stack except does not count (the one
-// being put); named picks what a stack names.
+// stackNaming returns the first stack, by ID, that names the volume or
+// secret name of a namespace, or "" if none does. named returns what a stack
+// names (its volumes or its secrets). The stack with the ID except is left
+// out: it is the one being put.
 func (s *State) stackNaming(namespace, name, except string, named func(stack *Stack) []string) string {
 	for _, id := range slices.Sorted(maps.Keys(s.Stacks)) {
 		stack := s.Stacks[id]
