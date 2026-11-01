@@ -158,7 +158,7 @@ func (a *Alerts) heartbeat(ctx context.Context) (time.Duration, bool) {
 	if alerts == nil || alerts.Heartbeat == nil {
 		return 0, false
 	}
-	target, err := a.secrets(copied)(alerts.Heartbeat.URL.Secret)
+	target, err := a.secrets(copied)(alerts.Heartbeat.URL)
 	if err == nil {
 		err = notify.Heartbeat(ctx, target)
 	}
@@ -352,8 +352,8 @@ func (a *Alerts) send(ctx context.Context, copied *state.State, notifiers map[in
 
 // secrets opens the secrets of cluster.yaml from the state.
 func (a *Alerts) secrets(copied *state.State) notify.Secrets {
-	return func(name string) (string, error) {
-		sealed, ok := copied.ClusterSecrets[name]
+	return func(name clusterspec.SecretRef) (string, error) {
+		sealed, ok := copied.ClusterSecret(name)
 		if !ok {
 			return "", fmt.Errorf("secret %s is not among the cluster's secrets", name)
 		}

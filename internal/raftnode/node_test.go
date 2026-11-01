@@ -107,7 +107,7 @@ func command(t *testing.T, kind string, payload any) state.Command {
 func bootstrapCommand(t *testing.T) state.Command {
 	return command(t, state.KindBootstrap, state.Bootstrap{
 		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
-		JoinKey: state.Sealed("join"),
+		JoinKey: state.SealedSecret{Value: state.Sealed("join"), Digest: "d"},
 		Host: state.Host{
 			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
 		},

@@ -5,23 +5,32 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 )
 
-// Bootstrap starts the cluster: the keys init made and the first host.
+// Bootstrap starts the cluster: the keys init made, its bootstrap key and
+// the first host.
 type Bootstrap struct {
-	Keys    ClusterKeys `json:"keys"`
-	JoinKey Sealed      `json:"join_key"`
-	Host    Host        `json:"host"`
+	Keys    ClusterKeys  `json:"keys"`
+	JoinKey SealedSecret `json:"join_key"`
+	Host    Host         `json:"host"`
 }
 
+// FirstJoinKey is the name of init's bootstrap key: the first entry of
+// cluster.yaml's join_keys, which the bootstrap's cluster.yaml writes.
+const FirstJoinKey = "join_keys[0]"
+
+// applyBootstrap makes the first host the cluster. Until the first
+// cluster.yaml is applied, the config is revision 0 and names only the
+// bootstrap key, so the first user and the next hosts get in with it.
 func applyBootstrap(s *State, _ Command, payload Bootstrap) error {
 	switch {
 	case s.Keys != nil:
 		return errors.New("the cluster is bootstrapped already")
 	case len(payload.Keys.CACertificate) == 0 || len(payload.Keys.CAKey) == 0 || len(payload.Keys.AgeIdentity) == 0:
 		return errors.New("the keys are incomplete")
-	case len(payload.JoinKey) == 0:
+	case len(payload.JoinKey.Value) == 0 || payload.JoinKey.Digest == "":
 		return errors.New("the bootstrap key is missing")
 	case payload.Host.ID != 0:
 		return fmt.Errorf("the first host has ID 0, not %d", payload.Host.ID)
@@ -33,7 +42,8 @@ func applyBootstrap(s *State, _ Command, payload Bootstrap) error {
 	host.Voter, host.Phase = true, Active
 	keys := payload.Keys
 	s.Keys = &keys
-	s.JoinKeys = []Sealed{payload.JoinKey}
+	s.Config = ClusterConfig{Spec: clusterspec.Config{JoinKeys: []clusterspec.SecretRef{FirstJoinKey}}}
+	s.ClusterSecrets = map[string]SealedSecret{FirstJoinKey: payload.JoinKey}
 	s.Hosts[host.ID] = &host
 	s.Namespaces[names.Default] = &Namespace{Meta: Meta{Name: names.Default, Generation: 1}}
 	return nil

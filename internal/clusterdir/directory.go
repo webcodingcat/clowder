@@ -1,53 +1,43 @@
 // Package clusterdir reads a cluster directory (cluster.yaml, whose types
-// and checks are clusterspec's, and the shared secrets in secrets.sops.yaml)
-// and the user's credentials, which live apart from it in the user's config
-// directory. It is portable (Linux, macOS, Windows); the SOPS files are
-// decrypted with the user's age key as SOPS finds it (SOPS_AGE_KEY_FILE,
-// SOPS_AGE_KEY or SOPS's default path).
+// and checks are clusterspec's, with its values encrypted in it) and the
+// user's credentials, which live apart from it in the user's config
+// directory. It is portable (Linux, macOS, Windows). The SOPS files of
+// Secret resources are decrypted here too, with the user's age key as SOPS
+// finds it (SOPS_AGE_KEY_FILE, SOPS_AGE_KEY or SOPS's default path).
 package clusterdir
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/secretvalue"
 	"github.com/webcodingcat/clowder/internal/sopsage"
 )
 
 // File names inside a cluster directory.
 const (
-	ConfigFile  = clusterspec.FileName
-	SecretsFile = "secrets.sops.yaml"
+	ConfigFile = clusterspec.FileName
 	// EnvVar names the cluster directory when --cluster is not given.
 	EnvVar = "CLOWDER_CLUSTER"
 )
 
 // Directory is a loaded cluster directory.
 type Directory struct {
-	Path   string
+	Path string
+	// Config is cluster.yaml as written, without defaults, with the names of
+	// its secrets where it has their values.
 	Config clusterspec.Config
-}
-
-// Secrets is secrets.sops.yaml after decryption.
-type Secrets struct {
-	// Values are referenced from cluster.yaml as {secret: name}.
-	Values map[string]string `yaml:"secrets"`
-	// JoinKeys are the bootstrap keys hosts may join with.
-	JoinKeys []string `yaml:"join_keys"`
-	// Registries hold the credentials for private image registries.
-	Registries map[string]RegistryLogin `yaml:"registries"`
-}
-
-// RegistryLogin is the login for one registry.
-type RegistryLogin struct {
-	Username string `yaml:"username" json:"username"`
-	Password string `yaml:"password" json:"password"`
+	// Encrypted are the values of cluster.yaml by name, still encrypted:
+	// only the cluster opens them.
+	Encrypted map[string]string
 }
 
 // Find returns the cluster directory: the flag if set, else $CLOWDER_CLUSTER,
@@ -64,72 +54,68 @@ func Find(flag string) (string, error) {
 	return dir, nil
 }
 
-// Load reads and checks cluster.yaml in dir.
+// Load reads cluster.yaml in dir: it takes the values tagged !secret out,
+// checks that they stand exactly where cluster.yaml may hold a secret
+// (clusterspec.SecretPlaces), and decodes the rest strictly. It does not
+// run clusterspec.Check: a cluster.yaml that is not complete yet, as the
+// bootstrap writes it, still names the cluster for the commands that need
+// only its name and seeds. cluster apply and diff check it.
 func Load(dir string) (*Directory, error) {
 	content, err := os.ReadFile(filepath.Join(dir, ConfigFile))
 	if err != nil {
 		return nil, fmt.Errorf("read the cluster directory: %w", err)
 	}
-	var config clusterspec.Config
-	if err := decodeStrict(content, &config); err != nil {
+	documents, err := secretvalue.Extract(content)
+	if err != nil {
 		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
 	}
-	if problems := clusterspec.Check(config); len(problems) > 0 {
-		return nil, problems
+	if len(documents) != 1 {
+		return nil, fmt.Errorf("%s holds %d YAML documents, not one", ConfigFile, len(documents))
 	}
-	config = config.WithDefaults()
-	return &Directory{Path: dir, Config: config}, nil
-}
-
-// Secrets decrypts secrets.sops.yaml and checks that every secret that
-// cluster.yaml names is there.
-func (d *Directory) Secrets() (*Secrets, error) {
-	var secrets Secrets
-	if err := d.decryptInto(filepath.Join(d.Path, SecretsFile), &secrets); err != nil {
+	// yaml.v3 decodes a node without refusing unknown keys, so the node goes
+	// back to text first
+	extracted, err := yaml.Marshal(documents[0].Node)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
+	}
+	var config clusterspec.Config
+	if err := decodeStrict(extracted, &config); err != nil {
+		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
+	}
+	if err := checkSecretPlaces(config, documents[0].Secrets); err != nil {
 		return nil, err
 	}
-	var missing clusterspec.Problems
-	for _, name := range clusterspec.SecretNames(d.Config) {
-		if _, ok := secrets.Values[name]; !ok {
-			missing = append(missing, fmt.Sprintf("secret %q is used in %s but missing in %s",
-				name, ConfigFile, SecretsFile))
-		}
-	}
-	if len(missing) > 0 {
-		return nil, missing
-	}
-	return &secrets, nil
+	return &Directory{Path: dir, Config: config, Encrypted: documents[0].Secrets}, nil
 }
 
-// decryptInto decrypts a SOPS file and decodes it strictly into target.
-func (d *Directory) decryptInto(file string, target any) error {
-	cleartext, err := ReadSOPS(file)
-	if err != nil {
-		return err
+// checkSecretPlaces holds the values taken out of cluster.yaml to the
+// places that may hold one: no value elsewhere, and at each such place a
+// value, also where its path happens to stand as text.
+func checkSecretPlaces(config clusterspec.Config, encrypted map[string]string) error {
+	places := map[string]bool{}
+	var problems clusterspec.Problems
+	for _, place := range clusterspec.SecretPlaces(config) {
+		places[place.Path] = true
+		if _, ok := encrypted[place.Path]; !ok {
+			problems = append(problems, fmt.Sprintf("%s: write the value encrypted, tagged !secret "+
+				"(clowder secret encrypt --cluster-yaml)", place.Path))
+		}
 	}
-	if err := decodeStrict(cleartext, target); err != nil {
-		return fmt.Errorf("%s: %w", file, err)
+	for _, path := range slices.Sorted(maps.Keys(encrypted)) {
+		if !places[path] {
+			problems = append(problems, fmt.Sprintf("%s: !secret is not allowed here", path))
+		}
+	}
+	if len(problems) > 0 {
+		return problems
 	}
 	return nil
 }
 
-// ReadSOPS decrypts a SOPS file with the user's age key, as sops finds it.
-// It refuses a file with values left in clear (a rule like
-// unencrypted_suffix): these files hold secrets, and such a value would sit
-// in the repository in clear.
-func ReadSOPS(file string) ([]byte, error) {
-	sealed, err := os.ReadFile(file)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("%s is missing: %w", file, err)
-		}
-		return nil, fmt.Errorf("read %s: %w", file, err)
-	}
-	return DecryptSOPS(file, sealed)
-}
-
-// DecryptSOPS decrypts what ReadSOPS reads from a file, for content read
-// elsewhere (stdin); file names it in messages.
+// DecryptSOPS decrypts a SOPS file of a Secret resource with the user's age
+// key, as sops finds it; file names it in messages. It refuses a file with
+// values left in clear (a rule like unencrypted_suffix): such a value would
+// sit in the repository in clear.
 func DecryptSOPS(file string, sealed []byte) ([]byte, error) {
 	identities, err := sopsage.LoadIdentities()
 	if err != nil {

@@ -117,6 +117,7 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/audit", pki.RoleUser, server.audit)
 	server.handle("GET /v1/cluster", pki.RoleUser, server.cluster)
 	server.handle("PUT /v1/cluster", pki.RoleUser, server.applyCluster)
+	server.handle("GET /v1/encryption", pki.RoleUser, server.encryption)
 	server.handle("POST /v1/apply", pki.RoleUser, server.applyResources)
 	server.handle("POST /v1/delete", pki.RoleUser, server.deleteResources)
 	server.handle("GET /v1/resources/{kind}", pki.RoleUser, server.listResources)

@@ -7,6 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,8 @@ import (
 	"net/http"
 	"slices"
 	"time"
+
+	"filippo.io/age"
 
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -25,23 +28,31 @@ import (
 //
 //  1. GET /v1/bootstrap: the agent sends its CA certificate and, for every
 //     valid bootstrap key, pki.TrustProof over it. The CLI trusts the CA only
-//     if one proof matches its key.
+//     if one proof matches its key. The offer also tells whether the cluster
+//     has its first user already, so the CLI stops before it makes a
+//     recovery key that would never count.
 //  2. POST /v1/bootstrap over TLS checked against that CA: the user's name
-//     and public key, signed with the bootstrap key. The agent issues the
-//     first user certificate; after that, the endpoint refuses.
+//     and public key and the recovery key's recipient, signed with the
+//     bootstrap key. The agent issues the first user certificate; after
+//     that, the endpoint refuses.
 
-// BootstrapOffer is the agent's answer to the first contact.
+// BootstrapOffer is the agent's answer to the first contact. It comes
+// unchecked: the proofs make the CA trustworthy, and Bootstrapped tells
+// anyone whether the cluster has a user, but not which.
 type BootstrapOffer struct {
 	CACertificate string   `json:"ca_certificate"`
 	Proofs        [][]byte `json:"proofs"`
+	Bootstrapped  bool     `json:"bootstrapped"`
 }
 
 // BootstrapRequest asks for the first user's certificate.
 type BootstrapRequest struct {
-	User      string    `json:"user"`
-	PublicKey []byte    `json:"public_key"` // Ed25519
-	Time      time.Time `json:"time"`
-	MAC       []byte    `json:"mac"`
+	User      string `json:"user"`
+	PublicKey []byte `json:"public_key"` // Ed25519
+	// RecoveryRecipient is the public half of the recovery key the CLI made.
+	RecoveryRecipient string    `json:"recovery_recipient"`
+	Time              time.Time `json:"time"`
+	MAC               []byte    `json:"mac"`
 }
 
 // bootstrapMaxAge is how old a request may be; a replay later is refused.
@@ -59,8 +70,8 @@ func (r *BootstrapRequest) SignedWith(bootstrapKey []byte) bool {
 
 func (r *BootstrapRequest) mac(bootstrapKey []byte) []byte {
 	mac := hmac.New(sha256.New, bootstrapKey)
-	mac.Write([]byte("clowder bootstrap\n" + r.User + "\n" +
-		base64.StdEncoding.EncodeToString(r.PublicKey) + "\n" + r.Time.UTC().Format(time.RFC3339)))
+	mac.Write([]byte("clowder bootstrap\n" + r.User + "\n" + base64.StdEncoding.EncodeToString(r.PublicKey) + "\n" +
+		r.RecoveryRecipient + "\n" + r.Time.UTC().Format(time.RFC3339)))
 	return mac.Sum(nil)
 }
 
@@ -69,65 +80,85 @@ type BootstrapAnswer struct {
 	Certificate string `json:"certificate"`
 }
 
-// Bootstrap gets the first user's certificate from the agent at seed. It
-// returns the CA and the certificate, both in PEM.
-func Bootstrap(ctx context.Context, seed string, bootstrapKey []byte, user string, public ed25519.PublicKey,
-	version string,
-) (caPEM, certificatePEM string, err error) {
+// TrustedCluster is a cluster the CLI found at seed and trusts: its CA
+// proved it knows the bootstrap key.
+type TrustedCluster struct {
+	seed, version string
+	bootstrapKey  []byte
+	CA            *x509.Certificate
+	CAPEM         string
+	// Bootstrapped tells that the cluster has its first user already.
+	Bootstrapped bool
+}
+
+// FindCluster asks the agent at seed for its CA and trusts it only if it
+// proves it knows the bootstrap key.
+func FindCluster(ctx context.Context, seed string, bootstrapKey []byte, version string) (*TrustedCluster, error) {
 	// first contact: nothing to check the agent against yet; the proof does it
 	unchecked := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{
 		InsecureSkipVerify: true, // the trust proof below decides
 		MinVersion:         tls.VersionTLS13,
 	}}}
-	url := "https://" + Address(seed) + "/v1/bootstrap"
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+Address(seed)+"/v1/bootstrap", nil)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 	request.Header.Set(VersionHeader, version)
 	var offer BootstrapOffer
 	if err := send(unchecked, request, &offer); err != nil {
-		return "", "", fmt.Errorf("ask %s for its CA: %w", seed, err)
+		return nil, fmt.Errorf("ask %s for its CA: %w", seed, err)
 	}
 	if !slices.ContainsFunc(offer.Proofs, func(proof []byte) bool {
 		return pki.CheckTrustProof(bootstrapKey, []byte(offer.CACertificate), proof)
 	}) {
-		return "", "", fmt.Errorf("%s cannot prove it knows the bootstrap key: wrong key, or not your cluster", seed)
+		return nil, fmt.Errorf("%s cannot prove it knows the bootstrap key: wrong key, or not your cluster", seed)
 	}
 	ca, err := pki.ParseCertificate([]byte(offer.CACertificate))
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
+	return &TrustedCluster{
+		seed: seed, version: version, bootstrapKey: bootstrapKey,
+		CA: ca, CAPEM: offer.CACertificate, Bootstrapped: offer.Bootstrapped,
+	}, nil
+}
 
-	// from now on only a host of this CA is believed
+// Bootstrap gets the first user's certificate (PEM), over TLS checked
+// against the trusted CA, and brings the recovery key's recipient.
+func (c *TrustedCluster) Bootstrap(ctx context.Context, user string, public ed25519.PublicKey,
+	recoveryRecipient string,
+) (string, error) {
 	checked := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
-		TLSClientConfig: pki.ClientTLSToHosts(tls.Certificate{}, ca, nil),
+		TLSClientConfig: pki.ClientTLSToHosts(tls.Certificate{}, c.CA, nil),
 	}}
-	signed := BootstrapRequest{User: user, PublicKey: public, Time: time.Now().UTC()}
-	signed.Sign(bootstrapKey)
+	signed := BootstrapRequest{User: user, PublicKey: public, RecoveryRecipient: recoveryRecipient, Time: time.Now().UTC()}
+	signed.Sign(c.bootstrapKey)
 	body, err := json.Marshal(signed)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	request, err = http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	url := "https://" + Address(c.seed) + "/v1/bootstrap"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	request.Header.Set(VersionHeader, version)
+	request.Header.Set(VersionHeader, c.version)
 	var answer BootstrapAnswer
 	if err := send(checked, request, &answer); err != nil {
-		return "", "", fmt.Errorf("get the first certificate from %s: %w", seed, err)
+		return "", fmt.Errorf("get the first certificate from %s: %w", c.seed, err)
 	}
-	return offer.CACertificate, answer.Certificate, nil
+	return answer.Certificate, nil
 }
 
 // bootstrapOffer answers the first contact.
 func (s *Server) bootstrapOffer(w http.ResponseWriter, _ *http.Request) {
 	var caPEM []byte
+	var bootstrapped bool
 	s.config.Cluster.Read(func(current *state.State) {
 		if current.Keys != nil {
 			caPEM = slices.Clone(current.Keys.CACertificate)
 		}
+		bootstrapped = len(current.Users) > 0
 	})
 	if caPEM == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("the cluster is not bootstrapped yet"))
@@ -138,7 +169,7 @@ func (s *Server) bootstrapOffer(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	offer := BootstrapOffer{CACertificate: string(caPEM)}
+	offer := BootstrapOffer{CACertificate: string(caPEM), Bootstrapped: bootstrapped}
 	for _, key := range keys {
 		offer.Proofs = append(offer.Proofs, pki.TrustProof(key, caPEM))
 	}
@@ -180,6 +211,10 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("the public key is no Ed25519 key"))
 		return
 	}
+	if _, err := age.ParseX25519Recipient(request.RecoveryRecipient); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("the recovery key's recipient: %w", err))
+		return
+	}
 	ca, err := s.authority()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -197,7 +232,9 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 	// no time here: the leader stamps its own (proposeHere)
 	cmd, err := state.NewCommand(state.KindAddUser, time.Time{}, state.UserActor(request.User),
-		state.AddUser{Name: request.User, Serial: pki.Serial(certificate), First: true})
+		state.AddUser{
+			Name: request.User, Serial: pki.Serial(certificate), First: true, RecoveryRecipient: request.RecoveryRecipient,
+		})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

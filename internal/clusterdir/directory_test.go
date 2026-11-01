@@ -2,9 +2,10 @@ package clusterdir
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
-	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -26,115 +27,96 @@ func useTestKey(t *testing.T) {
 	t.Setenv("SOPS_AGE_KEY", "")
 }
 
-func TestTheExampleDirectoryLoads(t *testing.T) {
+// withConfig writes the example's cluster.yaml, changed, into a directory
+// of its own.
+func withConfig(t *testing.T, change func(content string) string) string {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join("testdata", "prod", ConfigFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := change(string(content))
+	if changed == string(content) {
+		t.Fatal("the change found nothing to change in the example")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ConfigFile), []byte(changed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestTheExampleDirectoryLoadsWithItsValuesApart(t *testing.T) {
 	directory, err := Load(filepath.Join("testdata", "prod"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	config := directory.Config
-	if config.Name != "prod" || config.Ingress.FloatingIP != "198.51.100.7" {
+	if config.Name != "prod" || config.Ingress.FloatingIP != "198.51.100.7" || config.Hoster.Token != "hoster.token" {
 		t.Errorf("config: %+v", config)
 	}
 	if config.StorageClasses["any"].Fallback[0] != "fast" || config.Priorities.Categories["high"] != 700 {
 		t.Errorf("classes or priorities: %+v %+v", config.StorageClasses, config.Priorities)
 	}
-}
-
-func TestLoadFillsInTheDefaultPriorities(t *testing.T) {
-	content, err := os.ReadFile(filepath.Join("testdata", "prod", ConfigFile))
-	if err != nil {
-		t.Fatal(err)
+	want := []string{
+		"alerts.channels[0].webhook", "backup.password", "hoster.token", "join_keys[0]",
+		`registries["ghcr.io"].password`,
 	}
-	block := "priorities:\n  default: normal\n  categories: {critical: 900, high: 700, normal: 500, low: 200}\n"
-	if !strings.Contains(string(content), block) {
-		t.Fatal("the fixture's priorities block changed")
+	if got := slices.Sorted(maps.Keys(directory.Encrypted)); !slices.Equal(got, want) {
+		t.Errorf("values %q", got)
 	}
-	dir := t.TempDir()
-	without := strings.Replace(string(content), block, "", 1)
-	if err := os.WriteFile(filepath.Join(dir, ConfigFile), []byte(without), 0o600); err != nil {
-		t.Fatal(err)
+	if !strings.Contains(directory.Encrypted["join_keys[0]"], "am9pbg==") {
+		t.Errorf("the join key's armor: %q", directory.Encrypted["join_keys[0]"])
 	}
-	directory, err := Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(directory.Config.Priorities, clusterspec.DefaultPriorities()) {
-		t.Errorf("priorities: %+v", directory.Config.Priorities)
+	if problems := clusterspec.Check(config); len(problems) > 0 {
+		t.Errorf("the example does not pass Check: %v", problems)
 	}
 }
 
-func TestSecretsAreDecryptedWithTheUsersAgeKey(t *testing.T) {
+func TestASecretStandsOnlyWhereOneMay(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(content string) string
+		want   string
+	}{
+		{"in clear", func(content string) string {
+			return strings.Replace(content, "  password: !secret |\n    -----BEGIN AGE ENCRYPTED FILE-----\n"+
+				"    YmFja3Vw\n    -----END AGE ENCRYPTED FILE-----\n", "  password: backup.password\n", 1)
+		}, "backup.password: write the value encrypted"},
+		{"elsewhere", func(content string) string {
+			return strings.Replace(content, "username: robot", "username: !secret |\n      abc", 1)
+		}, `registries["ghcr.io"].username: !secret is not allowed here`},
+		{"two documents", func(content string) string { return content + "---\nname: other\n" }, "2 YAML documents"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Load(withConfig(t, test.change)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Errorf("got %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestSOPSFilesAreDecryptedWithTheUsersAgeKey(t *testing.T) {
 	useTestKey(t)
-	directory, err := Load(filepath.Join("testdata", "prod"))
+	file := filepath.Join("testdata", "secret.sops.yaml")
+	sealed, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secrets, err := directory.Secrets()
-	if err != nil {
-		t.Fatal(err)
+	cleartext, err := DecryptSOPS(file, sealed)
+	if err != nil || !strings.Contains(string(cleartext), "test-hcloud-token") {
+		t.Errorf("decrypted %q, %v", cleartext, err)
 	}
-	if secrets.Values["hcloud-token"] != "test-hcloud-token" || secrets.JoinKeys[0] != "test-join-key" {
-		t.Errorf("secrets: %+v", secrets)
-	}
-	if secrets.Registries["ghcr.io"].Username != "robot" {
-		t.Errorf("registries: %+v", secrets.Registries)
-	}
-}
-
-func TestDecryptingWithoutTheKeyExplainsWhy(t *testing.T) {
 	t.Setenv("SOPS_AGE_KEY_FILE", filepath.Join(t.TempDir(), "missing.txt"))
-	t.Setenv("SOPS_AGE_KEY", "")
-	directory, err := Load(filepath.Join("testdata", "prod"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := directory.Secrets(); err == nil || !strings.Contains(err.Error(), "age key") {
+	if _, err := DecryptSOPS(file, sealed); err == nil || !strings.Contains(err.Error(), "age key") {
 		t.Errorf("want a hint about the age key, got %v", err)
 	}
 }
 
 func TestMisspeltKeysAreRefused(t *testing.T) {
-	dir := t.TempDir()
-	content, err := os.ReadFile(filepath.Join("testdata", "prod", ConfigFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	misspelled := strings.Replace(string(content), "seeds:", "seed:", 1)
-	if err := os.WriteFile(filepath.Join(dir, ConfigFile), []byte(misspelled), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	dir := withConfig(t, func(content string) string { return strings.Replace(content, "seeds:", "seed:", 1) })
 	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "seed") {
 		t.Errorf("want an error about seed, got %v", err)
-	}
-}
-
-func TestTheFlatHosterFieldsAreRefused(t *testing.T) {
-	dir := t.TempDir()
-	content, err := os.ReadFile(filepath.Join("testdata", "prod", ConfigFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	flat := strings.Replace(string(content), "hoster:\n  type: hetzner\n  token: {secret: hcloud-token}\n",
-		"hoster: hetzner\nhoster_token: {secret: hcloud-token}\n", 1)
-	if flat == string(content) {
-		t.Fatal("the example has no hoster section to replace")
-	}
-	if err := os.WriteFile(filepath.Join(dir, ConfigFile), []byte(flat), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "hoster") {
-		t.Errorf("want an error about hoster, got %v", err)
-	}
-}
-
-func TestEverySecretReferenceIsFound(t *testing.T) {
-	directory, err := Load(filepath.Join("testdata", "prod"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := strings.Join(clusterspec.SecretNames(directory.Config), ",")
-	if got != "discord-webhook,hcloud-token,restic-password" {
-		t.Errorf("got %s", got)
 	}
 }
 
@@ -165,7 +147,7 @@ func TestTheSchemaDescribesClusterYAML(t *testing.T) {
 	if err := json.Unmarshal(encoded, &schema); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"name", "seeds", "storage_classes", "priorities", "alerts"} {
+	for _, key := range []string{"name", "seeds", "storage_classes", "priorities", "alerts", "join_keys", "registries"} {
 		if _, ok := schema.Properties[key]; !ok {
 			t.Errorf("schema lacks %s", key)
 		}

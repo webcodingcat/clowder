@@ -100,7 +100,7 @@ func startCluster(t *testing.T) string {
 	current := &state.State{}
 	cmd, err := state.NewCommand(state.KindBootstrap, time.Now(), state.LeaderActor, state.Bootstrap{
 		Keys:    state.ClusterKeys{CACertificate: ca.CertificatePEM(), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
-		JoinKey: state.Sealed("join"),
+		JoinKey: state.SealedSecret{Value: state.Sealed("join"), Digest: "d"},
 		Host:    state.Host{ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0"},
 	})
 	if err != nil {
@@ -137,9 +137,9 @@ func startCluster(t *testing.T) string {
 	t.Cleanup(server.Close)
 
 	dir := t.TempDir()
+	// no secret in it: these commands need only the cluster's name and seeds
 	config := clusterspec.Config{
 		Name: "test", Seeds: []string{server.Listener.Addr().String()},
-		Hoster:         clusterspec.Hoster{Type: "hetzner", Token: clusterspec.SecretRef{Secret: "hcloud-token"}},
 		Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.11"},
 		StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 	}

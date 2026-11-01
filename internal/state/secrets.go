@@ -40,7 +40,7 @@ func putSecret(s *State, id string, payload PutResource) (*Meta, error) {
 	}
 	secrets := maps.Clone(s.Secrets)
 	secrets[id] = put
-	err = checkSecretLimits(secrets, clusterValues(s.ClusterSecrets, s.JoinKeys, s.Registries))
+	err = checkSecretLimits(secrets, s.ClusterSecrets)
 	if err != nil {
 		return nil, fmt.Errorf("secret %s: %w", id, err)
 	}
@@ -54,7 +54,7 @@ func putSecret(s *State, id string, payload PutResource) (*Meta, error) {
 // clear (ClearSize) per value, per namespace and in the cluster, and in
 // number. put-resource and apply-config both ask it, so neither can pass
 // what the other refuses.
-func checkSecretLimits(secrets map[string]*Secret, cluster []Sealed) error {
+func checkSecretLimits(secrets map[string]*Secret, cluster map[string]SealedSecret) error {
 	if count := len(secrets) + len(cluster); count > resource.MaxClusterSecrets {
 		return fmt.Errorf("the cluster would have %d secrets, more than %d (cluster.yaml's values count too)",
 			count, resource.MaxClusterSecrets)
@@ -79,8 +79,8 @@ func checkSecretLimits(secrets map[string]*Secret, cluster []Sealed) error {
 		}
 		inNamespace[secret.Namespace] += size
 	}
-	for _, value := range cluster {
-		if _, err := add("a value of cluster.yaml", value); err != nil {
+	for _, name := range slices.Sorted(maps.Keys(cluster)) {
+		if _, err := add(name, cluster[name].Value); err != nil {
 			return err
 		}
 	}

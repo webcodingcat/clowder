@@ -133,19 +133,23 @@ func newTestAlerts(t *testing.T) (*Alerts, *leader, *fakeChannel, *fakeChannel) 
 	var config clusterspec.Config
 	l.Read(func(current *state.State) { config = current.Config.Spec })
 	config.Alerts = &clusterspec.Alerts{Channels: []clusterspec.AlertChannel{
-		{Type: "webhook", URL: &clusterspec.SecretRef{Secret: "hook"}},
-		{Type: "discord", Webhook: &clusterspec.SecretRef{Secret: "discord"}, MinSeverity: clusterspec.SeverityCritical},
+		{Type: "webhook", URL: "alerts.channels[0].url"},
+		{Type: "discord", Webhook: "alerts.channels[1].webhook", MinSeverity: clusterspec.SeverityCritical},
 	}}
 	l.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
-		Spec:    config,
-		Secrets: map[string]state.Sealed{"token": state.Sealed("t"), "hook": state.Sealed("h"), "discord": state.Sealed("d")},
+		Spec: config,
+		Secrets: map[string]state.SealedSecret{
+			"hoster.token":               {Value: state.Sealed("t"), Digest: "d"},
+			"alerts.channels[0].url":     {Value: state.Sealed("h"), Digest: "d"},
+			"alerts.channels[1].webhook": {Value: state.Sealed("d"), Digest: "d"},
+		},
 	})
 	webhook, discord := &fakeChannel{}, &fakeChannel{}
 	open := func(sealed state.Sealed) ([]byte, error) { return sealed, nil }
 	alerts := NewAlerts(l, l.propose, open, NewConditions(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	alerts.connect = func(channel clusterspec.AlertChannel, secrets notify.Secrets, _ map[string][]byte) (notify.Notifier, error) {
 		if channel.Type == "webhook" {
-			if url, err := secrets("hook"); err != nil || url != "h" {
+			if url, err := secrets(channel.URL); err != nil || url != "h" {
 				t.Errorf("the webhook's URL %q, %v", url, err)
 			}
 			return webhook, nil

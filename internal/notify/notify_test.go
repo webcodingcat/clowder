@@ -29,7 +29,7 @@ var testMessage = Message{
 }
 
 // secrets opens every secret as its own name with a prefix.
-func secrets(name string) (string, error) { return "opened-" + name, nil }
+func secrets(name clusterspec.SecretRef) (string, error) { return "opened-" + string(name), nil }
 
 func TestTheWebhookPostsTheMessageAsJSON(t *testing.T) {
 	var got Message
@@ -58,8 +58,8 @@ func TestDiscordGetsAnEmbedColoredBySeverity(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&got)
 	}))
 	defer server.Close()
-	notifier, err := New(clusterspec.AlertChannel{Type: "discord", Webhook: &clusterspec.SecretRef{Secret: "hook"}},
-		func(string) (string, error) { return server.URL, nil }, nil)
+	notifier, err := New(clusterspec.AlertChannel{Type: "discord", Webhook: "alerts.channels[0].webhook"},
+		func(clusterspec.SecretRef) (string, error) { return server.URL, nil }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func emailChannel(port int) clusterspec.AlertChannel {
 	return clusterspec.AlertChannel{
 		Type: "email", From: "clowder@example.com", To: []string{"ops@example.com"},
 		SMTP: &clusterspec.SMTP{
-			Host: "127.0.0.1", Port: port, User: "clowder", Password: &clusterspec.SecretRef{Secret: "smtp"},
+			Host: "127.0.0.1", Port: port, User: "clowder", Password: "alerts.channels[0].smtp.password",
 			CA: "certs/ca.pem",
 		},
 	}

@@ -184,12 +184,8 @@ func TestEncryptedValuesComeBackThroughAFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var file strings.Builder
-	file.WriteString("hoster:\n  token: !secret |\n")
-	for _, line := range strings.Split(strings.TrimRight(token, "\n"), "\n") {
-		file.WriteString("    " + line + "\n")
-	}
-	documents, err := Extract([]byte(file.String()))
+	file := "hoster:\n  token: " + Block(token, "    ")
+	documents, err := Extract([]byte(file))
 	if err != nil {
 		t.Fatal(err)
 	}

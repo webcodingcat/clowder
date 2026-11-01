@@ -78,7 +78,7 @@ func TestTheHostersAPIIsAFullURL(t *testing.T) {
 		"ftp://api.example.com":        false,
 		"https:///v1":                  false,
 	} {
-		hoster := Hoster{Type: "hetzner", Token: SecretRef{Secret: "token"}, API: api}
+		hoster := Hoster{Type: "hetzner", Token: "hoster.token", API: api}
 		if problems := checkHoster(hoster); (len(problems) == 0) != valid {
 			t.Errorf("api %q: valid %v, problems %v", api, valid, problems)
 		}
@@ -110,7 +110,9 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 			},
 			Heartbeat: &Heartbeat{Interval: "often"},
 		},
-		ACME: ACME{Directory: "acme.example.com", Email: "ops", CA: "../ca.pem", RenewBefore: "soon"},
+		ACME:       ACME{Directory: "acme.example.com", Email: "ops", CA: "../ca.pem", RenewBefore: "soon"},
+		JoinKeys:   []SecretRef{"join_keys[0]", "the-key"},
+		Registries: map[string]Registry{"ghcr.io": {}},
 	}
 	want := []string{
 		`acme.directory "acme.example.com"`, `acme.email "ops"`, `"../ca.pem" is not a path`, `renew_before "soon"`,
@@ -119,9 +121,10 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 		`network "both"`, "not an IPv4 address", `pool "nopool"`, `reserve "95%"`,
 		`falls back to "slow"`, "storage class empty", "resync_rate", "top: 2000",
 		`default "medium"`, `"Monitoring" is not <namespace>/<stack>`, "reservations.memory", "reservations.cpus", `"borg"`,
-		"webhook: {secret", "type is not discord", `min_severity "loud"`, "url: {secret",
+		"webhook: a value tagged !secret", "type is not discord", `min_severity "loud"`, "url: a value tagged !secret",
 		"heartbeat.url", `interval "often"`, "backup.target.url", "backup.password",
-		"smtp needs host and port",
+		"smtp needs host and port", `registries["ghcr.io"].username`, `registries["ghcr.io"].password`,
+		`join_keys[1] names the secret "the-key"`,
 	}
 	problems := Check(config)
 	text := problems.Error()

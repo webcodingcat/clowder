@@ -19,8 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"filippo.io/age"
-
 	"github.com/webcodingcat/clowder/internal/cli"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
@@ -29,7 +27,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/resource"
-	"github.com/webcodingcat/clowder/internal/sopsage"
 	"github.com/webcodingcat/clowder/internal/storage"
 )
 
@@ -322,9 +319,16 @@ func waitForOutput(t *testing.T, want string, args ...string) {
 // clowder runs the CLI and returns what it printed.
 func clowder(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+	return clowderWithInput(t, "", args...)
+}
+
+// clowderWithInput runs the CLI with input on its stdin.
+func clowderWithInput(t *testing.T, input string, args ...string) (string, error) {
+	t.Helper()
 	var out bytes.Buffer
 	root := cli.NewRoot()
 	root.SetOut(&out)
+	root.SetIn(strings.NewReader(input))
 	root.SetArgs(args)
 	err := root.ExecuteContext(context.Background())
 	return out.String(), err
@@ -405,40 +409,77 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 		t.Fatalf("systemd heard %q, %v", message[:n], err)
 	}
 
-	// the user's side: an age key, an empty cluster directory
-	identity, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
+	// the user's side: an empty cluster directory, a config directory
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", home)
-	t.Setenv("SOPS_AGE_KEY", identity.String())
-	t.Setenv("SOPS_AGE_KEY_FILE", "")
 	t.Setenv(clusterdir.EnvVar, "")
 	dir := t.TempDir()
 	seed := net.JoinHostPort("127.0.0.2", strconv.Itoa(apiPort))
-	bootstrap := func(user, name, cluster, key string) error {
-		_, err := clowder(t, "--cluster", cluster, "cluster", "bootstrap", user, "--name", name,
-			"--age", identity.Recipient().String(), "--seed", seed, "--key-file", key)
+	recoveryFile := filepath.Join(t.TempDir(), "recovery-key")
+	bootstrap := func(user, name, cluster, key string, more ...string) error {
+		_, err := clowder(t, append([]string{
+			"--cluster", cluster, "cluster", "bootstrap", user, "--name", name,
+			"--seed", seed, "--key-file", key,
+		}, more...)...)
 		return err
 	}
 
-	if err := bootstrap("alice", "test", dir, keyFile(t, "a-guess")); err == nil ||
+	if err := bootstrap("alice", "test", dir, keyFile(t, "a-guess"), "--recovery-out", recoveryFile); err == nil ||
 		!strings.Contains(err.Error(), "cannot prove it knows the bootstrap key") {
 		t.Errorf("a wrong bootstrap key: %v", err)
 	}
 	theKey := keyFile(t, "the-bootstrap-key\n")
-	if err := bootstrap("alice", "test", dir, theKey); err != nil {
+	if err := bootstrap("alice", "test", dir, theKey); err == nil || !strings.Contains(err.Error(), "--recovery-out") {
+		t.Errorf("no terminal and no --recovery-out: %v", err)
+	}
+	if err := bootstrap("alice", "test", dir, theKey, "--recovery-out", recoveryFile); err != nil {
 		t.Fatal(err)
 	}
-	if err := bootstrap("bob", "test", t.TempDir(), theKey); err == nil || !strings.Contains(err.Error(), "--force") {
+	if recovery, err := os.ReadFile(recoveryFile); err != nil || !strings.HasPrefix(string(recovery), "AGE-SECRET-KEY-1") {
+		t.Errorf("the recovery key: %q, %v", recovery, err)
+	}
+	if err := bootstrap("bob", "test", t.TempDir(), theKey, "--recovery-out", filepath.Join(t.TempDir(), "r")); err == nil ||
+		!strings.Contains(err.Error(), "--force") {
 		t.Errorf("a second bootstrap under the same name: %v", err)
 	}
-	if err := bootstrap("bob", "other", t.TempDir(), theKey); err == nil ||
+	secondRecovery := filepath.Join(t.TempDir(), "r")
+	if err := bootstrap("bob", "other", t.TempDir(), theKey, "--recovery-out", secondRecovery); err == nil ||
 		!strings.Contains(err.Error(), "first user already") {
 		t.Errorf("a second bootstrap: %v", err)
+	}
+	if _, err := os.Stat(secondRecovery); err == nil {
+		t.Error("a second bootstrap made a recovery key")
+	}
+
+	// cluster.yaml as the bootstrap wrote it, the bootstrap key encrypted
+	config := filepath.Join(dir, clusterdir.ConfigFile)
+	written, err := os.ReadFile(config)
+	if err != nil || !strings.Contains(string(written), "join_keys:\n  - !secret |\n") ||
+		strings.Contains(string(written), "the-bootstrap-key") {
+		t.Fatalf("cluster.yaml: %q, %v", written, err)
+	}
+	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err == nil || !strings.Contains(err.Error(), "hoster") {
+		t.Errorf("diff of the unfinished cluster.yaml: %q, %v", out, err)
+	}
+	// finished with the hoster's token, encrypted by the cluster's recipients
+	finish := func(token string, extra string) {
+		t.Helper()
+		block, err := clowderWithInput(t, token+"\n", "--cluster", dir, "secret", "encrypt", "--cluster-yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		finished := string(written) + "hoster:\n  type: hetzner\n  token: " + block +
+			"ingress:\n  floating_ip: 203.0.113.10\nstorage_classes:\n  fast: {pool: vg-fast/thin}\n" + extra
+		if err := os.WriteFile(config, []byte(finished), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finish("CHANGE-ME", "")
+	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "never applied") ||
+		!strings.Contains(out, "the secret hoster.token differs") {
+		t.Errorf("diff before the first apply: %q, %v", out, err)
 	}
 
 	out, err := clowder(t, "--cluster", dir, "cluster", "apply")
@@ -496,29 +537,16 @@ spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
 	}
 	hostDocker.waitFor(t, "down default_shop")
 	hostStorage.waitFor(t, "remove "+lv)
-	config := filepath.Join(dir, clusterdir.ConfigFile)
-	content, err := os.ReadFile(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config, append(content, []byte("network: public\n")...), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	// the same token encrypted anew is no change; the network is
+	finish("CHANGE-ME", "network: public\n")
 	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "network") ||
-		strings.Contains(out, "secrets") {
+		strings.Contains(out, "secret") {
 		t.Errorf("diff after a change of cluster.yaml: %q, %v", out, err)
 	}
-	// and now the hoster token as well: diff names both
-	secrets, err := sopsage.Encrypt([]byte("secrets: {hcloud-token: new}\njoin_keys: [the-bootstrap-key]\n"),
-		[]string{identity.Recipient().String()}, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, clusterdir.SecretsFile), secrets, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	// and now a new hoster token as well: diff names both
+	finish("new", "network: public\n")
 	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "network") ||
-		!strings.Contains(out, "secrets differ") {
+		!strings.Contains(out, "the secret hoster.token differs") {
 		t.Errorf("diff after both changed: %q, %v", out, err)
 	}
 	out, err = clowder(t, "--cluster", dir, "cluster", "status")

@@ -11,8 +11,8 @@
 // No error carries a value: a file may be read with a wrong key or be
 // broken, and the message goes to a terminal or a log.
 //
-// Nothing uses it yet: it is to replace the SOPS files (internal/sopsage),
-// cluster.yaml's values first, then the Secret resources.
+// cluster.yaml's values are such values; the Secret resources are to be
+// next, in place of their SOPS files (internal/sopsage).
 package secretvalue
 
 import (

@@ -2,7 +2,7 @@
 // writes it: hoster.token, alerts.channels[0].url,
 // registries["ghcr.io"].password. The names of the secrets in cluster.yaml
 // are such paths: internal/secretvalue builds them as it reads a file, and
-// cluster.yaml's types are to build them here too, so the two always agree.
+// clusterspec.SecretPlaces as it lists the places, so the two always agree.
 package yamlpath
 
 import (

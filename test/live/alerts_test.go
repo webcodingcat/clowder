@@ -41,25 +41,23 @@ func alertsReachTheChannels(t *testing.T, server host) {
 	}
 	writeClusterFile(t, mailCAFile, caCert)
 	setClusterSecrets(t, map[string]string{
-		"discord-webhook": received.url("/discord"), "alert-webhook": received.url("/webhook"),
-		"heartbeat-url": received.url("/heartbeat"), "smtp-password": "any",
+		"alerts.channels[0].webhook": received.url("/discord"), "alerts.channels[1].url": received.url("/webhook"),
+		"alerts.channels[2].smtp.password": "any", "alerts.heartbeat.url": received.url("/heartbeat"),
 	})
 	changeConfig(t, func(config *clusterspec.Config) {
 		config.Alerts = &clusterspec.Alerts{
 			Channels: []clusterspec.AlertChannel{
-				{Type: "discord", Webhook: &clusterspec.SecretRef{Secret: "discord-webhook"}},
-				{Type: "webhook", URL: &clusterspec.SecretRef{Secret: "alert-webhook"}},
+				{Type: "discord", Webhook: "alerts.channels[0].webhook"},
+				{Type: "webhook", URL: "alerts.channels[1].url"},
 				{
 					Type: "email", From: "clowder@" + zone, To: []string{"ops@" + zone},
 					SMTP: &clusterspec.SMTP{
 						Host: labAddress, Port: mailServerPort, User: "clowder",
-						Password: &clusterspec.SecretRef{Secret: "smtp-password"}, CA: mailCAFile,
+						Password: "alerts.channels[2].smtp.password", CA: mailCAFile,
 					},
 				},
 			},
-			Heartbeat: &clusterspec.Heartbeat{
-				URL: clusterspec.SecretRef{Secret: "heartbeat-url"}, Interval: heartbeatInterval.String(),
-			},
+			Heartbeat: &clusterspec.Heartbeat{URL: "alerts.heartbeat.url", Interval: heartbeatInterval.String()},
 		}
 	})
 

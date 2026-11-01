@@ -141,7 +141,7 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 	cluster := &testCluster{t: t, state: &state.State{}, keys: keys}
 	cluster.apply(state.KindBootstrap, state.LeaderActor, state.Bootstrap{
 		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
-		JoinKey: state.Sealed("j"),
+		JoinKey: state.SealedSecret{Value: state.Sealed("j"), Digest: "d"},
 		Host: state.Host{
 			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
 		},
@@ -149,11 +149,11 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 	cluster.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
 		Spec: clusterspec.Config{
 			Name: "prod", Seeds: []string{"10.0.0.2"},
-			Hoster:         clusterspec.Hoster{Type: "hetzner", Token: clusterspec.SecretRef{Secret: "token"}},
+			Hoster:         clusterspec.Hoster{Type: "hetzner", Token: "hoster.token"},
 			Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.10"},
 			StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 		},
-		Secrets: map[string]state.Sealed{"token": state.Sealed("t")},
+		Secrets: map[string]state.SealedSecret{"hoster.token": {Value: state.Sealed("t"), Digest: "d"}},
 	})
 	cluster.put(resource.KindVolume, "db", resource.VolumeSpec{Class: "fast", Size: 1 << 30, Replicas: 0})
 	cluster.put(resource.KindStack, "shop", usingDB(stackspec.Service{}))
@@ -402,7 +402,9 @@ func TestDockerLogsInOnceForEachRegistryLogin(t *testing.T) {
 		cluster.Read(func(current *state.State) {
 			applied = state.ApplyConfig{Spec: current.Config.Spec, Secrets: maps.Clone(current.ClusterSecrets)}
 		})
-		applied.Registries = map[string]state.RegistryLogin{"ghcr.io": {Username: "robot", Password: sealed}}
+		name := `registries["ghcr.io"].password`
+		applied.Spec.Registries = map[string]clusterspec.Registry{"ghcr.io": {Username: "robot", Password: clusterspec.SecretRef(name)}}
+		applied.Secrets[name] = state.SealedSecret{Value: sealed, Digest: name}
 		cluster.apply(state.KindApplyConfig, state.UserActor("alice"), applied)
 	}
 	login("first")

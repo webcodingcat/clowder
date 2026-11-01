@@ -11,11 +11,11 @@ How to use it is in the main [README](../../README.md#a-host-on-hetzner-cloud).
   everyone (Traefik, and the ACME CA's checks); a port your stacks publish opens with
   `published_ports` (`["udp/9987"]`).
 - **The bootstrap key** lets the first user in and later hosts join. It is in the OpenTofu
-  state, encrypted in `secrets.sops.yaml`, and in the server's user data: root on the host
-  can read it from cloud-init's cache and the metadata service, which containers cannot
-  reach. That gives root nothing new, as root on a host holds the cluster's keys anyway; the
-  setup deletes only its own copy in `/etc/clowder`. Keep the state as safe as
-  `secrets.sops.yaml`.
+  state, encrypted in `cluster.yaml` (`join_keys`), and in the server's user data: root on
+  the host can read it from cloud-init's cache and the metadata service, which containers
+  cannot reach. That gives root nothing new, as root on a host holds the cluster's keys
+  anyway; the setup deletes only its own copy in `/etc/clowder`. Keep the state as safe as
+  the recovery key.
 - Pin `clowderd_version`, so a host made later gets the cluster's version.
 - The module makes one host; more come with `clowderd join` (not there yet). It ignores later
   changes to the user data, so a storage class added to `storage_classes` gets a volume but

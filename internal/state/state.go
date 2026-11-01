@@ -37,15 +37,16 @@ type State struct {
 	Index  uint64        `json:"index"`
 	Keys   *ClusterKeys  `json:"keys,omitempty"`
 	Config ClusterConfig `json:"config"`
-	// ClusterSecrets are the secrets cluster.yaml names (the hoster's
-	// token, the alert channels'), by name.
-	ClusterSecrets map[string]Sealed `json:"cluster_secrets,omitempty"`
-	// JoinKeys and Registries are read only through ValidJoinKeys and
-	// RegistryLogins. Both fields are to move into ClusterSecrets; then only
-	// the two functions change, not the code that reads them.
-	JoinKeys   []Sealed                 `json:"join_keys,omitempty"`
-	Registries map[string]RegistryLogin `json:"registries,omitempty"`
-	Hosts      map[HostID]*Host         `json:"hosts,omitempty"`
+	// ClusterSecrets are the values of cluster.yaml, by their names
+	// (clusterspec.SecretPlaces): the hoster's token, the join keys, the
+	// registries' passwords, the alert channels'. A digest each, so a diff
+	// tells a changed value from one encrypted anew.
+	ClusterSecrets map[string]SealedSecret `json:"cluster_secrets,omitempty"`
+	// RecoveryRecipient is the public half of the recovery key: every
+	// encrypted value is for it too, so its holder can read the values when
+	// the cluster is lost.
+	RecoveryRecipient string           `json:"recovery_recipient,omitempty"`
+	Hosts             map[HostID]*Host `json:"hosts,omitempty"`
 	// Ingress is the host that should hold the Floating IP; the leader keeps
 	// the hoster's routing in line with it.
 	Ingress *HostID `json:"ingress,omitempty"`
@@ -89,12 +90,10 @@ type ClusterKeys struct {
 
 // ClusterConfig is the applied cluster.yaml.
 type ClusterConfig struct {
-	// Revision counts the applies, starting at 1.
-	Revision int64 `json:"revision"`
-	// Hash of cluster.yaml and the secrets as the CLI applied them, so diff
-	// can tell whether anything changed.
-	Hash string             `json:"hash,omitempty"`
-	Spec clusterspec.Config `json:"spec"`
+	// Revision counts the applies. It is 0 until the first, with a spec
+	// that names only init's join key.
+	Revision int64              `json:"revision"`
+	Spec     clusterspec.Config `json:"spec"`
 	// Files are the files next to cluster.yaml that it names (acme.ca).
 	Files map[string][]byte `json:"files,omitempty"`
 }

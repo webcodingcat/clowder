@@ -1,21 +1,14 @@
 package cli
 
 import (
-	"bytes"
-	"crypto/ed25519"
-	"encoding/json"
 	"fmt"
 	"io"
-	"maps"
-	"slices"
 
 	"github.com/spf13/cobra"
 
 	"github.com/webcodingcat/clowder/internal/api"
-	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
-	"github.com/webcodingcat/clowder/internal/pki"
 )
 
 func newCluster(g *globals) *cobra.Command {
@@ -62,101 +55,24 @@ func printStatus(out io.Writer, status api.Status) error {
 	return printHosts(out, status.Hosts)
 }
 
-func newBootstrap(g *globals) *cobra.Command {
-	var name, recipient, seed, keyFile string
-	var force bool
-	command := &cobra.Command{
-		Use:   "bootstrap <user>",
-		Short: "Become the first user of a new cluster and set up its directory",
-		Long: "Asks the first host for the cluster's CA, trusts it only if the host proves it knows the\n" +
-			"bootstrap key, and gets the first user's certificate. Writes your credentials into your\n" +
-			"config directory, under the cluster's name, and the cluster directory: cluster.yaml to\n" +
-			"fill in, secrets.sops.yaml and .sops.yaml.",
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			user := args[0]
-			if err := pki.CheckUserName(user); err != nil {
-				return err
-			}
-			path, err := clusterdir.Target(g.cluster)
-			if err != nil {
-				return err
-			}
-			// before the cluster is asked: once it has its first user, a
-			// bootstrap cannot be repeated
-			if err := clusterdir.CheckBootstrap(path, name, force); err != nil {
-				return err
-			}
-			bootstrapKey, err := pki.ReadBootstrapKey(keyFile)
-			if err != nil {
-				return err
-			}
-			key, err := pki.NewKey()
-			if err != nil {
-				return err
-			}
-			caPEM, certificatePEM, err := api.Bootstrap(cmd.Context(), seed, []byte(bootstrapKey), user,
-				key.Public().(ed25519.PublicKey), buildinfo.Version)
-			if err != nil {
-				return err
-			}
-			keyPEM, err := pki.EncodeKey(key)
-			if err != nil {
-				return err
-			}
-			// the credentials first: without them the cluster's first user
-			// is lost, while cluster.yaml can be written by hand
-			err = clusterdir.WriteCredentials(name, clusterdir.Credentials{
-				User: user, CA: caPEM, Certificate: certificatePEM, Key: string(keyPEM),
-			})
-			if err != nil {
-				return err
-			}
-			err = clusterdir.Create(clusterdir.NewDirectory{
-				Path: path, Name: name, Recipient: recipient, Seed: seed, BootstrapKey: bootstrapKey,
-			})
-			if err != nil {
-				return err
-			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s is the first user of cluster %s. Next:\n"+
-				"  1. fill in cluster.yaml (the Floating IP, the storage classes)\n"+
-				"  2. sops edit secrets.sops.yaml (the hoster token)\n"+
-				"  3. clowder cluster apply\n", user, name)
-			return err
-		},
-	}
-	command.Flags().StringVar(&name, "name", "", "the cluster's name, by which the CLI finds your credentials")
-	command.Flags().BoolVar(&force, "force", false, "replace your credentials for a cluster of the same name")
-	command.Flags().StringVar(&recipient, "age", "", "your age public key (age1...) or SSH public key")
-	command.Flags().StringVar(&seed, "seed", "", "address of the first host")
-	command.Flags().StringVar(&keyFile, "key-file", "",
-		"a file with the cluster's bootstrap key (from OpenTofu); not the key itself, which shell histories would keep")
-	for _, flag := range []string{"name", "age", "seed", "key-file"} {
-		_ = command.MarkFlagRequired(flag) // the flags exist; this cannot fail
-	}
-	return command
-}
-
-// localApply is what clowder cluster apply would send.
+// localApply is what clowder cluster apply sends: cluster.yaml, checked
+// here first so its problems show without a round trip, its values still
+// encrypted, and its files.
 func localApply(directory *clusterdir.Directory) (api.ClusterApply, error) {
-	secrets, err := directory.Secrets()
-	if err != nil {
-		return api.ClusterApply{}, err
+	if problems := clusterspec.Check(directory.Config); len(problems) > 0 {
+		return api.ClusterApply{}, problems
 	}
 	files, err := directory.Files()
 	if err != nil {
 		return api.ClusterApply{}, err
 	}
-	return api.ClusterApply{
-		Spec: directory.Config, Secrets: secrets.Values, JoinKeys: secrets.JoinKeys, Registries: secrets.Registries,
-		Files: files,
-	}, nil
+	return api.ClusterApply{Spec: directory.Config, Encrypted: directory.Encrypted, Files: files}, nil
 }
 
 func newApply(g *globals) *cobra.Command {
 	return &cobra.Command{
 		Use:   "apply",
-		Short: "Send cluster.yaml and the secrets to the cluster",
+		Short: "Send cluster.yaml to the cluster",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client, directory, err := g.connect()
@@ -183,107 +99,53 @@ func newApply(g *globals) *cobra.Command {
 func newDiff(g *globals) *cobra.Command {
 	return &cobra.Command{
 		Use:   "diff",
-		Short: "Show whether cluster.yaml and the secrets differ from what the cluster runs",
-		Args:  cobra.NoArgs,
+		Short: "Show what cluster apply would change",
+		Long: "Asks the cluster to try cluster.yaml without applying it: a problem shows as an apply\n" +
+			"would show it, else the fields, files and secrets that would change. A secret encrypted\n" +
+			"anew with the same value is no change.",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client, directory, err := g.connect()
 			if err != nil {
 				return err
 			}
-			local, err := localApply(directory)
+			apply, err := localApply(directory)
 			if err != nil {
 				return err
 			}
-			hash, err := local.Hash()
+			diff, err := client.DiffCluster(cmd.Context(), apply)
 			if err != nil {
 				return err
 			}
-			var applied api.ClusterInfo
-			if err := client.Get(cmd.Context(), "/v1/cluster", &applied); err != nil {
-				return err
-			}
-			out := cmd.OutOrStdout()
-			if hash == applied.Hash {
-				_, err = fmt.Fprintf(out, "nothing to apply (revision %d)\n", applied.Revision)
-				return err
-			}
-			changed, err := changedFields(applied.Spec, local.Spec)
-			if err != nil {
-				return err
-			}
-			if len(changed) > 0 {
-				if _, err := fmt.Fprintf(out, "cluster.yaml differs in: %v\n", changed); err != nil {
-					return err
-				}
-			}
-			for _, name := range changedFiles(applied.Files, local.Files) {
-				if _, err := fmt.Fprintf(out, "the file %s differs\n", name); err != nil {
-					return err
-				}
-			}
-			// the applied cluster.yaml and files with the local secrets: if
-			// that hash differs too, the secrets changed
-			secretsOnly := local
-			secretsOnly.Spec, secretsOnly.Files = applied.Spec, applied.Files
-			secretsHash, err := secretsOnly.Hash()
-			if err != nil || secretsHash == applied.Hash {
-				return err
-			}
-			_, err = fmt.Fprintln(out, "the secrets differ (secrets.sops.yaml)")
-			return err
+			return printDiff(cmd.OutOrStdout(), diff)
 		},
 	}
 }
 
-// changedFields lists the top-level keys of cluster.yaml whose values
-// differ.
-func changedFields(applied, local clusterspec.Config) ([]string, error) {
-	fields := func(config clusterspec.Config) (map[string]json.RawMessage, error) {
-		encoded, err := json.Marshal(config)
-		if err != nil {
-			return nil, err
-		}
-		var byField map[string]json.RawMessage
-		return byField, json.Unmarshal(encoded, &byField)
+// printDiff prints what a cluster apply would change.
+func printDiff(out io.Writer, diff api.ClusterDiff) error {
+	lines := []string{}
+	if diff.Revision == 0 {
+		lines = append(lines, "cluster.yaml was never applied")
 	}
-	before, err := fields(applied)
-	if err != nil {
-		return nil, err
+	if len(diff.Fields) > 0 {
+		lines = append(lines, fmt.Sprintf("cluster.yaml differs in: %v", diff.Fields))
 	}
-	after, err := fields(local)
-	if err != nil {
-		return nil, err
+	for _, name := range diff.Files {
+		lines = append(lines, "the file "+name+" differs")
 	}
-	var changed []string
-	for _, name := range slices.Sorted(maps.Keys(after)) {
-		if !bytes.Equal(before[name], after[name]) {
-			changed = append(changed, name)
+	for _, name := range diff.Secrets {
+		lines = append(lines, "the secret "+name+" differs")
+	}
+	if len(lines) == 0 {
+		lines = append(lines, fmt.Sprintf("nothing to apply (revision %d)", diff.Revision))
+	}
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(out, line); err != nil {
+			return err
 		}
 	}
-	for _, name := range slices.Sorted(maps.Keys(before)) {
-		if _, kept := after[name]; !kept {
-			changed = append(changed, name)
-		}
-	}
-	return changed, nil
-}
-
-// changedFiles lists the files next to cluster.yaml that came, went or
-// changed.
-func changedFiles(applied, local map[string][]byte) []string {
-	var changed []string
-	for name, content := range local {
-		if applies, ok := applied[name]; !ok || !bytes.Equal(applies, content) {
-			changed = append(changed, name)
-		}
-	}
-	for name := range applied {
-		if _, kept := local[name]; !kept {
-			changed = append(changed, name)
-		}
-	}
-	slices.Sort(changed)
-	return changed
+	return nil
 }
 
 func newSchema() *cobra.Command {

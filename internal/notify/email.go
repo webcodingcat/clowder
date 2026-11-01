@@ -46,8 +46,8 @@ func newEmail(channel clusterspec.AlertChannel, secrets Secrets, files map[strin
 	sender := email{
 		host: server.Host, port: server.Port, tls: config, user: server.User, from: channel.From, to: channel.To,
 	}
-	if server.Password != nil {
-		if sender.password, err = secrets(server.Password.Secret); err != nil {
+	if server.Password != "" {
+		if sender.password, err = secrets(server.Password); err != nil {
 			return email{}, err
 		}
 	}

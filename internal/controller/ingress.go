@@ -94,9 +94,9 @@ func holdIngress(ctx context.Context, cluster Cluster, propose Propose, open Ope
 	if err != nil {
 		return false, fmt.Errorf("read the Floating IP: %w", err)
 	}
-	sealed, ok := copied.ClusterSecrets[config.Hoster.Token.Secret]
+	sealed, ok := copied.ClusterSecret(config.Hoster.Token)
 	if !ok {
-		return false, fmt.Errorf("the hoster's token %s is not among the cluster's secrets", config.Hoster.Token.Secret)
+		return false, fmt.Errorf("the hoster's token %s is not among the cluster's secrets", config.Hoster.Token)
 	}
 	token, err := open(sealed)
 	if err != nil {

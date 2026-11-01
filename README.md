@@ -10,7 +10,8 @@ without a way to upgrade a running cluster. On one host, what runs today:
 
 - `clowderd check` checks a host, `clowderd init` makes it the first of a cluster and starts
   the agent, which keeps the containers apart and answers their DNS.
-- `clowder cluster bootstrap|apply|diff|status|schema` sets the cluster up and changes it.
+- `clowder cluster bootstrap|apply|diff|status|schema` sets the cluster up and changes it;
+  `clowder secret encrypt --cluster-yaml` encrypts a value for `cluster.yaml`.
 - `clowder host ...` drains, removes and enables hosts.
 - The cluster raises alerts (a pool or the root file system filling up, Docker not
   answering, the Floating IP not held, a host over capacity, a certificate not renewed, a
@@ -112,12 +113,29 @@ export HCLOUD_TOKEN=...
 tofu init
 tofu apply -var 'ssh_public_key=ssh-ed25519 AAAA...' -var 'admin_cidrs=["203.0.113.7/32"]'
 tofu output -raw bootstrap_key > bootstrap-key
-clowder cluster bootstrap me --name prod --age age1... \
-  --seed "$(tofu output -raw public_address)" --key-file bootstrap-key
+clowder cluster bootstrap me --name prod --seed "$(tofu output -raw public_address)" \
+  --key-file bootstrap-key
 ```
 
-Then fill in `cluster.yaml` from `tofu output cluster_yaml`, put the hoster token into
-`secrets.sops.yaml` (`sops edit`) and run `clowder cluster apply`.
+The bootstrap shows the cluster's **recovery key** once and asks for its last 8
+characters (`--recovery-out <file>` writes it to a file instead). Keep it in your password
+manager and offline: with it, the values in your files can be read when the cluster is
+lost. Then fill in `cluster.yaml` from `tofu output cluster_yaml`, add the hoster's token
+and run `clowder cluster apply`:
+
+```yaml
+hoster:
+  type: hetzner
+  token: !secret |                 # clowder secret encrypt --cluster-yaml < token
+    -----BEGIN AGE ENCRYPTED FILE-----
+    ...
+    -----END AGE ENCRYPTED FILE-----
+```
+
+Secrets stand in `cluster.yaml` encrypted, tagged `!secret`, for the cluster and the
+recovery key; only the cluster opens them, and `clowder cluster diff` names what an apply
+would change, a secret by its name. Editors with the yaml-language-server need
+`customTags: ["!secret scalar"]`.
 
 Your credentials (your key, your certificate and the cluster's CA) do not go into the
 cluster directory, which you may share in a repository, but into your config directory,

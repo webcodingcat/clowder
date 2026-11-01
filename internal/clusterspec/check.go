@@ -71,8 +71,8 @@ func Check(config Config) Problems {
 		if backup.Target.URL == "" {
 			report("backup.target.url is required")
 		}
-		if missingSecret(&backup.Password) {
-			report("backup.password: {secret: <name>} is required")
+		if backup.Password == "" {
+			report("backup.password: a value tagged !secret is required")
 		}
 	}
 	if config.Alerts != nil {
@@ -80,8 +80,8 @@ func Check(config Config) Problems {
 			problems = append(problems, checkChannel(index, channel)...)
 		}
 		if heartbeat := config.Alerts.Heartbeat; heartbeat != nil {
-			if missingSecret(&heartbeat.URL) {
-				report("alerts.heartbeat.url: {secret: <name>} is required")
+			if heartbeat.URL == "" {
+				report("alerts.heartbeat.url: a value tagged !secret is required")
 			}
 			if heartbeat.Interval != "" {
 				if interval, err := units.ParseDuration(heartbeat.Interval); err != nil || interval <= 0 {
@@ -91,6 +91,24 @@ func Check(config Config) Problems {
 		}
 	}
 	problems = append(problems, checkACME(config.ACME)...)
+	for _, host := range slices.Sorted(maps.Keys(config.Registries)) {
+		if config.Registries[host].Username == "" {
+			report("registries[%q].username is required", host)
+		}
+		if config.Registries[host].Password == "" {
+			report("registries[%q].password: a value tagged !secret is required", host)
+		}
+	}
+	for index, key := range config.JoinKeys {
+		if key == "" {
+			report("join_keys[%d]: a value tagged !secret is required", index)
+		}
+	}
+	for _, place := range SecretPlaces(config) {
+		if string(place.Name) != place.Path {
+			report("%s names the secret %q; a secret is named by its place", place.Path, place.Name)
+		}
+	}
 	files := FileNames(config)
 	for _, name := range files {
 		if !validFileName(name) {
@@ -125,8 +143,8 @@ func checkHoster(hoster Hoster) Problems {
 	if hoster.Type != "hetzner" {
 		problems = append(problems, fmt.Sprintf("hoster.type %q is not supported (hetzner)", hoster.Type))
 	}
-	if missingSecret(&hoster.Token) {
-		problems = append(problems, "hoster.token: {secret: <name>} is required")
+	if hoster.Token == "" {
+		problems = append(problems, "hoster.token: a value tagged !secret is required")
 	}
 	if hoster.API != "" && !fullURL(hoster.API) {
 		problems = append(problems, fmt.Sprintf("hoster.api %q is not a full URL with http:// or https://", hoster.API))
@@ -251,12 +269,12 @@ func checkChannel(index int, channel AlertChannel) Problems {
 	}
 	switch channel.Type {
 	case "discord":
-		if missingSecret(channel.Webhook) {
-			report("webhook: {secret: <name>} is required")
+		if channel.Webhook == "" {
+			report("webhook: a value tagged !secret is required")
 		}
 	case "webhook":
-		if missingSecret(channel.URL) {
-			report("url: {secret: <name>} is required")
+		if channel.URL == "" {
+			report("url: a value tagged !secret is required")
 		}
 	case "email":
 		if channel.SMTP == nil || channel.From == "" || len(channel.To) == 0 {
@@ -268,36 +286,4 @@ func checkChannel(index int, channel AlertChannel) Problems {
 		report("type is not discord, email or webhook")
 	}
 	return problems
-}
-
-// SecretNames lists every secret cluster.yaml refers to, sorted.
-func SecretNames(config Config) []string {
-	names := map[string]bool{}
-	add := func(reference *SecretRef) {
-		if reference != nil && reference.Secret != "" {
-			names[reference.Secret] = true
-		}
-	}
-	add(&config.Hoster.Token)
-	if config.Backup != nil {
-		add(&config.Backup.Password)
-	}
-	if config.Alerts != nil {
-		for _, channel := range config.Alerts.Channels {
-			add(channel.Webhook)
-			add(channel.URL)
-			if channel.SMTP != nil {
-				add(channel.SMTP.Password)
-			}
-		}
-		if config.Alerts.Heartbeat != nil {
-			add(&config.Alerts.Heartbeat.URL)
-		}
-	}
-	return slices.Sorted(maps.Keys(names))
-}
-
-// missingSecret tells whether a reference to a secret is absent or names none.
-func missingSecret(reference *SecretRef) bool {
-	return reference == nil || reference.Secret == ""
 }

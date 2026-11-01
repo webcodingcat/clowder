@@ -69,7 +69,7 @@ func newLeader(t *testing.T, poolSize int64) *leader {
 	l := &leader{t: t, state: &state.State{}, changed: make(chan struct{})}
 	l.apply(state.KindBootstrap, state.LeaderActor, state.Bootstrap{
 		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
-		JoinKey: state.Sealed("j"),
+		JoinKey: state.SealedSecret{Value: state.Sealed("j"), Digest: "d"},
 		Host: state.Host{
 			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg",
 			CertificateSerial: "s0",
@@ -78,11 +78,11 @@ func newLeader(t *testing.T, poolSize int64) *leader {
 	l.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
 		Spec: clusterspec.Config{
 			Name: "prod", Seeds: []string{"10.0.0.2"},
-			Hoster:         clusterspec.Hoster{Type: "hetzner", Token: clusterspec.SecretRef{Secret: "token"}},
+			Hoster:         clusterspec.Hoster{Type: "hetzner", Token: "hoster.token"},
 			Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.10"},
 			StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 		},
-		Secrets: map[string]state.Sealed{"token": state.Sealed("t")},
+		Secrets: map[string]state.SealedSecret{"hoster.token": {Value: state.Sealed("t"), Digest: "d"}},
 	})
 	l.apply(state.KindReportHost, state.HostActor(0), state.ReportHost{
 		Host: 0, Version: "1.0.0", Capacity: state.Resources{MemoryBytes: 4 << 30, CPUs: 4},

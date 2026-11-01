@@ -23,6 +23,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/secretvalue"
+	"github.com/webcodingcat/clowder/internal/yamlpath"
 )
 
 // labAddress is where the test and the tools of bin/dev live run in the
@@ -91,38 +93,84 @@ func download(t *testing.T, url string) []byte {
 // changeConfig edits the test's cluster.yaml and applies it.
 func changeConfig(t *testing.T, change func(config *clusterspec.Config)) {
 	t.Helper()
-	file := filepath.Join(clusterDir(), clusterdir.ConfigFile)
-	content, err := os.ReadFile(file)
+	directory, err := clusterdir.Load(clusterDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	var config clusterspec.Config
-	decoder := yaml.NewDecoder(bytes.NewReader(content))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&config); err != nil {
-		t.Fatal(err)
-	}
-	change(&config)
-	if content, err = yaml.Marshal(config); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(file, content, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	change(&directory.Config)
+	writeConfig(t, directory.Config, directory.Encrypted)
 	mustClowder(t, "cluster", "apply")
 }
 
-// setClusterSecrets adds secrets to secrets.sops.yaml; the next cluster
-// apply sends them.
+// encrypted are the values of cluster.yaml the test set, by name (their
+// path), encrypted as clowder secret encrypt does.
+var encrypted = map[string]string{}
+
+// setClusterSecrets encrypts values for cluster.yaml, by their names; the
+// next writeConfig puts them at their places.
 func setClusterSecrets(t *testing.T, values map[string]string) {
 	t.Helper()
-	file := filepath.Join(clusterDir(), clusterdir.SecretsFile)
-	secrets := readSecrets(t, file)
 	for name, value := range values {
-		secrets.Values[name] = value
+		block, err := clowderWithInput(strings.NewReader(value), "secret", "encrypt", "--cluster-yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// the armor without the block's tag line and indentation
+		_, armor, _ := strings.Cut(block, "\n")
+		var lines []string
+		for _, line := range strings.Split(strings.TrimRight(armor, "\n"), "\n") {
+			lines = append(lines, strings.TrimSpace(line))
+		}
+		encrypted[name] = strings.Join(lines, "\n") + "\n"
 	}
-	if err := clusterdir.WriteSOPS(file, secrets, recipient); err != nil {
+}
+
+// writeConfig writes the test's cluster.yaml: config, with the value of
+// each of its secrets tagged !secret at its place, from known (what the file
+// had) or set by setClusterSecrets.
+func writeConfig(t *testing.T, config clusterspec.Config, known map[string]string) {
+	t.Helper()
+	values := map[string]string{}
+	for _, place := range clusterspec.SecretPlaces(config) {
+		value, ok := encrypted[place.Path]
+		if !ok {
+			value, ok = known[place.Path]
+		}
+		if !ok {
+			t.Fatalf("no value for %s", place.Path)
+		}
+		values[place.Path] = value
+	}
+	var document yaml.Node
+	if err := document.Encode(config); err != nil {
 		t.Fatal(err)
+	}
+	tagSecrets(&document, "", values)
+	content, err := yaml.Marshal(&document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(clusterDir(), clusterdir.ConfigFile), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// tagSecrets puts each value at its path in the node tree, as a block
+// tagged !secret, naming the places as the CLI's Extract does.
+func tagSecrets(node *yaml.Node, path string, values map[string]string) {
+	switch node.Kind {
+	case yaml.MappingNode:
+		for index := 0; index+1 < len(node.Content); index += 2 {
+			tagSecrets(node.Content[index+1], yamlpath.Key(path, node.Content[index].Value), values)
+		}
+	case yaml.SequenceNode:
+		for index, item := range node.Content {
+			tagSecrets(item, yamlpath.Index(path, index), values)
+		}
+	case yaml.ScalarNode:
+		if value, ok := values[path]; ok {
+			node.Tag, node.Style, node.Value = secretvalue.Tag, yaml.LiteralStyle, value
+		}
 	}
 }
 

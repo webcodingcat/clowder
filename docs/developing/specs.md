@@ -116,16 +116,29 @@ on a host (`compose.Render`).
 - `clusterspec` is `cluster.yaml` without files: its types (`Config`), their defaults
   (`WithDefaults`) and `Check`, which lists every problem. The state reads it, so it does
   no I/O.
+- **Secrets in `cluster.yaml`** stand at their places, encrypted and tagged `!secret`
+  (Encrypted values, below): the hoster's token, `join_keys`, the registries' passwords,
+  the alert channels' URLs and passwords, the heartbeat's URL, the backup's password.
+  `clusterspec.SecretPlaces` lists these places, the one list of them. In `Config` a
+  secret is its name (`SecretRef`), which is its path (`hoster.token`, `join_keys[0]`):
+  `Check` holds each name to its place, so no CLI can name a secret otherwise than the
+  state expects.
 - `clusterdir` reads the directory. `Find` picks it (`--cluster`, `$CLOWDER_CLUSTER`, the
-  working directory), `Load` reads `cluster.yaml` strictly and runs `clusterspec.Check`.
-  `Schema` makes the JSON schema of `cluster.yaml` from the Go types; it lives here so the
-  state does not link the schema library.
-- `ReadSOPS` decrypts a SOPS file with the user's age key, as SOPS finds it. It refuses a
-  file with values left in clear (a rule like `unencrypted_suffix`): these files hold
-  secrets. `Secrets` reads through it; `DecryptSOPS` does the same for content read
-  elsewhere (a `Secret` resource on stdin or in a file of `apply`).
-- `WriteSOPS` and `WriteSOPSConfig` write a SOPS file and the `.sops.yaml` beside it, for
-  `cluster bootstrap`. `testdata/test-age-key.txt` is a test-only key for the fixtures.
+  working directory). `Load` takes the values out of `cluster.yaml`
+  (`secretvalue.Extract`), checks that the places they came from are exactly
+  `SecretPlaces` (a `!secret` elsewhere, or a place in clear, is an error), decodes the
+  rest strictly and keeps the values apart, still encrypted (`Directory.Encrypted`). It
+  does not run `Check`: the commands that need only the name and the seeds (`secret
+  encrypt`) work with the `cluster.yaml` the bootstrap writes, which is not complete yet.
+  `cluster apply` and `diff` run it. `Schema` makes the JSON schema of `cluster.yaml` from
+  the Go types; it lives here so the state does not link the schema library. Editors with
+  the yaml-language-server need `customTags: ["!secret scalar"]`.
+- `Create` writes the `cluster.yaml` of `cluster bootstrap`: name, seed, the bootstrap
+  key encrypted, and as comments what the first `cluster apply` still needs.
+- `DecryptSOPS` decrypts a SOPS file of a `Secret` resource with the user's age key, as
+  SOPS finds it. It refuses a file with values left in clear (a rule like
+  `unencrypted_suffix`). `WriteSOPS` writes one (the live tests). `testdata/test-age-key.txt`
+  is a test-only key for the fixtures.
 - **The user's credentials** (`credentials.go`) are not in the cluster directory, which a
   team shares in a repository, but in the user's config directory
   (`os.UserConfigDir()/clowder/clusters/<name>/credentials.yaml`, `CredentialsPath`): the
@@ -173,8 +186,11 @@ read and written.
 ## Encrypted values (`internal/secretvalue`)
 
 A secret's value can stand in a YAML file encrypted, tagged `!secret`: age's ASCII armor
-in a literal block scalar. The CLI and the agent do not use it yet; it is to replace the
-SOPS files.
+in a literal block scalar, for two recipients, the cluster's age key and the recovery key.
+`cluster.yaml`'s values are such; the `Secret` resources are to follow, in place of their
+SOPS files. The CLI never opens a value: `clowder secret encrypt --cluster-yaml` encrypts
+for the recipients the cluster names (`GET /v1/encryption`, asked each time, never kept
+in a file someone could change), and only the cluster opens them.
 
 - **The envelope.** What age encrypts is JSON, `{"v":1,"for":"<place>","value":"<Base64>"}`.
   `for` is the place the value is for (a secret's ID, or `cluster` for `cluster.yaml`), so
@@ -195,5 +211,7 @@ SOPS files.
   gives a node's first line only, so `locate` finds the block's end by its indentation, as
   YAML does, and checks the lines it found against the value YAML read before it cuts.
   Golden file: `testdata/rewrite.yaml`, `bin/dev test ./internal/secretvalue -update`.
+- `Block` writes a value as it stands after its key: `!secret |` and the armor below,
+  indented; `secret encrypt` and the bootstrap's `cluster.yaml` write it.
 - No error message carries a value: `Open` drops json's messages, which quote the text
   they choke on.

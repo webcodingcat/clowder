@@ -61,17 +61,17 @@ type Notifier interface {
 const sendTimeout = 30 * time.Second
 
 // Secrets opens a secret of cluster.yaml by its name.
-type Secrets func(name string) (string, error)
+type Secrets func(name clusterspec.SecretRef) (string, error)
 
 // New makes the notifier of a channel, with its secrets opened and the
 // files next to cluster.yaml (smtp.ca) at hand.
 func New(channel clusterspec.AlertChannel, secrets Secrets, files map[string][]byte) (Notifier, error) {
 	switch channel.Type {
 	case "discord":
-		url, err := secrets(channel.Webhook.Secret)
+		url, err := secrets(channel.Webhook)
 		return discord{url: url}, err
 	case "webhook":
-		url, err := secrets(channel.URL.Secret)
+		url, err := secrets(channel.URL)
 		return webhook{url: url}, err
 	case "email":
 		return newEmail(channel, secrets, files)

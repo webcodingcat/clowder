@@ -218,13 +218,10 @@ var errUnchanged = errors.New("unchanged")
 // from a snapshot that left empty maps out), so handlers can write to them.
 func (s *State) makeMaps() {
 	if s.ClusterSecrets == nil {
-		s.ClusterSecrets = map[string]Sealed{}
+		s.ClusterSecrets = map[string]SealedSecret{}
 	}
 	if s.Secrets == nil {
 		s.Secrets = map[string]*Secret{}
-	}
-	if s.Registries == nil {
-		s.Registries = map[string]RegistryLogin{}
 	}
 	if s.Hosts == nil {
 		s.Hosts = map[HostID]*Host{}

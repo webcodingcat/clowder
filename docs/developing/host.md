@@ -66,7 +66,7 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   `forgetApplied`). The first pass waits until
   the state has caught up with the Raft log, so a host that was away does not start a stack
   that has moved on.
-- The agent also logs Docker in to the registries of `secrets.sops.yaml`, once per login
+- The agent also logs Docker in to the registries of `cluster.yaml`, once per login
   (`logIn`), runs the
   supervisor and, while it leads, the placement (`controller.RunPlacement`). Every
   `trimInterval` it trims the volumes.

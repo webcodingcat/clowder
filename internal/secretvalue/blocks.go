@@ -93,6 +93,18 @@ func Rewrite(content []byte, change func(document int, path, armored string) (st
 	return rewritten.Bytes(), nil
 }
 
+// Block writes a value as it stands in a file, after its key: the tag on
+// this line and the armor below it, each line after indent, which must be
+// deeper than the key's.
+func Block(armored, indent string) string {
+	var block strings.Builder
+	block.WriteString(Tag + " |\n")
+	for _, line := range strings.Split(strings.TrimRight(armored, "\n"), "\n") {
+		block.WriteString(indent + line + "\n")
+	}
+	return block.String()
+}
+
 // parsed is a file read for Extract and Rewrite: its lines with their
 // endings, its documents and, per document, its values in the order of
 // their lines.

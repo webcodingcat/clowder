@@ -24,6 +24,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/yamlpath"
 )
 
 // The host's files, as setup.sh and the agent lay them out. They are copied,
@@ -187,16 +188,24 @@ func waitForSetup(t *testing.T, server host) {
 	checkMemory(t, server, "idle")
 }
 
-// bootstrap makes the test the first user, fills in cluster.yaml from the
-// module's outputs, sets the hoster token and the registry's login in
-// secrets.sops.yaml, keeping the join keys, then applies both.
+// bootstrap makes the test the first user, its recovery key in a file, and
+// fills in cluster.yaml from the module's outputs, with the hoster token
+// and the registry's login encrypted next to the bootstrap's join key, then
+// applies it.
 func bootstrap(t *testing.T, server host, tofu outputs) {
 	keyFile := filepath.Join(workDir, "bootstrap-key")
 	if err := os.WriteFile(keyFile, []byte(tofu.BootstrapKey.Value), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	mustClowder(t, "cluster", "bootstrap", "tester", "--name", "live", "--age", recipient,
-		"--seed", tofu.PublicAddress.Value, "--key-file", keyFile)
+	mustClowder(t, "cluster", "bootstrap", "tester", "--name", "live", "--seed", tofu.PublicAddress.Value,
+		"--key-file", keyFile, "--recovery-out", filepath.Join(workDir, "recovery-key"))
+	bootstrapped, err := clusterdir.Load(clusterDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(bootstrapped.Encrypted["join_keys[0]"], tofu.BootstrapKey.Value) {
+		t.Fatal("cluster.yaml has the bootstrap key in clear")
+	}
 
 	// the module's part of cluster.yaml, read strictly into the real type, so a
 	// renamed field fails here and not only in the cluster
@@ -210,31 +219,28 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	if err := decoder.Decode(&config); err != nil {
 		t.Fatalf("the module's cluster_yaml: %v", err)
 	}
-	config.Name = "live" // as bootstrapped: the CLI finds the credentials by it
-	config.Hoster = clusterspec.Hoster{
-		Type: "hetzner", Token: clusterspec.SecretRef{Secret: "hcloud-token"}, API: os.Getenv("HCLOUD_ENDPOINT"),
-	}
-	content, err := yaml.Marshal(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(clusterDir(), clusterdir.ConfigFile), content, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
+	// as bootstrapped: the CLI finds the credentials by the name, and the
+	// join key stays
+	config.Name, config.JoinKeys = "live", bootstrapped.Config.JoinKeys
+	config.Hoster = clusterspec.Hoster{Type: "hetzner", Token: "hoster.token", API: os.Getenv("HCLOUD_ENDPOINT")}
 	password := pushPrivateImage(t, server)
-	secretsFile := filepath.Join(clusterDir(), clusterdir.SecretsFile)
-	secrets := readSecrets(t, secretsFile)
-	secrets.Values["hcloud-token"] = os.Getenv("HCLOUD_TOKEN")
-	secrets.Registries[registry] = clusterdir.RegistryLogin{Username: registryUser, Password: password}
-	if err := clusterdir.WriteSOPS(secretsFile, secrets, recipient); err != nil {
-		t.Fatal(err)
+	registryPassword := yamlpath.Key(yamlpath.Key("registries", registry), "password")
+	config.Registries = map[string]clusterspec.Registry{
+		registry: {Username: registryUser, Password: clusterspec.SecretRef(registryPassword)},
 	}
-	if joinKeys := readSecrets(t, secretsFile).JoinKeys; !slices.Equal(joinKeys, []string{tofu.BootstrapKey.Value}) {
-		t.Fatalf("secrets.sops.yaml lost the bootstrap key from its join keys")
-	}
+	setClusterSecrets(t, map[string]string{"hoster.token": os.Getenv("HCLOUD_TOKEN"), registryPassword: password})
+	writeConfig(t, config, bootstrapped.Encrypted)
 
+	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "never applied") {
+		t.Errorf("diff before the first apply:\n%s", diff)
+	}
 	mustClowder(t, "cluster", "apply")
+	// encrypted anew, the same token is no change
+	setClusterSecrets(t, map[string]string{"hoster.token": os.Getenv("HCLOUD_TOKEN")})
+	writeConfig(t, config, bootstrapped.Encrypted)
+	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "nothing to apply") {
+		t.Errorf("diff after the token was encrypted anew:\n%s", diff)
+	}
 	status := mustClowder(t, "cluster", "status")
 	if strings.Contains(status, "leader none") {
 		t.Errorf("the cluster has no leader:\n%s", status)
@@ -259,22 +265,6 @@ func pushPrivateImage(t *testing.T, server host) string {
 	server.must(t, fmt.Sprintf("docker tag %s %s && docker push -q %s", publicImage, privateImage, privateImage))
 	server.must(t, fmt.Sprintf("docker logout %s && docker rmi %s", registry, privateImage))
 	return strings.TrimSpace(string(password))
-}
-
-func readSecrets(t *testing.T, file string) clusterdir.Secrets {
-	t.Helper()
-	plain, err := clusterdir.ReadSOPS(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var secrets clusterdir.Secrets
-	if err := yaml.Unmarshal(plain, &secrets); err != nil {
-		t.Fatal(err)
-	}
-	if secrets.Registries == nil {
-		secrets.Registries = map[string]clusterdir.RegistryLogin{}
-	}
-	return secrets
 }
 
 // The stack's secrets in each generation; a $ must reach the container as

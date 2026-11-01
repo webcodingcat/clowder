@@ -53,7 +53,7 @@ loops that talk to the world outside.
 ## Hoster and ingress (`internal/hoster`, `internal/controller`)
 
 - `cluster.yaml` names the hoster in a section of its own, chosen by `type` like backup
-  targets and alert channels: `hoster: {type: hetzner, token: {secret: ...}}`, and `api`
+  targets and alert channels: `hoster: {type: hetzner, token: !secret ...}`, and `api`
   for a lab's API instead of the hoster's (a full `http://` or `https://` URL: the token
   goes there).
 - `hoster.Hoster` is what clowder asks of a hoster: where the Floating IP is routed, route

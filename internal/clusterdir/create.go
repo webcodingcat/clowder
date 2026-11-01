@@ -10,12 +10,9 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/webcodingcat/clowder/internal/secretvalue"
 	"github.com/webcodingcat/clowder/internal/sopsage"
 )
-
-// SOPSConfigFile tells the sops tool which age keys encrypt the files of a
-// directory, so users can edit them with sops.
-const SOPSConfigFile = ".sops.yaml"
 
 // NewDirectory is what clowder cluster bootstrap writes into an empty
 // cluster directory.
@@ -23,11 +20,10 @@ type NewDirectory struct {
 	Path string
 	// Name is the cluster's name in cluster.yaml.
 	Name string
-	// Recipient is the user's age key (age1... or an SSH public key); the SOPS
-	// files are encrypted for it.
-	Recipient    string
-	Seed         string
-	BootstrapKey string
+	Seed string
+	// JoinKey is the bootstrap key, encrypted for cluster.yaml
+	// (secretvalue's armor).
+	JoinKey string
 }
 
 // CheckBootstrap tells whether a bootstrap may write a cluster of that name
@@ -64,10 +60,9 @@ func checkNoConfig(path string) error {
 	return nil
 }
 
-// Create writes the first files of a cluster directory: secrets.sops.yaml
-// with the bootstrap key and a placeholder for the hoster token,
-// cluster.yaml to fill in and .sops.yaml. It refuses a directory that has a
-// cluster.yaml already.
+// Create writes cluster.yaml into a new cluster directory: the name, the
+// seed and the bootstrap key, and as comments what the first cluster apply
+// still needs. It refuses a directory that has a cluster.yaml already.
 func Create(directory NewDirectory) error {
 	if err := checkNoConfig(directory.Path); err != nil {
 		return err
@@ -75,35 +70,11 @@ func Create(directory NewDirectory) error {
 	if err := os.MkdirAll(directory.Path, 0o755); err != nil {
 		return fmt.Errorf("create the cluster directory: %w", err)
 	}
-	secrets := Secrets{
-		Values:     map[string]string{"hcloud-token": "CHANGE-ME"},
-		JoinKeys:   []string{directory.BootstrapKey},
-		Registries: map[string]RegistryLogin{},
-	}
-	if err := WriteSOPS(filepath.Join(directory.Path, SecretsFile), secrets, directory.Recipient); err != nil {
-		return err
-	}
-	if err := WriteSOPSConfig(directory.Path, `\.sops\.yaml$`, directory.Recipient); err != nil {
-		return err
-	}
 	return os.WriteFile(filepath.Join(directory.Path, ConfigFile), []byte(configTemplate(directory)), 0o644)
 }
 
-// WriteSOPSConfig writes the .sops.yaml of a directory: the files matching
-// pathRegex are encrypted for the recipient. Users add their colleagues'
-// keys there and run sops updatekeys.
-func WriteSOPSConfig(dir, pathRegex, recipient string) error {
-	config := fmt.Sprintf("# The sops tool encrypts the files here for these keys; add a colleague's\n"+
-		"# key and run sops updatekeys <file> in this directory.\n"+
-		"creation_rules:\n  - path_regex: %s\n    age: %s\n", pathRegex, recipient)
-	path := filepath.Join(dir, SOPSConfigFile)
-	if err := os.WriteFile(path, []byte(config), 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	return nil
-}
-
-// WriteSOPS encrypts a value as YAML for the recipient, as sops would.
+// WriteSOPS encrypts a value as YAML for the recipient, as sops would; for
+// the SOPS files of Secret resources.
 func WriteSOPS(path string, value any, recipient string) error {
 	plain, err := yaml.Marshal(value)
 	if err != nil {
@@ -121,25 +92,32 @@ func WriteSOPS(path string, value any, recipient string) error {
 
 // configTemplate is cluster.yaml for the user to finish.
 func configTemplate(directory NewDirectory) string {
-	lines := []string{
+	return strings.Join([]string{
 		"# The cluster as a whole; clowder cluster apply sends it, clowder cluster schema",
-		"# describes every field. The CLI finds your credentials by the name.",
+		"# describes every field. The CLI finds your credentials by the name. A secret",
+		"# stands here encrypted, tagged !secret: clowder secret encrypt --cluster-yaml",
+		"# writes one, and only the cluster opens it.",
 		"name: " + directory.Name,
 		"seeds: [" + directory.Seed + "]",
-		"hoster:",
-		"  type: hetzner",
-		"  token: {secret: hcloud-token}",
-		"ingress:",
-		"  floating_ip: 203.0.113.10  # CHANGE: the cluster's Floating IP",
-		"storage_classes:",
-		"  fast: {pool: vg-fast/thin}",
-		"  bulk: {pool: vg-bulk/thin}",
-		"  any: {fallback: [fast, bulk]}",
-		"# the certificates of the HTTP routes come from Let's Encrypt; its notices go here",
+		"# the bootstrap keys: hosts join with them",
+		"join_keys:",
+		"  - " + secretvalue.Block(directory.JoinKey, "    ") +
+			"# Before the first clowder cluster apply, fill in the rest (clowder cluster",
+		"# schema has every field), for example:",
+		"# hoster:",
+		"#   type: hetzner",
+		"#   token: !secret |",
+		"#     <clowder secret encrypt --cluster-yaml, given the hoster's API token>",
+		"# ingress:",
+		"#   floating_ip: 203.0.113.10",
+		"# storage_classes:",
+		"#   fast: {pool: vg-fast/thin}",
+		"#   bulk: {pool: vg-bulk/thin}",
+		"#   any: {fallback: [fast, bulk]}",
+		"# The certificates of the HTTP routes come from Let's Encrypt; its notices go to:",
 		"# acme:",
 		"#   email: ops@example.com",
-	}
-	return strings.Join(lines, "\n") + "\n"
+	}, "\n") + "\n"
 }
 
 // Target is the directory a new cluster goes into: the flag, else

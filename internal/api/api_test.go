@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
-	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"filippo.io/age"
+
 	"github.com/webcodingcat/clowder/internal/datakey"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -118,6 +118,9 @@ type testCluster struct {
 	clusters []*fakeCluster
 	servers  []*httptest.Server
 	apis     []*Server
+	// recipients are the cluster's age key and a recovery key: what
+	// cluster.yaml's values are encrypted for
+	recipients []age.Recipient
 }
 
 func newTestCluster(t *testing.T) *testCluster {
@@ -132,9 +135,25 @@ func newTestCluster(t *testing.T) *testCluster {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// and a real age key of the cluster's, sealed in the state as init does
+	clusterIdentity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.recipients = []age.Recipient{clusterIdentity.Recipient(), recovery.Recipient()}
+	sealedIdentity, err := keys.Seal([]byte(clusterIdentity.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
 	addresses := map[state.HostID]string{}
 	for id := range state.HostID(2) {
 		cluster := newFakeCluster(t, id == 0)
+		cluster.state.Keys.AgeIdentity = sealedIdentity
+		cluster.state.RecoveryRecipient = recovery.Recipient().String()
 		server := httptest.NewUnstartedServer(nil)
 		api := NewServer(ServerConfig{
 			Cluster: cluster, CA: ca.Certificate, Certificate: c.hostCertificate(id),
@@ -168,7 +187,7 @@ func bootstrappedState(t *testing.T) *state.State {
 	}
 	apply(1, state.KindBootstrap, state.Bootstrap{
 		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
-		JoinKey: state.Sealed("join"),
+		JoinKey: state.SealedSecret{Value: state.Sealed("join"), Digest: "d"},
 		Host:    state.Host{ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0"},
 	})
 	apply(2, state.KindAddHost, state.AddHost{Host: state.Host{
@@ -438,30 +457,6 @@ func TestTheClientNamesAClusterOfAnotherCA(t *testing.T) {
 	if err := client.Stream(context.Background(), "/v1/watch?kind=stack&allNamespaces=true", io.Discard); err == nil ||
 		!strings.Contains(err.Error(), "belongs to another cluster") {
 		t.Errorf("stream: %v", err)
-	}
-}
-
-func TestARegistrysPasswordIsSealedAndItsUserIsNot(t *testing.T) {
-	cluster := newTestCluster(t)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
-	apply := ClusterApply{
-		Spec: clusterspec.Config{
-			Name: "test", Seeds: []string{"10.0.0.2"},
-			Hoster:         clusterspec.Hoster{Type: "hetzner", Token: clusterspec.SecretRef{Secret: "hcloud-token"}},
-			Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.11"},
-			StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
-		},
-		Secrets:    map[string]string{"hcloud-token": "token"},
-		Registries: map[string]clusterdir.RegistryLogin{"ghcr.io": {Username: "robot", Password: "the password"}},
-	}
-	if _, err := client.Put(context.Background(), "/v1/cluster", apply); err != nil {
-		t.Fatal(err)
-	}
-	var login state.RegistryLogin
-	cluster.clusters[0].Read(func(current *state.State) { login = current.RegistryLogins()["ghcr.io"] })
-	password, err := cluster.apis[0].config.Keys.Open(login.Password)
-	if err != nil || login.Username != "robot" || string(password) != "the password" {
-		t.Errorf("login %s with %q, %v", login.Username, password, err)
 	}
 }
 

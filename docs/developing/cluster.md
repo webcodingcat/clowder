@@ -146,10 +146,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   one stack per volume, nothing deleted that a stack names, a removed host's certificate
   revoked.
 - **Secrets** arrive sealed (`Sealed`, age for the data key); `state` never sees them in
-  clear. Those `cluster.yaml` names are `ClusterSecrets`, the namespaces' `Secrets`. The
-  join keys and the registries' logins (the user in clear, the password sealed) are read
-  through `ValidJoinKeys` and `RegistryLogins`, so their readers stay when they become
-  cluster secrets. A stack names at most `MaxStackSecrets`. Who can read a secret: API,
+  clear. Those of `cluster.yaml` are `ClusterSecrets`, by name (`clusterspec.SecretPlaces`),
+  each with a digest; the namespaces' are `Secrets`. Readers find a value through the
+  spec, never by taking a name apart: `ClusterSecret(config.Hoster.Token)`,
+  `ValidJoinKeys`, `RegistryLogins` (the user from the spec, the password sealed). Until the
+  first `apply-config` the config is revision 0 and names only init's bootstrap key
+  (`FirstJoinKey`); the loops that need a hoster or a Floating IP find none and wait. A
+  stack names at most `MaxStackSecrets`. Who can read a secret: API,
   below.
 - `Copy` gives a deep copy without the audit, for work too slow for the state's lock (the
   placement weighs every stack) or that keeps parts of the state (the agent's stacks).
@@ -323,16 +326,32 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   every host (a stack must start anywhere); and, until there are permissions, every user of
   the cluster, through a stack that names it or one named in `stacks.privileged`, as such a
   container reaches the secrets and the data key on its host.
-- **`cluster apply`** sends `cluster.yaml` with the secrets of `secrets.sops.yaml` in clear
-  inside mutual TLS; the agent seals them before they go into the state. Its hash covers
-  both, so `cluster diff` tells changed fields of `cluster.yaml` from changed secrets without
-  the cluster showing any secret.
+- **`cluster apply`** (`PUT /v1/cluster`, `ClusterApply`) sends the spec with the
+  secrets' names, the values still encrypted by name, and the files. The agent opens each
+  value with the cluster's age key (`clusterIdentity`, sealed in the state), refuses one
+  that is not for `cluster` (a `Secret`'s value copied into `cluster.yaml`), and seals it
+  with a digest (`SealClusterSecret`: an HMAC over name and value with a key of its own).
+  `apply-config` takes a value for every name the spec has and no other.
+- **`cluster diff`** is the same request with `?dryRun=true`: the agent applies it to a
+  copy of its state, with every check of a real apply (a refusal is 409 with the reason),
+  and answers what would change (`ClusterDiff`): top-level fields, files, and secrets by
+  name. The digests tell a changed value from one encrypted anew; no value leaves the
+  cluster.
+- **`GET /v1/encryption`** names the recipients every value is encrypted for: the
+  cluster's age key and the recovery key (`State.RecoveryRecipient`).
 - **The first user** has no certificate yet (`cluster bootstrap`). `GET /v1/bootstrap` gives
   the CA certificate with a `pki.TrustProof` for each valid bootstrap key, and the CLI trusts
-  the CA only if one matches its key. `POST /v1/bootstrap`, over TLS checked against that CA,
-  carries the user's public key with an HMAC of the bootstrap key and a time
-  (`bootstrapMaxAge`). It works once: when the cluster has a user, users add the others. The
-  CLI then writes the credentials (`clusterdir.WriteCredentials`) and the cluster directory
+  the CA only if one matches its key (`api.FindCluster`). The offer also says whether the
+  cluster has a user already (`bootstrapped`): then the CLI stops before it makes a
+  recovery key, so nobody holds two and does not know which counts. Else it makes the
+  recovery key and hands it over: shown once with its last 8 characters typed back, or
+  into a new file (`--recovery-out`, for scripts); nothing has reached the cluster yet.
+  `POST /v1/bootstrap`, over TLS checked against that CA, carries the user's public key
+  and the recovery key's recipient with an HMAC of the bootstrap key and a time
+  (`bootstrapMaxAge`); the state keeps the recipient with the first user (`add-user`). It
+  works once: when the cluster has a user, users add the others. The CLI then writes the
+  credentials (`clusterdir.WriteCredentials`), checks that the cluster's recovery
+  recipient is the key it made, and writes `cluster.yaml` with the bootstrap key encrypted
   (`clusterdir.Create`).
 - The tests run real HTTPS servers: a follower forwarding to the leader, refused callers, the
   CLI against an agent with a cluster directory and credentials in a temporary config

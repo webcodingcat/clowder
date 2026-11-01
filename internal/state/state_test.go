@@ -39,7 +39,7 @@ func newCluster(t *testing.T) *cluster {
 	c := &cluster{t: t, state: &State{}}
 	c.mustApply(KindBootstrap, LeaderActor, Bootstrap{
 		Keys:    ClusterKeys{CACertificate: []byte("ca"), CAKey: Sealed("key"), AgeIdentity: Sealed("age")},
-		JoinKey: Sealed("join"),
+		JoinKey: SealedSecret{Value: Sealed("join"), Digest: "d-join"},
 		Host:    testHost(0),
 	})
 	return c
@@ -112,8 +112,8 @@ func TestBootstrapMakesHostZeroTheActiveVoter(t *testing.T) {
 	if host.Phase != Active || !host.Voter {
 		t.Errorf("host 0: %+v", host)
 	}
-	if len(c.state.JoinKeys) != 1 || c.state.Keys == nil {
-		t.Errorf("keys: %+v %v", c.state.Keys, c.state.JoinKeys)
+	if len(c.state.ValidJoinKeys()) != 1 || c.state.Keys == nil {
+		t.Errorf("keys: %+v %v", c.state.Keys, c.state.ValidJoinKeys())
 	}
 	c.refuse(KindBootstrap, LeaderActor, Bootstrap{}, "bootstrapped already")
 }
@@ -266,10 +266,17 @@ func TestTheIngressIsAnActiveHostWithAServerRef(t *testing.T) {
 	}
 }
 
-func TestOnlyOneFirstUser(t *testing.T) {
+func TestOnlyOneFirstUserAndItBringsTheRecoveryKey(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1", First: true})
-	c.refuse(KindAddUser, LeaderActor, AddUser{Name: "bob", Serial: "b1", First: true}, "first user already")
+	c.refuse(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1", First: true}, "recovery key's recipient")
+	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1", First: true, RecoveryRecipient: "age1first"})
+	if c.state.RecoveryRecipient != "age1first" {
+		t.Errorf("recovery recipient %q", c.state.RecoveryRecipient)
+	}
+	c.refuse(KindAddUser, LeaderActor, AddUser{Name: "bob", Serial: "b1", First: true, RecoveryRecipient: "age1b"},
+		"first user already")
+	c.refuse(KindAddUser, LeaderActor, AddUser{Name: "bob", Serial: "b1", RecoveryRecipient: "age1b"},
+		"recovery key's recipient")
 }
 
 func TestRemovingAUserRevokesTheirCertificates(t *testing.T) {
@@ -299,7 +306,7 @@ func TestRemovingAUserRevokesTheirCertificates(t *testing.T) {
 func testConfig() clusterspec.Config {
 	return clusterspec.Config{
 		Name: "prod", Seeds: []string{"10.0.0.2"},
-		Hoster:         clusterspec.Hoster{Type: "hetzner", Token: clusterspec.SecretRef{Secret: "hcloud-token"}},
+		Hoster:         clusterspec.Hoster{Type: "hetzner", Token: "hoster.token"},
 		Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.11"},
 		StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 	}
@@ -310,24 +317,43 @@ func testVolumeSpec() resource.VolumeSpec {
 	return resource.VolumeSpec{Class: "fast", Size: 1 << 30, Replicas: 1}
 }
 
-// testSecrets are the secrets testConfig needs.
-func testSecrets() map[string]Sealed {
-	return map[string]Sealed{"hcloud-token": Sealed("sealed")}
+// testSecrets are the values testConfig names.
+func testSecrets() map[string]SealedSecret {
+	return map[string]SealedSecret{"hoster.token": {Value: Sealed("sealed"), Digest: "d-token"}}
 }
 
 func TestApplyConfigCountsRevisionsAndReplacesTheSecrets(t *testing.T) {
 	c := newCluster(t)
-	secrets := map[string]Sealed{"hcloud-token": Sealed("sealed")}
-	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{
-		Hash: "h1", Spec: testConfig(), Secrets: secrets, JoinKeys: []Sealed{Sealed("k1"), Sealed("k2")},
-	})
-	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{
-		Hash: "h2", Spec: testConfig(), Secrets: secrets, JoinKeys: []Sealed{Sealed("k2")},
-	})
-	if c.state.Config.Revision != 2 || c.state.Config.Hash != "h2" || len(c.state.JoinKeys) != 1 {
-		t.Errorf("config %+v, join keys %v", c.state.Config, c.state.JoinKeys)
+	if c.state.Config.Revision != 0 || len(c.state.ValidJoinKeys()) != 1 {
+		t.Errorf("after init: config %+v, join keys %v", c.state.Config, c.state.ValidJoinKeys())
 	}
-	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig()}, "hcloud-token")
+	config := testConfig()
+	config.JoinKeys = []clusterspec.SecretRef{"join_keys[0]", "join_keys[1]"}
+	config.Registries = map[string]clusterspec.Registry{"ghcr.io": {Username: "robot", Password: `registries["ghcr.io"].password`}}
+	secrets := testSecrets()
+	secrets["join_keys[0]"] = SealedSecret{Value: Sealed("k1"), Digest: "d1"}
+	secrets["join_keys[1]"] = SealedSecret{Value: Sealed("k2"), Digest: "d2"}
+	secrets[`registries["ghcr.io"].password`] = SealedSecret{Value: Sealed("pw"), Digest: "d3"}
+	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: secrets})
+	if keys := c.state.ValidJoinKeys(); len(keys) != 2 || string(keys[1]) != "k2" {
+		t.Errorf("join keys %q", keys)
+	}
+	if login := c.state.RegistryLogins()["ghcr.io"]; login.Username != "robot" || string(login.Password) != "pw" {
+		t.Errorf("login %+v", login)
+	}
+
+	config.JoinKeys = config.JoinKeys[:1]
+	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: secrets},
+		"a value for join_keys[1], which cluster.yaml does not name")
+	delete(secrets, "join_keys[1]")
+	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: secrets})
+	if c.state.Config.Revision != 2 || len(c.state.ValidJoinKeys()) != 1 {
+		t.Errorf("config %+v, join keys %v", c.state.Config, c.state.ValidJoinKeys())
+	}
+	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig()}, "hoster.token: the value is missing")
+	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{
+		Spec: testConfig(), Secrets: map[string]SealedSecret{"hoster.token": {Value: Sealed("sealed")}},
+	}, "hoster.token: the value has no digest")
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Secrets: secrets}, "name is required")
 }
 

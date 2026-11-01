@@ -96,6 +96,17 @@ func (c *Client) change(ctx context.Context, path string, request any, dryRun bo
 	return result, nil
 }
 
+// DiffCluster asks the cluster what applying cluster.yaml would change,
+// with every check of a real apply (PUT /v1/cluster?dryRun=true).
+func (c *Client) DiffCluster(ctx context.Context, apply ClusterApply) (ClusterDiff, error) {
+	encoded, err := json.Marshal(apply)
+	if err != nil {
+		return ClusterDiff{}, fmt.Errorf("encode the request: %w", err)
+	}
+	var diff ClusterDiff
+	return diff, c.do(ctx, http.MethodPut, "/v1/cluster?dryRun=true", encoded, &diff)
+}
+
 // Put replaces what is at path with in. Reads after it wait for the write.
 func (c *Client) Put(ctx context.Context, path string, in any) (Written, error) {
 	return c.write(ctx, http.MethodPut, path, in)

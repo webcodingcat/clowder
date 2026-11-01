@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // AddUser records a certificate the leader issued to a user; a new name
@@ -14,6 +15,9 @@ type AddUser struct {
 	// First is the bootstrap's user, who may only come into a cluster
 	// without users: two bootstraps at once cannot both get in.
 	First bool `json:"first,omitempty"`
+	// RecoveryRecipient comes with the first user: the public half of the
+	// recovery key the bootstrap made (State.RecoveryRecipient).
+	RecoveryRecipient string `json:"recovery_recipient,omitempty"`
 }
 
 func applyAddUser(s *State, _ Command, payload AddUser) error {
@@ -26,6 +30,11 @@ func applyAddUser(s *State, _ Command, payload AddUser) error {
 		return fmt.Errorf("serial %s is used already", payload.Serial)
 	case payload.First && len(s.Users) > 0:
 		return errors.New("the cluster has its first user already; users add others")
+	case payload.First != strings.HasPrefix(payload.RecoveryRecipient, "age1"):
+		return errors.New("the first user, and only the first, brings the recovery key's recipient (age1...)")
+	}
+	if payload.First {
+		s.RecoveryRecipient = payload.RecoveryRecipient
 	}
 	user, ok := s.Users[payload.Name]
 	if !ok {

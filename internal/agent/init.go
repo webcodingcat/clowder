@@ -16,6 +16,7 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/datakey"
 	"github.com/webcodingcat/clowder/internal/network"
@@ -183,7 +184,7 @@ func bootstrapRaft(ctx context.Context, files Files, host Host, keys state.Clust
 	if err := waitForLead(ctx, node); err != nil {
 		return err
 	}
-	joinKey, err := credentials.dataKey.Seal([]byte(bootstrapKey))
+	joinKey, err := api.SealClusterSecret(credentials.dataKey, state.FirstJoinKey, []byte(bootstrapKey))
 	if err != nil {
 		return err
 	}

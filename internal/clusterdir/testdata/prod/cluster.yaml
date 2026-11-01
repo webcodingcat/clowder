@@ -2,7 +2,22 @@ name: prod
 seeds: [203.0.113.10, 203.0.113.11]
 hoster:
   type: hetzner
-  token: {secret: hcloud-token}
+  token: !secret |
+    -----BEGIN AGE ENCRYPTED FILE-----
+    dG9rZW4=
+    -----END AGE ENCRYPTED FILE-----
+join_keys:
+  - !secret |
+    -----BEGIN AGE ENCRYPTED FILE-----
+    am9pbg==
+    -----END AGE ENCRYPTED FILE-----
+registries:
+  ghcr.io:
+    username: robot
+    password: !secret |
+      -----BEGIN AGE ENCRYPTED FILE-----
+      cmVnaXN0cnk=
+      -----END AGE ENCRYPTED FILE-----
 network: private
 ingress:
   floating_ip: 198.51.100.7
@@ -21,9 +36,15 @@ defaults:
 system_reserve: {memory: 512M, cpus: "0.25"}
 backup:
   target: {type: restic, url: "sftp:u12345@u12345.your-storagebox.de:/clowder"}
-  password: {secret: restic-password}
+  password: !secret |
+    -----BEGIN AGE ENCRYPTED FILE-----
+    YmFja3Vw
+    -----END AGE ENCRYPTED FILE-----
 alerts:
   channels:
     - type: discord
-      webhook: {secret: discord-webhook}
+      webhook: !secret |
+        -----BEGIN AGE ENCRYPTED FILE-----
+        ZGlzY29yZA==
+        -----END AGE ENCRYPTED FILE-----
       min_severity: warning

@@ -18,9 +18,10 @@ const FileName = "cluster.yaml"
 
 // Config is cluster.yaml: everything cluster-wide. Changes take effect with
 // `clowder cluster apply`; the file is the source, the cluster keeps a copy.
-// Secrets never appear here, only references to secrets.sops.yaml. The json
-// names are how the cluster state stores the file: a Go field may be
-// renamed, its tags never.
+// No secret is in it: where cluster.yaml has a value tagged !secret, Config
+// has its name (SecretRef), and the value travels apart. The json names are
+// how the cluster state stores the file: a Go field may be renamed, its tags
+// never.
 type Config struct {
 	// Name of the cluster, shown by the CLI; it finds the user's credentials
 	// by it.
@@ -29,6 +30,11 @@ type Config struct {
 	// the current members.
 	Seeds  []string `yaml:"seeds" json:"seeds" jsonschema:"required,minItems=1"`
 	Hoster Hoster   `yaml:"hoster" json:"hoster" jsonschema:"required"`
+	// JoinKeys are the bootstrap keys: hosts join with one, and the first
+	// user bootstraps with one. A key left out is invalid once applied.
+	JoinKeys []SecretRef `yaml:"join_keys,omitempty" json:"join_keys,omitempty"`
+	// Registries are the logins for private image registries, by host.
+	Registries map[string]Registry `yaml:"registries,omitempty" json:"registries,omitempty"`
 	// Network the hosts use for WireGuard: private or public.
 	Network        string                  `yaml:"network,omitempty" json:"network,omitempty" jsonschema:"enum=private,enum=public"`
 	Ingress        Ingress                 `yaml:"ingress" json:"ingress" jsonschema:"required"`
@@ -136,9 +142,16 @@ type Hoster struct {
 	API string `yaml:"api,omitempty" json:"api,omitempty"`
 }
 
-// SecretRef points to a value in secrets.sops.yaml.
-type SecretRef struct {
-	Secret string `yaml:"secret" json:"secret" jsonschema:"required"`
+// SecretRef is the name of a secret: where cluster.yaml has a value tagged
+// !secret, the CLI puts the value's place there (SecretPlaces), so the name
+// is the path, such as hoster.token. "" is no secret.
+type SecretRef string
+
+// Registry is the login for a private image registry; only the password is
+// a secret.
+type Registry struct {
+	Username string    `yaml:"username" json:"username" jsonschema:"required"`
+	Password SecretRef `yaml:"password" json:"password" jsonschema:"required"`
 }
 
 // Ingress is the Floating IP and the hosts that should hold it.
@@ -215,13 +228,13 @@ type Alerts struct {
 
 // AlertChannel is one notifier: discord, email or webhook.
 type AlertChannel struct {
-	Type        string     `yaml:"type" json:"type" jsonschema:"required,enum=discord,enum=email,enum=webhook"`
-	MinSeverity string     `yaml:"min_severity,omitempty" json:"min_severity,omitempty" jsonschema:"enum=info,enum=warning,enum=critical"`
-	Webhook     *SecretRef `yaml:"webhook,omitempty" json:"webhook,omitempty"`
-	URL         *SecretRef `yaml:"url,omitempty" json:"url,omitempty"`
-	SMTP        *SMTP      `yaml:"smtp,omitempty" json:"smtp,omitempty"`
-	From        string     `yaml:"from,omitempty" json:"from,omitempty"`
-	To          []string   `yaml:"to,omitempty" json:"to,omitempty"`
+	Type        string    `yaml:"type" json:"type" jsonschema:"required,enum=discord,enum=email,enum=webhook"`
+	MinSeverity string    `yaml:"min_severity,omitempty" json:"min_severity,omitempty" jsonschema:"enum=info,enum=warning,enum=critical"`
+	Webhook     SecretRef `yaml:"webhook,omitempty" json:"webhook,omitempty"`
+	URL         SecretRef `yaml:"url,omitempty" json:"url,omitempty"`
+	SMTP        *SMTP     `yaml:"smtp,omitempty" json:"smtp,omitempty"`
+	From        string    `yaml:"from,omitempty" json:"from,omitempty"`
+	To          []string  `yaml:"to,omitempty" json:"to,omitempty"`
 }
 
 // The severities of an alert, which a channel's min_severity names.
@@ -245,10 +258,10 @@ func AtLeast(severity, min string) bool {
 // SMTP is the mail server of an email channel. Port 465 speaks TLS from the
 // start; any other port must offer STARTTLS.
 type SMTP struct {
-	Host     string     `yaml:"host" json:"host" jsonschema:"required"`
-	Port     int        `yaml:"port" json:"port" jsonschema:"required"`
-	User     string     `yaml:"user,omitempty" json:"user,omitempty"`
-	Password *SecretRef `yaml:"password,omitempty" json:"password,omitempty"`
+	Host     string    `yaml:"host" json:"host" jsonschema:"required"`
+	Port     int       `yaml:"port" json:"port" jsonschema:"required"`
+	User     string    `yaml:"user,omitempty" json:"user,omitempty"`
+	Password SecretRef `yaml:"password,omitempty" json:"password,omitempty"`
 	// CA is a PEM file next to cluster.yaml, written with "/", that the
 	// leader trusts for the server besides the system's (a test CA).
 	CA string `yaml:"ca,omitempty" json:"ca,omitempty"`
