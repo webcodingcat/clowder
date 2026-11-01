@@ -287,10 +287,23 @@ on a host (`compose.Render`).
   state does not link the schema library.
 - `ReadSOPS` decrypts a SOPS file with the user's age key, as SOPS finds it. It refuses a
   file with values left in clear (a rule like `unencrypted_suffix`): these files hold
-  secrets. `Secrets` and `Credentials` read through it; `DecryptSOPS` does the same for
-  content read elsewhere (a `Secret` resource on stdin or in a file of `apply`).
+  secrets. `Secrets` reads through it; `DecryptSOPS` does the same for content read
+  elsewhere (a `Secret` resource on stdin or in a file of `apply`).
 - `WriteSOPS` and `WriteSOPSConfig` write a SOPS file and the `.sops.yaml` beside it, for
   `cluster bootstrap`. `testdata/test-age-key.txt` is a test-only key for the fixtures.
+- **The user's credentials** (`credentials.go`) are not in the cluster directory, which a
+  team shares in a repository, but in the user's config directory
+  (`os.UserConfigDir()/clowder/clusters/<name>/credentials.yaml`, `CredentialsPath`): the
+  user's name, key and certificate, and the cluster's CA, which the CLI trusts. Plain YAML,
+  0600 in a directory of 0700, as SSH keeps its keys. `<name>` is `cluster.yaml`'s `name`,
+  so `clusterspec.Check` holds it to `names.Valid`: it becomes a directory. One file per
+  cluster, one user per file. The tests point `XDG_CONFIG_HOME` (and `HOME`, `AppData`) at
+  a temporary directory.
+- **`cluster bootstrap`** checks first (`CheckBootstrap`) that it writes over neither a
+  `cluster.yaml` nor credentials of a cluster of the same name (`--force` replaces those),
+  since once the cluster has its first user a bootstrap cannot be repeated. It writes the
+  credentials before the cluster directory: `cluster.yaml` can be written by hand, the
+  first user's key cannot be had again.
 - **Files next to `cluster.yaml`** (`acme.ca`): `clusterspec.FileNames` lists those it
   names, by paths relative to it and written with `/` (the CLI runs on Windows too), and
   `Check` refuses
@@ -611,8 +624,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   network error; a write only if it never left (`httptrace`), since one that was sent may
   have committed without an answer.
 - **The CLI** finds the cluster directory (`--cluster`, `$CLOWDER_CLUSTER`, the working
-  directory) and the user (`--user`, `$CLOWDER_USER`, the only credentials file), then talks
-  to the cluster with the user's certificate: `cluster status|apply|diff|schema`,
+  directory) and by its `name` the user's credentials, then talks to the cluster with the
+  user's certificate. An agent whose certificate is of another CA than the credentials'
+  is named as such (`foreignCA`: a cluster of the same name, or set up anew) instead of
+  with x509's words alone: `cluster status|apply|diff|schema`,
   `host list|drain|undrain|remove|enable`, `apply`, `get`, `delete`, `stack ps|logs|restart`.
 - **Exit codes**, for every command: 0 when it did what was asked, 2 for a wrong call
   (`usageError`: an unknown command, flags or arguments that do not fit; `checkArgs` makes
@@ -668,9 +683,11 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   the CA only if one matches its key. `POST /v1/bootstrap`, over TLS checked against that CA,
   carries the user's public key with an HMAC of the bootstrap key and a time
   (`bootstrapMaxAge`). It works once: when the cluster has a user, users add the others. The
-  CLI then writes the cluster directory (`clusterdir.Create`).
+  CLI then writes the credentials (`clusterdir.WriteCredentials`) and the cluster directory
+  (`clusterdir.Create`).
 - The tests run real HTTPS servers: a follower forwarding to the leader, refused callers, the
-  CLI against an agent with a cluster directory and SOPS-encrypted credentials.
+  CLI against an agent with a cluster directory and credentials in a temporary config
+  directory.
 
 ## The agent (`internal/agent`)
 

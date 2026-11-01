@@ -112,12 +112,18 @@ export HCLOUD_TOKEN=...
 tofu init
 tofu apply -var 'ssh_public_key=ssh-ed25519 AAAA...' -var 'admin_cidrs=["203.0.113.7/32"]'
 tofu output -raw bootstrap_key > bootstrap-key
-clowder cluster bootstrap me --age age1... --seed "$(tofu output -raw public_address)" \
-  --key-file bootstrap-key
+clowder cluster bootstrap me --name prod --age age1... \
+  --seed "$(tofu output -raw public_address)" --key-file bootstrap-key
 ```
 
 Then fill in `cluster.yaml` from `tofu output cluster_yaml`, put the hoster token into
 `secrets.sops.yaml` (`sops edit`) and run `clowder cluster apply`.
+
+Your credentials (your key, your certificate and the cluster's CA) do not go into the
+cluster directory, which you may share in a repository, but into your config directory,
+under the cluster's `name`: `~/.config/clowder/clusters/prod/credentials.yaml` on Linux,
+`~/Library/Application Support/clowder/...` on macOS, `%AppData%\clowder\...` on Windows.
+Only you can read the file, as with SSH keys; keep it as safe.
 
 - **The Cloud firewall is the only filter** in front of SSH and clowder's API (port 7443):
   `admin_cidrs` names who reaches them. It takes no `0.0.0.0/0`. HTTP and HTTPS are open to

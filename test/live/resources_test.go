@@ -77,7 +77,7 @@ func restartRecreatesAndTheWatchSeesIt(t *testing.T, server host) {
 	var shown watchOutput
 	watch := exec.CommandContext(ctx, clowderBinary, "get", "stacks", "--watch")
 	watch.Dir = workDir
-	watch.Env = append(os.Environ(), "CLOWDER_CLUSTER="+clusterDir())
+	watch.Env = cliEnvironment()
 	watch.Stdout, watch.Stderr = &shown, &shown
 	if err := watch.Start(); err != nil {
 		t.Fatal(err)

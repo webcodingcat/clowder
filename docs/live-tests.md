@@ -43,7 +43,8 @@ other. Each step has a deadline (`steps` in `live_test.go`). On a failure it pri
 cloud-init's status and the journals of `clowder-setup` and `clowderd`.
 
 1. The setup makes the first host and deletes its key file.
-2. The user bootstraps, fills in `cluster.yaml` from the module's outputs and applies it;
+2. The user bootstraps (its credentials go to `/work/config`, not to the developer's config
+   directory), fills in `cluster.yaml` from the module's outputs and applies it;
    the join keys stay in `secrets.sops.yaml`, the registry's login joins them. The host
    trusts the registry's CA (`/etc/docker/certs.d`), and the test pushes its image there,
    then logs out, so only the agent's login pulls it.

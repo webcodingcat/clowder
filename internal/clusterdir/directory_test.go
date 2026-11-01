@@ -79,16 +79,6 @@ func TestSecretsAreDecryptedWithTheUsersAgeKey(t *testing.T) {
 	if secrets.Registries["ghcr.io"].Username != "robot" {
 		t.Errorf("registries: %+v", secrets.Registries)
 	}
-	credentials, err := directory.Credentials("alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if credentials.Certificate != "TEST-CERT-PEM" {
-		t.Errorf("credentials: %+v", credentials)
-	}
-	if _, err := directory.Credentials("../secrets"); err == nil || !strings.Contains(err.Error(), "user name") {
-		t.Errorf("want an error about the user name, got %v", err)
-	}
 }
 
 func TestDecryptingWithoutTheKeyExplainsWhy(t *testing.T) {
@@ -186,23 +176,5 @@ func TestTheSchemaDescribesClusterYAML(t *testing.T) {
 		if !strings.Contains(missing, key) {
 			t.Errorf("the schema requires %s, but Check does not report it missing:\n%s", key, missing)
 		}
-	}
-}
-
-func TestUserComesFromTheFlagTheEnvironmentOrTheOnlyCredentials(t *testing.T) {
-	directory, err := Load(filepath.Join("testdata", "prod"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(UserEnvVar, "")
-	if user, err := directory.User(""); err != nil || user != "alice" {
-		t.Errorf("only credentials: %q, %v", user, err)
-	}
-	t.Setenv(UserEnvVar, "bob")
-	if user, _ := directory.User(""); user != "bob" {
-		t.Errorf("environment: %q", user)
-	}
-	if user, _ := directory.User("carol"); user != "carol" {
-		t.Errorf("flag: %q", user)
 	}
 }

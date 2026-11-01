@@ -160,6 +160,9 @@ func (c *Client) openStream(ctx context.Context, path string) (io.ReadCloser, er
 		}
 		request.Header.Set(VersionHeader, c.version)
 		response, err := c.streaming.Do(request)
+		if isForeignCA(err) {
+			return nil, foreignCA(seed, err)
+		}
 		if err != nil {
 			unreachable = append(unreachable, fmt.Sprintf("%s: %v", seed, err))
 			continue
@@ -214,12 +217,28 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 		switch {
 		case err == nil || errors.As(err, &statusError):
 			return err
+		case isForeignCA(err):
+			return foreignCA(seed, err)
 		case sent.Load() && method != http.MethodGet:
 			return fmt.Errorf("%s: %w (the write may have gone through: look before you repeat it)", seed, err)
 		}
 		unreachable = append(unreachable, fmt.Sprintf("%s: %v", seed, err))
 	}
 	return fmt.Errorf("no agent answered:\n  %s", strings.Join(unreachable, "\n  "))
+}
+
+// isForeignCA tells whether an agent showed a certificate of a CA other
+// than the one in the user's credentials.
+func isForeignCA(err error) bool {
+	var unknown x509.UnknownAuthorityError
+	return errors.As(err, &unknown)
+}
+
+// foreignCA says what a foreign CA most likely means, instead of x509's
+// words alone. The next seed is not tried: it belongs to the same cluster.
+func foreignCA(seed string, err error) error {
+	return fmt.Errorf("%s belongs to another cluster than your credentials: a cluster of the same name, "+
+		"or one set up anew? (%w)", seed, err)
 }
 
 // statusError reads an answer that is not 2xx: the API's Error, or the text.

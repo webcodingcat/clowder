@@ -195,7 +195,7 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	if err := os.WriteFile(keyFile, []byte(tofu.BootstrapKey.Value), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	mustClowder(t, "cluster", "bootstrap", "tester", "--age", recipient,
+	mustClowder(t, "cluster", "bootstrap", "tester", "--name", "live", "--age", recipient,
 		"--seed", tofu.PublicAddress.Value, "--key-file", keyFile)
 
 	// the module's part of cluster.yaml, read strictly into the real type, so a
@@ -210,7 +210,7 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	if err := decoder.Decode(&config); err != nil {
 		t.Fatalf("the module's cluster_yaml: %v", err)
 	}
-	config.Name = "live"
+	config.Name = "live" // as bootstrapped: the CLI finds the credentials by it
 	config.Hoster = clusterspec.Hoster{
 		Type: "hetzner", Token: clusterspec.SecretRef{Secret: "hcloud-token"}, API: os.Getenv("HCLOUD_ENDPOINT"),
 	}

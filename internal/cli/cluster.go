@@ -63,13 +63,15 @@ func printStatus(out io.Writer, status api.Status) error {
 }
 
 func newBootstrap(g *globals) *cobra.Command {
-	var recipient, seed, keyFile string
+	var name, recipient, seed, keyFile string
+	var force bool
 	command := &cobra.Command{
 		Use:   "bootstrap <user>",
 		Short: "Become the first user of a new cluster and set up its directory",
 		Long: "Asks the first host for the cluster's CA, trusts it only if the host proves it knows the\n" +
-			"bootstrap key, and gets the first user's certificate. Writes the cluster directory:\n" +
-			"credentials/<user>.sops.yaml, secrets.sops.yaml, cluster.yaml to fill in and .sops.yaml.",
+			"bootstrap key, and gets the first user's certificate. Writes your credentials into your\n" +
+			"config directory, under the cluster's name, and the cluster directory: cluster.yaml to\n" +
+			"fill in, secrets.sops.yaml and .sops.yaml.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			user := args[0]
@@ -78,6 +80,11 @@ func newBootstrap(g *globals) *cobra.Command {
 			}
 			path, err := clusterdir.Target(g.cluster)
 			if err != nil {
+				return err
+			}
+			// before the cluster is asked: once it has its first user, a
+			// bootstrap cannot be repeated
+			if err := clusterdir.CheckBootstrap(path, name, force); err != nil {
 				return err
 			}
 			bootstrapKey, err := pki.ReadBootstrapKey(keyFile)
@@ -97,26 +104,35 @@ func newBootstrap(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			err = clusterdir.Create(clusterdir.NewDirectory{
-				Path: path, Recipient: recipient, Seed: seed, BootstrapKey: bootstrapKey,
-				Credentials: clusterdir.Credentials{User: user, CA: caPEM, Certificate: certificatePEM, Key: string(keyPEM)},
+			// the credentials first: without them the cluster's first user
+			// is lost, while cluster.yaml can be written by hand
+			err = clusterdir.WriteCredentials(name, clusterdir.Credentials{
+				User: user, CA: caPEM, Certificate: certificatePEM, Key: string(keyPEM),
 			})
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s is the first user of the cluster. Next:\n"+
+			err = clusterdir.Create(clusterdir.NewDirectory{
+				Path: path, Name: name, Recipient: recipient, Seed: seed, BootstrapKey: bootstrapKey,
+			})
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s is the first user of cluster %s. Next:\n"+
 				"  1. fill in cluster.yaml (the Floating IP, the storage classes)\n"+
 				"  2. sops edit secrets.sops.yaml (the hoster token)\n"+
-				"  3. clowder cluster apply\n", user)
+				"  3. clowder cluster apply\n", user, name)
 			return err
 		},
 	}
+	command.Flags().StringVar(&name, "name", "", "the cluster's name, by which the CLI finds your credentials")
+	command.Flags().BoolVar(&force, "force", false, "replace your credentials for a cluster of the same name")
 	command.Flags().StringVar(&recipient, "age", "", "your age public key (age1...) or SSH public key")
 	command.Flags().StringVar(&seed, "seed", "", "address of the first host")
 	command.Flags().StringVar(&keyFile, "key-file", "",
 		"a file with the cluster's bootstrap key (from OpenTofu); not the key itself, which shell histories would keep")
-	for _, name := range []string{"age", "seed", "key-file"} {
-		_ = command.MarkFlagRequired(name) // the flags exist; this cannot fail
+	for _, flag := range []string{"name", "age", "seed", "key-file"} {
+		_ = command.MarkFlagRequired(flag) // the flags exist; this cannot fail
 	}
 	return command
 }

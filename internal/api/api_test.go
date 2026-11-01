@@ -424,6 +424,21 @@ func TestTheClientTriesTheNextSeed(t *testing.T) {
 	}
 }
 
+func TestTheClientNamesAClusterOfAnotherCA(t *testing.T) {
+	cluster, other := newTestCluster(t), newTestCluster(t)
+	// credentials of the other cluster, against this one's agent
+	client := NewClient([]string{cluster.servers[0].Listener.Addr().String()},
+		other.userCertificate("alice"), other.ca.Certificate, testVersion)
+	err := client.Get(context.Background(), "/v1/users", &[]UserInfo{})
+	if err == nil || !strings.Contains(err.Error(), "belongs to another cluster than your credentials") {
+		t.Errorf("read: %v", err)
+	}
+	if err := client.Stream(context.Background(), "/v1/watch?kind=stack&allNamespaces=true", io.Discard); err == nil ||
+		!strings.Contains(err.Error(), "belongs to another cluster") {
+		t.Errorf("stream: %v", err)
+	}
+}
+
 func TestAWriteThatLeftIsNotSentAgain(t *testing.T) {
 	cluster := newTestCluster(t)
 	// this agent takes the request and hangs up without an answer

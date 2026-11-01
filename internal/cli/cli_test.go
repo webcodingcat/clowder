@@ -25,7 +25,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/pki"
-	"github.com/webcodingcat/clowder/internal/sopsage"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -153,29 +152,19 @@ func startCluster(t *testing.T) string {
 	userCertificate, userKey := issue(func(public ed25519.PublicKey) ([]byte, error) {
 		return ca.IssueUser(public, "alice", time.Now())
 	})
-	plain, err := yaml.Marshal(clusterdir.Credentials{
+	home := t.TempDir() // no key or credentials of the developer join in
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("AppData", home)
+	t.Setenv("SOPS_AGE_KEY", identity.String())
+	t.Setenv("SOPS_AGE_KEY_FILE", "")
+	err = clusterdir.WriteCredentials(config.Name, clusterdir.Credentials{
 		User: "alice", CA: string(ca.CertificatePEM()), Certificate: string(userCertificate), Key: string(userKey),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealed, err := sopsage.Encrypt(plain, []string{identity.Recipient().String()}, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	credentials := filepath.Join(dir, clusterdir.CredentialsDir, "alice.sops.yaml")
-	if err := os.MkdirAll(filepath.Dir(credentials), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(credentials, sealed, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	home := t.TempDir() // no key of the developer joins in
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("SOPS_AGE_KEY", identity.String())
-	t.Setenv("SOPS_AGE_KEY_FILE", "")
-	t.Setenv(clusterdir.UserEnvVar, "")
 	return dir
 }
 

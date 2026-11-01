@@ -22,7 +22,8 @@ const FileName = "cluster.yaml"
 // names are how the cluster state stores the file: a Go field may be
 // renamed, its tags never.
 type Config struct {
-	// Name of the cluster, shown by the CLI.
+	// Name of the cluster, shown by the CLI; it finds the user's credentials
+	// by it.
 	Name string `yaml:"name" json:"name" jsonschema:"required"`
 	// Seeds are a few addresses the CLI tries first; it asks the cluster for
 	// the current members.

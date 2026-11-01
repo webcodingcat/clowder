@@ -1,8 +1,9 @@
-// Package clusterdir reads a cluster directory: cluster.yaml (whose types
-// and checks are clusterspec's), the shared secrets in secrets.sops.yaml and
-// each user's credentials under credentials/. It is portable (Linux, macOS,
-// Windows); the SOPS files are decrypted with the user's age key as SOPS
-// finds it (SOPS_AGE_KEY_FILE, SOPS_AGE_KEY or SOPS's default path).
+// Package clusterdir reads a cluster directory (cluster.yaml, whose types
+// and checks are clusterspec's, and the shared secrets in secrets.sops.yaml)
+// and the user's credentials, which live apart from it in the user's config
+// directory. It is portable (Linux, macOS, Windows); the SOPS files are
+// decrypted with the user's age key as SOPS finds it (SOPS_AGE_KEY_FILE,
+// SOPS_AGE_KEY or SOPS's default path).
 package clusterdir
 
 import (
@@ -16,16 +17,13 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
-	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/sopsage"
 )
 
 // File names inside a cluster directory.
 const (
-	ConfigFile      = clusterspec.FileName
-	SecretsFile     = "secrets.sops.yaml"
-	CredentialsDir  = "credentials"
-	credentialsTail = ".sops.yaml"
+	ConfigFile  = clusterspec.FileName
+	SecretsFile = "secrets.sops.yaml"
 	// EnvVar names the cluster directory when --cluster is not given.
 	EnvVar = "CLOWDER_CLUSTER"
 )
@@ -50,14 +48,6 @@ type Secrets struct {
 type RegistryLogin struct {
 	Username string `yaml:"username" json:"username"`
 	Password string `yaml:"password" json:"password"`
-}
-
-// Credentials is one user's credentials/<user>.sops.yaml after decryption.
-type Credentials struct {
-	User        string `yaml:"user"`
-	CA          string `yaml:"ca"`
-	Certificate string `yaml:"certificate"`
-	Key         string `yaml:"key"`
 }
 
 // Find returns the cluster directory: the flag if set, else $CLOWDER_CLUSTER,
@@ -109,47 +99,6 @@ func (d *Directory) Secrets() (*Secrets, error) {
 		return nil, missing
 	}
 	return &secrets, nil
-}
-
-// UserEnvVar names the user when --user is not given.
-const UserEnvVar = "CLOWDER_USER"
-
-// User returns who uses the CLI: the flag if set, else $CLOWDER_USER, else
-// the only user with credentials in the directory.
-func (d *Directory) User(flag string) (string, error) {
-	for _, candidate := range []string{flag, os.Getenv(UserEnvVar)} {
-		if candidate != "" {
-			return candidate, nil
-		}
-	}
-	files, err := filepath.Glob(filepath.Join(d.Path, CredentialsDir, "*"+credentialsTail))
-	if err != nil {
-		return "", fmt.Errorf("list the credentials: %w", err)
-	}
-	switch len(files) {
-	case 0:
-		return "", fmt.Errorf("no credentials in %s", filepath.Join(d.Path, CredentialsDir))
-	case 1:
-		return strings.TrimSuffix(filepath.Base(files[0]), credentialsTail), nil
-	default:
-		return "", fmt.Errorf("%d users have credentials here: use --user or set %s", len(files), UserEnvVar)
-	}
-}
-
-// Credentials decrypts the credentials of one user.
-func (d *Directory) Credentials(user string) (*Credentials, error) {
-	if err := pki.CheckUserName(user); err != nil {
-		return nil, err
-	}
-	var credentials Credentials
-	file := filepath.Join(d.Path, CredentialsDir, user+credentialsTail)
-	if err := d.decryptInto(file, &credentials); err != nil {
-		return nil, err
-	}
-	if credentials.User != user {
-		return nil, fmt.Errorf("%s belongs to %q, not to %q", file, credentials.User, user)
-	}
-	return &credentials, nil
 }
 
 // decryptInto decrypts a SOPS file and decodes it strictly into target.

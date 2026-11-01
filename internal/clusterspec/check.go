@@ -29,8 +29,11 @@ func Check(config Config) Problems {
 		problems = append(problems, fmt.Sprintf(format, args...))
 	}
 
-	if config.Name == "" {
+	switch {
+	case config.Name == "":
 		report("name is required")
+	case !names.Valid(config.Name): // the CLI keeps the credentials in a directory of this name
+		report("name %q: %s", config.Name, names.Rule)
 	}
 	if len(config.Seeds) == 0 {
 		report("seeds: at least one address is required")

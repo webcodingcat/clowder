@@ -149,7 +149,7 @@ func clowderWithInput(input io.Reader, args ...string) (string, error) {
 	cli := exec.CommandContext(ctx, clowderBinary, args...)
 	cli.Dir = workDir
 	cli.Stdin = input
-	cli.Env = append(os.Environ(), "CLOWDER_CLUSTER="+clusterDir())
+	cli.Env = cliEnvironment()
 	output, err := cli.CombinedOutput()
 	if err != nil {
 		return string(output), fmt.Errorf("clowder %s: %w\n%s", strings.Join(args, " "), err, output)
@@ -169,6 +169,13 @@ func mustClowder(t *testing.T, args ...string) string {
 }
 
 func clusterDir() string { return filepath.Join(workDir, "cluster") }
+
+// cliEnvironment is the CLI's environment: the test's cluster directory,
+// and a config directory of the test's own for the credentials, so a run
+// neither finds nor overwrites those of the developer.
+func cliEnvironment() []string {
+	return append(os.Environ(), "CLOWDER_CLUSTER="+clusterDir(), "XDG_CONFIG_HOME="+filepath.Join(workDir, "config"))
+}
 
 // stackDir is the directory of a stack's resources: outside the cluster
 // directory, which apply refuses.

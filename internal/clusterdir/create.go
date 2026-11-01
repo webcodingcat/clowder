@@ -1,6 +1,7 @@
 package clusterdir
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,29 +21,59 @@ const SOPSConfigFile = ".sops.yaml"
 // cluster directory.
 type NewDirectory struct {
 	Path string
+	// Name is the cluster's name in cluster.yaml.
+	Name string
 	// Recipient is the user's age key (age1... or an SSH public key); the SOPS
 	// files are encrypted for it.
 	Recipient    string
 	Seed         string
 	BootstrapKey string
-	Credentials  Credentials
 }
 
-// Create writes the first files of a cluster directory: the user's
-// credentials, secrets.sops.yaml with the bootstrap key and a placeholder
-// for the hoster token, cluster.yaml to fill in and .sops.yaml. It refuses a
-// directory that has a cluster.yaml already.
-func Create(directory NewDirectory) error {
-	if _, err := os.Stat(filepath.Join(directory.Path, ConfigFile)); err == nil {
-		return fmt.Errorf("%s has a %s already", directory.Path, ConfigFile)
-	}
-	if err := os.MkdirAll(filepath.Join(directory.Path, CredentialsDir), 0o700); err != nil {
-		return fmt.Errorf("create the cluster directory: %w", err)
-	}
-	user := directory.Credentials.User
-	if err := WriteSOPS(filepath.Join(directory.Path, CredentialsDir, user+credentialsTail),
-		directory.Credentials, directory.Recipient); err != nil {
+// CheckBootstrap tells whether a bootstrap may write a cluster of that name
+// into path: not over a cluster.yaml, and not over credentials of a cluster
+// of the same name unless force says so (a cluster set up anew). The CLI
+// asks before it contacts the cluster, so nothing fails after the cluster
+// has its first user.
+func CheckBootstrap(path, cluster string, force bool) error {
+	if err := checkNoConfig(path); err != nil {
 		return err
+	}
+	credentials, err := CredentialsPath(cluster)
+	if err != nil {
+		return err
+	}
+	_, err = os.Stat(credentials)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("look for credentials: %w", err)
+	case !force:
+		return fmt.Errorf("you have credentials for a cluster %s already (%s): "+
+			"give the new cluster another name, or replace them with --force", cluster, credentials)
+	}
+	return nil
+}
+
+// checkNoConfig refuses a directory that has a cluster.yaml.
+func checkNoConfig(path string) error {
+	if _, err := os.Stat(filepath.Join(path, ConfigFile)); err == nil {
+		return fmt.Errorf("%s has a %s already", path, ConfigFile)
+	}
+	return nil
+}
+
+// Create writes the first files of a cluster directory: secrets.sops.yaml
+// with the bootstrap key and a placeholder for the hoster token,
+// cluster.yaml to fill in and .sops.yaml. It refuses a directory that has a
+// cluster.yaml already.
+func Create(directory NewDirectory) error {
+	if err := checkNoConfig(directory.Path); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(directory.Path, 0o755); err != nil {
+		return fmt.Errorf("create the cluster directory: %w", err)
 	}
 	secrets := Secrets{
 		Values:     map[string]string{"hcloud-token": "CHANGE-ME"},
@@ -90,14 +121,10 @@ func WriteSOPS(path string, value any, recipient string) error {
 
 // configTemplate is cluster.yaml for the user to finish.
 func configTemplate(directory NewDirectory) string {
-	name := filepath.Base(directory.Path)
-	if absolute, err := filepath.Abs(directory.Path); err == nil {
-		name = filepath.Base(absolute)
-	}
 	lines := []string{
 		"# The cluster as a whole; clowder cluster apply sends it, clowder cluster schema",
-		"# describes every field.",
-		"name: " + name,
+		"# describes every field. The CLI finds your credentials by the name.",
+		"name: " + directory.Name,
 		"seeds: [" + directory.Seed + "]",
 		"hoster:",
 		"  type: hetzner",

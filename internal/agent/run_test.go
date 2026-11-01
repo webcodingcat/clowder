@@ -410,27 +410,30 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
 	t.Setenv("SOPS_AGE_KEY", identity.String())
 	t.Setenv("SOPS_AGE_KEY_FILE", "")
 	t.Setenv(clusterdir.EnvVar, "")
-	t.Setenv(clusterdir.UserEnvVar, "")
 	dir := t.TempDir()
 	seed := net.JoinHostPort("127.0.0.2", strconv.Itoa(apiPort))
-	bootstrap := []string{
-		"--cluster", dir, "cluster", "bootstrap", "alice", "--age", identity.Recipient().String(),
-		"--seed", seed,
+	bootstrap := func(user, name, cluster, key string) error {
+		_, err := clowder(t, "--cluster", cluster, "cluster", "bootstrap", user, "--name", name,
+			"--age", identity.Recipient().String(), "--seed", seed, "--key-file", key)
+		return err
 	}
 
-	if _, err := clowder(t, append(bootstrap, "--key-file", keyFile(t, "a-guess"))...); err == nil ||
+	if err := bootstrap("alice", "test", dir, keyFile(t, "a-guess")); err == nil ||
 		!strings.Contains(err.Error(), "cannot prove it knows the bootstrap key") {
 		t.Errorf("a wrong bootstrap key: %v", err)
 	}
 	theKey := keyFile(t, "the-bootstrap-key\n")
-	if _, err := clowder(t, append(bootstrap, "--key-file", theKey)...); err != nil {
+	if err := bootstrap("alice", "test", dir, theKey); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := clowder(t, "--cluster", t.TempDir(), "cluster", "bootstrap", "bob",
-		"--age", identity.Recipient().String(), "--seed", seed, "--key-file", theKey); err == nil ||
+	if err := bootstrap("bob", "test", t.TempDir(), theKey); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Errorf("a second bootstrap under the same name: %v", err)
+	}
+	if err := bootstrap("bob", "other", t.TempDir(), theKey); err == nil ||
 		!strings.Contains(err.Error(), "first user already") {
 		t.Errorf("a second bootstrap: %v", err)
 	}
