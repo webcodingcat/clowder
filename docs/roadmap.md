@@ -9,7 +9,7 @@ clowder is built in phases; each ends with live tests on HLab
 | 1a | the foundation on one host: stacks, cluster directory, host check, state, PKI, Raft, API, network, storage, containers | done, passes the live tests |
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done, passes the live tests |
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
-| 1d | encrypted values (`!secret`), access and recovery, still on one host | in progress: values in `cluster.yaml` and Secrets, `secret encrypt`, `rekey`, `decrypt`, access back with a code from a host (`user recover`, `recovery rotate`); next the rest of SOPS goes, then the live tests |
+| 1d | encrypted values (`!secret`), access and recovery, still on one host | in progress: values in `cluster.yaml` and Secrets, `secret encrypt`, `rekey`, `decrypt`, access back with a code from a host (`user recover`, `recovery rotate`), SOPS gone; next the live tests |
 | 2 | three hosts: replication, failover with fencing | |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |

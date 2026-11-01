@@ -7,7 +7,6 @@ rules:
   truthy:
     allowed-values: ["true", "false", "on"]
 
-# Written by SOPS (encrypted values) and by the renderer (golden files).
+# Written by the renderers (golden files).
 ignore: |
-  *.sops.yaml
   *.golden.yaml

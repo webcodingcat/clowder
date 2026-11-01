@@ -17,9 +17,8 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the Debian packages, CI and releas
 
 ## CI
 
-`.github/workflows/ci.yml` runs `bin/dev lint`, `bin/dev test`, `bin/dev test-sops`,
-`bin/dev test-tools` and `bin/dev package` on every push and pull request and keeps `dist/`
-as an artifact. `test-tools` checks the renderers' golden files with Debian's `nft -c`,
+`.github/workflows/ci.yml` runs `bin/dev lint`, `bin/dev test`, `bin/dev test-tools` and
+`bin/dev package` on every push and pull request and keeps `dist/` as an artifact. `test-tools` checks the renderers' golden files with Debian's `nft -c`,
 `drbdadm` and `docker-compose` (`test/tools/check-golden-files.sh`). The live tests need
 `/dev/kvm` and stay manual.
 
@@ -27,7 +26,7 @@ as an artifact. `test-tools` checks the renderers' golden files with Debian's `n
 
 A tag `v<major>.<minor>.<patch>` starts `.github/workflows/release.yml`:
 
-1. `bin/dev all` (lint, test, test-sops, test-tools, package); the version comes from the tag.
+1. `bin/dev all` (lint, test, test-tools, package); the version comes from the tag.
 2. CLI archives for Linux, macOS (`.tar.gz`) and Windows (`.zip`).
 3. `packaging/apt/publish.sh` adds the Debian packages to the public APT repository
    `webcodingcat/clowder-apt` with reprepro and signs it; GitHub Pages serves it at

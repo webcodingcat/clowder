@@ -22,8 +22,6 @@ jobs:
         run: bin/dev lint
       - name: Unit tests
         run: bin/dev test
-      - name: SOPS format against the real sops
-        run: bin/dev test-sops
       - name: Golden files against the real nft, drbdadm and docker-compose
         run: bin/dev test-tools
       - name: Build and package

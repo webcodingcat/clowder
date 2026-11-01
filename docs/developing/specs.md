@@ -158,28 +158,6 @@ on a host (`compose.Render`).
 - Durations (`acme.renew_before`, `alerts.heartbeat.interval`) are read by
   `units.ParseDuration`: Go's format, which may start with whole days (`30d`, `1d12h`).
 
-## SOPS files (`internal/sopsage`)
-
-Nothing uses it any more: values stand encrypted in the files themselves (Encrypted values,
-below), and the package goes in the next step. It was this: the SOPS library brings the
-SDKs of every cloud KMS along (the CLI grew from 2.5 to 44 MB), so `sopsage` implements the
-part of the SOPS format clowder needed: YAML files with age keys, read and written.
-
-- `Decrypt` opens the data key with one of the identities, decrypts every value (AES-256-GCM,
-  the key path as additional data) and checks the MAC; `Encrypt` writes what `sops encrypt`
-  writes with default settings. Comments are dropped. `LeftInClear` names the values SOPS
-  kept in clear.
-- No error message carries a value: a file may be read by a wrong key or be broken, and the
-  message goes to a terminal or a log.
-- `LoadIdentities` looks where SOPS looks: the SSH key, `SOPS_AGE_KEY`, `SOPS_AGE_KEY_FILE`
-  or `sops/age/keys.txt` in the user's config directory. `SOPS_AGE_KEY_CMD` is not
-  supported.
-- Files with settings it does not implement (`*_regex`, key groups, no age recipient) are
-  refused, not guessed at.
-- `testdata/plain*.sops.yaml` were written by the real sops from `testdata/plain.yaml`.
-  `bin/dev test-sops` runs `cross_test.go` (build tag `sops`) against Alpine's sops in both
-  directions.
-
 ## Encrypted values (`internal/secretvalue`)
 
 A secret's value can stand in a YAML file encrypted, tagged `!secret`: age's ASCII armor

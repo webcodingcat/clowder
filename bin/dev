@@ -7,14 +7,12 @@
 #   format    apply what the formatters can fix
 #   test      the unit tests (no VMs); arguments go to go test, e.g.
 #             bin/dev test ./internal/compose -update (rewrite golden files)
-#   test-sops the tests of internal/sopsage against the real sops (Alpine's
-#             package)
 #   test-tools  the golden files of the renderers against the real tools
 #             (nft -c, drbdadm, docker-compose) in Debian
 #   build     clowderd for linux/amd64, clowder for linux, darwin and windows
 #             into dist/
 #   package   build, then the Debian packages of clowder and clowderd into dist/
-#   all       lint, test, test-sops, test-tools, package (what CI runs)
+#   all       lint, test, test-tools, package (what CI runs)
 #   live      package, then the live tests in an HLab lab of their own:
 #             examples/hetzner makes a host, test/live drives it (about 20
 #             minutes; needs HLAB=<path to HLab's bin/hlab> and /dev/kvm).
@@ -32,9 +30,6 @@ DOCKER_ROOT="$(cd "${ROOT}" && (pwd -W 2>/dev/null || pwd) )"
 readonly DOCKER_ROOT
 
 readonly GO_IMAGE=golang:1.27.3
-# Alpine packages sops, so the cross-tests install it in seconds; this image
-# (Alpine 3.24) brings sops 3.12.2, the version of the fixtures.
-readonly GO_SOPS_IMAGE=golang:1.27.3-alpine
 readonly LINT_IMAGE=golangci/golangci-lint:v2.15.0
 readonly NFPM_IMAGE=goreleaser/nfpm:v2.48.0
 readonly SHELLCHECK_IMAGE=koalaman/shellcheck:v0.11.0
@@ -138,12 +133,6 @@ cmd_test() {
     give_back internal
   fi
   return "${status}"
-}
-
-# cmd_test_sops: Run the cross-tests of internal/sopsage against Alpine's sops.
-cmd_test_sops() {
-  in_image "${GO_SOPS_IMAGE}" sh -c \
-    'apk add --no-cache sops >/dev/null && go test -tags sops ./internal/sopsage'
 }
 
 # cmd_test_tools: Check the renderers' golden files with Debian's nft,
@@ -347,7 +336,6 @@ cmd_live_down() {
 cmd_all() {
   cmd_lint
   cmd_test
-  cmd_test_sops
   cmd_test_tools
   cmd_package
 }
@@ -357,7 +345,6 @@ main() {
   case "${1:-}" in
     lint | format | build | package | all) "cmd_$1" ;;
     test) cmd_test "${@:2}" ;;
-    test-sops) cmd_test_sops ;;
     test-tools) cmd_test_tools ;;
     live)
       if [[ "${2:-}" == down ]]; then

@@ -1,4 +1,0 @@
-# TEST ONLY: decrypts the SOPS files in this directory. Never use it for anything else.
-# created: 2026-10-28T16:53:14Z
-# public key: age1mp9raff3qauz3nychwmgsq0p5tv2ej8r5uq8e9pnz0dasrt3hu7s3qqhxh
-AGE-SECRET-KEY-1KWKR9YH0M5AGRADYP9HDJRYX8CC7038VCGVEEE65SEQW8FFVGH9QYL5XP3

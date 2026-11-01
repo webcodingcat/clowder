@@ -13,7 +13,7 @@ the package you change. This file has the whole and the rules that hold everywhe
 
 | File | Sections |
 |---|---|
-| [What users write](docs/developing/specs.md) | namespaces and names, stack specs, rendering, cluster config and directory, SOPS files, encrypted values |
+| [What users write](docs/developing/specs.md) | namespaces and names, stack specs, rendering, cluster config and directory, encrypted values |
 | [The cluster](docs/developing/cluster.md) | cluster state, certificates, Raft and the data key, API and the CLI, placement |
 | [A host](docs/developing/host.md) | the agent, network, storage, containers, host check |
 | [Ingress, certificates, alerts and metrics](docs/developing/loops.md) | Traefik, hoster and ingress, certificates of the routes, alerts, metrics |
@@ -137,7 +137,7 @@ What follows from there:
 The package layout is planned for the whole of v1; packages appear as the phases add them.
 
 - **Portable**: `cli`, `api`, `clusterspec` (`cluster.yaml`'s types and checks),
-  `clusterdir` (the cluster directory's files), `sopsage`, `secretvalue` (values tagged
+  `clusterdir` (the cluster directory's files), `secretvalue` (values tagged
   `!secret`), `yamlpath` (the names of places in YAML), `pki`, `recoverycode` (the codes
   from a host that give access back), `compose`, `units`,
   `names` (the rules for the names users give, and the names on the host made of them),

@@ -20,11 +20,10 @@ are not needed on the host.
 | `bin/dev lint` | golangci-lint (gofumpt, goimports, the import rule), shellcheck, shfmt, yamllint, `tofu fmt`, `tofu validate` |
 | `bin/dev format` | apply what the formatters can fix |
 | `bin/dev test` | the unit tests with the race detector (seconds, no VMs) |
-| `bin/dev test-sops` | the tests of `internal/sopsage` against the real sops |
 | `bin/dev test-tools` | the golden files of the renderers against the real `nft`, `drbdadm` and `docker-compose` |
 | `bin/dev build` | `clowderd` for Linux, `clowder` for Linux, macOS and Windows into `dist/` |
 | `bin/dev package` | build, then the Debian packages into `dist/` |
-| `bin/dev all` | lint, test, test-sops, test-tools, package – what CI runs |
+| `bin/dev all` | lint, test, test-tools, package – what CI runs |
 | `bin/dev live` | the live tests: a host from `examples/hetzner` in an HLab lab of their own, driven by `test/live` (about 20 minutes; `HLAB` points at HLab's `bin/hlab`, needs `/dev/kvm`); `bin/dev live down` removes what a failed run left |
 
 Run the live tests only at the end of a piece of work, on its finished state, and only while

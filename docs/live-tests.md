@@ -14,7 +14,7 @@ bin/dev live down    # after a failure: destroy the host, stop the lab
 
 Run them only at the end of a piece of work, on its finished state, and only while no one
 else uses the lab `clowder-live`. Without HLab, `bin/dev all` checks everything but these
-tests: lint, the unit tests, SOPS, the renderers against the real tools, the packages.
+tests: lint, the unit tests, the renderers against the real tools, the packages.
 
 ## What `bin/dev live` sets up
 

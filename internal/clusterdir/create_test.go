@@ -1,7 +1,6 @@
 package clusterdir
 
 import (
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -37,8 +36,5 @@ func TestTheBootstrapsClusterYAMLLoadsAndNamesWhatIsMissing(t *testing.T) {
 	}
 	if err := Create(NewDirectory{Path: dir, Name: "prod", JoinKey: testArmor}); err == nil {
 		t.Error("a second Create wrote over cluster.yaml")
-	}
-	if _, err := os.Stat(filepath.Join(dir, ".sops.yaml")); err == nil {
-		t.Error("a .sops.yaml came along")
 	}
 }
