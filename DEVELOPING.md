@@ -77,11 +77,11 @@ step names the file and function to read; the package's section explains the rul
 5. **The placement finds a host.** `controller/placement.go` `RunPlacement` runs on the
    leader. `scheduler/place.go` `Plan` picks a host for the stack and a pool for each new
    volume. The controller commits `put-volume` and `set-stack-status starting`.
-6. **The host runs it.** `agent/stacks.go` `stackRunner.pass` sees the stack placed on its
-   host. `agent/stack_apply.go` `apply` renders the Compose file (`render`), makes the
+6. **The host runs it.** `agent/stacks/runner.go` `Runner.pass` sees the stack placed on
+   its host. `agent/stacks/apply.go` `apply` renders the Compose file (`render`), makes the
    volumes (`ensureVolumes`), and `up` writes the secrets to tmpfs and runs
    `docker compose up`. The host reports `running` (`reportRunning`, through
-   `agent/loops.go` `commitAsHost`), or `failing` with why (`reportFailing`) and tries
+   `agent/loop` `CommitAsHost`), or `failing` with why (`reportFailing`) and tries
    again at the next pass.
 7. **The supervisor keeps it running.** Docker restarts nothing itself;
    `supervisor.Supervisor` follows Docker's events and restarts what crashes.
@@ -163,7 +163,11 @@ The package layout is planned for the whole of v1; packages appear as the phases
   `controller.Propose` for the commands it writes itself.
 - **Changes the host**: `agent`, `supervisor`, `raftnode` (Raft over mTLS), `datakey` (the
   key file), `command` (host tools with a timeout) and the drivers `network`, `storage`,
-  `docker`, `ingress` (Traefik's files; it renders, the agent writes).
+  `docker`, `ingress` (Traefik's files; it renders, the agent writes). Within the agent,
+  `agent/stacks` is the stack runner and `agent/loop` what all of the agent's loops share
+  (when a pass runs, the supervisor's signal, committing as the host); `agent` imports both,
+  `agent/stacks` imports `agent/loop`, and neither imports `agent`. `agent/agenttest` has
+  the fakes the tests of all three share.
 - **Reads the host**: `hostcheck` (for `clowderd check`). It compiles anywhere, but only the
   agent uses it, so depguard keeps it out of the CLI like the packages above.
 

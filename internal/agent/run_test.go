@@ -5,14 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,15 +18,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/agent/agenttest"
 	"github.com/webcodingcat/clowder/internal/cli"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
-	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/hoster"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/resource"
-	"github.com/webcodingcat/clowder/internal/storage"
 )
 
 func freePort(t *testing.T) int {
@@ -138,192 +135,6 @@ func (f *fakeNetwork) waitForRuleset(t *testing.T, want func(network.Ruleset) bo
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Errorf("no such ruleset applied; the last ones: %v", f.rulesets)
-}
-
-// calls is what a fake was asked to do, one line per call.
-type calls struct {
-	mu    sync.Mutex
-	lines []string
-}
-
-func (c *calls) add(format string, args ...any) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.lines = append(c.lines, fmt.Sprintf(format, args...))
-}
-
-// waitFor waits up to 10 s for a call.
-func (c *calls) waitFor(t *testing.T, line string) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		c.mu.Lock()
-		found := slices.Contains(c.lines, line)
-		c.mu.Unlock()
-		if found {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	t.Errorf("no call %q; the calls: %q", line, c.lines)
-}
-
-// fakeStorage stands in for the storage driver: every pool has 100 GiB,
-// dataPercent full, unless reading it fails (poolFails). A trim fails while
-// trimFails is set.
-type fakeStorage struct {
-	calls
-	dir         string
-	dataPercent float64
-	poolFails   bool
-	trimFails   bool
-}
-
-func (f *fakeStorage) Ensure(_ context.Context, volume storage.Volume) error {
-	f.add("ensure %s", volume.LV)
-	return nil
-}
-
-func (f *fakeStorage) Remove(_ context.Context, volume storage.Volume) error {
-	f.add("remove %s", volume.LV)
-	return nil
-}
-
-func (f *fakeStorage) Trim(_ context.Context, volumes []storage.Volume) error {
-	var lvs []string
-	for _, volume := range volumes {
-		lvs = append(lvs, volume.LV)
-	}
-	f.add("trim %s", strings.Join(lvs, " "))
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.trimFails {
-		return errors.New("fstrim timed out")
-	}
-	return nil
-}
-
-func (f *fakeStorage) PoolUsage(context.Context, string) (int64, float64, float64, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.poolFails {
-		return 0, 0, 0, errors.New("lvs timed out")
-	}
-	return 100 << 30, f.dataPercent, 0, nil
-}
-
-func (f *fakeStorage) MountPoint(volume storage.Volume) string {
-	return filepath.Join(f.dir, volume.LV)
-}
-
-// fakeDocker stands in for Docker: it sends no events and has one
-// container per stack.
-type fakeDocker struct {
-	calls
-	// failedUps and failedDowns are how many compose ups and downs fail
-	// before one works
-	failedUps, failedDowns int
-	// down makes Ping fail as if refused, hangs as if it timed out
-	down, hangs bool
-	// upFiles and leftOut are the files and the services left out of the
-	// last compose up
-	upFiles, leftOut []string
-	// containers and details are what Docker lists and inspects
-	containers []docker.Container
-	details    map[string]docker.Details
-	// duringUp runs within each compose up, as a Docker restart would
-	duringUp func()
-}
-
-func (f *fakeDocker) Events(ctx context.Context, _ string) (<-chan docker.Event, <-chan error) {
-	events := make(chan docker.Event)
-	go func() {
-		<-ctx.Done()
-		close(events)
-	}()
-	return events, make(chan error)
-}
-
-func (f *fakeDocker) Ping(ctx context.Context) error {
-	f.mu.Lock()
-	down, hangs := f.down, f.hangs
-	f.mu.Unlock()
-	switch {
-	case ctx.Err() != nil:
-		return ctx.Err()
-	case hangs:
-		// the client's own timeout ran out
-		return fmt.Errorf("ping Docker: %w", context.DeadlineExceeded)
-	case down:
-		return errors.New("connection refused")
-	}
-	return nil
-}
-
-func (f *fakeDocker) Start(context.Context, string) error   { return nil }
-func (f *fakeDocker) Restart(context.Context, string) error { return nil }
-
-func (f *fakeDocker) ComposeUp(_ context.Context, stack string, files, leftOut []string) error {
-	f.add("up %s", stack)
-	if f.duringUp != nil {
-		f.duringUp()
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.upFiles, f.leftOut = files, leftOut
-	if f.failedUps > 0 {
-		f.failedUps--
-		return errors.New("pull access denied")
-	}
-	return nil
-}
-
-func (f *fakeDocker) ComposePull(_ context.Context, stack string, _, services []string) error {
-	f.add("pull %s %s", stack, strings.Join(services, " "))
-	return nil
-}
-
-func (f *fakeDocker) ComposeDown(_ context.Context, stack, _ string) error {
-	f.add("down %s", stack)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.failedDowns > 0 {
-		f.failedDowns--
-		return errors.New("the container does not stop")
-	}
-	return nil
-}
-
-func (f *fakeDocker) ComposePs(context.Context, string, string) (string, error) {
-	return `{"Service":"app","State":"running","Health":"","Status":"Up 2 seconds"}` + "\n", nil
-}
-
-func (f *fakeDocker) ComposeLogs(_ context.Context, _, _ string, _ bool, out io.Writer) error {
-	_, err := fmt.Fprintln(out, "app-1  | hello")
-	return err
-}
-
-func (f *fakeDocker) Login(_ context.Context, registry, username, password string) error {
-	f.add("login %s %s %s", registry, username, password)
-	return nil
-}
-
-func (f *fakeDocker) Containers(context.Context, string) ([]docker.Container, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return slices.Clone(f.containers), nil
-}
-
-func (f *fakeDocker) Inspect(_ context.Context, id string) (docker.Details, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	details, ok := f.details[id]
-	if !ok {
-		return docker.Details{}, docker.ErrNoContainer
-	}
-	return details, nil
 }
 
 // keyFile writes a bootstrap key into a file of its own, as the user keeps it.
@@ -479,10 +290,10 @@ func TestRunEndsAtItsStartWhenAPartFailsAndLeavesNothingOpen(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel() // init takes a while
 			files, raftPort, apiPort := initTestHost(t)
-			hostNetwork, hostDocker := &fakeNetwork{}, &fakeDocker{}
+			hostNetwork, hostDocker := &fakeNetwork{}, &agenttest.Docker{}
 			want := test.prepare(t, &files, hostNetwork, apiPort)
 			parts := HostParts{
-				Network: hostNetwork, Storage: &fakeStorage{dir: t.TempDir()}, Docker: hostDocker,
+				Network: hostNetwork, Storage: &agenttest.Storage{Dir: t.TempDir()}, Docker: hostDocker,
 				Hoster: (&fakeHoster{}).connect,
 			}
 			err := Run(context.Background(), files, parts, logger)
@@ -499,8 +310,8 @@ func TestRunEndsAtItsStartWhenAPartFailsAndLeavesNothingOpen(t *testing.T) {
 			if closed := hostNetwork.resolver.closed.Load(); closed != wantClosed {
 				t.Errorf("the resolver was closed %d times, want %d", closed, wantClosed)
 			}
-			if len(hostDocker.lines) != 0 {
-				t.Errorf("Docker was asked %q", hostDocker.lines)
+			if calls := hostDocker.Lines(); len(calls) != 0 {
+				t.Errorf("Docker was asked %q", calls)
 			}
 		})
 	}
@@ -540,8 +351,8 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 
 	ctx, stop := context.WithCancel(context.Background())
 	stopped := make(chan error, 1)
-	hostStorage := &fakeStorage{dir: t.TempDir()}
-	hostDocker := &fakeDocker{}
+	hostStorage := &agenttest.Storage{Dir: t.TempDir()}
+	hostDocker := &agenttest.Docker{}
 	hostHoster := &fakeHoster{}
 	parts := HostParts{Network: hostNetwork, Storage: hostStorage, Docker: hostDocker, Hoster: hostHoster.connect}
 	go func() { stopped <- Run(ctx, files, parts, logger) }()
@@ -663,8 +474,8 @@ spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
 		t.Fatal(err)
 	}
 	lv := names.VolumeName("default/db", 1)
-	hostStorage.waitFor(t, "ensure "+lv)
-	hostDocker.waitFor(t, "up default_shop")
+	hostStorage.WaitFor(t, "ensure "+lv)
+	hostDocker.WaitFor(t, "up default_shop")
 	if _, err := os.Stat(filepath.Join(files.Dir, "stacks", "default_shop", "compose.yaml")); err != nil {
 		t.Errorf("the rendered Compose file: %v", err)
 	}
@@ -683,8 +494,8 @@ spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
 	if _, err := clowder(t, "--cluster", dir, "delete", "--with-data", "-f", resources); err != nil {
 		t.Fatal(err)
 	}
-	hostDocker.waitFor(t, "down default_shop")
-	hostStorage.waitFor(t, "remove "+lv)
+	hostDocker.WaitFor(t, "down default_shop")
+	hostStorage.WaitFor(t, "remove "+lv)
 	// the same token encrypted anew is no change; the network is
 	finish("CHANGE-ME", "network: public\n")
 	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "network") ||

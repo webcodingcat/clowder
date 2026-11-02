@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"crypto/ed25519"
 	"crypto/tls"
 	"errors"
@@ -21,9 +22,14 @@ import (
 	"github.com/webcodingcat/clowder/internal/secretvalue"
 )
 
+// bootstrapFlags are the flags of clowder cluster bootstrap.
+type bootstrapFlags struct {
+	name, seed, keyFile, recoveryOut string
+	force                            bool
+}
+
 func newBootstrap(g *globals) *cobra.Command {
-	var name, seed, keyFile, recoveryOut string
-	var force bool
+	var flags bootstrapFlags
 	command := &cobra.Command{
 		Use:   "bootstrap <user>",
 		Short: "Become the first user of a new cluster and set up its directory",
@@ -44,14 +50,14 @@ func newBootstrap(g *globals) *cobra.Command {
 			}
 			// before the cluster is asked: once it has its first user, a
 			// bootstrap cannot be repeated
-			if err := clusterdir.CheckBootstrap(path, name, force); err != nil {
+			if err := clusterdir.CheckBootstrap(path, flags.name, flags.force); err != nil {
 				return err
 			}
-			bootstrapKey, err := pki.ReadBootstrapKey(keyFile)
+			bootstrapKey, err := pki.ReadBootstrapKey(flags.keyFile)
 			if err != nil {
 				return err
 			}
-			cluster, err := api.FindCluster(cmd.Context(), seed, []byte(bootstrapKey), buildinfo.Version)
+			cluster, err := api.FindCluster(cmd.Context(), flags.seed, []byte(bootstrapKey), buildinfo.Version)
 			if err != nil {
 				return err
 			}
@@ -59,76 +65,98 @@ func newBootstrap(g *globals) *cobra.Command {
 			// which one counts
 			if cluster.Bootstrapped {
 				return fmt.Errorf("the cluster has its first user already. If that was an earlier try of "+
-					"yours, the recovery key it gave out is the one that counts; %s", accessByCode(user, name, seed))
+					"yours, the recovery key it gave out is the one that counts; %s",
+					accessByCode(user, flags.name, flags.seed))
 			}
 			recovery, err := age.GenerateX25519Identity()
 			if err != nil {
 				return err
 			}
-			if err := handOverRecoveryKey(cmd, recovery, recoveryOut); err != nil {
+			if err := handOverRecoveryKey(cmd, recovery, flags.recoveryOut); err != nil {
 				return err
 			}
-			key, err := pki.NewKey()
-			if err != nil {
-				return err
-			}
-			certificatePEM, err := cluster.Bootstrap(cmd.Context(), user, key.Public().(ed25519.PublicKey),
-				recovery.Recipient().String())
-			if err != nil {
-				return err
-			}
-			keyPEM, err := pki.EncodeKey(key)
+			credentials, err := becomeFirstUser(cmd.Context(), cluster, user, recovery)
 			if err != nil {
 				return err
 			}
 			// the credentials first: without them the cluster's first user
 			// is lost, while cluster.yaml can be written by hand
-			credentials := clusterdir.Credentials{User: user, CA: cluster.CAPEM, Certificate: certificatePEM, Key: string(keyPEM)}
-			if err := clusterdir.WriteCredentials(name, credentials); err != nil {
+			if err := clusterdir.WriteCredentials(flags.name, credentials); err != nil {
 				return fmt.Errorf("%w. The cluster has %s as its first user and the recovery key just made counts; "+
-					"%s, and write cluster.yaml after the README's example", err, user, accessByCode(user, name, seed))
+					"%s, and write cluster.yaml after the README's example", err, user,
+					accessByCode(user, flags.name, flags.seed))
 			}
-			certificate, err := tls.X509KeyPair([]byte(certificatePEM), keyPEM)
-			if err != nil {
-				return err
-			}
-			client := api.NewClient([]string{seed}, certificate, cluster.CA, buildinfo.Version)
-			recipients, encryption, err := clusterRecipients(cmd.Context(), client)
-			if err != nil {
-				return err
-			}
-			// a guard against a fault of clowder's own: a second bootstrap
-			// stops above, or the cluster refuses it
-			if encryption.Recovery != recovery.Recipient().String() {
-				return fmt.Errorf("the cluster's recovery key is %s, not the one just made; "+
-					"make a new one with clowder recovery rotate and a code from a host", encryption.Recovery)
-			}
-			joinKey, err := secretvalue.Encrypt(secretvalue.Value{For: secretvalue.Cluster, Bytes: []byte(bootstrapKey)},
-				recipients...)
-			if err != nil {
-				return err
-			}
-			if err := clusterdir.Create(clusterdir.NewDirectory{Path: path, Name: name, Seed: seed, JoinKey: joinKey}); err != nil {
+			newDirectory := clusterdir.NewDirectory{Path: path, Name: flags.name, Seed: flags.seed}
+			if err := createDirectory(cmd.Context(), newDirectory, credentials, cluster, recovery, bootstrapKey); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s is the first user of cluster %s. Next:\n"+
 				"  1. fill in cluster.yaml: the hoster with its token (clowder secret encrypt --cluster-yaml),\n"+
 				"     the Floating IP, the storage classes\n"+
-				"  2. clowder cluster apply\n", user, name)
+				"  2. clowder cluster apply\n", user, flags.name)
 			return err
 		},
 	}
-	command.Flags().StringVar(&name, "name", "", "the cluster's name, by which the CLI finds your credentials")
-	command.Flags().BoolVar(&force, "force", false, "replace your credentials for a cluster of the same name")
-	command.Flags().StringVar(&seed, "seed", "", "address of the first host")
-	command.Flags().StringVar(&keyFile, "key-file", "",
+	command.Flags().StringVar(&flags.name, "name", "", "the cluster's name, by which the CLI finds your credentials")
+	command.Flags().BoolVar(&flags.force, "force", false, "replace your credentials for a cluster of the same name")
+	command.Flags().StringVar(&flags.seed, "seed", "", "address of the first host")
+	command.Flags().StringVar(&flags.keyFile, "key-file", "",
 		"a file with the cluster's bootstrap key (from OpenTofu); not the key itself, which shell histories would keep")
-	command.Flags().StringVar(&recoveryOut, "recovery-out", "",
+	command.Flags().StringVar(&flags.recoveryOut, "recovery-out", "",
 		"write the recovery key to this new file instead of showing it (scripts, no terminal)")
 	for _, flag := range []string{"name", "seed", "key-file"} {
 		_ = command.MarkFlagRequired(flag) // the flags exist; this cannot fail
 	}
 	return command
+}
+
+// becomeFirstUser makes the user's key and gets its certificate from the
+// cluster, which takes recovery's public key as the cluster's recovery key.
+func becomeFirstUser(ctx context.Context, cluster *api.TrustedCluster, user string,
+	recovery *age.X25519Identity,
+) (clusterdir.Credentials, error) {
+	key, err := pki.NewKey()
+	if err != nil {
+		return clusterdir.Credentials{}, err
+	}
+	certificatePEM, err := cluster.Bootstrap(ctx, user, key.Public().(ed25519.PublicKey), recovery.Recipient().String())
+	if err != nil {
+		return clusterdir.Credentials{}, err
+	}
+	keyPEM, err := pki.EncodeKey(key)
+	if err != nil {
+		return clusterdir.Credentials{}, err
+	}
+	return clusterdir.Credentials{User: user, CA: cluster.CAPEM, Certificate: certificatePEM, Key: string(keyPEM)}, nil
+}
+
+// createDirectory writes the cluster directory with cluster.yaml to fill
+// in. Its join key is the bootstrap key, encrypted for the cluster, so the
+// user asks the cluster, with the new credentials, for its recipients.
+func createDirectory(ctx context.Context, directory clusterdir.NewDirectory, credentials clusterdir.Credentials,
+	cluster *api.TrustedCluster, recovery *age.X25519Identity, bootstrapKey string,
+) error {
+	certificate, err := tls.X509KeyPair([]byte(credentials.Certificate), []byte(credentials.Key))
+	if err != nil {
+		return err
+	}
+	client := api.NewClient([]string{directory.Seed}, certificate, cluster.CA, buildinfo.Version)
+	recipients, encryption, err := clusterRecipients(ctx, client)
+	if err != nil {
+		return err
+	}
+	// a guard against a fault of clowder's own: a second bootstrap stops
+	// before, or the cluster refuses it
+	if encryption.Recovery != recovery.Recipient().String() {
+		return fmt.Errorf("the cluster's recovery key is %s, not the one just made; "+
+			"make a new one with clowder recovery rotate and a code from a host", encryption.Recovery)
+	}
+	directory.JoinKey, err = secretvalue.Encrypt(secretvalue.Value{For: secretvalue.Cluster, Bytes: []byte(bootstrapKey)},
+		recipients...)
+	if err != nil {
+		return err
+	}
+	return clusterdir.Create(directory)
 }
 
 // accessByCode says how a user of the cluster gets in without credentials.

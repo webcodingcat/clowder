@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/agent/loop"
 	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -28,7 +29,7 @@ import (
 type hostReporter struct {
 	host    Host
 	version string
-	cluster stateReader
+	cluster loop.Cluster
 	docker  Docker
 	storage Storage
 	propose controller.Propose
@@ -37,7 +38,7 @@ type hostReporter struct {
 	root string
 }
 
-// run reports until ctx ends: every reconcileInterval, and at once when a
+// run reports until ctx ends: every loop.Interval, and at once when a
 // new cluster.yaml may name a new pool. Other changes of the state (a
 // stack's status, a certificate) wake no probe: lvs on a host whose DRBD
 // hangs is slow.
@@ -48,7 +49,7 @@ func (r *hostReporter) run(ctx context.Context) {
 		// take the channel before reading, so no change between goes unseen
 		changed := r.cluster.Changed()
 		if revision := r.configRevision(); revision != seen || !time.Now().Before(next) {
-			seen, next = revision, time.Now().Add(reconcileInterval)
+			seen, next = revision, time.Now().Add(loop.Interval)
 			if err := r.pass(ctx); err != nil {
 				r.logger.Error("report this host", "error", err)
 			}
@@ -114,7 +115,7 @@ func (r *hostReporter) pass(ctx context.Context) error {
 		report.DockerDown == self.DockerDown && report.RootUsedPercent == self.RootUsedPercent {
 		return nil
 	}
-	if err := commitAsHost(ctx, r.propose, r.host.ID, state.KindReportHost, report); err != nil {
+	if err := loop.CommitAsHost(ctx, r.propose, r.host.ID, state.KindReportHost, report); err != nil {
 		return fmt.Errorf("commit the report: %w", err)
 	}
 	// once the state has it, so a failed commit does not log it again

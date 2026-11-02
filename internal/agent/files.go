@@ -12,16 +12,22 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/webcodingcat/clowder/internal/agent/stacks"
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/datakey"
 	"github.com/webcodingcat/clowder/internal/ingress"
-	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
 // DefaultDir is where a host keeps its files.
 const DefaultDir = "/var/lib/clowder"
+
+// DefaultSecretsDir holds the stacks' secrets in clear. /run is a tmpfs:
+// they never reach a disk, and a boot clears them. It is not a systemd
+// RuntimeDirectory, which would go each time the agent stops while the
+// containers still use it.
+const DefaultSecretsDir = "/run/clowder-secrets"
 
 // The ports of an agent; tests use others.
 const (
@@ -53,38 +59,15 @@ func (f Files) volumesDir() string { return filepath.Join(f.Dir, "volumes") }
 func (f Files) storageDir() string { return filepath.Join(f.Dir, "storage") }
 func (f Files) lastTrim() string   { return filepath.Join(f.storageDir(), "last-trim") }
 
-// The files of the stacks on this host, by their Compose project
-// (names.Project): per stack its rendered Compose file and the LVs it
-// mounts.
-func (f Files) stacksDir() string              { return filepath.Join(f.Dir, "stacks") }
-func (f Files) stackDir(project string) string { return filepath.Join(f.stacksDir(), project) }
-func (f Files) stackFile(project string) string {
-	return filepath.Join(f.stackDir(project), "compose.yaml")
-}
-
-func (f Files) stackVolumesFile(project string) string {
-	return filepath.Join(f.stackDir(project), "volumes.json")
-}
-func (f Files) volumeRecordsDir() string { return filepath.Join(f.Dir, "volume-records") }
-func (f Files) volumeRecord(volumeID string) string {
-	return filepath.Join(f.volumeRecordsDir(), names.FileName(volumeID)+".json")
-}
-
-// The files of a stack's secrets, by its project: a file per secret a
-// service asks for as a file (bind-mounted to /run/secrets/<name>), and the
-// second Compose file with the secret variables.
-func (f Files) secretsDir(project string) string { return filepath.Join(f.SecretsDir, project) }
-
-func (f Files) secretFilesDir(project string) string {
-	return filepath.Join(f.secretsDir(project), "files")
-}
-
-func (f Files) secretEnvFile(project string) string {
-	return filepath.Join(f.secretsDir(project), "env.yaml")
-}
-
-func (f Files) secretFile(project, name string) string {
-	return filepath.Join(f.secretFilesDir(project), name)
+// stackFiles are where the stack runner keeps the stacks on this host: a
+// directory per stack, a record per volume, the secrets on the tmpfs.
+func (f Files) stackFiles() stacks.Files {
+	return stacks.Files{
+		StacksDir:        filepath.Join(f.Dir, "stacks"),
+		VolumeRecordsDir: filepath.Join(f.Dir, "volume-records"),
+		SecretsDir:       f.SecretsDir,
+		LastTrim:         f.lastTrim(),
+	}
 }
 
 // Traefik's files sit beside stacks/, so the search for stacks that left
@@ -97,7 +80,7 @@ func (f Files) traefikDynamicDir() string { return filepath.Join(f.Dir, "traefik
 // traefikCertificatesDir holds the routes' certificates and keys in clear,
 // beside the stacks' secrets on the tmpfs: the "clowder-" prefix keeps a
 // stack from taking it.
-func (f Files) traefikCertificatesDir() string { return f.secretsDir(ingress.Project) }
+func (f Files) traefikCertificatesDir() string { return filepath.Join(f.SecretsDir, ingress.Project) }
 
 // Host is host.json: who this host is in the cluster. init and join write it
 // last, so a host with this file has all the others.

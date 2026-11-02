@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/agent/loop"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/controller"
@@ -45,7 +46,7 @@ const metricsTimeout = 5 * time.Second
 type metricsSource struct {
 	host    Host
 	cluster interface {
-		stateReader
+		loop.Cluster
 		IsLeader() bool
 	}
 	docker   Docker

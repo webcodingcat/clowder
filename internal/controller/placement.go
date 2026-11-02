@@ -72,32 +72,34 @@ func (p *placer) pass(ctx context.Context) time.Duration {
 	// contrast, stands alone, so the others still go.
 	for _, pushOut := range decisions.PushOuts {
 		p.logger.Warn("pushing out services: the host's stacks reserve more than it offers", "pushed_out", pushOut)
-		if err := commit(ctx, p.propose, state.KindSetPushedOut, state.SetPushedOut{Stacks: pushOut}); err != nil {
-			p.logger.Error("place the stacks", "command", state.KindSetPushedOut, "error", err)
+		if !p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: pushOut}) {
 			return 0
 		}
 	}
 	p.commitWaitReasons(ctx, copied, decisions.Waiting)
 	for _, placement := range decisions.Placements {
-		if err := p.commitPlacement(ctx, placement); err != nil {
-			p.logger.Error("place a stack", "stack", placement.Stack, "error", err)
-		}
+		p.commitPlacement(ctx, placement)
 	}
 	return p.comeBack(ctx, decisions.ComeBack)
 }
 
-// commitOrLog writes one command; a failure is logged, and the next pass
-// plans again.
-func (p *placer) commitOrLog(ctx context.Context, kind string, payload any) {
+// commitOrLog writes one command and tells whether it committed; a failure
+// is logged, and the next pass plans again.
+func (p *placer) commitOrLog(ctx context.Context, kind string, payload any) bool {
 	if err := commit(ctx, p.propose, kind, payload); err != nil {
 		p.logger.Error("place the stacks", "command", kind, "error", err)
+		return false
 	}
+	return true
 }
 
 // noteOverCapacity holds the condition of each host over capacity and logs
 // it once.
 func (p *placer) noteOverCapacity(copied *state.State, hosts []state.HostID) {
 	for _, id := range slices.Sorted(maps.Keys(copied.Hosts)) {
+		if copied.Hosts[id].Phase == state.Removed {
+			continue // its condition is forgotten (conditionKeys)
+		}
 		if p.conditions.Observe(overCapacityKey(id), slices.Contains(hosts, id)) {
 			p.logger.Warn("host over capacity: its highest priority alone reserves more than it offers",
 				"host", copied.Hosts[id].Name)
@@ -131,26 +133,25 @@ func (p *placer) commitWaitReasons(ctx context.Context, copied *state.State, wai
 // commitPlacement commits one placement: what the stack pushes out first,
 // then the volumes, then the stack's host, so the agent finds the volumes
 // when it sees the stack. If the leader changes in between, the services
-// stay pushed out without the new stack, and come back (comeBack).
-func (p *placer) commitPlacement(ctx context.Context, placement scheduler.Placement) error {
-	if placement.PushedOut != nil {
-		err := commit(ctx, p.propose, state.KindSetPushedOut, state.SetPushedOut{Stacks: placement.PushedOut})
-		if err != nil {
-			return err
-		}
+// stay pushed out without the new stack, and come back (comeBack). The
+// first command that fails ends the placement; the next pass plans it
+// again.
+func (p *placer) commitPlacement(ctx context.Context, placement scheduler.Placement) {
+	if placement.PushedOut != nil &&
+		!p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: placement.PushedOut}) {
+		return
 	}
 	for _, volume := range placement.Volumes {
-		if err := commit(ctx, p.propose, state.KindPutVolume, state.PutVolume{Volume: volume}); err != nil {
-			return err
+		if !p.commitOrLog(ctx, state.KindPutVolume, state.PutVolume{Volume: volume}) {
+			return
 		}
 	}
-	if !placement.SetsHost {
-		return nil
+	if placement.SetsHost {
+		host := placement.Host
+		p.commitOrLog(ctx, state.KindSetStackStatus, state.SetStackStatus{
+			ID: placement.Stack, Status: state.StackStarting, Host: &host,
+		})
 	}
-	host := placement.Host
-	return commit(ctx, p.propose, state.KindSetStackStatus, state.SetStackStatus{
-		ID: placement.Stack, Status: state.StackStarting, Host: &host,
-	})
 }
 
 // comeBack brings a pushed-out service back once it has fit for

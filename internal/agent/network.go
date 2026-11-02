@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/agent/loop"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -21,15 +22,15 @@ type HostNetwork interface {
 
 // reconcileNetwork keeps the nft rules as the state says until ctx ends:
 // after a change of the state when the rules differ, and every
-// reconcileInterval anyway, to repair what someone changed by hand.
-func reconcileNetwork(ctx context.Context, cluster stateReader, hostNetwork HostNetwork, logger *slog.Logger) {
+// loop.Interval anyway, to repair what someone changed by hand.
+func reconcileNetwork(ctx context.Context, cluster loop.Cluster, hostNetwork HostNetwork, logger *slog.Logger) {
 	// applied is the ruleset loaded at appliedAt; nil at the start and
 	// after a failure
 	var applied *network.Ruleset
 	var appliedAt time.Time
-	runPasses(ctx, cluster, nil, func() {
+	loop.Run(ctx, cluster, nil, func() {
 		wanted := wantedRuleset(cluster)
-		repairDue := time.Since(appliedAt) >= reconcileInterval
+		repairDue := time.Since(appliedAt) >= loop.Interval
 		if applied != nil && *applied == wanted && !repairDue {
 			return
 		}
@@ -43,7 +44,7 @@ func reconcileNetwork(ctx context.Context, cluster stateReader, hostNetwork Host
 }
 
 // wantedRuleset is the nft ruleset for the current state.
-func wantedRuleset(cluster stateReader) network.Ruleset {
+func wantedRuleset(cluster loop.Cluster) network.Ruleset {
 	var ruleset network.Ruleset
 	cluster.Read(func(current *state.State) {
 		// empty before the first cluster apply; clusterspec.Check lets no

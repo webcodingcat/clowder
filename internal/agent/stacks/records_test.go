@@ -1,17 +1,18 @@
-package agent
+package stacks
 
 import (
 	"context"
 	"os"
 	"testing"
 
+	"github.com/webcodingcat/clowder/internal/agent/agenttest"
 	"github.com/webcodingcat/clowder/internal/storage"
 )
 
 func TestTheRecordKeepsEachCopyOnce(t *testing.T) {
 	runner, _, _, _ := newTestRunner(t)
-	first := storage.Volume{ID: "default/db", LV: dbLV(1), Pool: "vg-fast/thin", SizeBytes: 1 << 30}
-	second := storage.Volume{ID: "default/db", LV: dbLV(2), Pool: "vg-fast/thin", SizeBytes: 1 << 30}
+	first := storage.Volume{ID: "default/db", LV: agenttest.DBLV(1), Pool: "vg-fast/thin", SizeBytes: 1 << 30}
+	second := storage.Volume{ID: "default/db", LV: agenttest.DBLV(2), Pool: "vg-fast/thin", SizeBytes: 1 << 30}
 	logs := storage.Volume{ID: "default/logs", LV: "logs-1", Pool: "vg-fast/thin", SizeBytes: 1 << 20}
 	if err := runner.recordCopies([]storage.Volume{second, logs}); err != nil {
 		t.Fatal(err)
@@ -64,12 +65,12 @@ func TestARecordThatDoesNotReadIsNeitherUsedNorOverwritten(t *testing.T) {
 		t.Error("the copies were listed without the broken record")
 	}
 	// overwriting it would forget the copies it lists, and with them data
-	placeVolume(cluster, "db", 2)
+	cluster.PlaceVolume("db", 2)
 	runner.pass(context.Background())
 	if content, err := os.ReadFile(file); err != nil || string(content) != "{not json" {
 		t.Errorf("the broken record was overwritten: %q, %v", content, err)
 	}
-	if storage.count("ensure "+dbLV(2)) != 0 || storage.count("remove "+dbLV(1)) != 0 {
-		t.Errorf("storage calls %q", storage.lines)
+	if storage.Count("ensure "+agenttest.DBLV(2)) != 0 || storage.Count("remove "+agenttest.DBLV(1)) != 0 {
+		t.Errorf("storage calls %q", storage.Lines())
 	}
 }

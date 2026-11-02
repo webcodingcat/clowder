@@ -1,4 +1,4 @@
-package agent
+package stacks
 
 import (
 	"context"
@@ -11,13 +11,10 @@ import (
 	"strings"
 
 	"github.com/webcodingcat/clowder/internal/api"
-	"github.com/webcodingcat/clowder/internal/names"
-	"github.com/webcodingcat/clowder/internal/state"
-	"github.com/webcodingcat/clowder/internal/supervisor"
 )
 
 // logIn logs Docker in to each private registry whose login changed.
-func (r *stackRunner) logIn(ctx context.Context, desired desiredState) {
+func (r *Runner) logIn(ctx context.Context, desired desiredState) {
 	for _, registry := range slices.Sorted(maps.Keys(desired.registries)) {
 		login := desired.registries[registry]
 		password, err := r.open(login.Password)
@@ -37,45 +34,8 @@ func (r *stackRunner) logIn(ctx context.Context, desired desiredState) {
 	}
 }
 
-// restartRules tell the supervisor the restart rules of this host's
-// services (restartRules.of is a supervisor.Rules).
-type restartRules struct {
-	cluster stateReader
-	host    state.HostID
-}
-
-// of is a service's restart rule, from the stack as the state has it: a
-// pushed-out service never restarts. Clowder's own Traefik has a rule of
-// its own.
-func (r restartRules) of(project, service string) (supervisor.Rule, bool) {
-	if clowdersOwn(project) {
-		return traefikRule, true
-	}
-	namespace, stackName, ok := names.SplitProject(project)
-	if !ok {
-		return supervisor.Rule{}, false
-	}
-	var rule supervisor.Rule
-	var known bool
-	r.cluster.Read(func(current *state.State) {
-		stack, ok := current.Stacks[names.ID(namespace, stackName)]
-		if !ok || stack.Host == nil || *stack.Host != r.host {
-			return
-		}
-		found, ok := stack.Spec.Services[service]
-		if !ok {
-			return
-		}
-		rule, known = supervisor.Rule{Restart: found.Restart, RestartUnhealthy: found.RestartsUnhealthy()}, true
-		if slices.Contains(stack.PushedOut, service) {
-			rule = supervisor.Rule{Restart: "no"}
-		}
-	})
-	return rule, known
-}
-
 // Ps lists a stack's containers on this host (api.Containers).
-func (r *stackRunner) Ps(ctx context.Context, project string) ([]api.ContainerInfo, error) {
+func (r *Runner) Ps(ctx context.Context, project string) ([]api.ContainerInfo, error) {
 	output, err := r.docker.ComposePs(ctx, project, r.files.stackFile(project))
 	if err != nil {
 		return nil, err
@@ -84,7 +44,7 @@ func (r *stackRunner) Ps(ctx context.Context, project string) ([]api.ContainerIn
 }
 
 // Logs writes a stack's logs on this host (api.Containers).
-func (r *stackRunner) Logs(ctx context.Context, project string, follow bool, out io.Writer) error {
+func (r *Runner) Logs(ctx context.Context, project string, follow bool, out io.Writer) error {
 	return r.docker.ComposeLogs(ctx, project, r.files.stackFile(project), follow, out)
 }
 

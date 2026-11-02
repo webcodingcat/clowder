@@ -46,10 +46,10 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   closes them, and systemd restarts the agent. Raft's log is on disk and survives that.
 - `HostParts` are what the agent changes on its host (the network, the storage driver and
   Docker) and the hoster's API. `clowderd run` passes the real ones, the tests fakes.
-- **Reconcilers** run after a change of the state and every `reconcileInterval`, to repair
+- **Reconcilers** run after a change of the state and every `loop.Interval`, to repair
   what someone changed by hand: `reconcileNetwork` keeps the nft rules as the state says,
   and the stack runner keeps the stacks.
-- **The stack runner** (`stackRunner`) keeps everything of a stack under its project
+- **The stack runner** (`agent/stacks`, `stacks.Runner`) keeps everything of a stack under its project
   (`names.Project`). A pass first stops the stacks that left the host (`compose down`), and
   only then, for each stack the state places here, renders its Compose file, `Ensure`s its
   volume copies, writes its secrets, runs `compose up` unless all of it came up before, and
@@ -63,8 +63,10 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   under the same tag. Docker keeps the label, so a reboot pulls nothing again. Last, volume
   copies the state retired here are removed and forgotten ([Cluster state](cluster.md#cluster-state-internalstate), Retired copies). A copy
   the state neither places nor retires here stays, with a warning once per run. The pass
-  is in `stacks.go`; one stack's steps in `stack_apply.go`, the leavers in `leavers.go`,
-  the volume copies in `volumes.go` and their records in `records.go`.
+  is in `runner.go`; one stack's steps in `apply.go`, the leavers in `leavers.go`,
+  the volume copies in `volumes.go` and their records in `records.go`. The agent hands the
+  runner its parts (`stacks.Parts`): where its files are (`stacks.Files`), this host, the
+  Raft member, Docker, the storage driver, the data key and the supervisor.
 - **A leaver that fails to stop** may still use its volumes, and no other stack may take
   them until it stopped: two databases on one file system would ruin it. Its volumes are
   the LVs in its `volumes.json` beside `compose.yaml`. Before `compose up` the runner adds
@@ -94,8 +96,8 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
 - **After a boot no container runs** (`restart: "no"`). The runner remembers only in memory
   what each stack came up with, so its first pass runs `compose up` for every stack. A
   restart of Docker also stops every container. The supervisor notices it (its event
-  stream breaks off) and starts a pass at once (`passSignal.dockerRestarted`). The runner
-  stores Docker's restart count with each stack it brought up (`broughtUp`), so after a
+  stream breaks off) and starts a pass at once (`loop.Signal.DockerRestarted`). The runner
+  stores Docker's restart count with each stack it brought up (`loop.BroughtUp`), so after a
   restart, even one during `compose up`, every stack comes up again. The first pass waits
   until the state has caught up with the Raft log, so a host that was away does not start
   a stack that has since moved to another host.
@@ -117,15 +119,17 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
 - **Tests.** The package's test goes the whole way on 127.0.0.1: init, the agent with a
   notify socket, the user's bootstrap, apply and diff, the Floating IP reaching the nft
   rules, and a volume and a stack applied, listed and deleted; `Run` that fails at its
-  start leaves nothing open. `stacks_test.go` runs single passes of the runner against a
-  state in memory, with a fake supervisor (`pauser`) and fake Docker: a failed `compose up`
+  start leaves nothing open; `restart_test.go`: the supervisor's restart rules. The fakes
+  of Docker, the storage driver and a cluster in memory are in `agent/agenttest`; the
+  cluster fails a test whose loop writes into its copy of the state
+  (`statetest.ReadOnlyCopy`). In `agent/stacks`, `runner_test.go` runs single passes of the
+  runner against that cluster, with a fake supervisor and fake Docker: a failed `compose up`
   reported `failing`, compose only while the supervisor is paused, a new data generation, a
   volume that outlives its stack, secrets written, changed and removed, the label changing
   with a secret, the secrets the containers came up with reported. `leavers_test.go`: a
   volume passes to the next stack only once the old one stopped, and waits while a stop
   fails, while the leavers cannot be listed, and while a failed `compose up` leaves old
-  containers on old volumes. `containers_test.go`: the restart rules, registry logins,
-  `compose ps`. `secrets_test.go`, `records_test.go` and `volumes_test.go` run the same way: a
+  containers on old volumes. `containers_test.go`: registry logins, `compose ps`. `secrets_test.go`, `records_test.go` and `volumes_test.go` run the same way: a
   secret that does not open keeps its stack down, only changed secret files are replaced,
   and a stack's secrets go only once its containers stopped; each copy recorded once, a
   record that does not read left alone, the weekly trim across restarts. That docker

@@ -161,9 +161,9 @@ func (p *planner) take(host state.HostID, pool string, size int64) {
 }
 
 // place decides for one stack; a reason means it waits, and the placement
-// then names only the stack. A new stack goes
-// to the active host where all of it fits with the least room left (best
-// fit), else to the first where its services push out others.
+// then names only the stack. A new stack goes to the active host where all
+// of it fits with the least room left (best fit), else to the first where
+// its services push out others.
 func (p *planner) place(stack *state.Stack) (Placement, string) {
 	if stack.Host != nil {
 		volumes, reason := p.newVolumes(stack, *stack.Host)
@@ -217,39 +217,37 @@ type allocation struct {
 	size int64
 }
 
+// reservation is what one stack's new volumes would take on a host. It is
+// kept apart from the planner until all of them fit: a stack that does not
+// fit takes nothing, neither space nor minors.
+type reservation struct {
+	space  []allocation
+	minors []int
+}
+
 // newVolumes places on host the volumes the stack names that wait for
 // their first stack (pending), taking their space; a reason says why one
 // does not fit, or why host is the wrong one: a placed volume stays where
 // its copy is, so the stack must go there.
 func (p *planner) newVolumes(stack *state.Stack, host state.HostID) ([]state.Volume, string) {
 	var volumes []state.Volume
-	var tentative []allocation
-	// a stack that does not fit takes nothing: neither space nor minors
-	var minors []int
-	giveBack := func() {
-		for _, minor := range minors {
-			delete(p.minors, minor)
-		}
-	}
+	var reserved reservation
 	for _, name := range stack.Spec.VolumeNames() {
 		current, ok := p.current.Volumes[names.ID(stack.Namespace, name)]
 		switch {
 		case !ok:
-			giveBack()
 			return nil, fmt.Sprintf("volume %s is gone", name) // the state refuses this; a guard
 		case current.Status != state.VolumePending:
 			if !slices.ContainsFunc(current.Copies, func(volumeCopy state.VolumeCopy) bool {
 				return volumeCopy.Host == host && !volumeCopy.Tiebreaker
 			}) {
-				giveBack()
 				return nil, fmt.Sprintf("volume %s has its data on another host", name)
 			}
 			continue
 		}
 		wanted := current.Spec
-		class, pool, ok := p.fit(host, wanted.Class, int64(wanted.Size), tentative)
+		class, pool, ok := p.fit(host, wanted.Class, int64(wanted.Size), reserved.space)
 		if !ok {
-			giveBack()
 			return nil, fmt.Sprintf("volume %s (%s, class %s) fits no pool", name,
 				units.FormatSize(int64(wanted.Size)), wanted.Class)
 		}
@@ -257,54 +255,60 @@ func (p *planner) newVolumes(stack *state.Stack, host state.HostID) ([]state.Vol
 		volume.Copies = []state.VolumeCopy{{Host: host, Class: class}}
 		volume.Status = state.VolumeOK
 		if wanted.Replicas > 0 {
-			minor, ok := p.freeMinor()
+			minor, ok := p.freeMinor(reserved.minors)
 			if !ok {
-				giveBack()
 				return nil, "no free DRBD minor"
 			}
-			minors = append(minors, minor)
+			reserved.minors = append(reserved.minors, minor)
 			volume.Minor = &minor
 		}
-		tentative = append(tentative, allocation{pool, int64(wanted.Size)})
+		reserved.space = append(reserved.space, allocation{pool, int64(wanted.Size)})
 		volumes = append(volumes, volume)
 	}
-	for _, each := range tentative {
+	for _, each := range reserved.space {
 		p.take(host, each.pool, each.size)
+	}
+	for _, minor := range reserved.minors {
+		p.minors[minor] = true
 	}
 	return volumes, ""
 }
 
-// fit finds the class (the one asked for, or one of its fallbacks) whose
-// pool on host holds size without overcommit.
-func (p *planner) fit(host state.HostID, className string, size int64, tentative []allocation) (string, string, bool) {
+// fit finds a class whose pool on host holds size without overcommit,
+// counting the space reserved beside what the planner has taken. A class
+// with a pool of its own is the only candidate; a class without one stands
+// for its fallbacks, tried in order.
+func (p *planner) fit(host state.HostID, className string, size int64, reserved []allocation) (
+	class, pool string, ok bool,
+) {
 	candidates := []string{className}
-	if class := p.classes[className]; class.Pool == "" {
-		candidates = class.Fallback
+	if asked := p.classes[className]; asked.Pool == "" {
+		candidates = asked.Fallback
 	}
 	for _, candidate := range candidates {
-		class := p.classes[candidate]
-		pool, reported := p.current.Hosts[host].Pools[class.Pool]
-		if class.Pool == "" || !reported {
+		spec := p.classes[candidate]
+		reported, ok := p.current.Hosts[host].Pools[spec.Pool]
+		if spec.Pool == "" || !ok {
 			continue
 		}
-		allocated := slices.Clone(p.allocated[host][class.Pool])
-		for _, each := range tentative {
-			if each.pool == class.Pool {
+		allocated := slices.Clone(p.allocated[host][spec.Pool])
+		for _, each := range reserved {
+			if each.pool == spec.Pool {
 				allocated = append(allocated, each.size)
 			}
 		}
-		if Fits(pool.SizeBytes, class.ReservePercent(), allocated, size) {
-			return candidate, class.Pool, true
+		if Fits(reported.SizeBytes, spec.ReservePercent(), allocated, size) {
+			return candidate, spec.Pool, true
 		}
 	}
 	return "", "", false
 }
 
-// freeMinor takes the lowest DRBD minor no volume has.
-func (p *planner) freeMinor() (int, bool) {
+// freeMinor finds the lowest DRBD minor that neither a volume has nor
+// reserved holds.
+func (p *planner) freeMinor(reserved []int) (int, bool) {
 	for minor := range state.MaxMinor + 1 {
-		if !p.minors[minor] {
-			p.minors[minor] = true
+		if !p.minors[minor] && !slices.Contains(reserved, minor) {
 			return minor, true
 		}
 	}

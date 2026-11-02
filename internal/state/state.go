@@ -75,7 +75,8 @@ type State struct {
 	// keeps its data.
 	Retired []RetiredCopy `json:"retired,omitempty"`
 	// Alerts are the open alerts by key.
-	Alerts     map[string]*Alert     `json:"alerts,omitempty"`
+	Alerts map[string]*Alert `json:"alerts,omitempty"`
+	// Operations and their Locks are for phase 2: nothing starts one yet.
 	Operations map[string]*Operation `json:"operations,omitempty"`
 	Locks      map[string]string     `json:"locks,omitempty"` // "stack/<stack ID>" or "volume/<volume ID>" -> operation
 	Audit      []AuditEntry          `json:"audit,omitempty"`
@@ -106,7 +107,9 @@ type ClusterConfig struct {
 // HostPhase is where a host is in its life; see phaseChanges for the moves.
 type HostPhase string
 
-// The phases of a host.
+// The phases of a host. Until phase 2 a host reaches only active, draining
+// and removed; joining, passive and those of failover come with the hosts
+// that join.
 const (
 	Joining    HostPhase = "joining"
 	Passive    HostPhase = "passive"

@@ -1,4 +1,4 @@
-package agent
+package stacks
 
 import (
 	"bytes"
@@ -16,12 +16,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// DefaultSecretsDir holds the stacks' secrets in clear. /run is a tmpfs:
-// they never reach a disk, and a boot clears them. It is not a systemd
-// RuntimeDirectory, which would go each time the agent stops while the
-// containers still use it.
-const DefaultSecretsDir = "/run/clowder-secrets"
-
 // stackSecrets are what compose up of a stack needs of its secrets.
 type stackSecrets struct {
 	// files holds the value of each secret a service asks for as a file.
@@ -37,9 +31,9 @@ type stackSecrets struct {
 	digests map[string]string
 }
 
-// secretLabelPurpose names the key, derived from the data key, that the
-// labels of secret files are made with.
-const secretLabelPurpose = "clowder secrets label"
+// SecretLabelPurpose names the key, derived from the data key, that the
+// labels of secret files are made with (Parts.DigestKey).
+const SecretLabelPurpose = "clowder secrets label"
 
 // secretLabel is an HMAC-SHA256 over the names and the state's digests of
 // the secret files of one service, in name order: it changes with any of
@@ -55,7 +49,7 @@ func secretLabel(key []byte, digests map[string]string, secretNames []string) st
 
 // openSecrets opens the secrets a stack names, the Secret resources of its
 // namespace.
-func (r *stackRunner) openSecrets(desired desiredState, stack *state.Stack) (stackSecrets, error) {
+func (r *Runner) openSecrets(desired desiredState, stack *state.Stack) (stackSecrets, error) {
 	values := map[string]string{}
 	secrets := stackSecrets{files: map[string][]byte{}, labels: map[string]string{}, digests: map[string]string{}}
 	for _, name := range stack.Spec.SecretNames() {
@@ -89,7 +83,7 @@ func (r *stackRunner) openSecrets(desired desiredState, stack *state.Stack) (sta
 // writeSecrets writes the new and changed secret files and the secret
 // variables before compose up. A file is replaced by a rename, so a running
 // container keeps the old value until compose up recreates it.
-func (r *stackRunner) writeSecrets(project string, secrets stackSecrets) error {
+func (r *Runner) writeSecrets(project string, secrets stackSecrets) error {
 	for _, name := range slices.Sorted(maps.Keys(secrets.files)) {
 		path, value := r.files.secretFile(project, name), secrets.files[name]
 		if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, value) {
@@ -109,7 +103,7 @@ func (r *stackRunner) writeSecrets(project string, secrets stackSecrets) error {
 
 // removeStaleSecrets removes, after compose up, what the stack no longer
 // asks for: until then a running container may still use it.
-func (r *stackRunner) removeStaleSecrets(project string, secrets stackSecrets) error {
+func (r *Runner) removeStaleSecrets(project string, secrets stackSecrets) error {
 	entries, err := os.ReadDir(r.files.secretFilesDir(project))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -132,7 +126,7 @@ func (r *stackRunner) removeStaleSecrets(project string, secrets stackSecrets) e
 // removeSecretsOfOthers removes the secrets of the stacks that are not
 // placed here and have no Compose file left (compose down ran): the
 // leavers, and what a crash left behind.
-func (r *stackRunner) removeSecretsOfOthers(desired desiredState) {
+func (r *Runner) removeSecretsOfOthers(desired desiredState) {
 	entries, err := os.ReadDir(r.files.SecretsDir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		r.logger.Error("list the stacks' secrets", "error", err)
@@ -140,7 +134,7 @@ func (r *stackRunner) removeSecretsOfOthers(desired desiredState) {
 	}
 	for _, entry := range entries {
 		project := entry.Name()
-		if _, staying := desired.stacks[project]; staying || clowdersOwn(project) {
+		if _, staying := desired.stacks[project]; staying || names.ClowdersOwn(project) {
 			continue
 		}
 		if _, err := os.Stat(r.files.stackFile(project)); !errors.Is(err, os.ErrNotExist) {

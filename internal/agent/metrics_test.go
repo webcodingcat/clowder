@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/agent/agenttest"
 	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -21,32 +22,32 @@ var update = flag.Bool("update", false, "write the golden files anew")
 
 // leadingCluster is a test cluster whose agent leads or not.
 type leadingCluster struct {
-	*testCluster
+	*agenttest.Cluster
 	leads bool
 }
 
 func (c leadingCluster) IsLeader() bool { return c.leads }
 
-// newTestMetrics collects host 0 of newTestRunner's cluster with a pool,
-// two containers of shop, a restart, a certificate, an open alert and a
-// failed delivery.
+// newTestMetrics collects host 0 of agenttest.NewCluster with a pool, two
+// containers of shop, a restart, a certificate, an open alert and a failed
+// delivery.
 func newTestMetrics(t *testing.T, leads bool) *metricsSource {
 	t.Helper()
-	_, cluster, fake, _ := newTestRunner(t)
-	cluster.apply(state.KindReportHost, state.HostActor(0), state.ReportHost{
+	cluster, fake := agenttest.NewCluster(t), &agenttest.Docker{}
+	cluster.Apply(state.KindReportHost, state.HostActor(0), state.ReportHost{
 		Host: 0, Version: "1.0.0", Capacity: state.Resources{MemoryBytes: 4 << 30, CPUs: 2},
 		Pools:           map[string]state.Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: 100 << 30, DataPercent: 42, MetadataPercent: 7}},
 		RootUsedPercent: 31,
 	})
-	cluster.apply(state.KindPutCertificate, state.LeaderActor, state.PutCertificate{Certificate: state.Certificate{
+	cluster.Apply(state.KindPutCertificate, state.LeaderActor, state.PutCertificate{Certificate: state.Certificate{
 		Domain: "shop.example.com", Key: state.Sealed("k"), Chain: []byte("c"),
 		NotBefore: time.Unix(1_790_000_000, 0), NotAfter: time.Unix(1_797_776_000, 0),
 	}})
-	cluster.apply(state.KindPutAlert, state.LeaderActor, state.PutAlert{
+	cluster.Apply(state.KindPutAlert, state.LeaderActor, state.PutAlert{
 		Key: "root-use/node0", Kind: "root-use", Severity: "warning", Subject: "s",
 	})
-	labels := map[string]string{docker.ProjectLabel: shopProject, docker.ServiceLabel: "app"}
-	fake.containers = []docker.Container{
+	labels := map[string]string{docker.ProjectLabel: agenttest.ShopProject, docker.ServiceLabel: "app"}
+	fake.Listed = []docker.Container{
 		{ID: "a", State: "running", Labels: labels},
 		{ID: "b", State: "exited", Labels: labels},
 		{ID: "t", State: "running", Labels: map[string]string{docker.ProjectLabel: "clowder-traefik", docker.ServiceLabel: "traefik"}},
@@ -54,7 +55,7 @@ func newTestMetrics(t *testing.T, leads bool) *metricsSource {
 	return &metricsSource{
 		host: Host{ID: 0, Name: "node0"}, cluster: leadingCluster{cluster, leads}, docker: fake,
 		restarts: func() map[supervisor.Service]int {
-			return map[supervisor.Service]int{{Stack: shopProject, Name: "app"}: 3}
+			return map[supervisor.Service]int{{Stack: agenttest.ShopProject, Name: "app"}: 3}
 		},
 		failures: func() []controller.Failure { return []controller.Failure{{Key: "root-use/node0"}} },
 		memory:   func() (int64, error) { return 41 << 20, nil },

@@ -13,6 +13,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/notify"
+	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -151,6 +152,25 @@ func TestAnOpenAlertStaysUntilItsConditionIsLookedAt(t *testing.T) {
 	alerts.pass(context.Background())
 	if open() {
 		t.Error("the alert stayed after the Floating IP was held again")
+	}
+}
+
+func TestTheConditionsOfGoneStacksAndHostsAreForgotten(t *testing.T) {
+	alerts, l, _, _ := newTestAlerts(t)
+	shop, node0 := stackFailingKey("default/shop"), dockerDownKey(0)
+	alerts.conditions.Observe(shop, true)
+	alerts.conditions.Observe(node0, true)
+	alerts.pass(context.Background())
+	if !alerts.conditions.Seen(shop) || !alerts.conditions.Seen(node0) {
+		t.Fatal("a condition was forgotten while its stack and host are there")
+	}
+	deleteResource(l, resource.KindStack, "shop")
+	l.apply(state.KindSetHostPhase, state.UserActor("alice"), state.SetHostPhase{Host: 0, Phase: state.Removed})
+	alerts.pass(context.Background())
+	for _, key := range []string{shop, node0} {
+		if _, held := alerts.conditions.Since(key); held || alerts.conditions.Seen(key) {
+			t.Errorf("%s is still known after its subject went", key)
+		}
 	}
 }
 

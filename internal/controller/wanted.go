@@ -21,8 +21,26 @@ const (
 
 // The keys of the conditions other loops hold (Conditions). They name a
 // host by its ID, which never changes; the alerts' keys name it by its
-// name, which people read.
+// name, which people read. conditionKeys lists them all.
 const ingressNotHeld = "ingress-not-held"
+
+// conditionKeys are the keys of every condition the state still has a
+// subject for: the hosts not removed and the stacks. A new key belongs
+// here too, or its conditions are forgotten at every alerts pass
+// (Conditions.Keep).
+func conditionKeys(current *state.State) map[string]bool {
+	keys := map[string]bool{ingressNotHeld: true}
+	for id, host := range current.Hosts {
+		if host.Phase != state.Removed {
+			keys[overCapacityKey(id)] = true
+			keys[dockerDownKey(id)] = true
+		}
+	}
+	for id := range current.Stacks {
+		keys[stackFailingKey(id)] = true
+	}
+	return keys
+}
 
 // overCapacityKey is the condition of a host over capacity.
 func overCapacityKey(host state.HostID) string {

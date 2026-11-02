@@ -9,10 +9,10 @@ loops that talk to the world outside.
   `clowder-traefik` in the host network, with `restart: "no"` like every container. It is no
   stack: the state knows nothing of it, its files live in `<Dir>/traefik/` beside `stacks/`
   (so the search for stacks that left never finds it), and a stack's project starts with its
-  namespace, which `names` refuses to start with `clowder-`. `clowdersOwn` answers whether a
-  project is clowder's own; every place of the stack runner that treats Traefik apart asks
-  it: the supervisor's rule (restart always, also when unhealthy) and the clean-up of
-  secrets.
+  namespace, which `names` refuses to start with `clowder-`. `names.ClowdersOwn` answers whether a
+  project is clowder's own; every place that treats Traefik apart asks it: the
+  supervisor's rule (restart always, also when unhealthy) and the stack runner's clean-up
+  of secrets.
 - `ingress.RenderStatic` writes `traefik.yml`: the entrypoints `web` and `websecure` on the
   Floating IP :80 and :443, `internal` on the node address :7480 (phase 2) trusting
   `X-Forwarded-For` only from the node network, and `ping` on 127.0.0.1:7446 for the health
@@ -20,9 +20,9 @@ loops that talk to the world outside.
   address itself. `ingress.RenderCompose` writes the Compose file.
 - `traefikRunner` has a loop of its own beside the stack runner, so a long image pull of a
   stack never holds up the ingress. It runs compose up as the stack runner does
-  (`whilePaused`, with the supervisor paused for it) when the hash of the Compose file and
+  (`loop.WhilePaused`, with the supervisor paused for it) when the hash of the Compose file and
   `traefik.yml` differs from the one Traefik came up with: at the first pass after the agent
-  started, after Docker restarted (`passSignal.dockerRestarted`), and after a new image pin or Floating IP. Each
+  started, after Docker restarted (`loop.Signal.DockerRestarted`), and after a new image pin or Floating IP. Each
   of its files is compared with what is on disk, so one removed or changed by hand comes
   back at the next pass. It reads only the Floating IP, the stacks' routes and the
   certificates from the state, no copy of all of it: it passes at every event of Docker's.
@@ -45,7 +45,7 @@ loops that talk to the world outside.
   on 127.0.0.1:7445, which answers from the state (`State.Challenges`): whichever host
   holds the Floating IP can answer the CA.
 - The runner's passes come at every change of the state, every 30 s, and at once when the
-  supervisor sees an event of Docker's (`passSignal.now`: start, die, health status): a container that
+  supervisor sees an event of Docker's (`loop.Signal.Now`: start, die, health status): a container that
   turns unhealthy leaves its route within seconds.
 - Golden files in `internal/ingress/testdata`; `bin/dev test-tools` checks the Compose file
   with Debian's docker-compose.
@@ -144,10 +144,13 @@ loops that talk to the world outside.
   Floating IP's loop), a host over capacity (the placement), Docker not answering and a stack
   failing (the alerts, from `report-host` and `set-stack-status`). After a change of leader they start again, so a new alert comes a
   little later rather than wrongly; one that is open stays until the loop that observes its
-  condition has looked (`Conditions.Seen`). An agent that leads no more forgets them.
+  condition has looked (`Conditions.Seen`). An agent that leads no more forgets them, and
+  each alerts pass forgets those of stacks and hosts that are gone or removed
+  (`conditionKeys`, `Conditions.Keep`).
 - `wanted_test.go` and `conditions_test.go` check `wantedAlerts` and `Conditions` on a
   state in memory: the thresholds, how long a condition must last, what keeps an open
-  alert; `alerts_test.go` checks the loop: delivery, retries and channels.
+  alert; `alerts_test.go` checks the loop: delivery, retries, channels, and the conditions
+  of a deleted stack and a removed host forgotten.
 
 | Alert | Severity | Raised | Resolved |
 |---|---|---|---|

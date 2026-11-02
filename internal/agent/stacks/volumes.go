@@ -1,4 +1,4 @@
-package agent
+package stacks
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/agent/loop"
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
@@ -24,12 +25,12 @@ const trimInterval = 7 * 24 * time.Hour
 // storage driver takes it. The LV's name carries the generation, so a
 // restored volume is a new LV next to the old one; the DRBD resource has the
 // LV's name.
-func (r *stackRunner) describe(desired desiredState, id string) (storage.Volume, error) {
+func (r *Runner) describe(desired desiredState, id string) (storage.Volume, error) {
 	volume, ok := desired.volumes[id]
 	if !ok {
 		return storage.Volume{}, fmt.Errorf("volume %s is not placed yet", id)
 	}
-	index := slices.IndexFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host.ID })
+	index := slices.IndexFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host })
 	if index < 0 {
 		return storage.Volume{}, fmt.Errorf("volume %s has no copy on this host", id)
 	}
@@ -74,7 +75,7 @@ func poolOf(config clusterspec.Config, volumeID, class string) (string, error) {
 
 // removeVolumes removes the recorded copies on this host that the state
 // retired here, and forgets them in the state.
-func (r *stackRunner) removeVolumes(ctx context.Context, desired desiredState) {
+func (r *Runner) removeVolumes(ctx context.Context, desired desiredState) {
 	recorded, err := r.recordedCopies()
 	if err != nil {
 		r.logger.Error("read the volume copies of this host", "error", err)
@@ -90,7 +91,7 @@ func (r *stackRunner) removeVolumes(ctx context.Context, desired desiredState) {
 // removeCopies removes the copies of one volume on this host that the
 // state has retired here and no longer places here in their data
 // generation.
-func (r *stackRunner) removeCopies(ctx context.Context, desired desiredState, id string, recorded []storage.Volume) error {
+func (r *Runner) removeCopies(ctx context.Context, desired desiredState, id string, recorded []storage.Volume) error {
 	var kept []storage.Volume
 	var errs []error
 	for _, volume := range recorded {
@@ -113,7 +114,7 @@ func (r *stackRunner) removeCopies(ctx context.Context, desired desiredState, id
 		}
 		// Remove picks up where it left, so a copy whose forgetting failed
 		// stays recorded and is tried again at the next pass
-		if err := commitAsHost(ctx, r.propose, r.host.ID, state.KindForgetCopy, state.ForgetCopy{Copy: retired}); err != nil {
+		if err := loop.CommitAsHost(ctx, r.propose, r.host, state.KindForgetCopy, state.ForgetCopy{Copy: retired}); err != nil {
 			errs = append(errs, fmt.Errorf("forget copy %s: %w", volume.LV, err))
 			kept = append(kept, volume)
 		}
@@ -126,9 +127,9 @@ func (r *stackRunner) removeCopies(ctx context.Context, desired desiredState, id
 
 // placedHere tells whether the state has a copy of the volume on this host
 // in the recorded data generation.
-func (r *stackRunner) placedHere(desired desiredState, volume storage.Volume) bool {
+func (r *Runner) placedHere(desired desiredState, volume storage.Volume) bool {
 	current, ok := desired.volumes[volume.ID]
-	if !ok || !slices.ContainsFunc(current.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host.ID }) {
+	if !ok || !slices.ContainsFunc(current.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host }) {
 		return false
 	}
 	return names.VolumeName(volume.ID, current.DataGeneration) == volume.LV
@@ -136,9 +137,9 @@ func (r *stackRunner) placedHere(desired desiredState, volume storage.Volume) bo
 
 // retiredHere finds the retired copy in the state that matches the copy
 // recorded on this host.
-func (r *stackRunner) retiredHere(desired desiredState, volume storage.Volume) (state.RetiredCopy, bool) {
+func (r *Runner) retiredHere(desired desiredState, volume storage.Volume) (state.RetiredCopy, bool) {
 	for _, retired := range desired.retired {
-		if retired.Host == r.host.ID && retired.Volume == volume.ID &&
+		if retired.Host == r.host && retired.Volume == volume.ID &&
 			names.VolumeName(volume.ID, retired.DataGeneration) == volume.LV {
 			return retired, true
 		}
@@ -148,7 +149,7 @@ func (r *stackRunner) retiredHere(desired desiredState, volume storage.Volume) (
 
 // warnUnexplained says once per agent run that a copy is kept which the
 // state neither places nor retires here.
-func (r *stackRunner) warnUnexplained(volume storage.Volume) {
+func (r *Runner) warnUnexplained(volume storage.Volume) {
 	if r.unexplained[volume.LV] {
 		return
 	}
@@ -157,13 +158,13 @@ func (r *stackRunner) warnUnexplained(volume storage.Volume) {
 		"volume", volume.ID, "lv", volume.LV)
 }
 
-// trim gives the free blocks of this host's volumes back to their pools
+// Trim gives the free blocks of this host's volumes back to their pools
 // once every trimInterval, until ctx ends. The time of the last trim is a
 // file, so restarts of the agent do not put it off. It runs beside the
 // runner's loop, so it uses none of the runner's loop-only fields.
-func (r *stackRunner) trim(ctx context.Context) {
+func (r *Runner) Trim(ctx context.Context) {
 	for {
-		info, err := os.Stat(r.files.lastTrim())
+		info, err := os.Stat(r.files.LastTrim)
 		if err != nil || time.Since(info.ModTime()) >= trimInterval {
 			r.trimNow(ctx)
 		}
@@ -176,7 +177,7 @@ func (r *stackRunner) trim(ctx context.Context) {
 }
 
 // trimNow trims every recorded copy and remembers when.
-func (r *stackRunner) trimNow(ctx context.Context) {
+func (r *Runner) trimNow(ctx context.Context) {
 	recorded, err := r.recordedCopies()
 	if err != nil {
 		r.logger.Error("trim the volumes", "error", err)
@@ -190,7 +191,7 @@ func (r *stackRunner) trimNow(ctx context.Context) {
 		r.logger.Error("trim the volumes", "error", err)
 	}
 	// written after a failure too: the next try is in a week, not in an hour
-	if err := atomicfile.Write(r.files.lastTrim(), nil, 0o600); err != nil {
+	if err := atomicfile.Write(r.files.LastTrim, nil, 0o600); err != nil {
 		r.logger.Error("remember the trim", "error", err)
 	}
 }

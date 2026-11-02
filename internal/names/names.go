@@ -73,6 +73,13 @@ func Project(namespace, stack string) string {
 	return namespace + "_" + stack
 }
 
+// ClowdersOwn tells whether a Compose project is one clowder runs itself
+// (its Traefik) and no stack's. Every place that treats such a project
+// apart asks it.
+func ClowdersOwn(project string) bool {
+	return strings.HasPrefix(project, ReservedPrefix)
+}
+
 // SplitProject is the reverse of Project; ok is false for anything Project
 // does not make of a valid namespace and stack (clowder's own projects).
 func SplitProject(project string) (namespace, stack string, ok bool) {

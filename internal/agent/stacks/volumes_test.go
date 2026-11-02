@@ -1,10 +1,12 @@
-package agent
+package stacks
 
 import (
 	"context"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/webcodingcat/clowder/internal/agent/agenttest"
 )
 
 func TestTrimRunsOnceAWeekAcrossRestarts(t *testing.T) {
@@ -13,8 +15,8 @@ func TestTrimRunsOnceAWeekAcrossRestarts(t *testing.T) {
 	done, cancel := context.WithCancel(context.Background())
 	cancel() // one round of the loop, then it ends
 	trims := func() int {
-		runner.trim(done)
-		return storage.count("trim " + dbLV(1))
+		runner.Trim(done)
+		return storage.Count("trim " + agenttest.DBLV(1))
 	}
 
 	if got := trims(); got != 1 {
@@ -24,10 +26,12 @@ func TestTrimRunsOnceAWeekAcrossRestarts(t *testing.T) {
 		t.Errorf("%d trims after a restart within the week, want 1", got)
 	}
 	weekAgo := time.Now().Add(-trimInterval)
-	if err := os.Chtimes(runner.files.lastTrim(), weekAgo, weekAgo); err != nil {
+	if err := os.Chtimes(runner.files.LastTrim, weekAgo, weekAgo); err != nil {
 		t.Fatal(err)
 	}
-	storage.trimFails = true
+	storage.Lock()
+	storage.TrimFails = true
+	storage.Unlock()
 	if got := trims(); got != 2 {
 		t.Errorf("%d trims a week later, want 2", got)
 	}

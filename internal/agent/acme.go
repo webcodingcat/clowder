@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/webcodingcat/clowder/internal/agent/loop"
 	"github.com/webcodingcat/clowder/internal/ingress"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -15,7 +16,7 @@ import (
 // challengeHandler answers ACME's HTTP-01 challenges from the state, where
 // the leader puts them while it orders: every agent serves them, so
 // whichever host holds the Floating IP can answer the CA.
-func challengeHandler(cluster stateReader) http.Handler {
+func challengeHandler(cluster loop.Cluster) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+ingress.ChallengePath+"{token}", func(w http.ResponseWriter, r *http.Request) {
 		var answer string
@@ -34,7 +35,7 @@ func challengeHandler(cluster stateReader) http.Handler {
 // serveChallenges serves challengeHandler on 127.0.0.1, where Traefik's
 // router for the challenges sends them. The loopback address is always
 // there, so it needs no freeBind.
-func serveChallenges(cluster stateReader, logger *slog.Logger) (*http.Server, error) {
+func serveChallenges(cluster loop.Cluster, logger *slog.Logger) (*http.Server, error) {
 	listener, err := net.Listen("tcp", ingress.ChallengeAddress)
 	if err != nil {
 		return nil, fmt.Errorf("listen for ACME's challenges on %s: %w", ingress.ChallengeAddress, err)

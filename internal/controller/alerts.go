@@ -178,8 +178,11 @@ func (a *Alerts) pass(ctx context.Context) {
 		return // no cluster.yaml yet: no channels
 	}
 	now := time.Now()
+	a.conditions.Keep(conditionKeys(copied))
 	for id, host := range copied.Hosts {
-		a.conditions.Observe(dockerDownKey(id), host.DockerDown)
+		if host.Phase != state.Removed {
+			a.conditions.Observe(dockerDownKey(id), host.DockerDown)
+		}
 	}
 	for id, stack := range copied.Stacks {
 		a.conditions.Observe(stackFailingKey(id), stack.Status == state.StackFailing)

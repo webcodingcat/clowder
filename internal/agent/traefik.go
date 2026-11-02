@@ -13,26 +13,18 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 
+	"github.com/webcodingcat/clowder/internal/agent/loop"
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/digest"
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/ingress"
-	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/supervisor"
 )
-
-// clowdersOwn tells whether a Compose project is one clowder runs itself
-// (its Traefik) and no stack: names refuses stack names with this prefix.
-// Every place that treats such a project apart asks it.
-func clowdersOwn(project string) bool {
-	return strings.HasPrefix(project, names.ReservedPrefix)
-}
 
 // traefikRule is how the supervisor restarts Traefik: always, and when it
 // turns unhealthy, as the host's ingress depends on it.
@@ -44,32 +36,32 @@ var traefikRule = supervisor.Rule{Restart: "always", RestartUnhealthy: true}
 type traefikRunner struct {
 	files   Files
 	host    Host
-	cluster stateReader
+	cluster loop.Cluster
 	docker  Docker
 	// open unseals the certificates' keys (datakey.Key.Open)
 	open   func(sealed state.Sealed) ([]byte, error)
 	logger *slog.Logger
 	// supervisor is paused while compose up recreates Traefik
-	supervisor pauser
+	supervisor loop.Pauser
 	// signal is how the supervisor starts a pass: after each of Docker's
 	// events, so a container that turns unhealthy leaves its route within
 	// seconds, and when Docker restarted
-	signal *passSignal
+	signal *loop.Signal
 
 	// Only the runner's loop uses what follows, so it needs no lock.
 
 	// cameUp is what Traefik last came up with; zero after the agent
 	// started, so it comes up again (restart: "no")
-	cameUp broughtUp
+	cameUp loop.BroughtUp
 	// unopened are the sealed keys that did not open, logged once
 	unopened map[string]bool
 }
 
 // run keeps Traefik and its routes as this host needs them, until ctx ends
-// (runPasses). Each pass compares every file with what is on disk, so it
+// (loop.Run). Each pass compares every file with what is on disk, so it
 // also repairs what someone changed by hand.
 func (t *traefikRunner) run(ctx context.Context) {
-	runPasses(ctx, t.cluster, t.signal.wake, func() {
+	loop.Run(ctx, t.cluster, t.signal.Wake(), func() {
 		if err := t.pass(ctx); err != nil {
 			t.logger.Error("run Traefik", "error", err)
 		}
@@ -136,11 +128,11 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	hash := [32]byte(sum.Sum(nil))
 	// read before compose up: a restart of Docker during it makes Traefik
 	// come up again at the next pass
-	upNow := broughtUp{hash: hash, dockerRestarts: t.signal.restarts()}
+	upNow := loop.BroughtUp{Hash: hash, DockerRestarts: t.signal.Restarts()}
 	if t.cameUp == upNow {
 		return nil
 	}
-	err = whilePaused(t.supervisor, ingress.Project, func() error {
+	err = loop.WhilePaused(t.supervisor, ingress.Project, func() error {
 		return t.docker.ComposeUp(ctx, ingress.Project, []string{t.files.traefikCompose()}, nil)
 	})
 	if err != nil {

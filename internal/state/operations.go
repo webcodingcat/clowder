@@ -16,6 +16,10 @@ import (
 // state machine: the leader writes each step, the agent that owns it runs it
 // and reports back. Every step first checks whether its goal is reached
 // already, so a step survives a new leader or a restarted agent.
+//
+// Operations are for phase 2 (failover, moving a volume): the state applies
+// and checks them, and stacks and volumes obey their locks, but nothing
+// starts one yet.
 type Operation struct {
 	ID     string          `json:"id"` // a ULID: sorts by start time
 	Kind   string          `json:"kind"`

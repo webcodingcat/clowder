@@ -15,6 +15,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
+	"github.com/webcodingcat/clowder/internal/state/statetest"
 )
 
 // leader is a state that applies what is proposed, as the leader would.
@@ -32,11 +33,11 @@ func (l *leader) Read(use func(current *state.State)) {
 }
 
 // SharedCopy copies afresh each time: what the tests check is that the
-// loops read the copy, not the state under its lock.
+// loops read the copy, not the state under its lock, and never write into it.
 func (l *leader) SharedCopy() (*state.State, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.state.Copy()
+	return statetest.ReadOnlyCopy(l.t, l.state)
 }
 
 func (l *leader) Changed() <-chan struct{} {

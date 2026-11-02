@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"maps"
 	"sync"
 	"time"
 )
@@ -55,6 +56,15 @@ func (c *Conditions) Seen(key string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.seen[key]
+}
+
+// Keep forgets every condition but those in keys: those of stacks and hosts
+// that are gone would otherwise stay in memory as long as this agent leads.
+func (c *Conditions) Keep(keys map[string]bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	maps.DeleteFunc(c.since, func(key string, _ time.Time) bool { return !keys[key] })
+	maps.DeleteFunc(c.seen, func(key string, _ bool) bool { return !keys[key] })
 }
 
 // Reset forgets every condition: when this agent leads no more, what it

@@ -1,9 +1,11 @@
-package agent
+package stacks
 
 import (
 	"context"
 	"errors"
 	"os"
+
+	"github.com/webcodingcat/clowder/internal/agent/loop"
 )
 
 // stopLeavers stops the stacks that left this host. The files tell how far
@@ -12,9 +14,9 @@ import (
 // secrets go once compose.yaml is gone (removeSecretsOfOthers). Its volume
 // copies have records of their own (removeVolumes). It returns the volumes
 // that leavers which failed to stop may still use.
-func (r *stackRunner) stopLeavers(ctx context.Context, desired desiredState) volumesInUse {
+func (r *Runner) stopLeavers(ctx context.Context, desired desiredState) volumesInUse {
 	inUse := volumesInUse{}
-	entries, err := os.ReadDir(r.files.stacksDir())
+	entries, err := os.ReadDir(r.files.StacksDir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		// not knowing the leavers, any of them may use any volume
 		r.logger.Error("list the stacks of this host", "error", err)
@@ -40,12 +42,12 @@ func (r *stackRunner) stopLeavers(ctx context.Context, desired desiredState) vol
 
 // stop runs compose down for a stack that left this host, once: its
 // Compose file goes with it.
-func (r *stackRunner) stop(ctx context.Context, project string) error {
+func (r *Runner) stop(ctx context.Context, project string) error {
 	file := r.files.stackFile(project)
 	if _, err := os.Stat(file); errors.Is(err, os.ErrNotExist) {
 		return nil // stopped before
 	}
-	err := whilePaused(r.supervisor, project, func() error { return r.docker.ComposeDown(ctx, project, file) })
+	err := loop.WhilePaused(r.supervisor, project, func() error { return r.docker.ComposeDown(ctx, project, file) })
 	if err != nil {
 		return err
 	}
@@ -77,7 +79,7 @@ func (u volumesInUse) user(lv string) (string, bool) {
 // what it may still use while they run. If they cannot be read, it marks
 // every volume, as wrongly starting a stack beside it could ruin a file
 // system, and waiting costs only a pass.
-func (r *stackRunner) markInUse(inUse volumesInUse, project string) {
+func (r *Runner) markInUse(inUse volumesInUse, project string) {
 	if _, err := os.Stat(r.files.stackFile(project)); errors.Is(err, os.ErrNotExist) {
 		return // stopped after all
 	}

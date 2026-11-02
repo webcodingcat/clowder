@@ -1,4 +1,4 @@
-package agent
+package stacks
 
 import (
 	"encoding/json"
@@ -18,7 +18,7 @@ import (
 // is found whatever happened to the stack that used it.
 
 // recordCopies adds volume copies to their volumes' records.
-func (r *stackRunner) recordCopies(volumes []storage.Volume) error {
+func (r *Runner) recordCopies(volumes []storage.Volume) error {
 	for _, volume := range volumes {
 		recorded, err := r.readRecord(r.files.volumeRecord(volume.ID))
 		if err != nil {
@@ -33,7 +33,7 @@ func (r *stackRunner) recordCopies(volumes []storage.Volume) error {
 }
 
 // writeRecord replaces a volume's record; without copies the file goes.
-func (r *stackRunner) writeRecord(volumeID string, volumes []storage.Volume) error {
+func (r *Runner) writeRecord(volumeID string, volumes []storage.Volume) error {
 	file := r.files.volumeRecord(volumeID)
 	if len(volumes) == 0 {
 		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -50,7 +50,7 @@ func (r *stackRunner) writeRecord(volumeID string, volumes []storage.Volume) err
 }
 
 // readRecord reads a volume's record; a missing file has no copies.
-func (r *stackRunner) readRecord(file string) ([]storage.Volume, error) {
+func (r *Runner) readRecord(file string) ([]storage.Volume, error) {
 	content, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -66,14 +66,14 @@ func (r *stackRunner) readRecord(file string) ([]storage.Volume, error) {
 }
 
 // recordedCopies are all volume copies on this host, by volume ID.
-func (r *stackRunner) recordedCopies() (map[string][]storage.Volume, error) {
-	entries, err := os.ReadDir(r.files.volumeRecordsDir())
+func (r *Runner) recordedCopies() (map[string][]storage.Volume, error) {
+	entries, err := os.ReadDir(r.files.VolumeRecordsDir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("list the volume copies of this host: %w", err)
 	}
 	volumes := map[string][]storage.Volume{}
 	for _, entry := range entries {
-		recorded, err := r.readRecord(filepath.Join(r.files.volumeRecordsDir(), entry.Name()))
+		recorded, err := r.readRecord(filepath.Join(r.files.VolumeRecordsDir, entry.Name()))
 		if err != nil {
 			return nil, err
 		}

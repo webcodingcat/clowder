@@ -11,10 +11,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/agent/loop"
+	"github.com/webcodingcat/clowder/internal/agent/stacks"
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/controller"
+	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/raftnode"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -30,9 +33,6 @@ const (
 	// catchUpTimeout is how long the agent waits at start for its state to
 	// catch up with the Raft log; well within systemd's start timeout.
 	catchUpTimeout = 15 * time.Second
-	// reconcileInterval is how often the reconcilers (network, stacks) run
-	// without a change of the state, to repair what someone changed by hand.
-	reconcileInterval = 30 * time.Second
 )
 
 // HostParts are the host's network, storage and Docker, which the agent
@@ -43,6 +43,22 @@ type HostParts struct {
 	Storage Storage
 	Docker  Docker
 	Hoster  controller.ConnectHoster
+}
+
+// Docker is what the agent and its runners need from Docker; docker.Client
+// is the real one.
+type Docker interface {
+	supervisor.Docker
+	stacks.Docker
+	Inspect(ctx context.Context, id string) (docker.Details, error)
+	Ping(ctx context.Context) error
+}
+
+// Storage is what the agent and the stack runner need from the storage
+// driver; storage.Driver is the real one.
+type Storage interface {
+	stacks.Storage
+	PoolUsage(ctx context.Context, pool string) (sizeBytes int64, dataPercent, metadataPercent float64, err error)
 }
 
 // Run runs the agent until ctx ends, in the order docs/developing/host.md
@@ -148,7 +164,7 @@ type daemon struct {
 	shared
 	// propose is how every part commits (serverProposer)
 	propose    controller.Propose
-	runner     *stackRunner
+	runner     *stacks.Runner
 	traefik    *traefikRunner
 	reporter   *hostReporter
 	supervisor *supervisor.Supervisor
@@ -159,7 +175,7 @@ type daemon struct {
 
 // newDaemon makes the agent's parts; it starts nothing. Who calls whom:
 //
-//	supervisor ──wakes (passSignal)──▶ stack runner, Traefik
+//	supervisor ──wakes (loop.Signal)──▶ stack runner, Traefik
 //	stack runner, Traefik ──call Pause on──▶ supervisor
 //	stack runner, report, alerts, leader's loops ──commit through (serverProposer)──▶ API server
 //	API server ──answers for──▶ stack runner (containers), alerts
@@ -168,13 +184,13 @@ type daemon struct {
 // proposer gets the server last, as the server needs the stack runner and
 // the alerts. No loop runs before newDaemon returns.
 func newDaemon(base shared) (*daemon, error) {
-	stacksSignal, traefikSignal := newPassSignal(), newPassSignal()
+	stacksSignal, traefikSignal := loop.NewSignal(), loop.NewSignal()
 	dockerRestarted := func() {
-		stacksSignal.dockerRestarted()
-		traefikSignal.dockerRestarted()
+		stacksSignal.DockerRestarted()
+		traefikSignal.DockerRestarted()
 	}
 	watcher := supervisor.New(base.parts.Docker, restartRules{base.node, base.host.ID}.of, supervisor.DefaultBackoff,
-		dockerRestarted, traefikSignal.now, base.logger)
+		dockerRestarted, traefikSignal.Now, base.logger)
 	proposer := &serverProposer{}
 
 	runner, err := newStackRunner(base, watcher, stacksSignal, proposer.propose)
@@ -210,31 +226,31 @@ func (p *serverProposer) propose(ctx context.Context, cmd state.Command) (uint64
 
 // newStackRunner makes the stack runner, with the key of its secrets'
 // labels derived from the data key.
-func newStackRunner(base shared, watcher pauser, signal *passSignal, propose controller.Propose) (*stackRunner, error) {
-	digestKey, err := base.credentials.dataKey.Derive(secretLabelPurpose)
+func newStackRunner(base shared, watcher loop.Pauser, signal *loop.Signal, propose controller.Propose) (
+	*stacks.Runner, error,
+) {
+	digestKey, err := base.credentials.dataKey.Derive(stacks.SecretLabelPurpose)
 	if err != nil {
 		return nil, fmt.Errorf("derive the key of the secrets' labels: %w", err)
 	}
-	return &stackRunner{
-		files:       base.files,
-		host:        base.host,
-		cluster:     base.node,
-		docker:      base.parts.Docker,
-		storage:     base.parts.Storage,
-		open:        base.credentials.dataKey.Open,
-		digestKey:   digestKey,
-		logger:      base.logger,
-		supervisor:  watcher,
-		signal:      signal,
-		propose:     propose,
-		applied:     map[string]broughtUp{},
-		logins:      map[string][32]byte{},
-		unexplained: map[string]bool{},
-	}, nil
+	return stacks.New(stacks.Parts{
+		Files:       base.files.stackFiles(),
+		Host:        base.host.ID,
+		NodeAddress: base.host.NodeAddress,
+		Cluster:     base.node,
+		Docker:      base.parts.Docker,
+		Storage:     base.parts.Storage,
+		Open:        base.credentials.dataKey.Open,
+		DigestKey:   digestKey,
+		Supervisor:  watcher,
+		Signal:      signal,
+		Propose:     propose,
+		Logger:      base.logger,
+	}), nil
 }
 
 // newTraefikRunner makes Traefik's runner.
-func newTraefikRunner(base shared, watcher pauser, signal *passSignal) *traefikRunner {
+func newTraefikRunner(base shared, watcher loop.Pauser, signal *loop.Signal) *traefikRunner {
 	return &traefikRunner{
 		files:      base.files,
 		host:       base.host,
@@ -264,7 +280,7 @@ func newHostReporter(base shared, propose controller.Propose) *hostReporter {
 
 // newAPIServer makes the API server, which answers for the stack runner
 // (a stack's containers) and the alerts.
-func newAPIServer(base shared, runner *stackRunner, alerts *controller.Alerts) *api.Server {
+func newAPIServer(base shared, runner *stacks.Runner, alerts *controller.Alerts) *api.Server {
 	return api.NewServer(api.ServerConfig{
 		Cluster: base.node, CA: base.credentials.ca, Certificate: base.credentials.certificate,
 		APIAddress: func(id state.HostID) string {
@@ -284,7 +300,7 @@ func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup, caughtUp
 	// this host's loops that start no container
 	loops.Go(func() { reconcileNetwork(ctx, node, d.parts.Network, logger) })
 	loops.Go(func() { d.supervisor.Run(ctx, compose.LabelStack) })
-	loops.Go(func() { d.runner.trim(ctx) })
+	loops.Go(func() { d.runner.Trim(ctx) })
 
 	// the leader's loops: each does nothing while this host does not lead
 	loops.Go(func() { controller.RunPlacement(ctx, node, propose, d.conditions, logger) })
@@ -311,7 +327,7 @@ func (d *daemon) runOnceCaughtUp(ctx context.Context, loops *sync.WaitGroup, cau
 	// returned yet: adding to it from here is allowed
 	loops.Go(func() { d.reporter.run(ctx) })
 	loops.Go(func() { d.traefik.run(ctx) })
-	d.runner.run(ctx)
+	d.runner.Run(ctx)
 }
 
 // errLoopsLeft ends the agent when a loop did not end in time.

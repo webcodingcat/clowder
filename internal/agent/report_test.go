@@ -7,31 +7,33 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/webcodingcat/clowder/internal/agent/agenttest"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// newTestReporter reports host 0 of newTestRunner's cluster.
-func newTestReporter(t *testing.T) (*hostReporter, *testCluster, *fakeDocker, *fakeStorage) {
+// newTestReporter reports host 0 of agenttest.NewCluster.
+func newTestReporter(t *testing.T) (*hostReporter, *agenttest.Cluster, *agenttest.Docker, *agenttest.Storage) {
 	t.Helper()
-	runner, cluster, docker, storage := newTestRunner(t)
+	cluster := agenttest.NewCluster(t)
+	docker, storage := &agenttest.Docker{}, &agenttest.Storage{Dir: t.TempDir()}
 	reporter := &hostReporter{
-		host: runner.host, version: "1.0.0", cluster: cluster, docker: docker, storage: storage,
-		propose: runner.propose, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), root: t.TempDir(),
+		host: Host{ID: 0, Name: "node0"}, version: "1.0.0", cluster: cluster, docker: docker, storage: storage,
+		propose: cluster.Propose, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), root: t.TempDir(),
 	}
 	return reporter, cluster, docker, storage
 }
 
 // reported is host 0 as the state has it, and how many reports it took.
-func reported(cluster *testCluster) (state.Host, int) {
-	cluster.mu.Lock()
-	defer cluster.mu.Unlock()
+func reported(cluster *agenttest.Cluster) (state.Host, int) {
+	cluster.Lock()
+	defer cluster.Unlock()
 	count := 0
-	for _, entry := range cluster.state.Audit {
+	for _, entry := range cluster.State.Audit {
 		if entry.Kind == state.KindReportHost {
 			count++
 		}
 	}
-	return *cluster.state.Hosts[0], count
+	return *cluster.State.Hosts[0], count
 }
 
 // set changes a fake under its lock.
@@ -43,7 +45,7 @@ func set(mu sync.Locker, change func()) {
 
 func TestTheHostIsReportedOnlyWhenAValueMovesByAPercent(t *testing.T) {
 	reporter, cluster, _, storage := newTestReporter(t)
-	set(&storage.mu, func() { storage.dataPercent = 79.2 })
+	set(storage, func() { storage.DataPercent = 79.2 })
 	if err := reporter.pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +54,7 @@ func TestTheHostIsReportedOnlyWhenAValueMovesByAPercent(t *testing.T) {
 		host.Version != "1.0.0" || count != 1 {
 		t.Errorf("host %+v after %d reports", host, count)
 	}
-	set(&storage.mu, func() { storage.dataPercent = 79.9 }) // the same whole percent, rounded up
+	set(storage, func() { storage.DataPercent = 79.9 }) // the same whole percent, rounded up
 	if err := reporter.pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -63,12 +65,12 @@ func TestTheHostIsReportedOnlyWhenAValueMovesByAPercent(t *testing.T) {
 
 func TestAHangingDockerIsReportedAndAFailedPoolKeepsItsLastUse(t *testing.T) {
 	reporter, cluster, docker, storage := newTestReporter(t)
-	set(&storage.mu, func() { storage.dataPercent = 42 })
+	set(storage, func() { storage.DataPercent = 42 })
 	if err := reporter.pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	set(&docker.mu, func() { docker.hangs = true })
-	set(&storage.mu, func() { storage.poolFails = true })
+	set(docker, func() { docker.Hangs = true })
+	set(storage, func() { storage.PoolFails = true })
 	if err := reporter.pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -82,11 +84,11 @@ func TestAHangingDockerIsReportedAndAFailedPoolKeepsItsLastUse(t *testing.T) {
 
 	// Docker answers again, then the agent stops: its ping fails because
 	// it stops, which says nothing about Docker
-	set(&docker.mu, func() { docker.hangs = false })
+	set(docker, func() { docker.Hangs = false })
 	if err := reporter.pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	set(&docker.mu, func() { docker.hangs = true })
+	set(docker, func() { docker.Hangs = true })
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := reporter.pass(ctx); err != nil {

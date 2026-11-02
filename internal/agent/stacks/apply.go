@@ -1,4 +1,4 @@
-package agent
+package stacks
 
 import (
 	"cmp"
@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/agent/loop"
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/digest"
@@ -28,7 +29,7 @@ import (
 // renders its Compose file, makes the copies, brings the stack up and
 // reports it running. inUse are the LVs that a stack which failed to stop
 // (stopLeavers) may still write to, so no other stack may take them yet.
-func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *state.Stack, inUse volumesInUse) error {
+func (r *Runner) apply(ctx context.Context, desired desiredState, stack *state.Stack, inUse volumesInUse) error {
 	secrets, err := r.openSecrets(desired, stack)
 	if err != nil {
 		return err
@@ -55,7 +56,7 @@ func (r *stackRunner) apply(ctx context.Context, desired desiredState, stack *st
 // stackVolumes are this host's copies of the volumes a stack names, by
 // name. It returns errVolumeInUse when a stack that failed to stop may
 // still use one of them.
-func (r *stackRunner) stackVolumes(desired desiredState, stack *state.Stack, inUse volumesInUse) (map[string]storage.Volume, error) {
+func (r *Runner) stackVolumes(desired desiredState, stack *state.Stack, inUse volumesInUse) (map[string]storage.Volume, error) {
 	volumes := map[string]storage.Volume{}
 	for _, name := range stack.Spec.VolumeNames() {
 		volume, err := r.describe(desired, names.ID(stack.Namespace, name))
@@ -71,7 +72,7 @@ func (r *stackRunner) stackVolumes(desired desiredState, stack *state.Stack, inU
 }
 
 // render renders a stack's Compose file for this host.
-func (r *stackRunner) render(desired desiredState, stack *state.Stack, volumes map[string]storage.Volume,
+func (r *Runner) render(desired desiredState, stack *state.Stack, volumes map[string]storage.Volume,
 	secrets stackSecrets,
 ) ([]byte, error) {
 	// before the first cluster apply there is no Floating IP
@@ -84,7 +85,7 @@ func (r *stackRunner) render(desired desiredState, stack *state.Stack, volumes m
 		mounted[name] = compose.MountedVolume{Dir: r.storage.MountPoint(volume), Name: volume.LV}
 	}
 	rendered, err := compose.Render(stack.Name, stack.Spec, compose.Target{
-		Namespace: stack.Namespace, FloatingIP: floatingIP, NodeAddress: r.host.NodeAddress,
+		Namespace: stack.Namespace, FloatingIP: floatingIP, NodeAddress: r.nodeAddress,
 		Resolver: network.Resolver, Volumes: mounted, SecretsDir: r.files.secretFilesDir(stack.Project()),
 		SecretLabels: secrets.labels, Restarted: stack.Restarted,
 	})
@@ -96,7 +97,7 @@ func (r *stackRunner) render(desired desiredState, stack *state.Stack, volumes m
 
 // ensureVolumes makes a stack's volume copies. They are recorded before they
 // exist, so a copy made by a crashed pass is still found and removed later.
-func (r *stackRunner) ensureVolumes(ctx context.Context, volumes map[string]storage.Volume) error {
+func (r *Runner) ensureVolumes(ctx context.Context, volumes map[string]storage.Volume) error {
 	if err := r.recordCopies(slices.Collect(maps.Values(volumes))); err != nil {
 		return err
 	}
@@ -112,14 +113,14 @@ func (r *stackRunner) ensureVolumes(ctx context.Context, volumes map[string]stor
 // services, unless all of it came up before. It pulls the images of the
 // services a user restarted since their containers came up first. A failed
 // pull or compose up is tried again at the next pass.
-func (r *stackRunner) up(ctx context.Context, stack *state.Stack, rendered []byte, secrets stackSecrets,
+func (r *Runner) up(ctx context.Context, stack *state.Stack, rendered []byte, secrets stackSecrets,
 	volumes map[string]storage.Volume,
 ) error {
 	project := stack.Project()
 	hash := upHash(rendered, secrets, stack.PushedOut)
 	// read before compose up: a restart of Docker during it makes the
 	// stack come up again at the next pass
-	upNow := broughtUp{hash: hash, dockerRestarts: r.signal.restarts()}
+	upNow := loop.BroughtUp{Hash: hash, DockerRestarts: r.signal.Restarts()}
 	if r.applied[project] == upNow {
 		return nil
 	}
@@ -130,7 +131,7 @@ func (r *stackRunner) up(ctx context.Context, stack *state.Stack, rendered []byt
 	if err := r.pullRestarted(ctx, project, files, stack.Restarted); err != nil {
 		return err
 	}
-	err = whilePaused(r.supervisor, project, func() error {
+	err = loop.WhilePaused(r.supervisor, project, func() error {
 		return r.docker.ComposeUp(ctx, project, files, stack.PushedOut)
 	})
 	if err != nil {
@@ -150,7 +151,7 @@ func (r *stackRunner) up(ctx context.Context, stack *state.Stack, rendered []byt
 // writeStackFiles writes what compose up reads: the LVs the stack mounts
 // (addMountedLVs), its Compose file and its secrets. It returns the
 // Compose files, the stack's and, if it has secret variables, theirs.
-func (r *stackRunner) writeStackFiles(project string, rendered []byte, secrets stackSecrets,
+func (r *Runner) writeStackFiles(project string, rendered []byte, secrets stackSecrets,
 	volumes map[string]storage.Volume,
 ) ([]string, error) {
 	// before the Compose file, so a stack that has one has its LVs too
@@ -192,7 +193,7 @@ func lvsOf(volumes map[string]storage.Volume) []string {
 // With one, its containers may hold any LV: the file is left as it is,
 // and markInUse, which cannot read it either, counts every volume as in
 // use until compose up worked.
-func (r *stackRunner) addMountedLVs(project string, lvs []string) error {
+func (r *Runner) addMountedLVs(project string, lvs []string) error {
 	held, err := r.readMountedLVs(project)
 	if err != nil {
 		_, statErr := os.Stat(r.files.stackFile(project))
@@ -205,7 +206,7 @@ func (r *stackRunner) addMountedLVs(project string, lvs []string) error {
 }
 
 // writeMountedLVs writes the LVs a stack's containers may hold, sorted.
-func (r *stackRunner) writeMountedLVs(project string, lvs []string) error {
+func (r *Runner) writeMountedLVs(project string, lvs []string) error {
 	lvs = slices.Compact(slices.Sorted(slices.Values(lvs)))
 	encoded, err := json.Marshal(lvs)
 	if err != nil {
@@ -215,7 +216,7 @@ func (r *stackRunner) writeMountedLVs(project string, lvs []string) error {
 }
 
 // readMountedLVs reads the LVs a stack's containers may hold.
-func (r *stackRunner) readMountedLVs(project string) ([]string, error) {
+func (r *Runner) readMountedLVs(project string) ([]string, error) {
 	var lvs []string
 	content, err := os.ReadFile(r.files.stackVolumesFile(project))
 	if err == nil {
@@ -229,7 +230,7 @@ func (r *stackRunner) readMountedLVs(project string) ([]string, error) {
 
 // pullRestarted pulls the images of the services a user restarted since
 // their containers came up (restartedSinceUp).
-func (r *stackRunner) pullRestarted(ctx context.Context, project string, files []string,
+func (r *Runner) pullRestarted(ctx context.Context, project string, files []string,
 	restarted map[string]time.Time,
 ) error {
 	services, err := r.restartedSinceUp(ctx, project, restarted)
@@ -251,7 +252,7 @@ func (r *stackRunner) pullRestarted(ctx context.Context, project string, files [
 // pulled before, as one may have changed under the same tag. Docker keeps
 // the label, so after a reboot or an agent restart nothing is pulled again,
 // and a service without a container gets its image from compose up anyway.
-func (r *stackRunner) restartedSinceUp(ctx context.Context, project string, restarted map[string]time.Time) ([]string, error) {
+func (r *Runner) restartedSinceUp(ctx context.Context, project string, restarted map[string]time.Time) ([]string, error) {
 	if len(restarted) == 0 {
 		return nil, nil
 	}
@@ -288,11 +289,11 @@ func upHash(rendered []byte, secrets stackSecrets, pushedOut []string) [32]byte 
 // reportRunning reports a stack running with the secrets its containers
 // came up with. A new generation or a restart made the stack starting, so
 // running with the same secrets means nothing new to report.
-func (r *stackRunner) reportRunning(ctx context.Context, stack *state.Stack, secrets stackSecrets) error {
+func (r *Runner) reportRunning(ctx context.Context, stack *state.Stack, secrets stackSecrets) error {
 	if stack.Status == state.StackRunning && maps.Equal(stack.AppliedSecrets, secrets.digests) {
 		return nil
 	}
-	err := commitAsHost(ctx, r.propose, r.host.ID, state.KindSetStackStatus, state.SetStackStatus{
+	err := loop.CommitAsHost(ctx, r.propose, r.host, state.KindSetStackStatus, state.SetStackStatus{
 		ID: stack.ID(), Status: state.StackRunning, Host: stack.Host, Generation: stack.Generation,
 		Restarted: stack.Restarted, AppliedSecrets: secrets.digests,
 	})
@@ -310,7 +311,7 @@ const upErrorLength = 200
 // shortened. A stack that fails again keeps its first error, so a pass that
 // tries in vain writes nothing. A failed report is only logged: the next
 // pass reports again.
-func (r *stackRunner) reportFailing(ctx context.Context, stack *state.Stack, cause error) {
+func (r *Runner) reportFailing(ctx context.Context, stack *state.Stack, cause error) {
 	if stack.Status == state.StackFailing {
 		return
 	}
@@ -318,7 +319,7 @@ func (r *stackRunner) reportFailing(ctx context.Context, stack *state.Stack, cau
 	if runes := []rune(upError); len(runes) > upErrorLength {
 		upError = string(runes[:upErrorLength-1]) + "…"
 	}
-	err := commitAsHost(ctx, r.propose, r.host.ID, state.KindSetStackStatus, state.SetStackStatus{
+	err := loop.CommitAsHost(ctx, r.propose, r.host, state.KindSetStackStatus, state.SetStackStatus{
 		ID: stack.ID(), Status: state.StackFailing, Host: stack.Host, Generation: stack.Generation,
 		Restarted: stack.Restarted, UpError: cmp.Or(upError, "an empty error"),
 	})

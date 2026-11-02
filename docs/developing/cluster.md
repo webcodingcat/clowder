@@ -33,8 +33,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | the alerts | `put-alert`, `resolve-alert` |
   | each agent | `report-host`, `forget-copy` |
 
-  The other kinds (hosts that join, operations, users beyond the first) are for the next
-  steps. They are tested, but nothing sends them yet.
+  The other kinds (hosts that join, operations, users beyond the first) are for phase 2
+  and later. They are tested, but nothing sends them yet.
 - **Resources** (phase 1c): namespaces (`Namespaces`), and by `<namespace>/<name>` stacks
   (`Stacks`), volumes (`Volumes`) and secrets (`Secrets`), each with a `Meta`. The kinds
   and their specs are in `internal/resource` (a stack's in `internal/stackspec`), which the
@@ -137,7 +137,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   answering is `failed`; it comes back `active` by itself, or the leader powers it off
   (`fenced`) before its stacks start elsewhere. A fenced host that is back recovers
   (`recovering`, then `active`); one that fails again and again is `disabled` until a user
-  enables it. Any host can be `removed`.
+  enables it. Any host can be `removed`. Until phase 2, with no hosts that join and no
+  failover, a host is only ever `active`, `draining` or `removed`.
 
 - **Versions.** Until `v1.0.0` the state, the commands and `cluster.yaml` change freely:
   no cluster runs in production, so there are no migrations and no gates, and
@@ -153,7 +154,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **Locks.** Operations hold locks (`stack/<namespace>/<stack>`, `volume/<volume ID>`); a
   change to a locked stack or volume is refused with a `LockedError`, unless the holding
   operation makes it (`Operation` in the payload). Only failover takes locks over
-  (`TakeOver`).
+  (`TakeOver`). Operations are for phase 2: nothing starts one yet.
 - **Invariants** the state holds itself, as the last place to catch a wrong command: one
   first user, valid names (`internal/names`), volumes with 0 to 3 replicas and a DRBD minor
   exactly when replicated (a pending volume has neither copy nor minor), one copy per host,
