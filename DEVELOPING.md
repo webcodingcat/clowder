@@ -1,8 +1,8 @@
 # Developing clowder
 
-How the code fits together and which rules hold it together, with their reasons. Numbers,
-paths and timeouts live in the code as named constants; this file names them instead of
-repeating them. [STYLE.md](STYLE.md) has the coding standards, `bin/dev` the commands.
+How the code fits together, and the rules that keep it that way, with their reasons.
+Numbers, paths and timeouts are named constants in the code; this file names the constant
+instead of repeating its value. [STYLE.md](STYLE.md) has the coding standards, `bin/dev` the commands.
 
 New here? Read [Start here](#start-here-one-apply-through-the-code), then the part about
 the package you change. This file has the whole and the rules that hold everywhere:
@@ -117,7 +117,7 @@ What follows from there:
 | generation | of a resource: counts the changes of its spec; an apply that changes nothing does not count. A volume's data generation grows with a restore or class move and is part of its LV's name |
 | pushed out, coming back | a service stopped to make room for one of higher priority; it comes back once there is room again |
 | retired copy | a volume's copy the state gave up (the volume deleted, moved or restored); its host removes it, and only then is the data gone |
-| leavers, in use | on a host: the stacks that left it and stop first; the volumes such a stack still uses because its stop failed, which no other stack may take yet |
+| leavers, in use | on a host: leavers are the stacks that left the host (moved elsewhere or deleted); they are stopped before anything else starts. A volume is in use while a leaver whose stop failed still holds it; no other stack may take it until then |
 | pass | one run of a loop that brings its part of the host or the cluster to what the state says; a loop runs a pass at every change of the state and every 30 s |
 | room | what a host offers its services (memory, CPUs) less what they reserve: the scheduler's one measure |
 | desired | what the state wants on this host, read once per pass; the agent compares the host with it |
@@ -153,11 +153,12 @@ The package layout is planned for the whole of v1; packages appear as the phases
   (rule `state-pure`) keeps `os`, `net/http`, randomness and `clusterdir` out, forbidigo
   the clock (`time.Now`, `time.Since`, `time.Until`).
 - **Decides**: `controller` (the leader's loops) writes Raft commands. It talks to external
-  services only the leader uses (hoster API, ACME, Git remotes, alert channels), but never
-  changes the host. Their clients sit beside it: `hoster` (with `hoster/hetzner`),
-  `notify`, and `x/crypto/acme`; depguard keeps them out of the CLI, the state and the
-  scheduler. The agent starts its loops, so `agent` imports `controller`, never the
-  other way round; it also takes `controller.Propose` for the commands it writes itself.
+  services that only the leader uses (hoster API, ACME, Git remotes, alert channels), but it
+  never changes the host. The clients of these services are separate packages: `hoster`
+  (with `hoster/hetzner`), `notify`, and `x/crypto/acme`. depguard keeps them out of the
+  CLI, the state and the scheduler. The agent starts the controller's loops, so `agent`
+  imports `controller` and never the other way round. The agent also uses
+  `controller.Propose` for the commands it writes itself.
 - **Changes the host**: `agent`, `supervisor`, `raftnode` (Raft over mTLS), `datakey` (the
   key file), `command` (host tools with a timeout) and the drivers `network`, `storage`,
   `docker`, `ingress` (Traefik's files; it renders, the agent writes).
@@ -167,11 +168,12 @@ The package layout is planned for the whole of v1; packages appear as the phases
 ## Host tools (`internal/command`)
 
 Every host tool runs through `command.Run` or `command.RunWithInput`, with no exception
-(lvs, drbdadm, mkfs, mount, nft, ip, systemctl, docker, ...): with a timeout, and left behind
-if it does not finish. A process that touches a volume can hang in state D while DRBD
-suspends I/O, and then not even SIGKILL ends it; any other tool that hangs must not stop a
-reconciler either. `command.Stream` (logs that follow) is the one without a timeout; only
-tools that touch no volume use it. `command.ExitCode` tells a tool's own exit code from a
+(lvs, drbdadm, mkfs, mount, nft, ip, systemctl, docker, ...). Both give the tool a timeout;
+a tool that does not finish in time is left behind and the agent goes on. The reason: while
+DRBD suspends I/O, a process that touches a volume can hang in state D, and then not even
+SIGKILL ends it. A tool that hangs for any other reason must not stop a loop either.
+`command.Stream` (for logs that follow) is the only call without a timeout, so only tools
+that touch no volume use it. `command.ExitCode` tells the tool's own exit code apart from a
 timeout or a missing binary.
 
 ## Volumes
@@ -183,9 +185,10 @@ snapshot, copy) runs in separate processes that the agent watches for progress. 
 reports never depend on a volume.
 
 One exception holds until phase 2: `storage.Ensure` runs `mkfs` and `mkdir data/` from the
-stack runner's loop, each through `internal/command` with its timeout, so a hang leaves the
-process behind, not the agent; but a long `mkfs` holds up the other stacks of that pass. The
-roadmap's gaps of phase 2 name the change (a stack or volume worked on apart).
+stack runner's loop. Both run through `internal/command` with a timeout, so if one hangs,
+only that process is left behind, not the agent. But a long `mkfs` delays the other stacks
+of the same pass. The roadmap's gaps for phase 2 name the fix: each stack or volume is
+worked on separately.
 
 ## Logging and errors
 

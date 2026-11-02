@@ -87,8 +87,9 @@ func (r *stackRunner) removeVolumes(ctx context.Context, desired desiredState) {
 	}
 }
 
-// removeCopies removes those copies of one volume that the state no longer
-// places on this host in their generation and retired here.
+// removeCopies removes the copies of one volume on this host that the
+// state has retired here and no longer places here in their data
+// generation.
 func (r *stackRunner) removeCopies(ctx context.Context, desired desiredState, id string, recorded []storage.Volume) error {
 	var kept []storage.Volume
 	var errs []error
@@ -133,7 +134,8 @@ func (r *stackRunner) placedHere(desired desiredState, volume storage.Volume) bo
 	return names.VolumeName(volume.ID, current.DataGeneration) == volume.LV
 }
 
-// retiredHere finds the retired copy that the recorded one on this host is.
+// retiredHere finds the retired copy in the state that matches the copy
+// recorded on this host.
 func (r *stackRunner) retiredHere(desired desiredState, volume storage.Volume) (state.RetiredCopy, bool) {
 	for _, retired := range desired.retired {
 		if retired.Host == r.host.ID && retired.Volume == volume.ID &&

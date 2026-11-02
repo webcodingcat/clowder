@@ -16,8 +16,8 @@ const ChangeRingSize = 4096
 var ErrChangesGone = errors.New("the changes since that index are gone; list afresh")
 
 // ChangeRing keeps the last changes the log made, oldest first, for the
-// watch. It holds every change after index from: what came before is in
-// the snapshot it started from, or dropped for room.
+// watch. It holds every change after the index in from. Earlier changes
+// are in the snapshot the ring started from, or were dropped to make room.
 type ChangeRing struct {
 	changes []Change
 	from    uint64

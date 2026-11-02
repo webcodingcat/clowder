@@ -39,10 +39,14 @@ func (r resources) short() bool {
 	return r.memory < 0 || r.milliCPUs < 0
 }
 
-// withMargin is r and 5 % more: a pushed-out service comes back only with
-// room to spare, so it does not go again at the next small change.
+// comeBackMarginPercent is the room to spare a pushed-out service needs to
+// come back, so it is not pushed out again at the next small change.
+const comeBackMarginPercent = 5
+
+// withMargin is r and comeBackMarginPercent more.
 func (r resources) withMargin() resources {
-	return resources{r.memory * 105 / 100, r.milliCPUs * 105 / 100}
+	scale := func(value int64) int64 { return value * (100 + comeBackMarginPercent) / 100 }
+	return resources{scale(r.memory), scale(r.milliCPUs)}
 }
 
 func (r resources) String() string {
@@ -285,7 +289,7 @@ func (r *room) withDependents(ref serviceRef) []serviceRef {
 // victims chooses running services of a host below a priority to push
 // out, lowest first, each with what depends on it, until need fits into
 // free; services in gone already count as pushed out. ok is false if even
-// all of them would not make room; free is the room with them gone.
+// all of them would not make room; freeAfter is the room with them gone.
 func (r *room) victims(host state.HostID, below int, need, free resources, gone map[serviceRef]bool) (
 	victims []serviceRef, freeAfter resources, ok bool,
 ) {

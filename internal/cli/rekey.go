@@ -149,7 +149,9 @@ func rekeyByIdentity(cmd *cobra.Command, client *api.Client, identityFile string
 
 // rekeyFile rekeys the values of one file and writes it back whole or not
 // at all, with only the lines of the values changed. It tells how many
-// values it rekeyed.
+// values it rekeyed. Every file with a value is written: age encrypts with
+// a fresh key each time, so new armor never equals the old, and the
+// ciphertext does not tell whether a value already reaches the recovery key.
 func rekeyFile(ctx context.Context, path string, rekey rekeyFunc) (int, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {

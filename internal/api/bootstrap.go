@@ -96,7 +96,7 @@ type TrustedCluster struct {
 func FindCluster(ctx context.Context, seed string, bootstrapKey []byte, version string) (*TrustedCluster, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+Address(seed)+"/v1/bootstrap", nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ask %s for its CA: %w", seed, err)
 	}
 	request.Header.Set(VersionHeader, version)
 	var offer BootstrapOffer
@@ -110,7 +110,7 @@ func FindCluster(ctx context.Context, seed string, bootstrapKey []byte, version 
 	}
 	ca, err := pki.ParseCertificate([]byte(offer.CACertificate))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read the CA of %s: %w", seed, err)
 	}
 	return &TrustedCluster{
 		seed: seed, version: version, bootstrapKey: bootstrapKey,
@@ -127,12 +127,12 @@ func (c *TrustedCluster) Bootstrap(ctx context.Context, user string, public ed25
 	signed.Sign(c.bootstrapKey)
 	body, err := json.Marshal(signed)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("encode the request: %w", err)
 	}
 	url := "https://" + Address(c.seed) + "/v1/bootstrap"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("get the first certificate from %s: %w", c.seed, err)
 	}
 	request.Header.Set(VersionHeader, c.version)
 	var answer BootstrapAnswer

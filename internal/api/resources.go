@@ -115,9 +115,9 @@ type StackStatus struct {
 	Restarted map[string]time.Time `json:"restarted,omitempty"`
 }
 
-// secretResourcePurpose names the key the digests of Secret resources
-// take, apart from the key of the containers' labels: neither digest tells
-// anything about the other.
+// secretResourcePurpose names the key for the digests of Secret resources.
+// It differs from the key for the containers' labels, so neither digest
+// tells anything about the other.
 const secretResourcePurpose = "clowder secret resource digest"
 
 // changeBatch is an apply or a delete as the agent that took it hands it to
@@ -244,8 +244,9 @@ func (s *Server) putCommand(actor string, object resource.Object) (state.Command
 			return state.Command{}, err
 		}
 		id := names.ID(payload.Namespace, payload.Name)
-		// a value copied from another place, the hoster's token into a
-		// Secret a container reads, is refused
+		// the value must be encrypted for this Secret: one copied from
+		// elsewhere, such as the hoster's token from cluster.yaml, would
+		// otherwise reach a container
 		value, err := secretvalue.OpenFor(secret.Encrypted, id, identity)
 		if err != nil {
 			return state.Command{}, fmt.Errorf("secret %s: %w", id, err)
@@ -261,7 +262,7 @@ func (s *Server) putCommand(actor string, object resource.Object) (state.Command
 	if spec != nil {
 		encoded, err := json.Marshal(spec)
 		if err != nil {
-			return state.Command{}, err
+			return state.Command{}, fmt.Errorf("encode the spec: %w", err)
 		}
 		payload.Spec = encoded
 	}
@@ -279,7 +280,7 @@ func (s *Server) sealSecret(id string, value []byte) (state.SealedSecret, error)
 	}
 	key, err := s.config.Keys.Derive(secretResourcePurpose)
 	if err != nil {
-		return state.SealedSecret{}, err
+		return state.SealedSecret{}, fmt.Errorf("derive the digest key: %w", err)
 	}
 	return state.SealedSecret{Value: sealed, Digest: digest.HMAC(key, []byte(id), value)}, nil
 }
@@ -316,12 +317,12 @@ func (s *Server) forwardChanges(ctx context.Context, batch changeBatch) (ChangeR
 	}
 	body, err := json.Marshal(batch)
 	if err != nil {
-		return ChangeResult{}, err
+		return ChangeResult{}, fmt.Errorf("encode the batch: %w", err)
 	}
 	url := "https://" + s.config.APIAddress(leader) + "/v1/internal/changes"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return ChangeResult{}, err
+		return ChangeResult{}, fmt.Errorf("forward to the leader (host %d): %w", leader, err)
 	}
 	request.Header.Set(VersionHeader, s.config.Version)
 	var answer ChangeResult
@@ -396,10 +397,10 @@ func (s *Server) runChange(ctx context.Context, copied *state.State, each batchC
 	if each.Command == nil {
 		return Refused, each.Error, 0
 	}
-	// The try needs a time, as Apply takes it from the command: the
-	// leader's clock. proposeHere stamps the command it commits anew; the
-	// two times differ by how long the try takes, and no check of a
-	// resource reads them.
+	// Apply takes the time from the command, so the try needs one: the
+	// leader's clock. proposeHere stamps the committed command with a new
+	// time. The two times differ by how long the try takes, but no check of
+	// a resource reads them.
 	tried := *each.Command
 	tried.At = time.Now().UTC()
 	// Apply moves the copy's index, so the next change gets the one after

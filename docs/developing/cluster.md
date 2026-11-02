@@ -236,6 +236,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   resource commands only (Resources, below). The leader's own commands (operations,
   placements, new hosts) are made on the leader and never come in from outside; a host never
   speaks for another host or for the leader.
+- **A host certificate may speak for any user.** The user's certificate ends at the first
+  agent, so the leader cannot check that a forwarded command really came from the user it
+  names: any host certificate may send a user's command with any user as its actor. This
+  is on purpose. A host holds the data key and the whole Raft state, and root on a host can
+  make a recovery code for any user anyway, so a host is trusted with everything. The checks
+  on the internal routes catch an agent's bug, not a host that lies; what keeps strangers
+  out is the CA, and removing a host revokes its certificate.
 - A refusal of the state is HTTP 409 with its reason; a write that did not commit is 503.
 - **Resources** (`resources.go`; the CLI's `apply`, `get` and `delete` below):
   - `POST /v1/apply` (`ApplyRequest`) and `POST /v1/delete` (`DeleteRequest`) take
@@ -442,7 +449,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   or from `--name` and `--seed` without one.
 - **Both routes come without a certificate,** so each agent takes at most `triesPerSender`
   tries a minute per sender and `triesInAll` in all, in memory (`api/limit.go`); then 429.
-  A sender is its IPv4 address, or for IPv6 its /64.
+  A sender is its IPv4 address, or for IPv6 its /64. The bootstrap's two routes are limited
+  the same way, with a count of their own: they too work with the data key for anyone who
+  asks, and strangers at the bootstrap must not block a recovery.
 - **`recovery rotate --code`** needs the user's credentials and their own code to rotate: stolen
   credentials alone cannot swap the recovery key. The CLI makes the new key and hands it
   over as the bootstrap does, then `POST /v1/recovery/rotate` commits

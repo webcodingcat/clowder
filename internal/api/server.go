@@ -101,9 +101,9 @@ type Server struct {
 	// does not wait for them
 	streams    context.Context
 	endStreams context.CancelFunc
-	// recoveries counts the tries at the recovery's routes, which come
-	// without a certificate
-	recoveries limiter
+	// the routes without a certificate count their tries, each pair for
+	// itself, so that strangers at the bootstrap do not block a recovery
+	bootstraps, recoveries limiter
 }
 
 // NewServer sets up the routes.
@@ -139,10 +139,10 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("POST /v1/internal/changes", pki.RoleHost, server.internalChanges)
 	server.handle("GET /v1/internal/stacks/{project}/ps", pki.RoleHost, server.localPs)
 	server.handle("GET /v1/internal/stacks/{project}/logs", pki.RoleHost, server.localLogs)
-	server.handleOpen("GET /v1/bootstrap", server.bootstrapOffer)
-	server.handleOpen("POST /v1/bootstrap", server.bootstrap)
-	server.handleOpen("GET /v1/recover/offer", server.limited(server.recoverOffer))
-	server.handleOpen("POST /v1/recover", server.limited(server.recoverUser))
+	server.handleOpen("GET /v1/bootstrap", limited(&server.bootstraps, server.bootstrapOffer))
+	server.handleOpen("POST /v1/bootstrap", limited(&server.bootstraps, server.bootstrap))
+	server.handleOpen("GET /v1/recover/offer", limited(&server.recoveries, server.recoverOffer))
+	server.handleOpen("POST /v1/recover", limited(&server.recoveries, server.recoverUser))
 	return server
 }
 
@@ -526,12 +526,12 @@ func (s *Server) Propose(ctx context.Context, cmd state.Command) (uint64, error)
 	}
 	body, err := json.Marshal(cmd)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("encode the command: %w", err)
 	}
 	url := "https://" + s.config.APIAddress(id) + "/v1/internal/propose"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("forward to the leader (host %d): %w", id, err)
 	}
 	request.Header.Set(VersionHeader, s.config.Version)
 	var written Written

@@ -8,18 +8,20 @@ import (
 	"time"
 )
 
-// How many tries of a recovery an agent takes per minute: per sender, so a
-// stranger cannot lock everybody out; in all, so many senders cannot keep
-// the agent busy. Someone with many addresses can still block recoveries
-// for minutes; no data is at risk then.
+// How many tries an agent takes per minute at a route without a
+// certificate (the bootstrap, the recovery): per sender, so a stranger
+// cannot lock everybody out; in all, so many senders cannot keep the agent
+// busy: each such route works with the data key for anyone who asks.
+// Someone with many addresses can still block the route for minutes; no
+// data is at risk then.
 const (
 	triesPerSender = 10
 	triesInAll     = 100
 )
 
-// limiter counts the tries of the current minute, in memory: each agent
-// for itself. Only tries it takes are counted, so it never holds more than
-// triesInAll senders.
+// limiter counts the tries of the current minute, in memory; each agent
+// counts for itself. A refused try is not counted, so the map never holds
+// more than triesInAll senders, however many send.
 type limiter struct {
 	mu       sync.Mutex
 	minute   int64
@@ -57,12 +59,12 @@ func senderOf(r *http.Request) netip.Addr {
 	return address
 }
 
-// limited lets a route take only the tries the limiter allows; the rest
+// limited lets a route take only the tries that tries allows; the rest
 // get 429.
-func (s *Server) limited(handler http.HandlerFunc) http.HandlerFunc {
+func limited(tries *limiter, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.recoveries.allow(senderOf(r), time.Now()) {
-			writeError(w, http.StatusTooManyRequests, errors.New("too many tries of a recovery; wait a minute"))
+		if !tries.allow(senderOf(r), time.Now()) {
+			writeError(w, http.StatusTooManyRequests, errors.New("too many tries; wait a minute"))
 			return
 		}
 		handler(w, r)

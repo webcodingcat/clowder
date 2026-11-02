@@ -212,6 +212,31 @@ func TestTheRecoveryTakesOnlySoManyTries(t *testing.T) {
 	}
 }
 
+func TestTheBootstrapTakesOnlySoManyTriesOfItsOwn(t *testing.T) {
+	cluster := newTestCluster(t)
+	cluster.withRealCA()
+	for try := range triesPerSender + 1 {
+		request, err := http.NewRequest(http.MethodGet, "https://"+cluster.seed(0)+"/v1/bootstrap", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// the test's join keys are not really sealed, so every offer fails
+		// with 500; this test checks only which tries get 429
+		err = send(uncheckedClient(), request, &BootstrapOffer{})
+		switch {
+		case try < triesPerSender && statusOf(err) == http.StatusTooManyRequests:
+			t.Fatalf("try %d was refused under the limit", try+1)
+		case try == triesPerSender && statusOf(err) != http.StatusTooManyRequests:
+			t.Errorf("one try too many: %v", err)
+		}
+	}
+	// the recovery counts apart: strangers at the bootstrap do not block it
+	if _, err := FindClusterByCode(context.Background(), []string{cluster.seed(0)}, "alice",
+		cluster.code(recoverycode.ForRecover, "alice"), testVersion); err != nil {
+		t.Errorf("a recovery after the bootstrap's limit: %v", err)
+	}
+}
+
 func TestTheLimiterCountsPerSenderAndInAll(t *testing.T) {
 	var limits limiter
 	now := time.Unix(1_800_000_000, 0)

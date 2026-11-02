@@ -130,17 +130,19 @@ func applySetRecoveryRecipient(s *State, cmd Command, payload SetRecoveryRecipie
 	}, nil
 }
 
-// UsedCode names a recovery code a command uses (internal/recoverycode):
-// by its digest, so the log and the audit do not show a code that may
-// still be taken, and with when no agent takes it any more.
+// UsedCode names a recovery code that a command uses
+// (internal/recoverycode). It holds the code's digest rather than the code,
+// so the log and the audit do not show a code that may still be valid. It
+// also holds the time after which no agent accepts the code any more.
 type UsedCode struct {
 	Digest  string    `json:"digest"`
 	Expires time.Time `json:"expires"`
 }
 
-// ErrCodeUsed refuses a recovery code that was used already: whoever saw it
-// on a console or in a log must not use it after its user, which would
-// lock the user out with the user's own way back.
+// ErrCodeUsed refuses a recovery code that was used already. Someone who
+// saw the code on a console or in a log must not be able to use it after
+// its user did: that would lock the user out through their own way back
+// in.
 var ErrCodeUsed = errors.New("the code was used already; the next quarter of an hour brings a new one")
 
 // usedCodeKept is how long a used code stays on the list after it

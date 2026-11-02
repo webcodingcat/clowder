@@ -55,9 +55,10 @@ func putVolumeResource(s *State, id string, payload PutResource) (func() *Meta, 
 	}, nil
 }
 
-// nextDataGeneration is a new volume's: one above the highest retired copy
-// of a deleted volume of the same ID, so its LV cannot be taken for one of
-// theirs, whose hosts may not have removed them yet.
+// nextDataGeneration returns the data generation for a new volume: one
+// above the highest retired copy of a deleted volume with the same ID. This
+// way the new volume's LV cannot be mistaken for an old copy whose host may
+// not have removed it yet.
 func (s *State) nextDataGeneration(id string) int64 {
 	generation := int64(1)
 	for _, retired := range s.Retired {
@@ -176,8 +177,9 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 	}, nil
 }
 
-// retire records the copies of old as retired, except those that kept,
-// the volume's new record, still has: same host, same data generation.
+// retire marks the copies of old as retired. It skips each copy that kept
+// (the volume's new record) still has on the same host with the same data
+// generation.
 func (s *State) retire(old *Volume, kept *Volume) {
 	for _, volumeCopy := range old.Copies {
 		if kept != nil && kept.DataGeneration == old.DataGeneration &&

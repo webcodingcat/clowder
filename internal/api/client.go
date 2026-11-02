@@ -146,7 +146,10 @@ func (c *Client) Stream(ctx context.Context, path string, out io.Writer) error {
 	if ctx.Err() != nil {
 		return nil // the caller stopped following
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("copy the stream: %w", err)
+	}
+	return nil
 }
 
 // Watch hands each event of a watch (GET /v1/watch) to each, until ctx
@@ -184,7 +187,7 @@ func (c *Client) openStream(ctx context.Context, path string) (io.ReadCloser, er
 	for _, seed := range c.seeds {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+Address(seed)+path, nil)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("ask %s: %w", seed, err)
 		}
 		request.Header.Set(VersionHeader, c.version)
 		response, err := c.streaming.Do(request)
@@ -230,7 +233,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	for _, seed := range c.seeds {
 		request, err := http.NewRequestWithContext(ctx, method, "https://"+Address(seed)+path, bytes.NewReader(body))
 		if err != nil {
-			return err
+			return fmt.Errorf("ask %s: %w", seed, err)
 		}
 		request.Header.Set(VersionHeader, c.version)
 		if method == http.MethodGet && c.written > 0 {

@@ -103,11 +103,11 @@ type SetHostPhase struct {
 	From HostPhase `json:"from,omitempty"`
 }
 
-// mover is who may make a phase change: the leader, on its own or for a
-// user, or the host itself, reporting what only it can see. A host never
-// moves another host. Which actor may send which kind of command at all is
-// the API's check; the state checks only what it alone can tell, whose host
-// a report is about.
+// mover says who may make a phase change: the leader (on its own or for a
+// user), or the host itself when it reports what only it can see. A host
+// never moves another host. The API checks which actor may send which kind
+// of command at all. The state checks only what needs the state: whether
+// the reporting host is the host the report is about.
 type mover int
 
 const (

@@ -88,7 +88,7 @@ func FindClusterByCode(ctx context.Context, seeds []string, user string, code re
 		address := "https://" + Address(seed) + "/v1/recover/offer?user=" + url.QueryEscape(user)
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("ask %s for its CA: %w", seed, err)
 		}
 		request.Header.Set(VersionHeader, version)
 		var offer RecoverOffer
@@ -109,7 +109,7 @@ func FindClusterByCode(ctx context.Context, seeds []string, user string, code re
 		}
 		ca, err := pki.ParseCertificate([]byte(offer.CACertificate))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read the CA of %s: %w", seed, err)
 		}
 		return &RecoveringCluster{
 			seed: seed, version: version, user: user, code: code, CA: ca, CAPEM: offer.CACertificate,
@@ -124,12 +124,12 @@ func FindClusterByCode(ctx context.Context, seeds []string, user string, code re
 func (c *RecoveringCluster) Recover(ctx context.Context, public ed25519.PublicKey) (string, error) {
 	body, err := json.Marshal(RecoverRequest{User: c.user, PublicKey: public, Code: c.code.String()})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("encode the request: %w", err)
 	}
 	address := "https://" + Address(c.seed) + "/v1/recover"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, address, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("get a new certificate from %s: %w", c.seed, err)
 	}
 	request.Header.Set(VersionHeader, c.version)
 	var answer RecoverAnswer
@@ -265,14 +265,14 @@ func (s *Server) rotateRecovery(w http.ResponseWriter, r *http.Request) {
 		state.SetRecoveryRecipient{Recipient: request.Recipient, Code: used})
 }
 
-// checkCode tells whether a code is the user's for the use now and was not
-// used yet, and names it for the command that uses it. The state refuses
-// the command too if the code was used in the meantime, through another
-// agent.
+// checkCode tells whether a code belongs to the user, is valid for this use
+// at this time and has not been used yet. It also returns the UsedCode for
+// the command that uses it. The state refuses that command as well if the
+// code was used in the meantime through another agent.
 func (s *Server) checkCode(use recoverycode.Use, user string, code recoverycode.Code) (state.UsedCode, bool, error) {
 	key, err := s.config.Keys.Derive(recoverycode.Purpose)
 	if err != nil {
-		return state.UsedCode{}, false, err
+		return state.UsedCode{}, false, fmt.Errorf("derive the code key: %w", err)
 	}
 	expires, valid := recoverycode.Valid(key, use, user, code, time.Now())
 	used := state.UsedCode{Digest: code.Digest(), Expires: expires}

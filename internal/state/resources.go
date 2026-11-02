@@ -47,12 +47,12 @@ const (
 	VerbRead    = "read"
 )
 
-// Authorize tells whether an actor may do a verb to the resources of a kind
-// in a namespace. It decides in the state, as every command applies, so
-// the actor's permissions are those of the state at that point of the log,
-// and no agent that took a request decides alone; the API asks it too, for
-// its reads. Until users get permissions every user may do everything, so
-// it reads none of its arguments yet.
+// Authorize tells whether an actor may apply a verb to the resources of a
+// kind in a namespace. The state calls it as each command is applied, so
+// it uses the permissions as they are at that point of the log, and no
+// single agent that took the request decides on its own. The API also
+// calls it for reads. Until users have permissions, every user may do
+// everything, so it ignores its arguments for now.
 func Authorize(_, _, _, _ string) error {
 	return nil
 }
@@ -81,7 +81,9 @@ type DeleteResource struct {
 }
 
 // resourceKind is how the state keeps one kind of resource, by its ID
-// (resourceID).
+// (resourceID). put and remove only check; they return the change as a
+// function that the handler runs once every check has passed, so a refused
+// command leaves no trace (docs/developing/cluster.md, Cluster state).
 type resourceKind struct {
 	// find returns the resource's Meta, or nil if there is none.
 	find func(s *State, id string) *Meta
@@ -105,11 +107,12 @@ var resourceKinds = map[string]resourceKind{
 	resource.KindStack:     {find: findStack, put: putStack, remove: removeStack},
 }
 
-// applyPutResource checks in a fixed order: whether the actor may, which
-// channel owns the resource, whether anything changes, and only then the
-// rest. So a channel learns nothing of another channel's spec, only that the
-// resource is another's; and an unchanged resource passes even where the
-// state has moved on since.
+// applyPutResource checks in a fixed order: whether the actor may put the
+// resource, which channel owns it, whether anything changes, and only then
+// everything else. This way a channel learns nothing about another
+// channel's spec, only that the resource belongs to another channel. And an
+// unchanged resource passes even if the state has changed since in a way
+// that would make the same spec fail the other checks.
 func applyPutResource(s *State, cmd Command, payload PutResource) (func(), error) {
 	kind, ok := resourceKinds[payload.Kind]
 	if !ok {

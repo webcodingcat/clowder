@@ -278,12 +278,13 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) (func(),
 	}, nil
 }
 
-// checkHostReport refuses a host's report that is not about the stack as
-// the state has it now. A host reports only about a stack it runs, and
-// never moves it: the leader may have moved it since the host read the
-// state. And it reports about the generation and the restarts applied: one
-// about older ones came before an apply or a restart, whose containers
-// have yet to come up.
+// checkHostReport refuses a host's report that does not match the stack as
+// the state has it now. Only the host that runs the stack may report about
+// it, and the report cannot move the stack to another host, because the
+// leader may have moved it since the host read the state. The report must
+// also be about the stack's current generation and restarts. A report about
+// older ones was made before an apply or a restart whose containers have
+// not come up yet.
 func checkHostReport(stack *Stack, actor string, payload SetStackStatus) error {
 	switch {
 	case stack.Host == nil || actor != HostActor(*stack.Host) || !samePlace(stack.Host, payload.Host):

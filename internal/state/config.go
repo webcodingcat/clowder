@@ -57,9 +57,10 @@ func (s *State) RegistryLogins() map[string]RegistryLogin {
 	return logins
 }
 
-// checkClusterSecrets holds the values to the spec: one for each name it
-// has, none it does not name, each with a digest. Check made sure each name
-// is its place's path.
+// checkClusterSecrets makes sure the values match the spec: one value for
+// each name the spec has, no value for a name it does not have, and a
+// digest for each value. Check has already made sure that each name is
+// the path of its place.
 func checkClusterSecrets(spec clusterspec.Config, secrets map[string]SealedSecret) error {
 	named := map[string]bool{}
 	for _, place := range clusterspec.SecretPlaces(spec) {

@@ -59,8 +59,9 @@ type Encryption struct {
 	Recovery string `json:"recovery"`
 }
 
-// clusterSecretPurpose names the key the digests of cluster.yaml's values
-// are made with, apart from the Secret resources' (secretResourcePurpose).
+// clusterSecretPurpose names the key for the digests of cluster.yaml's
+// values. It differs from the key for Secret resources
+// (secretResourcePurpose).
 const clusterSecretPurpose = "clowder cluster secret digest"
 
 func (s *Server) cluster(w http.ResponseWriter, _ *http.Request) {
@@ -105,8 +106,9 @@ type RekeyRequest struct {
 	Values []PlacedValue `json:"values"`
 }
 
-// PlacedValue is a value and what it must be for where it stands: a
-// Secret's ID, or secretvalue.Cluster in cluster.yaml.
+// PlacedValue is a value and the place it must be for, as its file says:
+// a Secret's ID, or secretvalue.Cluster in cluster.yaml. For is what
+// secretvalue.OpenFor wants; the value's envelope must name the same place.
 type PlacedValue struct {
 	For       string `json:"for"`
 	Encrypted string `json:"encrypted"`
@@ -196,7 +198,7 @@ func SealClusterSecret(keys Keys, name string, value []byte) (state.SealedSecret
 	}
 	key, err := keys.Derive(clusterSecretPurpose)
 	if err != nil {
-		return state.SealedSecret{}, err
+		return state.SealedSecret{}, fmt.Errorf("derive the digest key: %w", err)
 	}
 	return state.SealedSecret{Value: sealed, Digest: digest.HMAC(key, []byte(name), value)}, nil
 }
@@ -217,7 +219,11 @@ func (s *Server) clusterIdentity() (*age.X25519Identity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open the cluster's age key: %w", err)
 	}
-	return age.ParseX25519Identity(string(opened))
+	identity, err := age.ParseX25519Identity(string(opened))
+	if err != nil {
+		return nil, fmt.Errorf("read the cluster's age key: %w", err)
+	}
+	return identity, nil
 }
 
 // diffCluster applies the config to a copy of the state, then answers what
@@ -259,10 +265,13 @@ func changedFields(applied, next clusterspec.Config) ([]string, error) {
 	fields := func(config clusterspec.Config) (map[string]json.RawMessage, error) {
 		encoded, err := json.Marshal(config)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("encode cluster.yaml: %w", err)
 		}
 		var byField map[string]json.RawMessage
-		return byField, json.Unmarshal(encoded, &byField)
+		if err := json.Unmarshal(encoded, &byField); err != nil {
+			return nil, fmt.Errorf("split cluster.yaml into its fields: %w", err)
+		}
+		return byField, nil
 	}
 	before, err := fields(applied)
 	if err != nil {

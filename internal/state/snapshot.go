@@ -31,12 +31,12 @@ func (s *State) WriteSnapshot(out io.Writer) error {
 	return nil
 }
 
-// Copy is a deep copy of the state without its audit, for work too slow to
-// do under the state's lock (parsing Compose files) or that keeps parts of
-// it. It goes through JSON, the way snapshots do: simple, and as costly as
-// the whole state, so the agent's loops share one per change
-// (raftnode.Node.SharedCopy); only who changes a copy (a dry run) makes its
-// own.
+// Copy returns a deep copy of the state without its audit. It is for work
+// that is too slow to do under the state's lock (such as parsing Compose
+// files) or that keeps parts of the state. The copy goes through JSON, as
+// snapshots do. This is simple but costs as much as the whole state, so
+// the agent's loops share one copy per change (raftnode.Node.SharedCopy).
+// Only code that changes its copy (a dry run) makes its own.
 func (s *State) Copy() (*State, error) {
 	withoutAudit := *s
 	withoutAudit.Audit = nil
