@@ -85,7 +85,9 @@ func (f *fakeHoster) waitForTarget(t *testing.T, serverRef, token string) {
 	t.Errorf("the Floating IP is not on server %s with token %q", serverRef, token)
 }
 
-// fakeNetwork stands in for the host's network and remembers the rules.
+// fakeNetwork stands in for the host's network and remembers the rules. The
+// agent's tests run one host, whose mesh has no peers, so ApplyMesh does
+// nothing; network's tests cover the mesh.
 type fakeNetwork struct {
 	mu       sync.Mutex
 	rulesets []network.Ruleset
@@ -109,6 +111,8 @@ func (f *fakeNetwork) ApplyRules(_ context.Context, ruleset network.Ruleset) err
 	f.rulesets = append(f.rulesets, ruleset)
 	return nil
 }
+
+func (f *fakeNetwork) ApplyMesh(context.Context, network.Mesh) error { return nil }
 
 func (f *fakeNetwork) StartResolver() (io.Closer, error) {
 	if f.resolverFails {
@@ -493,15 +497,15 @@ spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
 	}
 	hostDocker.WaitFor(t, "down default_shop")
 	hostStorage.WaitFor(t, "remove "+lv)
-	// the same token encrypted anew is no change; the network is
-	finish("CHANGE-ME", "network: public\n")
-	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "network") ||
+	// the same token encrypted anew is no change; the private network is
+	finish("CHANGE-ME", "private_network: 10.0.0.0/16\n")
+	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "private_network") ||
 		strings.Contains(out, "secret") {
 		t.Errorf("diff after a change of cluster.yaml: %q, %v", out, err)
 	}
 	// and now a new hoster token as well: diff names both
-	finish("new", "network: public\n")
-	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "network") ||
+	finish("new", "private_network: 10.0.0.0/16\n")
+	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "private_network") ||
 		!strings.Contains(out, "the secret hoster.token differs") {
 		t.Errorf("diff after both changed: %q, %v", out, err)
 	}

@@ -28,7 +28,7 @@ output "cluster_yaml" {
   description = "What cluster.yaml needs from this module."
   value = {
     seeds           = [hcloud_server.host.ipv4_address]
-    network         = "private"
+    private_network = var.network_ip_range
     ingress         = { floating_ip = hcloud_floating_ip.ingress.ip_address }
     storage_classes = { for name in keys(var.storage_classes) : name => { pool = "vg-${name}/thin" } }
   }

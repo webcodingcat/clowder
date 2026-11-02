@@ -35,8 +35,10 @@ type Config struct {
 	JoinKeys []SecretRef `yaml:"join_keys,omitempty" json:"join_keys,omitempty"`
 	// Registries are the logins for private image registries, by host.
 	Registries map[string]Registry `yaml:"registries,omitempty" json:"registries,omitempty"`
-	// Network the hosts use for WireGuard: private or public.
-	Network        string                  `yaml:"network,omitempty" json:"network,omitempty" jsonschema:"enum=private,enum=public"`
+	// PrivateNetwork is the hoster's private network the hosts share, as a
+	// CIDR; containers may not reach it. Empty when the hosts reach each
+	// other over their public addresses.
+	PrivateNetwork string                  `yaml:"private_network,omitempty" json:"private_network,omitempty"`
 	Ingress        Ingress                 `yaml:"ingress" json:"ingress" jsonschema:"required"`
 	StorageClasses map[string]StorageClass `yaml:"storage_classes" json:"storage_classes" jsonschema:"required"`
 	Replication    Replication             `yaml:"replication,omitempty" json:"replication,omitempty"`

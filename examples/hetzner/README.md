@@ -12,11 +12,12 @@ How to use it is in the main [README](../../README.md#getting-started-on-hetzner
   `published_ports` (`["udp/9987"]`).
 - **The bootstrap key** lets the user in and later hosts join. It is in the OpenTofu
   state, encrypted in `cluster.yaml` (`join_keys`), and in the server's user data. Root
-  reads the user data from cloud-init's cache; the metadata service hands it to any process
-  on the host, root or not, and to containers in the host's network such as Traefik. Only
-  containers on clowder's and Docker's bridges cannot reach it. So treat the key as known
-  to everything that runs on the host itself. The setup deletes only its own copy in
-  `/etc/clowder`. Keep the state as safe as the recovery key.
+  reads the user data from cloud-init's cache. The metadata service hands it to any
+  process that reaches it; once `clowderd` runs, its rules close the service to the host
+  and its containers, Traefik included, but at boot cloud-init reads it before `clowderd`
+  starts. So treat the key as known to root and to whatever runs at boot. The setup reads
+  the service once, keeps what it needs in `/var/lib/clowder-setup`, and deletes only its
+  own copy of the key in `/etc/clowder`. Keep the state as safe as the recovery key.
 - `clowderd_version` pins the version from clowder's APT repository, so a host made later
   gets the cluster's version. Its default is the release this module comes with; check the
   module out at that release's tag.

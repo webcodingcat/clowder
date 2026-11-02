@@ -1,6 +1,6 @@
 // Package network sets up the host's network for clowder: clowder0 with the
-// node address, the nft table inet clowder and the containers' DNS resolver.
-// WireGuard and routing between hosts follow in phase 2.
+// node address, the WireGuard mesh to the other hosts with its routes, the
+// nft table inet clowder and the containers' DNS resolver.
 package network
 
 import (
@@ -27,22 +27,22 @@ func NodeAddress(id state.HostID) netip.Addr {
 // it the node address and the resolver's address. It does only what is
 // missing, so the agent runs it at every start (the interface does not
 // survive a reboot).
-func (Host) SetUpInterface(ctx context.Context, nodeAddress netip.Addr) error {
+func (h Host) SetUpInterface(ctx context.Context, nodeAddress netip.Addr) error {
 	// ip exits with 1 when the interface does not exist
-	_, err := command.Run(ctx, toolTimeout, "ip", "link", "show", Interface)
+	_, err := h.Run(ctx, toolTimeout, "", "ip", "link", "show", Interface)
 	if code, exited := command.ExitCode(err); err != nil && (!exited || code != 1) {
 		return fmt.Errorf("look for %s: %w", Interface, err)
 	}
 	if err != nil {
-		if _, err := command.Run(ctx, toolTimeout, "ip", "link", "add", Interface, "type", "dummy"); err != nil {
+		if _, err := h.Run(ctx, toolTimeout, "", "ip", "link", "add", Interface, "type", "dummy"); err != nil {
 			return err
 		}
 	}
-	if _, err := command.Run(ctx, toolTimeout, "ip", "link", "set", Interface, "up"); err != nil {
+	if _, err := h.Run(ctx, toolTimeout, "", "ip", "link", "set", Interface, "up"); err != nil {
 		return err
 	}
 	for _, address := range []netip.Addr{nodeAddress, Resolver} {
-		if _, err := command.Run(ctx, toolTimeout, "ip", "address", "replace", address.String()+"/32",
+		if _, err := h.Run(ctx, toolTimeout, "", "ip", "address", "replace", address.String()+"/32",
 			"dev", Interface); err != nil {
 			return err
 		}

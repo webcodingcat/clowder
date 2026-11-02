@@ -85,12 +85,32 @@ func TestTheHostersAPIIsAFullURL(t *testing.T) {
 	}
 }
 
+func TestThePrivateNetworkIsAnIPv4NetworkOutsideClowders(t *testing.T) {
+	for network, problem := range map[string]string{
+		"10.0.0.0/16":  "",
+		"10.0.0.1/16":  "is not an IPv4 network",
+		"fd00::/8":     "is not an IPv4 network",
+		"10.77.0.0/16": "overlaps clowder's 10.77.0.0/24",
+	} {
+		var reported []string
+		for _, reportedProblem := range Check(Config{PrivateNetwork: network}) {
+			if strings.HasPrefix(reportedProblem, "private_network") {
+				reported = append(reported, reportedProblem)
+			}
+		}
+		if problem == "" && len(reported) != 0 ||
+			problem != "" && (len(reported) != 1 || !strings.Contains(reported[0], problem)) {
+			t.Errorf("private_network %q: %v, want %q", network, reported, problem)
+		}
+	}
+}
+
 func TestCheckReportsEveryProblem(t *testing.T) {
 	config := Config{
-		Seeds:   []string{"10.0.0.1:99999"},
-		Hoster:  Hoster{Type: "aws", API: "api.example.com/v1"},
-		Network: "both",
-		Ingress: Ingress{FloatingIP: "2001:db8::1"},
+		Seeds:          []string{"10.0.0.1:99999"},
+		Hoster:         Hoster{Type: "aws", API: "api.example.com/v1"},
+		PrivateNetwork: "10.77.0.0/16",
+		Ingress:        Ingress{FloatingIP: "2001:db8::1"},
 		StorageClasses: map[string]StorageClass{
 			"fast":  {Pool: "nopool", Reserve: "95%"},
 			"any":   {Fallback: []string{"slow"}},
@@ -117,7 +137,7 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 		`acme.directory "acme.example.com"`, `acme.email "ops"`, `"../ca.pem" is not a path`, `renew_before "soon"`,
 		"name is required", `"10.0.0.1:99999"`, `hoster.type "aws"`, "hoster.token",
 		`hoster.api "api.example.com/v1" is not a full URL`,
-		`network "both"`, "not an IPv4 address", `pool "nopool"`, `reserve "95%"`,
+		"private_network 10.77.0.0/16 overlaps clowder's 10.77.0.0/24", "not an IPv4 address", `pool "nopool"`, `reserve "95%"`,
 		`falls back to "slow"`, "storage class empty", "resync_rate", "top: 2000",
 		`default "medium"`, `"Monitoring" is not <namespace>/<stack>`, "reservations.memory", "reservations.cpus",
 		"webhook: a value tagged !secret", "type is not discord", `min_severity "loud"`, "url: a value tagged !secret",

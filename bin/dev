@@ -8,7 +8,7 @@
 #   test      the unit tests (no VMs); arguments go to go test, e.g.
 #             bin/dev test ./internal/compose -update (rewrite golden files)
 #   test-tools  the golden files of the renderers against the real tools
-#             (nft -c, drbdadm, docker-compose) in Debian
+#             (nft -c, wg, drbdadm, docker-compose) in Debian
 #   build     clowderd for linux/amd64, clowder for linux, darwin and windows
 #             into dist/
 #   package   build, then the Debian packages of clowder and clowderd into dist/
@@ -164,7 +164,7 @@ cmd_test() {
   return "${status}"
 }
 
-# cmd_test_tools: Check the renderers' golden files with Debian's nft,
+# cmd_test_tools: Check the renderers' golden files with Debian's nft, wg,
 # drbdadm and docker-compose (the hostname node0 is a host of the resource
 # files).
 cmd_test_tools() {

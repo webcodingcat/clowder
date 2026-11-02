@@ -55,8 +55,11 @@ func checkNewHost(host Host) error {
 	switch {
 	case host.Name == "":
 		return errors.New("the host has no name")
-	case !host.Underlay.IsValid():
-		return fmt.Errorf("host %s has no underlay address", host.Name)
+	// the nft rules and WireGuard's endpoints are IPv4
+	case !host.Underlay.Is4():
+		return fmt.Errorf("host %s has no IPv4 underlay address", host.Name)
+	case host.PublicAddress.IsValid() && !host.PublicAddress.Is4():
+		return fmt.Errorf("host %s: the public address %s is not IPv4", host.Name, host.PublicAddress)
 	case host.WGPublicKey == "":
 		return fmt.Errorf("host %s has no WireGuard key", host.Name)
 	case host.CertificateSerial == "":

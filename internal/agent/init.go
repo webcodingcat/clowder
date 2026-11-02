@@ -59,6 +59,11 @@ func Init(ctx context.Context, files Files, options InitOptions, hostNetwork Hos
 	if options.BootstrapKey == "" || options.Name == "" || !options.Underlay.IsValid() {
 		return errors.New("init needs the bootstrap key, the host's name and its underlay address")
 	}
+	// the state takes only IPv4 (checkNewHost); refused there, init would
+	// stop halfway
+	if !options.Underlay.Is4() || options.PublicAddress.IsValid() && !options.PublicAddress.Is4() {
+		return errors.New("the underlay and the public address must be IPv4 addresses")
+	}
 	host := Host{
 		ID: 0, Name: options.Name, NodeAddress: options.NodeAddress, Underlay: options.Underlay,
 		PublicAddress: options.PublicAddress, ServerRef: options.ServerRef,

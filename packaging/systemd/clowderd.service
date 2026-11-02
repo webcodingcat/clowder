@@ -2,6 +2,8 @@
 Description=clowder agent
 Documentation=https://github.com/webcodingcat/clowder
 Wants=network-online.target docker.service
+# After network-online.target: by then cloud-init's network stage has read
+# the metadata service, which the agent's rules close to the host.
 After=network-online.target docker.service
 # Restart without limit and never give up: the agent is the host's only way
 # to the cluster.

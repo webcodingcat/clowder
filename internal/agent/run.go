@@ -332,7 +332,7 @@ func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup, caughtUp
 	node, propose, logger := d.node, d.propose, d.logger
 
 	// this host's loops that start no container
-	loops.Go(func() { reconcileNetwork(ctx, node, d.parts.Network, logger) })
+	loops.Go(func() { reconcileNetwork(ctx, node, d.host.ID, d.parts.Network, logger) })
 	loops.Go(func() { d.supervisor.Run(ctx, compose.LabelStack) })
 
 	// the leader's loops: each does nothing while this host does not lead

@@ -57,7 +57,7 @@ func newInit() *cobra.Command {
 				return err
 			}
 			files := Files{Dir: DefaultDir}
-			if err := Init(cmd.Context(), files, options, hostNetwork(), slog.Default()); err != nil {
+			if err := Init(cmd.Context(), files, options, hostNetwork(files), slog.Default()); err != nil {
 				return err
 			}
 			if !start {
@@ -100,15 +100,18 @@ func newRun() *cobra.Command {
 }
 
 // hostNetwork is the host's real network.
-func hostNetwork() network.Host {
-	return network.Host{ResolvConf: "/etc/resolv.conf", Logger: slog.Default()}
+func hostNetwork(files Files) network.Host {
+	return network.Host{
+		ResolvConf: "/etc/resolv.conf", WireGuardKey: files.wireGuardKey(), Run: command.RunWithInput,
+		Logger: slog.Default(),
+	}
 }
 
 // hostParts are the host's real network, storage and Docker, and the
 // hoster's real API.
 func hostParts(files Files) HostParts {
 	return HostParts{
-		Network: hostNetwork(),
+		Network: hostNetwork(files),
 		Storage: storage.Driver{
 			VolumesDir:  files.volumesDir(),
 			StateDir:    files.storageDir(),

@@ -74,9 +74,23 @@ wait_for_hardware() {
   done
 }
 
+# metadata <path>: Print a value of Hetzner's metadata service, read once and
+# kept from then on: once clowderd runs, its nft rules close the service to
+# the host (the user data holds the bootstrap key), and the setup runs again
+# at a boot until its marker exists.
+metadata() {
+  local kept="${STATE_DIR}/metadata/$1"
+  if [[ ! -s "${kept}" ]]; then
+    mkdir -p "${STATE_DIR}/metadata"
+    curl -fsS "${METADATA}/$1" >"${kept}.new"
+    mv "${kept}.new" "${kept}"
+  fi
+  cat "${kept}"
+}
+
 # private_address: Print the host's address in the private network.
 private_address() {
-  curl -fsS "${METADATA}/private-networks" | awk '/- ip:/ {print $3; exit}'
+  metadata private-networks | awk '/- ip:/ {print $3; exit}'
 }
 
 # install_headers: Install the headers of the running kernel for the DRBD
@@ -233,7 +247,7 @@ time_synchronized() {
 # init_cluster: clowderd check, then clowderd init, once.
 init_cluster() {
   local public private class_volume pools=()
-  public="$(curl -fsS "${METADATA}/public-ipv4")"
+  public="$(metadata public-ipv4)"
   private="$(private_address)"
   for class_volume in ${VOLUMES}; do
     pools+=(--pool "vg-${class_volume%%=*}/thin")
@@ -248,7 +262,7 @@ init_cluster() {
     return 1
   fi
   clowderd init --name "${NAME}" --underlay "${private}" --public-address "${public}" \
-    --server-ref "$(curl -fsS "${METADATA}/instance-id")" --bootstrap-key-file "${KEY_FILE}"
+    --server-ref "$(metadata instance-id)" --bootstrap-key-file "${KEY_FILE}"
 }
 
 # main: Do what the header of this script describes.

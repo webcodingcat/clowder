@@ -1,13 +1,13 @@
 package network
 
 import (
-	"context"
 	"fmt"
 	"net/netip"
 	"strings"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/command"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/state"
 )
 
 // Fixed addresses of clowder's network.
@@ -15,9 +15,10 @@ var (
 	// Resolver is the DNS resolver every container uses; it sits on clowder0.
 	Resolver = netip.MustParseAddr("169.254.77.53")
 	// Overlay holds the node addresses.
-	Overlay = netip.MustParsePrefix("10.77.0.0/24")
+	Overlay = clusterspec.Overlay
 	// metadataService is the hoster's metadata API: its user data holds the
-	// bootstrap key, so no container may reach it.
+	// bootstrap key, so neither containers nor the host's own processes
+	// (Traefik in the host's network) may reach it.
 	metadataService = netip.MustParseAddr("169.254.169.254")
 )
 
@@ -25,9 +26,24 @@ var (
 // bridges, Docker's default bridge and Compose networks clowder did not make.
 const containerBridges = `{ "cbr-*", "docker0", "br-*" }`
 
+// markMask holds the bits of a connection's mark that clowder uses; the
+// others stay as they are. The mark of a packet from a container bridge is
+// clowder's alone: it is set to these bits (nft cannot merge two marks), and
+// nothing else on the host marks such packets.
+const markMask = 0xfff
+
 // Ruleset is what goes into the nft table inet clowder.
 type Ruleset struct {
 	FloatingIP netip.Addr
+	// ClusterHosts are the underlay and public addresses of every host,
+	// sorted.
+	ClusterHosts []netip.Addr
+	// PrivateNetwork is the hoster's private network between the hosts;
+	// the zero value when they share none.
+	PrivateNetwork netip.Prefix
+	// Peers are the other hosts this one has a WireGuard interface to,
+	// sorted.
+	Peers []state.HostID
 }
 
 // Render writes the table inet clowder. It deletes and recreates the table
@@ -36,19 +52,57 @@ type Ruleset struct {
 //
 // What containers may reach on the host: the resolver, the local Traefik
 // on the Floating IP (HTTP hairpin) and answers to their own connections;
-// nothing else. What they may not reach beyond it: the metadata API, and the
-// node addresses of other hosts unless clowder itself redirected them there
-// (DNAT: exports and hairpin).
+// nothing else (guard_in). On the host and beyond it (guard_fwd), a packet
+// whose source is not of its bridge's network goes first, so a container with NET_RAW
+// can neither spoof another's address nor slip into its connections; the
+// fib lookup asks the routing table whether an answer to the source would
+// leave through the interface the packet came in on. Then what clowder or
+// Docker redirected (DNAT: exports, hairpin, published ports) passes, to
+// any target: every DNAT rule opens its target past the drops that follow.
+// The metadata API, the hosts, the private network and the overlay stay
+// closed; a connection open before the table first loads (the agent's
+// start) passes as established until it ends. The host's own processes do not reach the metadata API either
+// (guard_out); clowderd never needs it, and cloud-init reads it at boot
+// before clowderd starts.
+//
+// The marks bring a container's answer to a connection from a peer back
+// through that peer. The host's own processes get none: what reaches them
+// from a peer comes from its node address, and the route to it leads back.
+// So a DNAT from another host that keeps the client's address must lead to
+// a container, never to a process in the host's network.
 func Render(ruleset Ruleset) string {
 	lines := []string{
 		"table inet clowder",
 		"delete table inet clowder",
 		"table inet clowder {",
+		"  set cluster_hosts {",
+		"    type ipv4_addr",
+	}
+	if len(ruleset.ClusterHosts) > 0 {
+		lines = append(lines, "    elements = { "+joinAddresses(ruleset.ClusterHosts)+" }")
+	}
+	lines = append(lines,
+		"  }",
+		"  chain marks {",
+		"    type filter hook prerouting priority mangle; policy accept;",
+	)
+	// answers to a connection that came in from a peer go back to it
+	// (peerTable): the connection keeps the peer's mark, the container's
+	// answer gets it from there. nft binds & before |: the mark's other bits
+	// stay, clowder's become the peer's
+	for _, peer := range ruleset.Peers {
+		lines = append(lines, fmt.Sprintf(`    ct state new iifname "%s" ct mark set ct mark & %#x | %#x`,
+			PeerInterface(peer), ^uint32(markMask), peerMark(peer)))
+	}
+	lines = append(lines,
+		fmt.Sprintf("    iifname %s meta mark set ct mark & %#x", containerBridges, markMask),
+		"  }",
 		"  chain guard_in {",
 		"    type filter hook input priority filter; policy accept;",
-		"    iifname " + containerBridges + " ct state established,related accept",
+		"    iifname "+containerBridges+" fib saddr . iif oif missing counter drop",
+		"    iifname "+containerBridges+" ct state established,related accept",
 		fmt.Sprintf("    iifname %s ip daddr %s meta l4proto { tcp, udp } th dport 53 accept", containerBridges, Resolver),
-	}
+	)
 	if ruleset.FloatingIP.IsValid() {
 		lines = append(lines,
 			fmt.Sprintf("    iifname %s ip daddr %s tcp dport { 80, 443 } accept", containerBridges, ruleset.FloatingIP))
@@ -58,24 +112,43 @@ func Render(ruleset Ruleset) string {
 		"  }",
 		"  chain guard_fwd {",
 		"    type filter hook forward priority filter - 10; policy accept;",
-		fmt.Sprintf("    iifname %s ip daddr %s drop", containerBridges, metadataService),
-		fmt.Sprintf("    iifname %s ip daddr %s ct status dnat accept", containerBridges, Overlay),
-		fmt.Sprintf("    iifname %s ip daddr %s drop", containerBridges, Overlay),
+		"    iifname "+containerBridges+" fib saddr . iif oif missing counter drop",
+		"    iifname "+containerBridges+" ct state established,related accept",
+		"    iifname "+containerBridges+" ct status dnat accept",
+		fmt.Sprintf("    iifname %s ip daddr %s counter drop", containerBridges, metadataService),
+		"    iifname "+containerBridges+" ip daddr @cluster_hosts counter drop",
+	)
+	if ruleset.PrivateNetwork.IsValid() {
+		lines = append(lines,
+			fmt.Sprintf("    iifname %s ip daddr %s counter drop", containerBridges, ruleset.PrivateNetwork))
+	}
+	lines = append(lines,
+		fmt.Sprintf("    iifname %s ip daddr %s counter drop", containerBridges, Overlay),
+		"  }",
+		"  chain guard_out {",
+		"    type filter hook output priority filter; policy accept;",
+		fmt.Sprintf("    ip daddr %s counter drop", metadataService),
+		"  }",
+		// the WireGuard interfaces' MTU is smaller than the containers'; TCP
+		// through them learns it from the handshake (UDP must fit itself)
+		"  chain mss {",
+		"    type filter hook forward priority mangle; policy accept;",
+		fmt.Sprintf(`    oifname "%s*" tcp flags syn / syn,rst tcp option maxseg size set rt mtu`, peerInterfacePrefix),
 		"  }",
 		"}",
 	)
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// toolTimeout bounds nft and ip, which answer in milliseconds when well.
-const toolTimeout = 30 * time.Second
-
-// Apply checks the ruleset with nft and then loads it.
-func Apply(ctx context.Context, ruleset string) error {
-	for _, args := range [][]string{{"-c", "-f", "-"}, {"-f", "-"}} {
-		if _, err := command.RunWithInput(ctx, toolTimeout, ruleset, "nft", args...); err != nil {
-			return err
-		}
+// joinAddresses lists addresses for an nft set.
+func joinAddresses(addresses []netip.Addr) string {
+	listed := make([]string, len(addresses))
+	for i, address := range addresses {
+		listed[i] = address.String()
 	}
-	return nil
+	return strings.Join(listed, ", ")
 }
+
+// toolTimeout bounds nft, ip, wg and conntrack, which answer in
+// milliseconds when well.
+const toolTimeout = 30 * time.Second

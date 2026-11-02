@@ -10,7 +10,7 @@ clowder is built in phases; each ends with live tests on HLab
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done, passes the live tests |
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
-| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions, the leader's plans and the locks |
+| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions, the leader's plans and the locks, the network for several hosts |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -38,7 +38,15 @@ leader places only stacks that have no host yet. Operations came back into the s
 with locks on stacks, volumes and hosts that every handler of theirs minds, and steps
 that only their owner records, each once. Nothing starts an operation yet: moving a
 stack and fencing bring the first, with their steps, deadlines and rollbacks, and the
-placement then leaves locked stacks alone.
+placement then leaves locked stacks alone. Then the network for several hosts: a
+WireGuard interface per peer with its own port, route and routing table for the answers
+that come back without SNAT, MSS clamping, and the connections of a former peer
+forgotten. The containers' boundaries go first: a packet with a source outside its
+bridge's network is dropped before anything is accepted, and beyond what was redirected,
+the hosts' addresses, the private network (`private_network` in `cluster.yaml`, which
+took the place of `network`) and the overlay stay closed. The host's own processes no
+longer reach the metadata service either. The DNAT to another host, and the conntrack
+cleanup when its target moves, come with the ingress failover.
 
 Before it, the first release became installable and the commands honest: the APT
 repository keeps every version, `examples/hetzner` pins `0.1.0`, `bin/dev live release
@@ -62,8 +70,8 @@ to upgrade a running cluster.
 
 They matter once there are several hosts; on one, they cost at most time.
 
-- Raft and the forwarding of writes run on the node address, which other hosts reach only
-  through the WireGuard mesh.
+- The WireGuard mesh is tested only by its golden file and `wg`: one host has no peer.
+  The join brings the live test of it.
 - `CatchUp` makes sure the state holds the whole log only on the leader; a follower returns
   once it knows a leader. Before a host that was away starts its stacks, it must have
   applied the leader's commit index.
@@ -92,8 +100,8 @@ They matter once there are several hosts; on one, they cost at most time.
 - A host that falls silent raises no alert: `docker-down` and the pools come from the
   host's own report, which a dead host does not send. On one host the heartbeat covers it;
   with several, the leader needs an alert for a host whose reports stop.
-- `TestBoundaries` checks one host. With several, containers must not reach the other
-  hosts' underlay either, and a packet with a spoofed source must be dropped.
+- `TestBoundaries` checks one host. With several, it must show that containers reach
+  neither the other hosts' underlay nor their node addresses.
 - `examples/hetzner` ignores later changes to the server's user data, so a storage class
   added later gets a volume but no thin pool on an existing host.
 

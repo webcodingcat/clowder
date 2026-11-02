@@ -18,7 +18,7 @@ registries:
       -----BEGIN AGE ENCRYPTED FILE-----
       cmVnaXN0cnk=
       -----END AGE ENCRYPTED FILE-----
-network: private
+private_network: 10.0.0.0/16
 ingress:
   floating_ip: 198.51.100.7
   preferred_hosts: [node0, node1]

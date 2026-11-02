@@ -202,6 +202,22 @@ func TestAnEntryTheAgentCannotReadLeavesTheStateAndItsIndex(t *testing.T) {
 	}
 }
 
+func TestAHostHasIPv4Addresses(t *testing.T) {
+	for name, change := range map[string]func(*Host){
+		"no IPv4 underlay address":   func(host *Host) { host.Underlay = netip.MustParseAddr("2001:db8::2") },
+		"public address 2001:db8::3": func(host *Host) { host.PublicAddress = netip.MustParseAddr("2001:db8::3") },
+	} {
+		c := &cluster{t: t, state: &State{}}
+		host := testHost(0)
+		change(&host)
+		c.refuse(KindBootstrap, LeaderActor, Bootstrap{
+			Keys:    ClusterKeys{CACertificate: []byte("ca"), CAKey: Sealed("key"), AgeIdentity: Sealed("age")},
+			JoinKey: SealedSecret{Value: Sealed("join"), Digest: "d-join"},
+			Host:    host,
+		}, name)
+	}
+}
+
 func TestARefusedCommandMovesTheIndexOn(t *testing.T) {
 	c := newCluster(t)
 	err := c.apply(KindBootstrap, LeaderActor, Bootstrap{})

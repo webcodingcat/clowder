@@ -18,6 +18,7 @@ depends:
   - wireguard-tools
   - nftables
   - iptables
+  - conntrack
   - lvm2
   - thin-provisioning-tools
   - e2fsprogs

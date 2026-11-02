@@ -15,6 +15,18 @@ import (
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
+// clowder's own address ranges. They live here, where cluster.yaml is
+// checked against them; network and hostcheck take them from here.
+var (
+	// Overlay holds the node addresses.
+	Overlay = netip.MustParsePrefix("10.77.0.0/24")
+	// ExportVIPs holds the addresses of exported services.
+	ExportVIPs = netip.MustParsePrefix("10.78.0.0/16")
+	// ClowderRanges are both: neither the private network nor Docker's
+	// address pools may overlap them.
+	ClowderRanges = []netip.Prefix{Overlay, ExportVIPs}
+)
+
 // Problems lists everything wrong in a cluster directory at once.
 type Problems []string
 
@@ -44,8 +56,16 @@ func Check(config Config) Problems {
 		}
 	}
 	problems = append(problems, checkHoster(config.Hoster)...)
-	if config.Network != "" && config.Network != "private" && config.Network != "public" {
-		report("network %q is neither private nor public", config.Network)
+	if config.PrivateNetwork != "" {
+		network, err := netip.ParsePrefix(config.PrivateNetwork)
+		if err != nil || !network.Addr().Is4() || network != network.Masked() {
+			report("private_network %q is not an IPv4 network such as 10.0.0.0/16", config.PrivateNetwork)
+		}
+		for _, used := range ClowderRanges {
+			if err == nil && network.Overlaps(used) {
+				report("private_network %s overlaps clowder's %s", network, used)
+			}
+		}
 	}
 	if address, err := netip.ParseAddr(config.Ingress.FloatingIP); err != nil || !address.Is4() {
 		report("ingress.floating_ip %q is not an IPv4 address", config.Ingress.FloatingIP)

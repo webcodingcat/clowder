@@ -168,10 +168,19 @@ The stack `echo` lives from step 2 to the last.
 ### `TestBoundaries`
 
 1. A container of the stack `prober` reaches none of these, each of which answers the
-   host itself: the metadata service, the API on the node address, the underlay and the
-   public address, Raft, `/metrics`, SSH on the underlay, the public address and the
-   Floating IP, and a container of the stack `neighbor` on its port. It reaches the
-   registry beyond the host, and the resolver answers it. The probe runs on the host in
-   the container's network namespace (`nsenter --net`), so its packets leave through the
-   container's bridge.
-2. Both stacks go.
+   host itself: the API on the node address, the underlay and the public address, Raft,
+   `/metrics`, SSH on the underlay, the public address and the Floating IP, and a
+   container of the stack `neighbor` on its port. It reaches the registry beyond the
+   host, and the resolver answers it. The probe runs on the host in the container's
+   network namespace (`nsenter --net`), so its packets leave through the container's
+   bridge.
+2. What no answer of the host can vouch for is dropped by its own rule, whose counter
+   grows: the metadata service, from the host itself (`guard_out`) and from the
+   container; an address of the private network that no host has; and a packet from the
+   container with a source outside its network (an address of TEST-NET-1 added to its
+   interface, to the registry). The agent reloads the table every loop interval, which
+   zeroes the counters, so each probe gets three tries.
+3. Both stacks go.
+
+With several hosts (the join), the test also covers the other hosts' underlay and node
+addresses.

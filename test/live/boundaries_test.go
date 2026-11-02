@@ -3,10 +3,13 @@
 package live
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -77,7 +80,6 @@ func checkBoundaries(t *testing.T, server host, tofu outputs) {
 	}
 
 	for _, target := range []struct{ what, address string }{
-		{"the metadata service", "169.254.169.254:80"},
 		{"the API on the node address", net.JoinHostPort(node, apiPort)},
 		{"Raft", net.JoinHostPort(node, raftPort)},
 		{"/metrics", net.JoinHostPort(node, metricsPort)},
@@ -100,6 +102,7 @@ func checkBoundaries(t *testing.T, server host, tofu outputs) {
 	if !reaches(t, server, proberPID, registry) {
 		t.Errorf("a container does not reach the registry beyond the host (%s): the probe cannot get out", registry)
 	}
+	checkDroppedBeyondTheHost(t, server, tofu, proberPID)
 	directory, err := url.Parse(os.Getenv("HLAB_ACME_DIRECTORY"))
 	if err != nil {
 		t.Fatal(err)
@@ -109,6 +112,80 @@ func checkBoundaries(t *testing.T, server host, tofu outputs) {
 	if output, err := server.run("docker exec " + prober + " nslookup " + directory.Hostname()); err != nil {
 		t.Errorf("the resolver does not answer a container: %v\n%s", err, output)
 	}
+}
+
+// checkDroppedBeyondTheHost probes what no answer of the host itself can
+// vouch for: the metadata service, which the host's own processes must not
+// reach either, an address of the private network that is no host, and a
+// packet with a source outside the container's network. Each must be
+// dropped by its own rule of internal/network, whose counter shows it.
+func checkDroppedBeyondTheHost(t *testing.T, server host, tofu outputs, proberPID string) {
+	const metadata = "169.254.169.254:80"
+	dropsProbe(t, server, "guard_out", "ip daddr 169.254.169.254", func() {
+		if reaches(t, server, "", metadata) {
+			t.Errorf("the host's own processes reach the metadata service (%s)", metadata)
+		}
+	})
+	dropsProbe(t, server, "guard_fwd", "ip daddr 169.254.169.254", func() {
+		if reaches(t, server, proberPID, metadata) {
+			t.Errorf("a container reaches the metadata service (%s)", metadata)
+		}
+	})
+
+	privateNetwork, err := netip.ParsePrefix(fmt.Sprint(tofu.ClusterYAML.Value["private_network"]))
+	if err != nil {
+		t.Fatalf("the module's private_network: %v", err)
+	}
+	// the address before the network's last (its broadcast): no host has it
+	first := privateNetwork.Addr().As4()
+	size := uint32(1) << (32 - privateNetwork.Bits())
+	var beforeLast [4]byte
+	binary.BigEndian.PutUint32(beforeLast[:], binary.BigEndian.Uint32(first[:])+size-2)
+	stranger := net.JoinHostPort(netip.AddrFrom4(beforeLast).String(), "22")
+	dropsProbe(t, server, "guard_fwd", "ip daddr "+privateNetwork.String(), func() {
+		if reaches(t, server, proberPID, stranger) {
+			t.Errorf("a container reaches %s in the private network", stranger)
+		}
+	})
+
+	// a source of TEST-NET-1 on the container's own interface, as a
+	// container with NET_RAW could send; the registry answers it unspoofed
+	const spoofed = "192.0.2.7"
+	inContainer := "nsenter --target " + proberPID + " --net"
+	server.must(t, inContainer+" ip address add "+spoofed+"/32 dev eth0")
+	defer server.must(t, inContainer+" ip address delete "+spoofed+"/32 dev eth0")
+	dropsProbe(t, server, "guard_fwd", "fib saddr . iif oif missing", func() {
+		server.must(t, fmt.Sprintf("%s timeout %d curl -s --interface %s http://%s/ >/dev/null; true",
+			inContainer, probeSeconds, spoofed, registry))
+	})
+}
+
+// dropsProbe fails the test unless probe makes the counter of a drop rule
+// of the table inet clowder grow; rule is the start of the rule's match. The agent
+// loads the table anew every loop interval, which zeroes the counters, so a
+// few tries tell a reload from a probe that went through.
+func dropsProbe(t *testing.T, server host, chain, rule string, probe func()) {
+	t.Helper()
+	count := func() int {
+		listed := server.must(t, "nft list chain inet clowder "+chain)
+		for line := range strings.Lines(listed) {
+			if _, after, found := strings.Cut(line, rule+" counter packets "); found {
+				if packets, err := strconv.Atoi(strings.Fields(after)[0]); err == nil {
+					return packets
+				}
+			}
+		}
+		t.Fatalf("no rule %q with a counter in %s:\n%s", rule, chain, listed)
+		return 0
+	}
+	for range 3 {
+		before := count()
+		probe()
+		if count() > before {
+			return
+		}
+	}
+	t.Errorf("the rule %q of %s dropped nothing of the probe", rule, chain)
 }
 
 // reaches tells whether a TCP connection to address opens from the network

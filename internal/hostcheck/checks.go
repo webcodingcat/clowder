@@ -8,14 +8,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-)
 
-// The overlay ranges of clowder; Docker's address pools must not overlap
-// them.
-var clowderRanges = []netip.Prefix{
-	netip.MustParsePrefix("10.77.0.0/24"),
-	netip.MustParsePrefix("10.78.0.0/16"),
-}
+	"github.com/webcodingcat/clowder/internal/clusterspec"
+)
 
 // The oldest drbd-utils that LINBIT's drbd-dkms accepts: 9.28.
 const (
@@ -230,7 +225,7 @@ func checkDockerDaemon(_ context.Context, host Host, _ Options) (Status, string)
 			problems = append(problems, fmt.Sprintf("address pool %q is not a prefix", pool.Base))
 			continue
 		}
-		for _, used := range clowderRanges {
+		for _, used := range clusterspec.ClowderRanges {
 			if base.Overlaps(used) {
 				problems = append(problems, fmt.Sprintf("address pool %s overlaps clowder's %s", base, used))
 			}

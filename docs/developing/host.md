@@ -36,7 +36,7 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
      of them cannot listen, the agent ends before it started any container. Once they
      serve, only an API that fails ends the agent: without the other two the host still
      runs its stacks, so their failure is logged.
-  5. The loops (`startLoops`): this host's that start no container (nft rules,
+  5. The loops (`startLoops`): this host's that start no container (the network,
      supervisor), the leader's, which do nothing while it does not lead, and, once the
      state caught up (`runOnceCaughtUp`), the report, Traefik, the volume reconciler with
      its trim, and the stack runner.
@@ -188,18 +188,72 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
 ## Network (`internal/network`)
 
 - `clowder0` carries the node address and the resolver's address (`network.Resolver`).
-- The table `inet clowder` (`Render`, golden file `testdata/isolation.golden.nft`) keeps
-  containers in their place. From a container bridge the host answers only the resolver,
-  the local Traefik on the Floating IP (HTTP hairpin) and the container's own connections.
-  Beyond the host, the metadata API (whose user data holds the bootstrap key) is dropped, and
-  so are other hosts' node addresses unless clowder redirected the packet there itself
-  (DNAT). `Apply` checks with `nft -c`, then replaces the table in one transaction; Docker's
-  rules stay untouched.
+- **The agent's network loop** (`agent/network.go`) reads the wanted network from the
+  state (`readWantedNetwork`) and applies the nft rules first, then the WireGuard mesh, at
+  every change and every loop interval. Every other host is a peer until it is removed;
+  the addresses of all hosts stay closed to containers.
+- **The WireGuard mesh** (`ApplyMesh`) has an interface per peer, `clw-<m>`, so each peer
+  has a port, a route and a routing table of its own:
+  - `clw-<m>` listens on `51800 + m` and reaches peer *m* at its underlay on
+    `51800 + <own ID>`, with `AllowedIPs 0.0.0.0/0`: answers without SNAT carry a
+    client's address, and the peers are the cluster's own hosts. Its configuration
+    (`RenderWireGuard`, golden file `testdata/clw-2.golden.conf`, which `bin/dev
+    test-tools` loads with `wg`) holds the private key, so it reaches `wg syncconf` on
+    its standard input.
+  - Its MTU is the underlay interface's less 80.
+  - It carries the own node address as `/32 noprefixroute` (the reverse path filter
+    drops what arrives on an interface without an IPv4 address) and the route to the
+    peer's node address with the own one as `src`.
+  - Table `100 + m` has `default dev clw-<m>`; the rule of priority `100 + m` sends
+    packets marked `0x100 + m` (mask `0xfff`) there.
+  - A former peer loses all three. First `conntrack -D --mark` forgets the connections
+    that came from it, as its ID may come back with another host; should the agent stop
+    halfway, the interface or the rule left brings the next pass back to it.
+  At every pass it sets each peer's interface and routes anew (`wg syncconf` and `ip …
+  replace` change only what differs) and replaces a rule that is not as wanted. A peer
+  that fails holds up no other; the errors come together. Only `clw-<host ID>` is its
+  own, and a rule whose priority and table are both `100 + m`. The tools run through
+  `Host.Run`, so `wireguard_test.go` checks the commands against what the host has.
+- **The table `inet clowder`** (`Render`, golden file `testdata/isolation.golden.nft`)
+  keeps containers in their place:
+  - `guard_in`: from a container bridge the host answers only the resolver, the local
+    Traefik on the Floating IP (HTTP hairpin) and the container's own connections; a
+    spoofed source goes first, as in `guard_fwd`.
+  - `guard_fwd`, beyond the host, in this order: a packet whose source would not route
+    back through the bridge it came from is dropped (`fib saddr . iif oif missing`), so a
+    container with NET_RAW can neither spoof nor slip into another's connection (conntrack
+    does not look at the interface); then established connections and what clowder or
+    Docker redirected (`ct status dnat`: exports, hairpin, published ports) pass; the
+    metadata API, `@cluster_hosts` (every host's underlay and public address, a removed
+    host's too, as its server may still run), the private network (`private_network` in
+    `cluster.yaml`, which must not overlap `clusterspec.ClowderRanges`) and the overlay are
+    dropped. The rules are IPv4 only: Docker gives the bridges no IPv6 (`daemon.json`).
+  - `guard_out`: the host's own processes, Traefik in the host's network included, do not
+    reach the metadata API either; its user data holds the bootstrap key, and clowderd
+    never needs it. cloud-init reads it at boot in its network stage, before
+    `network-online.target` and so before `clowderd.service` starts, and the table does
+    not survive a reboot. The resolver's upstreams come from `/etc/resolv.conf`, not from
+    there. A known limit: a tool that reads the service later, such as Hetzner's
+    `hc-utils` when a private network's interface is plugged in while the host runs,
+    gets no answer; `examples/hetzner` attaches the network when it makes the server.
+  - `marks`: a new connection that comes in through `clw-<m>` keeps the mark `0x100 + m`,
+    and a container's answer gets it back, so the answer leaves through its peer's table.
+    The host's own processes (Traefik) get none: what reaches them from a peer comes from
+    its node address, and the route to it leads back. So a DNAT from another host that
+    keeps the client's address must lead to a container.
+  - A connection open before the table first loads (at the agent's start) passes as
+    established until it ends.
+  - `mss`: TCP through `clw-*` gets its MSS from the route's MTU; UDP must fit itself.
+  - The drop rules count (`counter`), so `nft list table inet clowder` shows what they
+    dropped since the table was last loaded (every loop interval).
+  `ApplyRules` checks with `nft -c`, then replaces the table in one transaction; Docker's rules
+  stay untouched.
 - The resolver passes every question on to the host's resolvers (`/etc/resolv.conf`). Names
   of exported services come with exports.
 - Published ports are bound on every host's Floating IP and node address
-  ([Rendering](specs.md#rendering-internalcompose)). The DNAT that brings them to a stack on another host, and the marks for
-  answers over WireGuard, join the ruleset in phase 2, where two hosts can test them.
+  ([Rendering](specs.md#rendering-internalcompose)). The DNAT that brings them to a stack
+  on another host, and the conntrack cleanup when its target moves, join the ruleset with
+  the ingress failover, where several hosts can test them.
 
 ## Storage (`internal/storage`)
 

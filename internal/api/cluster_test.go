@@ -112,10 +112,10 @@ func TestADiffNamesWhatAnApplyWouldChange(t *testing.T) {
 		t.Errorf("the same cluster.yaml: %+v, %v", same, err)
 	}
 	changed := cluster.testApply("a new token")
-	changed.Spec.Network = "public"
-	if diff, err := client.DiffCluster(ctx, changed); err != nil || !slices.Equal(diff.Fields, []string{"network"}) ||
+	changed.Spec.PrivateNetwork = "10.0.0.0/16"
+	if diff, err := client.DiffCluster(ctx, changed); err != nil || !slices.Equal(diff.Fields, []string{"private_network"}) ||
 		!slices.Equal(diff.Secrets, []string{"hoster.token"}) {
-		t.Errorf("a new token and network: %+v, %v", diff, err)
+		t.Errorf("a new token and private network: %+v, %v", diff, err)
 	}
 	// what apply-config refuses, the diff refuses as well
 	refused := cluster.testApply("the token")

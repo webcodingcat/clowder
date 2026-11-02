@@ -1,16 +1,34 @@
 #!/bin/sh
 # Check the renderers' golden files with the tools the hosts run them with:
-# nft for the ruleset, drbdadm for the resource files, docker-compose for the
-# rendered stacks and Traefik's Compose file. Runs inside a Debian container from the repository root
-# (bin/dev test-tools); nft -c needs CAP_NET_ADMIN.
+# nft for the ruleset, wg for the WireGuard interfaces, drbdadm for the
+# resource files, docker-compose for the rendered stacks and Traefik's Compose
+# file. Runs inside a Debian container from the repository root (bin/dev
+# test-tools); nft -c and a WireGuard interface need CAP_NET_ADMIN.
 # Usage: test/tools/check-golden-files.sh
 set -eu
 
-# install_tools: Install nftables, drbd-utils and docker-compose quietly.
+# install_tools: Install nftables, iproute2, wireguard-tools, drbd-utils and
+# docker-compose quietly.
 install_tools() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get -qq update >/dev/null
-  apt-get -qq install -y --no-install-recommends nftables drbd-utils docker-compose >/dev/null
+  apt-get -qq install -y --no-install-recommends nftables iproute2 wireguard-tools drbd-utils \
+    docker-compose >/dev/null
+}
+
+# check_wireguard: Load every golden WireGuard configuration into an
+# interface of the container's own, as the agent does (wg syncconf).
+check_wireguard() {
+  for config in internal/network/testdata/*.golden.conf; do
+    ip link add clw-check type wireguard
+    if ! output="$(wg syncconf clw-check "${config}" 2>&1)"; then
+      echo "${output}"
+      ip link delete clw-check
+      return 1
+    fi
+    ip link delete clw-check
+    echo "wg: ${config} OK"
+  done
 }
 
 # check_compose: Check every rendered stack with the docker-compose of the
@@ -65,6 +83,7 @@ check_drbd() {
 main() {
   install_tools
   check_nft
+  check_wireguard
   check_drbd
   check_compose
 }
