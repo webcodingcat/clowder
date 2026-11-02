@@ -176,7 +176,7 @@ func TestAStackThatFitsNowhereShowsWhyUntilItFits(t *testing.T) {
 	l := newLeader(t, 512<<20)
 	placement := newPlacer(l)
 	for range 3 {
-		placement.place(context.Background())
+		placement.pass(context.Background())
 	}
 	l.Read(func(current *state.State) {
 		if reason := current.Stacks["default/shop"].WaitReason; reason != "node0: volume db (1G, class fast) fits no pool" {
@@ -197,7 +197,7 @@ func TestAStackThatFitsNowhereShowsWhyUntilItFits(t *testing.T) {
 		Host: 0, Version: "1.0.1", Capacity: state.Resources{MemoryBytes: 4 << 30, CPUs: 4},
 		Pools: map[string]state.Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: 100 << 30}},
 	})
-	placement.place(context.Background())
+	placement.pass(context.Background())
 	l.Read(func(current *state.State) {
 		if stack := current.Stacks["default/shop"]; stack.Host == nil || stack.WaitReason != "" || !stack.WaitingSince.IsZero() {
 			t.Errorf("after the pool grew: host %v, reason %q since %v", stack.Host, stack.WaitReason, stack.WaitingSince)
@@ -215,9 +215,9 @@ func TestAServicePushedOutComesBackAfterItFitAMinute(t *testing.T) {
 	})
 	putResource(l, resource.KindStack, "shop", reserving("app", "200", "600M"))
 	placement := newPlacer(l)
-	placement.place(context.Background())
+	placement.pass(context.Background())
 	putResource(l, resource.KindStack, "web", reserving("web", "800", "500M"))
-	placement.place(context.Background())
+	placement.pass(context.Background())
 	l.Read(func(current *state.State) {
 		if fmt.Sprint(current.Stacks["default/shop"].PushedOut) != "[app]" || current.Stacks["default/web"].Host == nil {
 			t.Fatalf("shop pushed out %v, web on %v", current.Stacks["default/shop"].PushedOut, current.Stacks["default/web"].Host)
@@ -225,7 +225,7 @@ func TestAServicePushedOutComesBackAfterItFitAMinute(t *testing.T) {
 	})
 
 	deleteResource(l, resource.KindStack, "web")
-	if again := placement.place(context.Background()); again <= 0 || again > comeBackAfter {
+	if again := placement.pass(context.Background()); again <= 0 || again > comeBackAfter {
 		t.Errorf("look again in %v", again)
 	}
 	l.Read(func(current *state.State) {
@@ -234,7 +234,7 @@ func TestAServicePushedOutComesBackAfterItFitAMinute(t *testing.T) {
 		}
 	})
 	placement.fittingSince = time.Now().Add(-comeBackAfter) // a minute went by
-	placement.place(context.Background())
+	placement.pass(context.Background())
 	l.Read(func(current *state.State) {
 		if len(current.Stacks["default/shop"].PushedOut) != 0 {
 			t.Errorf("app is still pushed out: %v", current.Stacks["default/shop"].PushedOut)

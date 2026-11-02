@@ -18,7 +18,7 @@ write, and how they become what runs.
 
   | What | Name |
   |---|---|
-  | Compose project, the agent's stack directory, the secrets' directory, the supervisor's hold, Traefik's service | `<namespace>_<stack>` (`names.Project`) |
+  | Compose project, the agent's stack directory, the secrets' directory, the supervisor's pause, Traefik's service | `<namespace>_<stack>` (`names.Project`) |
   | the stack's one Docker network | `<namespace>_<stack>_net` (`names.StackNetwork`) |
   | container | `<namespace>_<stack>_<service>` (`names.Container`) |
   | volume ID | `<namespace>/<volume>` (`names.ID`) |

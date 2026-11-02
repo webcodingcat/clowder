@@ -97,7 +97,7 @@ func (s *Server) restartStack(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s.write(w, r, state.KindRestartStack, state.RestartStack{
+	s.commitRequest(w, r, state.KindRestartStack, state.RestartStack{
 		Namespace: r.PathValue("namespace"), Name: r.PathValue("name"), Services: request.Services,
 	})
 }

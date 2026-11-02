@@ -261,7 +261,7 @@ func (s *Server) rotateRecovery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("the recovery key's recipient: %w", err))
 		return
 	}
-	s.write(w, r, state.KindSetRecoveryRecipient,
+	s.commitRequest(w, r, state.KindSetRecoveryRecipient,
 		state.SetRecoveryRecipient{Recipient: request.Recipient, Code: used})
 }
 

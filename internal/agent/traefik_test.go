@@ -47,7 +47,7 @@ func newTestTraefik(t *testing.T) (*traefikRunner, *stackRunner, *fakeDocker) {
 	traefik := &traefikRunner{
 		files: runner.files, host: runner.host, cluster: cluster, docker: fake, open: runner.open,
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)), supervisor: runner.supervisor,
-		wake: make(chan struct{}, 1), unopened: map[string]bool{},
+		signal: newPassSignal(), unopened: map[string]bool{},
 	}
 	return traefik, runner, fake
 }
@@ -98,7 +98,7 @@ func TestTraefikComesUpWithRoutesToTheContainersThatMayTakeRequests(t *testing.T
 	if ups := fake.count(up); ups != 1 {
 		t.Errorf("Traefik came up %d times, want once", ups)
 	}
-	traefik.forgetApplied() // Docker restarted
+	traefik.signal.dockerRestarted()
 	if err := traefik.pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestARouteFollowsItsContainersAtOnce(t *testing.T) {
 	fake.mu.Lock()
 	fake.details["healthy"] = docker.Details{Running: true, Health: "unhealthy"}
 	fake.mu.Unlock()
-	traefik.passNow() // the supervisor saw health_status: unhealthy
+	traefik.signal.now() // the supervisor saw health_status: unhealthy
 	waitForRoutes(t, traefik, func(routes string) bool { return !strings.Contains(routes, "172.18.0.2") })
 }
 
@@ -146,7 +146,7 @@ func waitForRoutes(t *testing.T, traefik *traefikRunner, want func(routes string
 
 func TestTraefikIsNoStack(t *testing.T) {
 	_, runner, _ := newTestTraefik(t)
-	if rule, ok := runner.rules(ingress.Project, "traefik"); !ok || rule != traefikRule {
+	if rule, ok := (restartRules{runner.cluster, 0}).of(ingress.Project, "traefik"); !ok || rule != traefikRule {
 		t.Errorf("Traefik's rule %+v, %v", rule, ok)
 	}
 	// the stack runner keeps its secrets, though no stack of that name is

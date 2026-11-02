@@ -40,7 +40,7 @@ func RunPlacement(ctx context.Context, cluster Cluster, propose Propose, conditi
 		changed := cluster.Changed()
 		wait := interval
 		if cluster.IsLeader() {
-			if again := p.place(ctx); again > 0 {
+			if again := p.pass(ctx); again > 0 {
 				wait = min(wait, again)
 			}
 		}
@@ -53,10 +53,10 @@ func RunPlacement(ctx context.Context, cluster Cluster, propose Propose, conditi
 	}
 }
 
-// place plans once and writes the decisions and why stacks wait. It tells
+// pass plans once and commits the decisions and why stacks wait. It tells
 // how soon it should look again: when a pushed-out service will have fit
 // long enough, else 0.
-func (p *placer) place(ctx context.Context) time.Duration {
+func (p *placer) pass(ctx context.Context) time.Duration {
 	// Plan weighs every stack on every host: too slow for the state's lock,
 	// which Raft's Apply waits for
 	copied, err := p.cluster.SharedCopy()
@@ -77,9 +77,9 @@ func (p *placer) place(ctx context.Context) time.Duration {
 			return 0
 		}
 	}
-	p.writeWaitReasons(ctx, copied, decisions.Waiting)
+	p.commitWaitReasons(ctx, copied, decisions.Waiting)
 	for _, placement := range decisions.Placements {
-		if err := p.write(ctx, placement); err != nil {
+		if err := p.commitPlacement(ctx, placement); err != nil {
 			p.logger.Error("place a stack", "stack", placement.Stack, "error", err)
 		}
 	}
@@ -98,20 +98,20 @@ func (p *placer) commitOrLog(ctx context.Context, kind string, payload any) {
 // it once.
 func (p *placer) noteOverCapacity(copied *state.State, hosts []state.HostID) {
 	for _, id := range slices.Sorted(maps.Keys(copied.Hosts)) {
-		if p.conditions.Hold(overCapacityKey(id), slices.Contains(hosts, id)) {
+		if p.conditions.Observe(overCapacityKey(id), slices.Contains(hosts, id)) {
 			p.logger.Warn("host over capacity: its highest priority alone reserves more than it offers",
 				"host", copied.Hosts[id].Name)
 		}
 	}
 }
 
-// writeWaitReasons records why stacks wait. The state remembers the last
+// commitWaitReasons records why stacks wait. The state remembers the last
 // reason, so each change is written and logged once, not every 30 s, and a
 // new leader knows it too; an empty reason clears it once the stack no
 // longer waits. Every change is a Raft write and an audit entry, so a
 // reason holds only what stays the same from pass to pass (no free space,
 // no times).
-func (p *placer) writeWaitReasons(ctx context.Context, copied *state.State, waiting []scheduler.Waiting) {
+func (p *placer) commitWaitReasons(ctx context.Context, copied *state.State, waiting []scheduler.Waiting) {
 	reasons := map[string]string{}
 	for _, wait := range waiting {
 		reasons[wait.Stack] = wait.Reason
@@ -128,11 +128,11 @@ func (p *placer) writeWaitReasons(ctx context.Context, copied *state.State, wait
 	}
 }
 
-// write commits one placement: what the stack pushes out first, then the
-// volumes, then the stack's host, so the agent finds the volumes when it
-// sees the stack. If the leader changes in between, the services stay
-// pushed out without the new stack, and come back (comeBack).
-func (p *placer) write(ctx context.Context, placement scheduler.Placement) error {
+// commitPlacement commits one placement: what the stack pushes out first,
+// then the volumes, then the stack's host, so the agent finds the volumes
+// when it sees the stack. If the leader changes in between, the services
+// stay pushed out without the new stack, and come back (comeBack).
+func (p *placer) commitPlacement(ctx context.Context, placement scheduler.Placement) error {
 	if placement.PushedOut != nil {
 		err := commit(ctx, p.propose, state.KindSetPushedOut, state.SetPushedOut{Stacks: placement.PushedOut})
 		if err != nil {

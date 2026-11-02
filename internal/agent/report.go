@@ -115,7 +115,7 @@ func (r *hostReporter) pass(ctx context.Context) error {
 		return nil
 	}
 	if err := commitAsHost(ctx, r.propose, r.host.ID, state.KindReportHost, report); err != nil {
-		return err
+		return fmt.Errorf("commit the report: %w", err)
 	}
 	// once the state has it, so a failed commit does not log it again
 	switch {
@@ -156,18 +156,6 @@ func (r *hostReporter) readPool(ctx context.Context, name string) (state.Pool, e
 		Name: name, SizeBytes: size,
 		DataPercent: int(math.Ceil(dataPercent)), MetadataPercent: int(math.Ceil(metadataPercent)),
 	}, nil
-}
-
-// commitAsHost commits a command of this host about itself (its report, a
-// stack's status, a forgotten copy), with the host's actor; the leader's
-// loops have controller's commit with the leader's.
-func commitAsHost(ctx context.Context, propose controller.Propose, host state.HostID, kind string, payload any) error {
-	cmd, err := state.NewCommand(kind, time.Time{}, state.HostActor(host), payload)
-	if err != nil {
-		return err
-	}
-	_, err = propose(ctx, cmd)
-	return err
 }
 
 // usedPercent is how full the file system at path is, in whole percent

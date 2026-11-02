@@ -44,7 +44,6 @@ func freePort(t *testing.T) int {
 	return port
 }
 
-// fakeNetwork stands in for the host's network and remembers the rules.
 // fakeHoster is the hoster's API: it remembers where the Floating IP goes
 // and with which token it was asked.
 type fakeHoster struct {
@@ -92,6 +91,7 @@ func (f *fakeHoster) waitForTarget(t *testing.T, serverRef, token string) {
 	t.Errorf("the Floating IP is not on server %s with token %q", serverRef, token)
 }
 
+// fakeNetwork stands in for the host's network and remembers the rules.
 type fakeNetwork struct {
 	mu       sync.Mutex
 	rulesets []network.Ruleset
@@ -218,6 +218,8 @@ type fakeDocker struct {
 	// containers and details are what Docker lists and inspects
 	containers []docker.Container
 	details    map[string]docker.Details
+	// duringUp runs within each compose up, as a Docker restart would
+	duringUp func()
 }
 
 func (f *fakeDocker) Events(ctx context.Context, _ string) (<-chan docker.Event, <-chan error) {
@@ -250,6 +252,9 @@ func (f *fakeDocker) Restart(context.Context, string) error { return nil }
 
 func (f *fakeDocker) ComposeUp(_ context.Context, stack string, files, leftOut []string) error {
 	f.add("up %s", stack)
+	if f.duringUp != nil {
+		f.duringUp()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.upFiles, f.leftOut = files, leftOut

@@ -131,10 +131,10 @@ func TestASignalThatOnlyReloadsIsNoStop(t *testing.T) {
 
 func TestWantedStopsAreNoCrashes(t *testing.T) {
 	supervisor, fake := running(t)
-	release := supervisor.Hold("shop")
+	resume := supervisor.Pause("shop")
 	fake.events <- event("die", "app", 0)
 	settle()
-	release()
+	resume()
 	stop := event("kill", "app", 0) // docker stop by hand: kill (SIGTERM) comes before die
 	stop.Signal = 15
 	fake.events <- stop

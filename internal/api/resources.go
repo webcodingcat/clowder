@@ -164,7 +164,7 @@ func (s *Server) applyResources(w http.ResponseWriter, r *http.Request) {
 		cmd, err := s.putCommand(actor, object)
 		batch.add(object.Ref(), cmd, err)
 	}
-	s.decide(w, r, batch)
+	s.runOnLeader(w, r, batch)
 }
 
 // deleteResources deletes resources, in the order sent.
@@ -192,7 +192,7 @@ func (s *Server) deleteResources(w http.ResponseWriter, r *http.Request) {
 		})
 		batch.add(ref, cmd, err)
 	}
-	s.decide(w, r, batch)
+	s.runOnLeader(w, r, batch)
 }
 
 func (b *changeBatch) add(ref resource.Ref, cmd state.Command, err error) {
@@ -284,9 +284,9 @@ func (s *Server) sealSecret(id string, value []byte) (state.SealedSecret, error)
 	return state.SealedSecret{Value: sealed, Digest: digest.HMAC(key, []byte(id), value)}, nil
 }
 
-// decide has the leader run a batch: here if this agent leads, else on the
-// leader's /v1/internal/changes.
-func (s *Server) decide(w http.ResponseWriter, r *http.Request, batch changeBatch) {
+// runOnLeader has the leader run a batch: here if this agent leads, else on
+// the leader's /v1/internal/changes.
+func (s *Server) runOnLeader(w http.ResponseWriter, r *http.Request, batch changeBatch) {
 	var answer ChangeResult
 	if s.config.Cluster.IsLeader() {
 		answer = s.runChanges(r.Context(), batch)

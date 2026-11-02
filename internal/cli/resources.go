@@ -37,7 +37,7 @@ func newApplyResources(g *globals) *cobra.Command {
 			if from == "" {
 				return usage("name the resources with -f <file|directory|->")
 			}
-			objects, err := readResources(from, cmd.InOrStdin(), cmd.ErrOrStderr())
+			objects, err := readResourceFiles(from, cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -151,7 +151,7 @@ func newDelete(g *globals) *cobra.Command {
 			case from != "" && selected.namespace != "":
 				return usage("-f takes the namespaces from the files; drop -n")
 			case from != "":
-				objects, err := readResources(from, cmd.InOrStdin(), cmd.ErrOrStderr())
+				objects, err := readResourceFiles(from, cmd.InOrStdin(), cmd.ErrOrStderr())
 				if err != nil {
 					return err
 				}

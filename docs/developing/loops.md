@@ -20,9 +20,9 @@ loops that talk to the world outside.
   address itself. `ingress.RenderCompose` writes the Compose file.
 - `traefikRunner` has a loop of its own beside the stack runner, so a long image pull of a
   stack never holds up the ingress. It runs compose up as the stack runner does
-  (`composeUpHeld`, under the supervisor's hold) when the hash of the Compose file and
+  (`whilePaused`, with the supervisor paused for it) when the hash of the Compose file and
   `traefik.yml` differs from the one Traefik came up with: at the first pass after the agent
-  started, after Docker restarted (`forgetApplied`), and after a new image pin or Floating IP. Each
+  started, after Docker restarted (`passSignal.dockerRestarted`), and after a new image pin or Floating IP. Each
   of its files is compared with what is on disk, so one removed or changed by hand comes
   back at the next pass. It reads only the Floating IP, the stacks' routes and the
   certificates from the state, no copy of all of it: it passes at every event of Docker's.
@@ -45,7 +45,7 @@ loops that talk to the world outside.
   on 127.0.0.1:7445, which answers from the state (`State.Challenges`): whichever host
   holds the Floating IP can answer the CA.
 - The runner's passes come at every change of the state, every 30 s, and at once when the
-  supervisor sees an event of Docker's (`passNow`: start, die, health status): a container that
+  supervisor sees an event of Docker's (`passSignal.now`: start, die, health status): a container that
   turns unhealthy leaves its route within seconds.
 - Golden files in `internal/ingress/testdata`; `bin/dev test-tools` checks the Compose file
   with Debian's docker-compose.
@@ -139,11 +139,11 @@ loops that talk to the world outside.
   `clowder alert test` sends a test alert to every channel at once, from the agent the CLI
   asks: the one exception to "only the leader calls external services", so a channel can be
   tried also while the cluster has no leader.
-- **Conditions** that the state does not show are held in memory (`controller.Conditions`)
-  with the time they began, by the loop that sees them: the Floating IP not held (the
+- **Conditions** that the state does not show are kept in memory (`controller.Conditions`)
+  with the time they began, observed by the loop that sees them (`Observe`): the Floating IP not held (the
   Floating IP's loop), a host over capacity (the placement), Docker not answering (the alerts,
   from `report-host`). After a change of leader they start again, so a new alert comes a
-  little later rather than wrongly; one that is open stays until the loop that holds its
+  little later rather than wrongly; one that is open stays until the loop that observes its
   condition has looked (`Conditions.Seen`). An agent that leads no more forgets them.
 - `wanted_test.go` and `conditions_test.go` check `wantedAlerts` and `Conditions` on a
   state in memory: the thresholds, how long a condition must last, what keeps an open

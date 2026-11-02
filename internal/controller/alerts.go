@@ -179,7 +179,7 @@ func (a *Alerts) pass(ctx context.Context) {
 	}
 	now := time.Now()
 	for id, host := range copied.Hosts {
-		a.conditions.Hold(dockerDownKey(id), host.DockerDown)
+		a.conditions.Observe(dockerDownKey(id), host.DockerDown)
 	}
 	wanted := wantedAlerts(copied, a.conditions, now)
 	for _, key := range slices.Sorted(maps.Keys(copied.Alerts)) {

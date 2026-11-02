@@ -222,7 +222,7 @@ func serveMetrics(source *metricsSource, address string, logger *slog.Logger) (*
 		_ = set.Write(w) // the scraper is gone if this fails
 	})
 	server := &http.Server{
-		Handler: mux, ReadHeaderTimeout: 10 * time.Second,
+		Handler: mux, ReadHeaderTimeout: readHeaderTimeout,
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelDebug),
 	}
 	go func() {

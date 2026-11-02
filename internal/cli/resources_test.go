@@ -244,7 +244,7 @@ func TestASecretInClearIsRefusedFromFilesAndStdin(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, from := range []string{dir, path, "-"} {
-		_, err := readResources(from, strings.NewReader(secret), io.Discard)
+		_, err := readResourceFiles(from, strings.NewReader(secret), io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "secret token: write its value encrypted") ||
 			strings.Contains(err.Error(), "s3cret") {
 			t.Errorf("%s: %v", from, err)

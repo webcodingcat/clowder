@@ -9,7 +9,7 @@ import (
 // (the Floating IP not held, a host over capacity, Docker not answering for
 // a while), each with the time it began. They are in memory: after a change
 // of leader they start again, so a new alert comes a little later rather
-// than wrongly, and one that is open stays until the loop that holds its
+// than wrongly, and one that is open stays until the loop that observes its
 // condition has looked.
 type Conditions struct {
 	mu    sync.Mutex
@@ -24,9 +24,9 @@ func NewConditions() *Conditions {
 	return &Conditions{since: map[string]time.Time{}, seen: map[string]bool{}}
 }
 
-// Hold records whether a condition holds now. It tells whether it began
+// Observe records whether a condition holds now. It tells whether it began
 // with this call, so a loop logs a condition once.
-func (c *Conditions) Hold(key string, holds bool) (began bool) {
+func (c *Conditions) Observe(key string, holds bool) (began bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.seen[key] = true

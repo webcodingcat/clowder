@@ -142,12 +142,12 @@ func TestAnOpenAlertStaysUntilItsConditionIsLookedAt(t *testing.T) {
 	if !open() {
 		t.Fatal("the alert went before anyone looked")
 	}
-	alerts.conditions.Hold(ingressNotHeld, true) // still not held, for a moment only
+	alerts.conditions.Observe(ingressNotHeld, true) // still not held, for a moment only
 	alerts.pass(context.Background())
 	if !open() {
 		t.Fatal("the alert went while its condition held")
 	}
-	alerts.conditions.Hold(ingressNotHeld, false)
+	alerts.conditions.Observe(ingressNotHeld, false)
 	alerts.pass(context.Background())
 	if open() {
 		t.Error("the alert stayed after the Floating IP was held again")

@@ -50,7 +50,7 @@ func (c *Client) Get(ctx context.Context, path string, out any) error {
 
 // Post writes in (nil for none) to path. Reads after it wait for the write.
 func (c *Client) Post(ctx context.Context, path string, in any) (Written, error) {
-	return c.write(ctx, http.MethodPost, path, in)
+	return c.sendChange(ctx, http.MethodPost, path, in)
 }
 
 // Act posts in (nil for none) to path and reads the answer into out: an
@@ -126,12 +126,12 @@ func (c *Client) DiffCluster(ctx context.Context, apply ClusterApply) (ClusterDi
 
 // Put replaces what is at path with in. Reads after it wait for the write.
 func (c *Client) Put(ctx context.Context, path string, in any) (Written, error) {
-	return c.write(ctx, http.MethodPut, path, in)
+	return c.sendChange(ctx, http.MethodPut, path, in)
 }
 
 // Delete removes what is at path. Reads after it wait for the write.
 func (c *Client) Delete(ctx context.Context, path string) (Written, error) {
-	return c.write(ctx, http.MethodDelete, path, nil)
+	return c.sendChange(ctx, http.MethodDelete, path, nil)
 }
 
 // Stream copies what path answers to out as it comes (logs that follow);
@@ -204,7 +204,9 @@ func (c *Client) openStream(ctx context.Context, path string) (io.ReadCloser, er
 	return nil, fmt.Errorf("no agent answered:\n  %s", strings.Join(unreachable, "\n  "))
 }
 
-func (c *Client) write(ctx context.Context, method, path string, in any) (Written, error) {
+// sendChange sends a request that changes the state, and remembers its
+// index so that reads after it wait for it.
+func (c *Client) sendChange(ctx context.Context, method, path string, in any) (Written, error) {
 	var body []byte
 	if in != nil {
 		encoded, err := json.Marshal(in)

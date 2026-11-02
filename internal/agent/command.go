@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -94,7 +93,8 @@ func newRun() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
 			defer stop()
-			return Run(ctx, Files{Dir: DefaultDir, SecretsDir: DefaultSecretsDir}, hostParts(), slog.Default())
+			files := Files{Dir: DefaultDir, SecretsDir: DefaultSecretsDir}
+			return Run(ctx, files, hostParts(files), slog.Default())
 		},
 	}
 }
@@ -106,12 +106,12 @@ func hostNetwork() network.Host {
 
 // hostParts are the host's real network, storage and Docker, and the
 // hoster's real API.
-func hostParts() HostParts {
+func hostParts(files Files) HostParts {
 	return HostParts{
 		Network: hostNetwork(),
 		Storage: storage.Driver{
-			VolumesDir:  filepath.Join(DefaultDir, "volumes"),
-			StateDir:    filepath.Join(DefaultDir, "storage"),
+			VolumesDir:  files.volumesDir(),
+			StateDir:    files.storageDir(),
 			ResourceDir: "/etc/drbd.d",
 			Run:         command.Run,
 		},

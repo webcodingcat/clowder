@@ -72,7 +72,7 @@ func (r *stackRunner) openSecrets(desired desiredState, stack *state.Stack) (sta
 	}
 	env, err := compose.RenderSecretEnv(stack.Name, stack.Spec, values)
 	if err != nil {
-		return stackSecrets{}, err
+		return stackSecrets{}, fmt.Errorf("render the secret variables of stack %s: %w", stack.ID(), err)
 	}
 	secrets.env = env
 	for serviceName, service := range stack.Spec.Services {

@@ -32,12 +32,16 @@ They do no harm on a single host.
   once it knows a leader. Before a host that was away starts its stacks, it must have
   applied the leader's commit index.
 - `CatchUp` runs once, when the agent starts. A host that becomes leader later may not
-  have applied every committed entry yet, and its loops and `decide` would act on that
+  have applied every committed entry yet, and its loops and `runOnLeader` would act on that
   state. It needs a barrier when it gains the lead, before they act.
 - The agent runs its stacks one after another in one loop. A long image pull or `mkfs`
   holds up the others, and a command left behind on a suspended DRBD volume leaves a
   goroutine behind at every pass. It also runs `Ensure` on every volume at every pass,
   which it should skip when nothing changed.
+- A stack's `volumes.json` lists the volumes of its latest Compose file even when its
+  `compose up` failed and the old containers still use the old volumes. If the stack then
+  leaves the host and fails to stop, another stack could take a volume it still uses. The
+  file should keep the old LVs too until `compose up` worked.
 - A placement is several commands in a row (push-outs, volumes, the stack's host). A new
   leader repairs what one left half done in its next pass; with failover, one command per
   placement would leave fewer states between.

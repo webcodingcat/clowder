@@ -49,9 +49,9 @@ func (r resources) String() string {
 	return units.FormatSize(r.memory) + " and " + strconv.FormatFloat(float64(r.milliCPUs)/1000, 'f', -1, 64) + " CPUs"
 }
 
-// readResources reads resources of cluster.yaml; WithDefaults filled them
-// in and Check made sure they read.
-func readResources(config clusterspec.Resources) resources {
+// parseResources parses resources of cluster.yaml; WithDefaults filled them
+// in and Check made sure they parse.
+func parseResources(config clusterspec.Resources) resources {
 	memory, _ := units.ParseSize(config.Memory)
 	cpus, _ := strconv.ParseFloat(config.CPUs, 64)
 	return resources{memory, milli(cpus)}
@@ -115,8 +115,8 @@ func Rooms(current *state.State) map[state.HostID]HostRoom {
 func newRoom(current *state.State) *room {
 	config := current.Config.Spec.WithDefaults()
 	r := &room{
-		current: current, defaults: readResources(config.Defaults.Reservations),
-		reserve: readResources(config.SystemReserve), pushedOut: map[string]map[string]bool{},
+		current: current, defaults: parseResources(config.Defaults.Reservations),
+		reserve: parseResources(config.SystemReserve), pushedOut: map[string]map[string]bool{},
 		placed: map[string]state.HostID{}, effective: map[string]map[string]int{},
 	}
 	for id, stack := range current.Stacks {

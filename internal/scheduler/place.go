@@ -86,7 +86,7 @@ func Plan(current *state.State) Decisions {
 			unplaced = append(unplaced, stack)
 			continue
 		}
-		decisions.add(planner.decide(stack))
+		decisions.add(planner.place(stack))
 	}
 	// by the highest effective priority of their services, from the
 	// current categories like every other priority here
@@ -98,7 +98,7 @@ func Plan(current *state.State) Decisions {
 	}
 	slices.SortStableFunc(unplaced, func(a, b *state.Stack) int { return cmp.Compare(highest[b.ID()], highest[a.ID()]) })
 	for _, stack := range unplaced {
-		decisions.add(planner.decide(stack))
+		decisions.add(planner.place(stack))
 	}
 	// a pushed-out service comes back only in a pass that changes nothing
 	// else: a waiting stack gets the room first
@@ -113,23 +113,14 @@ func Plan(current *state.State) Decisions {
 	return decisions
 }
 
-// add takes one stack's placement or reason to wait.
-func (d *Decisions) add(placement Placement, waiting *Waiting) {
+// add takes one stack's placement, or its reason to wait.
+func (d *Decisions) add(placement Placement, reason string) {
 	switch {
-	case waiting != nil:
-		d.Waiting = append(d.Waiting, *waiting)
+	case reason != "":
+		d.Waiting = append(d.Waiting, Waiting{Stack: placement.Stack, Reason: reason})
 	case placement.Place || len(placement.Volumes) > 0:
 		d.Placements = append(d.Placements, placement)
 	}
-}
-
-// decide places one stack; a Waiting says why it cannot.
-func (p *planner) decide(stack *state.Stack) (Placement, *Waiting) {
-	placement, reason := p.place(stack)
-	if reason != "" {
-		return Placement{}, &Waiting{Stack: stack.ID(), Reason: reason}
-	}
-	return placement, nil
 }
 
 // planner keeps what the decisions so far have taken, so two stacks in one
@@ -168,7 +159,8 @@ func (p *planner) take(host state.HostID, pool string, size int64) {
 	p.allocated[host][pool] = append(p.allocated[host][pool], size)
 }
 
-// place decides for one stack; a reason means it waits. A new stack goes
+// place decides for one stack; a reason means it waits, and the placement
+// then names only the stack. A new stack goes
 // to the active host where all of it fits with the least room left (best
 // fit), else to the first where its services push out others.
 func (p *planner) place(stack *state.Stack) (Placement, string) {
@@ -209,13 +201,13 @@ func (p *planner) place(stack *state.Stack) (Placement, string) {
 		}, ""
 	}
 	if len(reasons) == 0 {
-		return Placement{}, "no active host"
+		return Placement{Stack: stack.ID()}, "no active host"
 	}
 	var each []string
 	for _, id := range slices.Sorted(maps.Keys(reasons)) {
 		each = append(each, p.current.Hosts[id].Name+": "+reasons[id])
 	}
-	return Placement{}, strings.Join(each, "; ")
+	return Placement{Stack: stack.ID()}, strings.Join(each, "; ")
 }
 
 // allocation is space a volume takes in a pool.

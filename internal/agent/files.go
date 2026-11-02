@@ -47,14 +47,23 @@ func (f Files) hostCertificate() string { return filepath.Join(f.Dir, "pki", "ho
 func (f Files) hostKey() string         { return filepath.Join(f.Dir, "pki", "host-key.pem") }
 func (f Files) raftDir() string         { return filepath.Join(f.Dir, "raft") }
 
-func (f Files) lastTrim() string { return filepath.Join(f.Dir, "storage", "last-trim") }
+// The storage driver's directories: the mount points of the volumes, and
+// its state, beside which the agent keeps the time of the last trim.
+func (f Files) volumesDir() string { return filepath.Join(f.Dir, "volumes") }
+func (f Files) storageDir() string { return filepath.Join(f.Dir, "storage") }
+func (f Files) lastTrim() string   { return filepath.Join(f.storageDir(), "last-trim") }
 
 // The files of the stacks on this host, by their Compose project
-// (names.Project): per stack its rendered Compose file.
+// (names.Project): per stack its rendered Compose file and the LVs it
+// mounts.
 func (f Files) stacksDir() string              { return filepath.Join(f.Dir, "stacks") }
 func (f Files) stackDir(project string) string { return filepath.Join(f.stacksDir(), project) }
 func (f Files) stackFile(project string) string {
 	return filepath.Join(f.stackDir(project), "compose.yaml")
+}
+
+func (f Files) stackVolumesFile(project string) string {
+	return filepath.Join(f.stackDir(project), "volumes.json")
 }
 func (f Files) volumeRecordsDir() string { return filepath.Join(f.Dir, "volume-records") }
 func (f Files) volumeRecord(volumeID string) string {

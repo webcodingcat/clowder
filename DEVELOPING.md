@@ -62,13 +62,13 @@ Follow `clowder apply -f shop/` from the user's machine to the running container
 step names the file and function to read; the package's section explains the rules.
 
 1. **The CLI reads the files.** `cli/resources.go` `newApplyResources` calls
-   `cli/files.go` `readResources`: the YAML files of the directory, a secret's value
+   `cli/files.go` `readResourceFiles`: the YAML files of the directory, a secret's value
    encrypted in them. `applyRank` sorts them: namespaces, then volumes and secrets, then stacks.
    `api.Client.ApplyResources` sends them in one request (`POST /v1/apply`).
 2. **Any agent takes the request.** `api/resources.go` `applyResources` turns each
    resource into a `put-resource` command (`putCommand`): it reads the spec strictly, and
    opens a secret's value with the cluster's key and seals it.
-3. **The leader decides.** `api/resources.go` `decide` hands the commands to the leader
+3. **The leader decides.** `api/resources.go` `runOnLeader` hands the commands to the leader
    (`internalChanges` on a follower). `runChanges` tries each on a copy of the state and
    proposes only those that change something.
 4. **The state applies.** `state/resources.go` `applyPutResource` checks who may and whose
@@ -78,9 +78,10 @@ step names the file and function to read; the package's section explains the rul
    leader. `scheduler/place.go` `Plan` picks a host for the stack and a pool for each new
    volume. The controller commits `put-volume` and `set-stack-status starting`.
 6. **The host runs it.** `agent/stacks.go` `stackRunner.pass` sees the stack placed on its
-   host. `apply` renders the Compose file (`compose.Render`), makes the volumes
-   (`storage.Ensure`), writes the secrets to tmpfs, and `up` runs `docker compose up`. The
-   host reports `running` (`commitAsHost`).
+   host. `agent/stack_apply.go` `apply` renders the Compose file (`render`), makes the
+   volumes (`ensureVolumes`), and `up` writes the secrets to tmpfs and runs
+   `docker compose up`. The host reports `running` (`reportRunning`, through
+   `agent/loops.go` `commitAsHost`).
 7. **The supervisor keeps it running.** Docker restarts nothing itself;
    `supervisor.Supervisor` follows Docker's events and restarts what crashes.
 
@@ -116,7 +117,7 @@ What follows from there:
 | generation | of a resource: counts the changes of its spec; an apply that changes nothing does not count. A volume's data generation grows with a restore or class move and is part of its LV's name |
 | pushed out, coming back | a service stopped to make room for one of higher priority; it comes back once there is room again |
 | retired copy | a volume's copy the state gave up (the volume deleted, moved or restored); its host removes it, and only then is the data gone |
-| leavers, held | on a host: the stacks that left it and stop first; the volumes such a stack still uses because its stop failed, which no other stack may take yet |
+| leavers, in use | on a host: the stacks that left it and stop first; the volumes such a stack still uses because its stop failed, which no other stack may take yet |
 | pass | one run of a loop that brings its part of the host or the cluster to what the state says; a loop runs a pass at every change of the state and every 30 s |
 | room | what a host offers its services (memory, CPUs) less what they reserve: the scheduler's one measure |
 | desired | what the state wants on this host, read once per pass; the agent compares the host with it |

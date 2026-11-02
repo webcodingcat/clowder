@@ -14,8 +14,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/compose"
@@ -51,61 +49,31 @@ type traefikRunner struct {
 	// open unseals the certificates' keys (datakey.Key.Open)
 	open   func(sealed state.Sealed) ([]byte, error)
 	logger *slog.Logger
-	// supervisor needs the stack runner's rules first, so Run sets it
-	// afterwards, as the stack runner's
+	// supervisor is paused while compose up recreates Traefik
 	supervisor *supervisor.Supervisor
+	// signal is how the supervisor starts a pass: after each of Docker's
+	// events, so a container that turns unhealthy leaves its route within
+	// seconds, and when Docker restarted
+	signal *passSignal
 
-	mu sync.Mutex
-	// cameUp is the hash of the Compose file and traefik.yml that Traefik
-	// last came up with; zero after the agent started or Docker restarted,
-	// so it comes up again (restart: "no")
-	cameUp [32]byte
+	// Only the runner's loop uses what follows, so it needs no lock.
 
-	// wake starts a pass at once (buffered, 1)
-	wake chan struct{}
-	// unopened are the sealed keys that did not open, logged once; only
-	// the runner's loop uses it
+	// cameUp is what Traefik last came up with; zero after the agent
+	// started, so it comes up again (restart: "no")
+	cameUp broughtUp
+	// unopened are the sealed keys that did not open, logged once
 	unopened map[string]bool
 }
 
-// run keeps Traefik and its routes as this host needs them, until ctx ends:
-// at every change of the state, at once when a container changed (passNow),
-// and every reconcileInterval.
+// run keeps Traefik and its routes as this host needs them, until ctx ends
+// (runPasses). Each pass compares every file with what is on disk, so it
+// also repairs what someone changed by hand.
 func (t *traefikRunner) run(ctx context.Context) {
-	for {
-		// take the channel before reading, so no change between goes unseen
-		changed := t.cluster.Changed()
+	runPasses(ctx, t.cluster, t.signal.wake, func() {
 		if err := t.pass(ctx); err != nil {
 			t.logger.Error("run Traefik", "error", err)
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-changed:
-		case <-t.wake:
-		case <-time.After(reconcileInterval):
-		}
-	}
-}
-
-// passNow starts a pass at once; the supervisor calls it after each of
-// Docker's events, so a container that turns unhealthy leaves its route
-// within seconds.
-func (t *traefikRunner) passNow() {
-	select {
-	case t.wake <- struct{}{}:
-	default: // a pass is due already
-	}
-}
-
-// forgetApplied makes Traefik come up again in a pass it starts at once;
-// the supervisor calls it when Docker restarted, which stopped every
-// container.
-func (t *traefikRunner) forgetApplied() {
-	t.mu.Lock()
-	t.cameUp = [32]byte{}
-	t.mu.Unlock()
-	t.passNow()
+	})
 }
 
 // pass writes the certificates and the routes, then runs compose up when
@@ -126,14 +94,14 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 		FloatingIP: floatingIP, NodeAddress: t.host.NodeAddress, Overlay: network.Overlay,
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("render traefik.yml: %w", err)
 	}
 	file, err := ingress.RenderCompose(ingress.Mounts{
 		Static: t.files.traefikStaticDir(), Dynamic: t.files.traefikDynamicDir(),
 		Certificates: t.files.traefikCertificatesDir(),
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("render Traefik's Compose file: %w", err)
 	}
 	// the certificates first, then the routes that name them, so Traefik
 	// finds both when it starts or reloads
@@ -147,7 +115,7 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	}
 	rendered, err := ingress.RenderDynamic(routes, certificates)
 	if err != nil {
-		return err
+		return fmt.Errorf("render Traefik's routes: %w", err)
 	}
 	// each file is compared with what is on disk, so one removed or changed
 	// by hand comes back at the next pass
@@ -166,18 +134,19 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	sum := sha256.New()
 	digest.WriteParts(sum, file, static)
 	hash := [32]byte(sum.Sum(nil))
-	t.mu.Lock()
-	upToDate := t.cameUp == hash
-	t.mu.Unlock()
-	if upToDate {
+	// read before compose up: a restart of Docker during it makes Traefik
+	// come up again at the next pass
+	upNow := broughtUp{hash: hash, dockerRestarts: t.signal.restarts()}
+	if t.cameUp == upNow {
 		return nil
 	}
-	if err := composeUpHeld(ctx, t.docker, t.supervisor, ingress.Project, []string{t.files.traefikCompose()}, nil); err != nil {
-		return err
+	err = whilePaused(t.supervisor, ingress.Project, func() error {
+		return t.docker.ComposeUp(ctx, ingress.Project, []string{t.files.traefikCompose()}, nil)
+	})
+	if err != nil {
+		return fmt.Errorf("compose up Traefik: %w", err)
 	}
-	t.mu.Lock()
-	t.cameUp = hash
-	t.mu.Unlock()
+	t.cameUp = upNow
 	return nil
 }
 

@@ -62,9 +62,9 @@ type Supervisor struct {
 	logger *slog.Logger
 
 	mu sync.Mutex
-	// held are the stacks the agent is stopping or recreating itself: the
+	// paused are the stacks the agent is stopping or recreating itself: the
 	// register of wanted stops. A container that dies in one is no crash.
-	held map[string]int
+	paused map[string]int
 	// stopped are containers someone stopped (docker stop): left alone.
 	stopped map[string]bool
 	// crashes counts each container's restarts since it last ran stably.
@@ -86,7 +86,7 @@ type Service struct {
 func New(dockerAPI Docker, rules Rules, backoff Backoff, missed, seen func(), logger *slog.Logger) *Supervisor {
 	return &Supervisor{
 		docker: dockerAPI, rules: rules, backoff: backoff, missed: missed, seen: seen, logger: logger,
-		held: map[string]int{}, stopped: map[string]bool{},
+		paused: map[string]int{}, stopped: map[string]bool{},
 		crashes: map[string]int{}, started: map[string]time.Time{}, restarts: map[Service]int{},
 	}
 }
@@ -99,20 +99,20 @@ func (s *Supervisor) Restarts() map[Service]int {
 	return maps.Clone(s.restarts)
 }
 
-// Hold registers that the agent itself is about to stop or recreate a
-// stack's containers (compose up of a new generation, down, a move); the
-// returned function ends that. Holds of one stack may overlap.
-func (s *Supervisor) Hold(stack string) (release func()) {
+// Pause stops supervising a stack while the agent itself stops or recreates
+// its containers (compose up of a new generation, down, a move); the
+// returned function resumes. Pauses of one stack may overlap.
+func (s *Supervisor) Pause(stack string) (resume func()) {
 	s.mu.Lock()
-	s.held[stack]++
+	s.paused[stack]++
 	s.mu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			if s.held[stack]--; s.held[stack] <= 0 {
-				delete(s.held, stack)
+			if s.paused[stack]--; s.paused[stack] <= 0 {
+				delete(s.paused, stack)
 			}
 		})
 	}
@@ -156,7 +156,7 @@ func (s *Supervisor) handle(ctx context.Context, event docker.Event) {
 		// docker stop or kill: the container stays down, unless the agent did
 		// it; a kill that only signals (a reload with SIGHUP) is no stop
 		s.mu.Lock()
-		if s.held[stack] == 0 {
+		if s.paused[stack] == 0 {
 			s.stopped[id] = true
 		}
 		s.mu.Unlock()
@@ -178,12 +178,12 @@ func (s *Supervisor) handle(ctx context.Context, event docker.Event) {
 func (s *Supervisor) crashed(ctx context.Context, stack, service, id string, exitCode int) {
 	rule, known := s.rules(stack, service)
 	s.mu.Lock()
-	held, stopped := s.held[stack] > 0, s.stopped[id]
+	paused, stopped := s.paused[stack] > 0, s.stopped[id]
 	if since, ok := s.started[id]; ok && time.Since(since) >= s.backoff.Stable {
 		s.crashes[id] = 0 // it ran stably: count anew
 	}
 	attempt := s.crashes[id]
-	restart := known && !held && !stopped && restarts(rule.Restart, exitCode, attempt)
+	restart := known && !paused && !stopped && restarts(rule.Restart, exitCode, attempt)
 	if restart {
 		s.crashes[id] = attempt + 1
 		s.restarts[Service{stack, service}]++
@@ -196,11 +196,11 @@ func (s *Supervisor) crashed(ctx context.Context, stack, service, id string, exi
 	s.logger.Warn("container crashed; restarting", "stack", stack, "service", service,
 		"exit_code", exitCode, "in", delay)
 	time.AfterFunc(delay, func() {
-		// the stack may be held by now (an update): then it is not ours to start
+		// the stack may be paused by now (an update): then it is not ours to start
 		s.mu.Lock()
-		held := s.held[stack] > 0 || s.stopped[id]
+		leftAlone := s.paused[stack] > 0 || s.stopped[id]
 		s.mu.Unlock()
-		if held || ctx.Err() != nil {
+		if leftAlone || ctx.Err() != nil {
 			return
 		}
 		err := s.docker.Start(ctx, id)
@@ -228,12 +228,12 @@ func endsContainer(signal int) bool {
 func (s *Supervisor) unhealthy(ctx context.Context, stack, service, id string) {
 	rule, known := s.rules(stack, service)
 	s.mu.Lock()
-	held := s.held[stack] > 0
+	paused := s.paused[stack] > 0
 	if since, ok := s.started[id]; ok && time.Since(since) >= s.backoff.Stable {
 		s.crashes[id] = 0
 	}
 	attempt := s.crashes[id]
-	restart := known && !held && rule.RestartUnhealthy
+	restart := known && !paused && rule.RestartUnhealthy
 	if restart {
 		s.crashes[id] = attempt + 1
 		s.restarts[Service{stack, service}]++
@@ -246,9 +246,9 @@ func (s *Supervisor) unhealthy(ctx context.Context, stack, service, id string) {
 	s.logger.Warn("container unhealthy; restarting", "stack", stack, "service", service, "in", delay)
 	time.AfterFunc(delay, func() {
 		s.mu.Lock()
-		held := s.held[stack] > 0 || s.stopped[id]
+		leftAlone := s.paused[stack] > 0 || s.stopped[id]
 		s.mu.Unlock()
-		if held || ctx.Err() != nil {
+		if leftAlone || ctx.Err() != nil {
 			return
 		}
 		if err := s.docker.Restart(ctx, id); err != nil && !errors.Is(err, docker.ErrNoContainer) {

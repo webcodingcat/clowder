@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/network"
-	"github.com/webcodingcat/clowder/internal/raftnode"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -23,36 +22,30 @@ type HostNetwork interface {
 // reconcileNetwork keeps the nft rules as the state says until ctx ends:
 // after a change of the state when the rules differ, and every
 // reconcileInterval anyway, to repair what someone changed by hand.
-func reconcileNetwork(ctx context.Context, node *raftnode.Node, hostNetwork HostNetwork, logger *slog.Logger) {
-	// applied is the ruleset that is loaded; nil means "load it again"
-	// (at the start, after a failure, at each repair)
+func reconcileNetwork(ctx context.Context, cluster stateReader, hostNetwork HostNetwork, logger *slog.Logger) {
+	// applied is the ruleset loaded at appliedAt; nil at the start and
+	// after a failure
 	var applied *network.Ruleset
-	for {
-		// take the channel before reading, so no change between goes unseen
-		changed := node.Changed()
-		wanted := wantedRuleset(node)
-		if applied == nil || *applied != wanted {
-			applied = nil
-			if err := hostNetwork.ApplyRules(ctx, wanted); err != nil {
-				logger.Error("apply the nft rules", "error", err)
-			} else {
-				applied = &wanted
-			}
-		}
-		select {
-		case <-ctx.Done():
+	var appliedAt time.Time
+	runPasses(ctx, cluster, nil, func() {
+		wanted := wantedRuleset(cluster)
+		repairDue := time.Since(appliedAt) >= reconcileInterval
+		if applied != nil && *applied == wanted && !repairDue {
 			return
-		case <-changed:
-		case <-time.After(reconcileInterval):
-			applied = nil
 		}
-	}
+		applied = nil
+		if err := hostNetwork.ApplyRules(ctx, wanted); err != nil {
+			logger.Error("apply the nft rules", "error", err)
+			return
+		}
+		applied, appliedAt = &wanted, time.Now()
+	})
 }
 
 // wantedRuleset is the nft ruleset for the current state.
-func wantedRuleset(node *raftnode.Node) network.Ruleset {
+func wantedRuleset(cluster stateReader) network.Ruleset {
 	var ruleset network.Ruleset
-	node.Read(func(current *state.State) {
+	cluster.Read(func(current *state.State) {
 		// empty before the first cluster apply; clusterspec.Check lets no
 		// other invalid address into the state
 		if address, err := netip.ParseAddr(current.Config.Spec.Ingress.FloatingIP); err == nil {

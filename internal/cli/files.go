@@ -12,11 +12,11 @@ import (
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
-// readResources reads the resources of a file, of the YAML files of a
+// readResourceFiles reads the resources of a file, of the YAML files of a
 // directory, or of stdin ("-"). A file or stdin must hold resources; in a
 // directory, hidden files, other files and files of other documents are
 // skipped, and each is reported to report.
-func readResources(from string, stdin io.Reader, report io.Writer) ([]resource.Object, error) {
+func readResourceFiles(from string, stdin io.Reader, report io.Writer) ([]resource.Object, error) {
 	if from == "-" {
 		data, err := io.ReadAll(stdin)
 		if err != nil {

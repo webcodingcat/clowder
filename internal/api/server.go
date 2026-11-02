@@ -378,7 +378,7 @@ func (s *Server) hostAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// the phase checked here must still be the host's when it commits
-	s.write(w, r, state.KindSetHostPhase, state.SetHostPhase{Host: id, Phase: action.To, From: phase})
+	s.commitRequest(w, r, state.KindSetHostPhase, state.SetHostPhase{Host: id, Phase: action.To, From: phase})
 }
 
 // phaseList reads "active", "active or draining", ...
@@ -466,8 +466,8 @@ func (s *Server) internalPropose(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// write turns a request into a command and commits it.
-func (s *Server) write(w http.ResponseWriter, r *http.Request, kind string, payload any) {
+// commitRequest turns a request into a command and commits it.
+func (s *Server) commitRequest(w http.ResponseWriter, r *http.Request, kind string, payload any) {
 	// no time here: the leader stamps its own (proposeHere)
 	cmd, err := state.NewCommand(kind, time.Time{}, actorOf(identityOf(r)), payload)
 	if err != nil {

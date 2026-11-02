@@ -63,9 +63,9 @@ func TestConditionsRaiseAlertsOnlyOnceTheyLasted(t *testing.T) {
 		},
 	}
 	conditions := NewConditions()
-	conditions.Hold(dockerDownKey(0), true)
-	conditions.Hold(ingressNotHeld, true)
-	conditions.Hold(overCapacityKey(0), true)
+	conditions.Observe(dockerDownKey(0), true)
+	conditions.Observe(ingressNotHeld, true)
+	conditions.Observe(overCapacityKey(0), true)
 	soon := fmt.Sprint(alertKeys(current, conditions, time.Now()))
 	want := "[over-capacity/node0=warning pool-use/node0/vg/thin/data=critical root-use/node0=warning stack-waiting/default/shop=warning]"
 	if soon != want {
@@ -82,7 +82,7 @@ func TestConditionsRaiseAlertsOnlyOnceTheyLasted(t *testing.T) {
 func TestAConditionRaisesItsAlertExactlyWhenItLasted(t *testing.T) {
 	current := node0(state.Active, 0, 0, 0)
 	conditions := NewConditions()
-	conditions.Hold(dockerDownKey(0), true)
+	conditions.Observe(dockerDownKey(0), true)
 	since, _ := conditions.Since(dockerDownKey(0))
 	if _, ok := wantedAlerts(current, conditions, since.Add(dockerDownFor-time.Second))["docker-down/node0"]; ok {
 		t.Error("raised a second early")
@@ -110,7 +110,7 @@ func TestAnOpenAlertStaysWhileItsConditionHoldsOrIsNotLookedAt(t *testing.T) {
 			current.Alerts = map[string]*state.Alert{"docker-down/node0": {Severity: clusterspec.SeverityCritical}}
 			conditions := NewConditions()
 			if test.look != nil {
-				conditions.Hold(dockerDownKey(0), *test.look)
+				conditions.Observe(dockerDownKey(0), *test.look)
 			}
 			_, ok := wantedAlerts(current, conditions, time.Now())["docker-down/node0"]
 			if ok != test.want {
@@ -123,8 +123,8 @@ func TestAnOpenAlertStaysWhileItsConditionHoldsOrIsNotLookedAt(t *testing.T) {
 func TestARemovedHostRaisesNoAlerts(t *testing.T) {
 	current := node0(state.Removed, 99, 99, 99)
 	conditions := NewConditions()
-	conditions.Hold(dockerDownKey(0), true)
-	conditions.Hold(overCapacityKey(0), true)
+	conditions.Observe(dockerDownKey(0), true)
+	conditions.Observe(overCapacityKey(0), true)
 	if keys := alertKeys(current, conditions, time.Now().Add(time.Hour)); len(keys) != 0 {
 		t.Errorf("alerts for a removed host: %v", keys)
 	}

@@ -253,7 +253,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
     digest computed (`sealSecret`: `digest.HMAC` over the ID and the value, with a key
     `Keys.Derive` gives for "clowder secret resource digest", apart from the containers'
     labels).
-  - **The leader decides** (`decide`): a follower hands the commands on as a batch to
+  - **The leader decides** (`runOnLeader`): a follower hands the commands on as a batch to
     `/v1/internal/changes`, since its own state may be behind and would answer
     `unchanged` or `refused` for what has changed since. `runChanges` applies each command
     to a copy of the leader's state first (`State.Copy`), with every check of the state: a

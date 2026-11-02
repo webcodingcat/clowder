@@ -182,7 +182,7 @@ func (s *Server) applyCluster(w http.ResponseWriter, r *http.Request) {
 		s.diffCluster(w, r, payload)
 		return
 	}
-	s.write(w, r, state.KindApplyConfig, payload)
+	s.commitRequest(w, r, state.KindApplyConfig, payload)
 }
 
 // SealClusterSecret seals a value of cluster.yaml for the state, with its

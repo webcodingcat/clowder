@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"time"
 
 	"github.com/webcodingcat/clowder/internal/ingress"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -33,7 +32,8 @@ func challengeHandler(cluster stateReader) http.Handler {
 }
 
 // serveChallenges serves challengeHandler on 127.0.0.1, where Traefik's
-// router for the challenges sends them.
+// router for the challenges sends them. The loopback address is always
+// there, so it needs no freeBind.
 func serveChallenges(cluster stateReader, logger *slog.Logger) (*http.Server, error) {
 	listener, err := net.Listen("tcp", ingress.ChallengeAddress)
 	if err != nil {
@@ -41,7 +41,7 @@ func serveChallenges(cluster stateReader, logger *slog.Logger) (*http.Server, er
 	}
 	server := &http.Server{
 		Handler:           challengeHandler(cluster),
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelDebug),
 	}
 	go func() {

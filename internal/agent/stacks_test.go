@@ -169,15 +169,15 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 
 	docker, storage := &fakeDocker{}, &fakeStorage{dir: t.TempDir()}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	runner := &stackRunner{
-		files: Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}, host: Host{ID: 0, Name: "node0", NodeAddress: netip.MustParseAddr("10.77.0.1")},
-		cluster: cluster, docker: docker, storage: storage, logger: logger,
-		propose: cluster.propose, applied: map[string][32]byte{}, logins: map[string][32]byte{},
-		unexplained: map[string]bool{}, open: keys.Open, digestKey: []byte("the test's digest key"),
-	}
 	// the tests run passes, never the supervisor's loop, which calls the two
 	// functions left out
-	runner.supervisor = supervisor.New(docker, runner.rules, supervisor.DefaultBackoff, nil, nil, logger)
+	watcher := supervisor.New(docker, restartRules{cluster, 0}.of, supervisor.DefaultBackoff, nil, nil, logger)
+	runner := &stackRunner{
+		files: Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}, host: Host{ID: 0, Name: "node0", NodeAddress: netip.MustParseAddr("10.77.0.1")},
+		cluster: cluster, docker: docker, storage: storage, supervisor: watcher, signal: newPassSignal(), logger: logger,
+		propose: cluster.propose, applied: map[string]broughtUp{}, logins: map[string][32]byte{},
+		unexplained: map[string]bool{}, open: keys.Open, digestKey: []byte("the test's digest key"),
+	}
 	return runner, cluster, docker, storage
 }
 
@@ -216,7 +216,7 @@ func TestAFailedComposeUpIsTriedAgain(t *testing.T) {
 	if ups := docker.count("up " + shopProject); ups != 2 {
 		t.Errorf("%d compose ups without a change, want 2", ups)
 	}
-	runner.forgetApplied() // Docker restarted
+	runner.signal.dockerRestarted()
 	runner.pass(context.Background())
 	if ups := docker.count("up " + shopProject); ups != 3 {
 		t.Errorf("%d compose ups after Docker restarted, want 3", ups)
@@ -262,17 +262,31 @@ func TestARestartPullsAndRecreatesOnce(t *testing.T) {
 	docker.mu.Lock()
 	docker.containers = shopContainer(restarted)
 	docker.mu.Unlock()
-	runner.forgetApplied()
+	runner.signal.dockerRestarted()
 	runner.pass(context.Background())
 	if pulls, ups := docker.count("pull "+shopProject+" app"), docker.count("up "+shopProject); pulls != 1 || ups != 3 {
 		t.Errorf("%d pulls and %d compose ups after Docker restarted, want 1 and 3", pulls, ups)
 	}
 }
 
+func TestAComposeUpThatDockersRestartOvertookIsRunAgain(t *testing.T) {
+	runner, _, docker, _ := newTestRunner(t)
+	docker.duringUp = func() {
+		docker.duringUp = nil // once
+		runner.signal.dockerRestarted()
+	}
+	runner.pass(context.Background())
+	runner.pass(context.Background()) // the pass the restart asked for
+	if ups := docker.count("up " + shopProject); ups != 2 {
+		t.Errorf("%d compose ups, want 2: the first may have come up before Docker restarted", ups)
+	}
+}
+
 func TestAPushedOutServiceIsLeftOutAndNotRestarted(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
 	runner.pass(context.Background())
-	if rule, ok := runner.rules(shopProject, "app"); !ok || rule.Restart != "always" || !rule.RestartUnhealthy {
+	rules := restartRules{cluster, 0}
+	if rule, ok := rules.of(shopProject, "app"); !ok || rule.Restart != "always" || !rule.RestartUnhealthy {
 		t.Errorf("the rule of a service %+v, %v", rule, ok)
 	}
 	cluster.mu.Lock()
@@ -285,7 +299,7 @@ func TestAPushedOutServiceIsLeftOutAndNotRestarted(t *testing.T) {
 	if ups := docker.count("up " + shopProject); ups != 2 || !slices.Equal(leftOut, []string{"app"}) {
 		t.Errorf("%d compose ups, the last without %v; want 2, without app", ups, leftOut)
 	}
-	if rule, ok := runner.rules(shopProject, "app"); !ok || rule.Restart != "no" {
+	if rule, ok := rules.of(shopProject, "app"); !ok || rule.Restart != "no" {
 		t.Errorf("the rule of a pushed-out service %+v, %v", rule, ok)
 	}
 }
@@ -382,7 +396,7 @@ func TestAVolumePassesOnlyOnceItsStackStopped(t *testing.T) {
 	}
 }
 
-func TestAStackWaitsWhileAStackThatFailedToStopHoldsItsVolume(t *testing.T) {
+func TestAStackWaitsWhileAStackThatFailedToStopUsesItsVolume(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
 	runner.pass(context.Background())
 	handOver(cluster)
@@ -394,6 +408,29 @@ func TestAStackWaitsWhileAStackThatFailedToStopHoldsItsVolume(t *testing.T) {
 	runner.pass(context.Background()) // shop stops now
 	if docker.count("up default_blog") != 1 || cluster.stack("blog").Status != state.StackRunning {
 		t.Errorf("docker %q, blog %s", docker.lines, cluster.stack("blog").Status)
+	}
+}
+
+func TestAStackWaitsWhenTheVolumesOfAStackThatFailedToStopDoNotRead(t *testing.T) {
+	runner, cluster, docker, _ := newTestRunner(t)
+	runner.pass(context.Background())
+	file := runner.files.stackVolumesFile(shopProject)
+	if content, err := os.ReadFile(file); err != nil || string(content) != `["`+dbLV(1)+`"]` {
+		t.Fatalf("the volumes shop mounts: %q, %v", content, err)
+	}
+	// as a stack brought up before the file existed
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	handOver(cluster)
+	docker.failedDowns = 1
+	runner.pass(context.Background())
+	if docker.count("up default_blog") != 0 {
+		t.Fatalf("blog came up beside shop, whose volumes are not known: %q", docker.lines)
+	}
+	runner.pass(context.Background()) // shop stops now
+	if docker.count("up default_blog") != 1 {
+		t.Errorf("docker %q", docker.lines)
 	}
 }
 
