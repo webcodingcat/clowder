@@ -50,7 +50,7 @@ type traefikRunner struct {
 	open   func(sealed state.Sealed) ([]byte, error)
 	logger *slog.Logger
 	// supervisor is paused while compose up recreates Traefik
-	supervisor *supervisor.Supervisor
+	supervisor pauser
 	// signal is how the supervisor starts a pass: after each of Docker's
 	// events, so a container that turns unhealthy leaves its route within
 	// seconds, and when Docker restarted
@@ -288,6 +288,9 @@ func (t *traefikRunner) routes(ctx context.Context, byProject map[string]map[str
 		if !routed || container.State != "running" {
 			continue
 		}
+		// one call per container: Docker's list (API 1.45, Debian's docker.io)
+		// has no health, only the text "Up 3 minutes (healthy)", and no
+		// parsing of that text is worth the calls it saves
 		details, err := t.docker.Inspect(ctx, container.ID)
 		if errors.Is(err, docker.ErrNoContainer) {
 			continue // gone since the list

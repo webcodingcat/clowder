@@ -7,7 +7,6 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/state"
-	"github.com/webcodingcat/clowder/internal/supervisor"
 )
 
 // What the agent's loops share.
@@ -81,10 +80,16 @@ type broughtUp struct {
 	dockerRestarts int
 }
 
+// pauser is what the runners need from the supervisor;
+// supervisor.Supervisor is the real one.
+type pauser interface {
+	Pause(project string) (resume func())
+}
+
 // whilePaused runs change, which stops or recreates a project's containers,
 // with the supervisor paused for the project: those containers did not
 // crash.
-func whilePaused(watcher *supervisor.Supervisor, project string, change func() error) error {
+func whilePaused(watcher pauser, project string, change func() error) error {
 	resume := watcher.Pause(project)
 	defer resume()
 	return change()

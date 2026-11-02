@@ -304,3 +304,31 @@ func TestPushedOutServicesAreTheStacksAndANewGenerationDropsGoneOnes(t *testing.
 		t.Errorf("pushed out after cache went %v", got)
 	}
 }
+
+func TestOnlyItsHostReportsAStackFailingAndWithWhy(t *testing.T) {
+	c := newCluster(t)
+	c.putShop(shopSpec())
+	host := HostID(0)
+	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackStarting, Host: &host})
+	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{
+		ID: "default/shop", Status: StackRunning, Host: &host, Generation: 1, AppliedSecrets: map[string]string{"key": "d"},
+	})
+	failing := SetStackStatus{ID: "default/shop", Status: StackFailing, Host: &host, Generation: 1, UpError: "pull access denied"}
+	c.refuse(KindSetStackStatus, LeaderActor, failing, "only its host reports it failing")
+	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackFailing, Host: &host, Generation: 1},
+		"an error goes with failing, and only with it")
+	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{
+		ID: "default/shop", Status: StackRunning, Host: &host, Generation: 1, UpError: "pull access denied",
+	}, "an error goes with failing, and only with it")
+
+	c.mustApply(KindSetStackStatus, HostActor(0), failing)
+	stack := c.state.Stacks["default/shop"]
+	if stack.Status != StackFailing || stack.UpError != "pull access denied" || stack.AppliedSecrets["key"] != "d" {
+		t.Errorf("failing stack %s, %q, %v: want its error, and the secrets of the containers that may still run",
+			stack.Status, stack.UpError, stack.AppliedSecrets)
+	}
+	c.mustApply(KindRestartStack, UserActor("alice"), RestartStack{Namespace: "default", Name: "shop"})
+	if stack.Status != StackStarting || stack.UpError != "" {
+		t.Errorf("a failing stack restarted is %s: %q", stack.Status, stack.UpError)
+	}
+}

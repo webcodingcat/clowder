@@ -232,6 +232,9 @@ type Stack struct {
 	Services map[string]Service `json:"services,omitempty"`
 	Host     *HostID            `json:"host,omitempty"` // nil: not placed yet
 	Status   StackStatus        `json:"status"`
+	// UpError is why the host could not bring the stack up, while it is
+	// failing: the first line of the first error, shortened. Display only.
+	UpError string `json:"up_error,omitempty"`
 	// AppliedSecrets are the digests of the secrets the containers on its
 	// host came up with, by name: a changed secret that has not reached the
 	// containers yet differs from its digest.
@@ -293,6 +296,9 @@ const (
 	StackPending  StackStatus = "pending"
 	StackStarting StackStatus = "starting"
 	StackRunning  StackStatus = "running"
+	// StackFailing is a stack its host could not bring up (UpError); the
+	// host tries again at every pass.
+	StackFailing StackStatus = "failing"
 )
 
 // Volume is a volume of a namespace and where its copies are.

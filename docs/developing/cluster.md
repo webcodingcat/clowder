@@ -96,12 +96,14 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
       secrets its namespace lacks;
     - keeps what the scheduler needs of each service (`Stack.Services`: the priority as
       written, the reservations, the dependencies).
-  - **A stack's status.** A new stack is `pending`. A changed one that runs is `starting`
-    until its host reports the new generation up. A host's `set-stack-status` names the
-    generation and the restart times it ran with; one about an older generation or other
-    restart times is refused, so a report from before an apply or a restart cannot mark
-    the stack `running`. With `running` the host
-    reports the digests of the secrets its containers came up with (`AppliedSecrets`).
+  - **A stack's status.** A new stack is `pending`. A changed one that runs or fails is
+    `starting` until its host reports the new generation up. A host's `set-stack-status`
+    names the generation and the restart times it ran with; one about an older generation
+    or other restart times is refused, so a report from before an apply or a restart cannot
+    mark the stack `running`. With `running` the host reports the digests of the secrets
+    its containers came up with (`AppliedSecrets`). Only the host reports `failing`, always
+    with why (`UpError`, display only); the digests stay, as containers of an earlier
+    `compose up` may still run with them. A failing stack keeps its host and its room.
   - **`restart-stack`** records the time of a restart per service (`Stack.Restarted`): for
     the services named (none: all) and every service that depends on one of them
     (`stackspec.Spec.WithDependents`), since a dependency holds only when a container
@@ -244,7 +246,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   on the internal routes catch an agent's bug, not a host that lies; what keeps strangers
   out is the CA, and removing a host revokes its certificate.
 - A refusal of the state is HTTP 409 with its reason; a write that did not commit is 503.
-- **Resources** (`resources.go`; the CLI's `apply`, `get` and `delete` below):
+- **Resources** (`changes.go` changes them, `resources.go` reads them; the CLI's `apply`,
+  `get` and `delete` below):
   - `POST /v1/apply` (`ApplyRequest`) and `POST /v1/delete` (`DeleteRequest`) take
     resources in order and answer per resource (`ChangeResult`): `applied` or `deleted`,
     `unchanged`,

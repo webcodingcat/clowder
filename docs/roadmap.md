@@ -24,7 +24,7 @@ to upgrade a running cluster.
 
 ## Known gaps to close in phase 2
 
-They do no harm on a single host.
+They matter once there are several hosts; on one, they cost at most time.
 
 - Raft and the forwarding of writes run on the node address, which other hosts reach only
   through the WireGuard mesh.
@@ -38,10 +38,6 @@ They do no harm on a single host.
   holds up the others, and a command left behind on a suspended DRBD volume leaves a
   goroutine behind at every pass. It also runs `Ensure` on every volume at every pass,
   which it should skip when nothing changed.
-- A stack's `volumes.json` lists the volumes of its latest Compose file even when its
-  `compose up` failed and the old containers still use the old volumes. If the stack then
-  leaves the host and fails to stop, another stack could take a volume it still uses. The
-  file should keep the old LVs too until `compose up` worked.
 - A placement is several commands in a row (push-outs, volumes, the stack's host). A new
   leader repairs what one left half done in its next pass; with failover, one command per
   placement would leave fewer states between.
@@ -49,8 +45,6 @@ They do no harm on a single host.
   marker. That is right for a new volume on one host; after a failover it would force an
   outdated copy. Whether a volume was ever initialised must come from the state, not a
   local file.
-- A stack whose `compose up` fails after a reboot or a restart of Docker stays `running` in
-  the state; only the agent's log says so. The host should report it.
 - A volume's copy that no stack on its host uses stays mounted, and with replicas its DRBD
   resource stays primary: on one host the next stack that names it takes it over once the
   old one stopped. With several hosts a copy without a stack must be unmounted and

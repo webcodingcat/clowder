@@ -269,7 +269,8 @@ func (s *State) makeMaps() {
 
 // Refused carries why Apply refused a command, so the one who proposed it can
 // tell a refusal (the command is wrong) from a command that did not commit
-// (no leader, no quorum).
+// (no leader, no quorum). The Raft member wraps Apply's error in it, which
+// is usually a CommandError: the same refusal, seen by the proposer.
 type Refused struct {
 	Err error
 }

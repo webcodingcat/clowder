@@ -13,9 +13,10 @@ import (
 // How long a condition the state does not show must last before it raises
 // an alert: a short hiccup is no alert.
 const (
-	dockerDownFor  = 2 * time.Minute
-	ingressLostFor = 5 * time.Minute
-	stackWaitFor   = 5 * time.Minute
+	dockerDownFor   = 2 * time.Minute
+	ingressLostFor  = 5 * time.Minute
+	stackWaitFor    = 5 * time.Minute
+	stackFailingFor = 2 * time.Minute
 )
 
 // The keys of the conditions other loops hold (Conditions). They name a
@@ -31,6 +32,12 @@ func overCapacityKey(host state.HostID) string {
 // dockerDownKey is the condition of a host whose Docker does not answer.
 func dockerDownKey(host state.HostID) string {
 	return fmt.Sprintf("docker-down/%d", host)
+}
+
+// stackFailingKey is the condition of a stack its host could not bring up;
+// like the alert's key, it names the stack by its ID.
+func stackFailingKey(stack string) string {
+	return "stack-failing/" + stack
 }
 
 // level is a threshold of a value in percent: it raises at raise and clears
@@ -124,6 +131,11 @@ func wantedAlerts(current *state.State, conditions *Conditions, now time.Time) m
 		if stack.WaitReason != "" && now.Sub(stack.WaitingSince) >= stackWaitFor {
 			add("stack-waiting/"+name, "stack-waiting", clusterspec.SeverityWarning, fmt.Sprintf("stack %s waits for a place", name),
 				"The stack finds no place: "+stack.WaitReason)
+		}
+		if key := stackFailingKey(name); held(key, key, stackFailingFor) {
+			add(key, "stack-failing", clusterspec.SeverityCritical, fmt.Sprintf("stack %s does not come up", name),
+				fmt.Sprintf("For %v or more its host could not bring the stack up and tries again at every pass: %s. "+
+					"The agent's log says more.", stackFailingFor, stack.UpError))
 		}
 	}
 	return wanted

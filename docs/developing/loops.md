@@ -141,8 +141,8 @@ loops that talk to the world outside.
   tried also while the cluster has no leader.
 - **Conditions** that the state does not show are kept in memory (`controller.Conditions`)
   with the time they began, observed by the loop that sees them (`Observe`): the Floating IP not held (the
-  Floating IP's loop), a host over capacity (the placement), Docker not answering (the alerts,
-  from `report-host`). After a change of leader they start again, so a new alert comes a
+  Floating IP's loop), a host over capacity (the placement), Docker not answering and a stack
+  failing (the alerts, from `report-host` and `set-stack-status`). After a change of leader they start again, so a new alert comes a
   little later rather than wrongly; one that is open stays until the loop that observes its
   condition has looked (`Conditions.Seen`). An agent that leads no more forgets them.
 - `wanted_test.go` and `conditions_test.go` check `wantedAlerts` and `Conditions` on a
@@ -159,6 +159,7 @@ loops that talk to the world outside.
 | `certificate-not-renewed` | warning | less than half the renewal window left | renewed |
 | `renew-before-ignored` | warning | for any certificate | value changed |
 | `stack-waiting` | warning | 5 min (`WaitingSince`) | placed |
+| `stack-failing` | critical | 2 min `failing` | up, applied anew or restarted |
 
 A value is resolved below its raise threshold, so one that hovers there does not raise and
 resolve at every report. Likewise an alert that gets better and then worse again, up to the

@@ -64,7 +64,7 @@ func TestARecordThatDoesNotReadIsNeitherUsedNorOverwritten(t *testing.T) {
 		t.Error("the copies were listed without the broken record")
 	}
 	// overwriting it would forget the copies it lists, and with them data
-	placeDB(cluster, 2)
+	placeVolume(cluster, "db", 2)
 	runner.pass(context.Background())
 	if content, err := os.ReadFile(file); err != nil || string(content) != "{not json" {
 		t.Errorf("the broken record was overwritten: %q, %v", content, err)

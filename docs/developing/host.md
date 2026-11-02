@@ -26,7 +26,8 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   2. The Raft member. It waits up to `catchUpTimeout` for its state to catch up with the
      Raft log.
   3. The containers' DNS resolver.
-  4. `newDaemon` makes the parts; then the API, once each on the underlay, the node
+  4. `newDaemon` makes the parts, each from what they all share (`shared`: the files,
+     this host, its keys, the Raft member, the host's parts, the logger); then the API, once each on the underlay, the node
      address and the public address. It binds them with `IP_FREEBIND` (`freeBind`): at
      boot the public address may come up after the agent, which must neither fail nor
      lock users out then. Then the answers to ACME's challenges and the metrics. If any
@@ -53,7 +54,10 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   only then, for each stack the state places here, renders its Compose file, `Ensure`s its
   volume copies, writes its secrets, runs `compose up` unless all of it came up before, and
   reports `running`: a volume that passes from one stack to another is never used by both
-  at once. A failed `compose up` is tried again at the next pass. Before `compose up` the
+  at once. A stack that fails to come up (any step, from its secrets to `compose up`) is
+  reported `failing` with the first line of the error (`reportFailing`, `Stack.UpError`),
+  once, and tried again at every pass; the leader raises `stack-failing` if it lasts. A
+  stack that waits for a leaver's volume is not failing. Before `compose up` the
   runner pulls the images of the services a user restarted since their containers came up:
   their `clowder.restarted` label differs from the state's time. An image may have changed
   under the same tag. Docker keeps the label, so a reboot pulls nothing again. Last, volume
@@ -63,9 +67,10 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   the volume copies in `volumes.go` and their records in `records.go`.
 - **A leaver that fails to stop** may still use its volumes, and no other stack may take
   them until it stopped: two databases on one file system would ruin it. Its volumes are
-  the LVs that `up` wrote to its `volumes.json` beside `compose.yaml`, from the volumes the
-  Compose file was rendered with. Without that file, the leaver counts as using every
-  volume, and every stack waits a pass.
+  the LVs in its `volumes.json` beside `compose.yaml`. Before `compose up` the runner adds
+  the LVs of the new Compose file to it, as the containers of the last one keep theirs
+  until `compose up` worked; after that, the file lists only the new ones. Without a
+  readable file, the leaver counts as using every volume, and every stack waits a pass.
 - **Crashes leave nothing unknown.** The files tell how far the runner got. A volume's
   record (`volume-records/`, one file per volume, apart from the stacks) lists its copies
   on this host before they are made, and loses one only after it is removed, so a copy is
@@ -111,12 +116,16 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   threshold trips early rather than late, and a small pool as early as a large one.
 - **Tests.** The package's test goes the whole way on 127.0.0.1: init, the agent with a
   notify socket, the user's bootstrap, apply and diff, the Floating IP reaching the nft
-  rules, and a volume and a stack applied, listed and deleted. `stacks_test.go` runs single
-  passes of the runner against a state in memory: a failed `compose up`, a new data
-  generation, a volume that outlives its stack, a volume that passes to the next stack only
-  once the old one stopped (and waits while a stop fails), secrets written, changed and
-  removed, the label changing with a secret, the secrets the containers came up with
-  reported. `secrets_test.go`, `records_test.go` and `volumes_test.go` run the same way: a
+  rules, and a volume and a stack applied, listed and deleted; `Run` that fails at its
+  start leaves nothing open. `stacks_test.go` runs single passes of the runner against a
+  state in memory, with a fake supervisor (`pauser`) and fake Docker: a failed `compose up`
+  reported `failing`, compose only while the supervisor is paused, a new data generation, a
+  volume that outlives its stack, secrets written, changed and removed, the label changing
+  with a secret, the secrets the containers came up with reported. `leavers_test.go`: a
+  volume passes to the next stack only once the old one stopped, and waits while a stop
+  fails, while the leavers cannot be listed, and while a failed `compose up` leaves old
+  containers on old volumes. `containers_test.go`: the restart rules, registry logins,
+  `compose ps`. `secrets_test.go`, `records_test.go` and `volumes_test.go` run the same way: a
   secret that does not open keeps its stack down, only changed secret files are replaced,
   and a stack's secrets go only once its containers stopped; each copy recorded once, a
   record that does not read left alone, the weekly trim across restarts. That docker

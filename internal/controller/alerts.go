@@ -181,6 +181,9 @@ func (a *Alerts) pass(ctx context.Context) {
 	for id, host := range copied.Hosts {
 		a.conditions.Observe(dockerDownKey(id), host.DockerDown)
 	}
+	for id, stack := range copied.Stacks {
+		a.conditions.Observe(stackFailingKey(id), stack.Status == state.StackFailing)
+	}
 	wanted := wantedAlerts(copied, a.conditions, now)
 	for _, key := range slices.Sorted(maps.Keys(copied.Alerts)) {
 		if _, ok := wanted[key]; !ok {

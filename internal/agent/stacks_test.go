@@ -24,7 +24,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
-	"github.com/webcodingcat/clowder/internal/supervisor"
 )
 
 // testCluster is a state that applies what is proposed, as the leader
@@ -164,29 +163,37 @@ func newTestRunner(t *testing.T) (*stackRunner, *testCluster, *fakeDocker, *fake
 	})
 	cluster.put(resource.KindVolume, "db", resource.VolumeSpec{Class: "fast", Size: 1 << 30, Replicas: 0})
 	cluster.put(resource.KindStack, "shop", usingDB(stackspec.Service{}))
-	placeDB(cluster, 1)
+	placeVolume(cluster, "db", 1)
 	cluster.place("shop")
 
 	docker, storage := &fakeDocker{}, &fakeStorage{dir: t.TempDir()}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	// the tests run passes, never the supervisor's loop, which calls the two
-	// functions left out
-	watcher := supervisor.New(docker, restartRules{cluster, 0}.of, supervisor.DefaultBackoff, nil, nil, logger)
 	runner := &stackRunner{
 		files: Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}, host: Host{ID: 0, Name: "node0", NodeAddress: netip.MustParseAddr("10.77.0.1")},
-		cluster: cluster, docker: docker, storage: storage, supervisor: watcher, signal: newPassSignal(), logger: logger,
+		cluster: cluster, docker: docker, storage: storage, supervisor: fakePauser{&docker.calls}, signal: newPassSignal(), logger: logger,
 		propose: cluster.propose, applied: map[string]broughtUp{}, logins: map[string][32]byte{},
 		unexplained: map[string]bool{}, open: keys.Open, digestKey: []byte("the test's digest key"),
 	}
 	return runner, cluster, docker, storage
 }
 
-// placeDB places the volume db on host 0 in a data generation, as the
-// placement (the first) or a restore (the next) does.
-func placeDB(cluster *testCluster, generation int64) {
+// fakePauser stands for the supervisor: it adds each pause and resume to
+// Docker's calls, so a test sees what ran between them.
+type fakePauser struct {
+	calls *calls
+}
+
+func (p fakePauser) Pause(project string) func() {
+	p.calls.add("pause %s", project)
+	return func() { p.calls.add("resume %s", project) }
+}
+
+// placeVolume places a volume of the namespace default on host 0 in a data
+// generation, as the placement (the first) or a restore (the next) does.
+func placeVolume(cluster *testCluster, name string, generation int64) {
 	cluster.t.Helper()
 	var volume state.Volume
-	cluster.Read(func(current *state.State) { volume = *current.Volumes["default/db"] })
+	cluster.Read(func(current *state.State) { volume = *current.Volumes[names.ID(names.Default, name)] })
 	volume.DataGeneration, volume.Status = generation, state.VolumeOK
 	volume.Copies = []state.VolumeCopy{{Host: 0, Class: "fast"}}
 	cluster.apply(state.KindPutVolume, state.LeaderActor, state.PutVolume{Volume: volume})
@@ -200,26 +207,80 @@ func (c *calls) count(line string) int {
 
 func TestAFailedComposeUpIsTriedAgain(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
-	docker.failedUps = 1
+	docker.failedUps = 2
 	runner.pass(context.Background())
-	if status := cluster.stack("shop").Status; status != state.StackStarting {
-		t.Errorf("after a failed compose up the stack is %s", status)
+	if stack := cluster.stack("shop"); stack.Status != state.StackFailing || stack.UpError != "pull access denied" {
+		t.Errorf("after a failed compose up the stack is %s: %q", stack.Status, stack.UpError)
+	}
+	version := cluster.stack("shop").ResourceVersion
+	runner.pass(context.Background()) // fails again: nothing new to report
+	if stack := cluster.stack("shop"); stack.ResourceVersion != version {
+		t.Errorf("a second failure was reported again: %s, %q", stack.Status, stack.UpError)
 	}
 	runner.pass(context.Background())
-	if ups := docker.count("up " + shopProject); ups != 2 {
-		t.Errorf("%d compose ups, want 2", ups)
+	if ups := docker.count("up " + shopProject); ups != 3 {
+		t.Errorf("%d compose ups, want 3", ups)
+	}
+	if stack := cluster.stack("shop"); stack.UpError != "" {
+		t.Errorf("the error stayed: %q", stack.UpError)
 	}
 	if status := cluster.stack("shop").Status; status != state.StackRunning {
 		t.Errorf("after compose up the stack is %s", status)
 	}
 	runner.pass(context.Background()) // nothing changed: no compose up
-	if ups := docker.count("up " + shopProject); ups != 2 {
-		t.Errorf("%d compose ups without a change, want 2", ups)
+	if ups := docker.count("up " + shopProject); ups != 3 {
+		t.Errorf("%d compose ups without a change, want 3", ups)
 	}
 	runner.signal.dockerRestarted()
 	runner.pass(context.Background())
-	if ups := docker.count("up " + shopProject); ups != 3 {
-		t.Errorf("%d compose ups after Docker restarted, want 3", ups)
+	if ups := docker.count("up " + shopProject); ups != 4 {
+		t.Errorf("%d compose ups after Docker restarted, want 4", ups)
+	}
+}
+
+func TestComposeChangesContainersOnlyWhileTheSupervisorIsPaused(t *testing.T) {
+	runner, cluster, docker, _ := newTestRunner(t)
+	runner.pass(context.Background())
+	cluster.remove(resource.KindStack, "shop")
+	runner.pass(context.Background())
+	docker.mu.Lock()
+	defer docker.mu.Unlock()
+	want := []string{
+		"pause " + shopProject, "up " + shopProject, "resume " + shopProject,
+		"pause " + shopProject, "down " + shopProject, "resume " + shopProject,
+	}
+	if !slices.Equal(docker.lines, want) {
+		t.Errorf("docker %q, want %q", docker.lines, want)
+	}
+}
+
+func TestAStackThatFailsAfterARestartOfDockerIsReportedFailing(t *testing.T) {
+	runner, cluster, docker, _ := newTestRunner(t)
+	cluster.putSecret("db-password", "first")
+	cluster.put(resource.KindStack, "shop", usingDB(stackspec.Service{Secrets: []string{"db-password"}}))
+	runner.pass(context.Background())
+	applied := cluster.stack("shop").AppliedSecrets
+
+	docker.failedUps = 1
+	runner.signal.dockerRestarted()
+	runner.pass(context.Background())
+	stack := cluster.stack("shop")
+	if stack.Status != state.StackFailing || !maps.Equal(stack.AppliedSecrets, applied) {
+		t.Errorf("the stack is %s with the secrets %v, want failing with %v", stack.Status, stack.AppliedSecrets, applied)
+	}
+	runner.pass(context.Background())
+	if stack := cluster.stack("shop"); stack.Status != state.StackRunning || stack.UpError != "" {
+		t.Errorf("once up, the stack is %s: %q", stack.Status, stack.UpError)
+	}
+}
+
+func TestAFailingStackIsStartingAgainWithANewGeneration(t *testing.T) {
+	runner, cluster, docker, _ := newTestRunner(t)
+	docker.failedUps = 1
+	runner.pass(context.Background())
+	cluster.put(resource.KindStack, "shop", usingDB(stackspec.Service{Command: []string{"serve"}}))
+	if stack := cluster.stack("shop"); stack.Status != state.StackStarting || stack.UpError != "" {
+		t.Errorf("a failing stack applied anew is %s: %q", stack.Status, stack.UpError)
 	}
 }
 
@@ -307,7 +368,7 @@ func TestAPushedOutServiceIsLeftOutAndNotRestarted(t *testing.T) {
 func TestANewDataGenerationReplacesTheLV(t *testing.T) {
 	runner, cluster, docker, storage := newTestRunner(t)
 	runner.pass(context.Background())
-	placeDB(cluster, 2) // a restore
+	placeVolume(cluster, "db", 2) // a restore
 	runner.pass(context.Background())
 	old, current := dbLV(1), dbLV(2)
 	if storage.count("ensure "+current) != 1 || storage.count("remove "+old) != 1 || storage.count("remove "+current) != 0 {
@@ -367,98 +428,6 @@ func TestAVolumeOutlivesItsStack(t *testing.T) {
 	}
 	if _, err := os.Stat(runner.files.volumeRecord("default/db")); !os.IsNotExist(err) {
 		t.Errorf("the record of the removed copy is left: %v", err)
-	}
-}
-
-// handOver deletes shop and applies blog on shop's volume, so both land in
-// the runner's next pass.
-func handOver(cluster *testCluster) {
-	cluster.t.Helper()
-	cluster.remove(resource.KindStack, "shop")
-	cluster.put(resource.KindStack, "blog", usingDB(stackspec.Service{}))
-	cluster.place("blog")
-}
-
-func TestAVolumePassesOnlyOnceItsStackStopped(t *testing.T) {
-	runner, cluster, docker, storage := newTestRunner(t)
-	runner.pass(context.Background())
-	handOver(cluster)
-	runner.pass(context.Background())
-	docker.mu.Lock()
-	down := slices.Index(docker.lines, "down "+shopProject)
-	up := slices.Index(docker.lines, "up default_blog")
-	docker.mu.Unlock()
-	if down < 0 || up < 0 || down > up {
-		t.Errorf("docker %q: shop must go down before blog comes up", docker.lines)
-	}
-	if storage.count("remove "+dbLV(1)) != 0 || cluster.stack("blog").Status != state.StackRunning {
-		t.Errorf("storage %q, blog %s", storage.lines, cluster.stack("blog").Status)
-	}
-}
-
-func TestAStackWaitsWhileAStackThatFailedToStopUsesItsVolume(t *testing.T) {
-	runner, cluster, docker, _ := newTestRunner(t)
-	runner.pass(context.Background())
-	handOver(cluster)
-	docker.failedDowns = 1
-	runner.pass(context.Background())
-	if docker.count("up default_blog") != 0 {
-		t.Fatalf("blog came up beside shop, which still runs: %q", docker.lines)
-	}
-	runner.pass(context.Background()) // shop stops now
-	if docker.count("up default_blog") != 1 || cluster.stack("blog").Status != state.StackRunning {
-		t.Errorf("docker %q, blog %s", docker.lines, cluster.stack("blog").Status)
-	}
-}
-
-func TestAStackWaitsWhenTheVolumesOfAStackThatFailedToStopDoNotRead(t *testing.T) {
-	runner, cluster, docker, _ := newTestRunner(t)
-	runner.pass(context.Background())
-	file := runner.files.stackVolumesFile(shopProject)
-	if content, err := os.ReadFile(file); err != nil || string(content) != `["`+dbLV(1)+`"]` {
-		t.Fatalf("the volumes shop mounts: %q, %v", content, err)
-	}
-	// as a stack brought up before the file existed
-	if err := os.Remove(file); err != nil {
-		t.Fatal(err)
-	}
-	handOver(cluster)
-	docker.failedDowns = 1
-	runner.pass(context.Background())
-	if docker.count("up default_blog") != 0 {
-		t.Fatalf("blog came up beside shop, whose volumes are not known: %q", docker.lines)
-	}
-	runner.pass(context.Background()) // shop stops now
-	if docker.count("up default_blog") != 1 {
-		t.Errorf("docker %q", docker.lines)
-	}
-}
-
-func TestDockerLogsInOnceForEachRegistryLogin(t *testing.T) {
-	runner, cluster, docker, _ := newTestRunner(t)
-	login := func(password string) {
-		t.Helper()
-		sealed, err := cluster.keys.Seal([]byte(password))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var applied state.ApplyConfig
-		cluster.Read(func(current *state.State) {
-			applied = state.ApplyConfig{Spec: current.Config.Spec, Secrets: maps.Clone(current.ClusterSecrets)}
-		})
-		name := `registries["ghcr.io"].password`
-		applied.Spec.Registries = map[string]clusterspec.Registry{"ghcr.io": {Username: "robot", Password: clusterspec.SecretRef(name)}}
-		applied.Secrets[name] = state.SealedSecret{Value: sealed, Digest: name}
-		cluster.apply(state.KindApplyConfig, state.UserActor("alice"), applied)
-	}
-	login("first")
-	runner.pass(context.Background())
-	login("first") // sealed anew, the same login
-	runner.pass(context.Background())
-	login("second")
-	runner.pass(context.Background())
-	if docker.count("login ghcr.io robot first") != 1 || docker.count("login ghcr.io robot second") != 1 {
-		t.Errorf("docker %q", docker.lines)
 	}
 }
 
@@ -542,15 +511,4 @@ func secretsLabel(t *testing.T, runner *stackRunner) string {
 		t.Fatal("app has no digest of its secret files")
 	}
 	return label
-}
-
-func TestComposePsOutputIsRead(t *testing.T) {
-	containers, err := parsePs(`{"Service":"app","State":"running","Health":"healthy","Status":"Up 1 minute"}` + "\n" +
-		`{"Service":"db","State":"exited","Health":"","Status":"Exited (1)"}` + "\n")
-	if err != nil || len(containers) != 2 || containers[0].Health != "healthy" || containers[1].State != "exited" {
-		t.Errorf("%+v, %v", containers, err)
-	}
-	if _, err := parsePs("not json\n"); err == nil {
-		t.Error("garbage was read")
-	}
 }

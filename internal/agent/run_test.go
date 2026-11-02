@@ -95,9 +95,19 @@ func (f *fakeHoster) waitForTarget(t *testing.T, serverRef, token string) {
 type fakeNetwork struct {
 	mu       sync.Mutex
 	rulesets []network.Ruleset
+	// interfaceFails and resolverFails make the interface and the resolver
+	// fail to start
+	interfaceFails, resolverFails bool
+	// resolver counts how often the resolver was stopped
+	resolver closeCounter
 }
 
-func (f *fakeNetwork) SetUpInterface(context.Context, netip.Addr) error { return nil }
+func (f *fakeNetwork) SetUpInterface(context.Context, netip.Addr) error {
+	if f.interfaceFails {
+		return errors.New("no such device")
+	}
+	return nil
+}
 
 func (f *fakeNetwork) ApplyRules(_ context.Context, ruleset network.Ruleset) error {
 	f.mu.Lock()
@@ -106,7 +116,12 @@ func (f *fakeNetwork) ApplyRules(_ context.Context, ruleset network.Ruleset) err
 	return nil
 }
 
-func (f *fakeNetwork) StartResolver() (io.Closer, error) { return io.NopCloser(nil), nil }
+func (f *fakeNetwork) StartResolver() (io.Closer, error) {
+	if f.resolverFails {
+		return nil, errors.New("address in use")
+	}
+	return &f.resolver, nil
+}
 
 // waitForRuleset waits up to 10 s until the last applied ruleset satisfies
 // want.
@@ -395,6 +410,99 @@ func TestStoppingWaitsForTheLoopsButNotForever(t *testing.T) {
 	}
 	if stillUsed.closed.Load() != 0 {
 		t.Error("closed what a hung loop still uses")
+	}
+}
+
+// initTestHost runs init for a host on 127.0.0.1, with its public address
+// on 127.0.0.2, and returns its files and its Raft and API ports.
+func initTestHost(t *testing.T) (files Files, raftPort, apiPort int) {
+	t.Helper()
+	loopback := netip.MustParseAddr("127.0.0.1")
+	files = Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}
+	raftPort, apiPort = freePort(t), freePort(t)
+	err := Init(context.Background(), files, InitOptions{
+		BootstrapKey: "the-bootstrap-key", Name: "node0", Underlay: loopback, PublicAddress: netip.MustParseAddr("127.0.0.2"),
+		ServerRef: "1000001", NodeAddress: loopback, RaftPort: raftPort, APIPort: apiPort,
+	}, &fakeNetwork{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files, raftPort, apiPort
+}
+
+// listenOn tells whether a port on 127.0.0.1 is free: Raft's port is once
+// the agent closed its Raft member.
+func listenOn(port int) error {
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		return err
+	}
+	return listener.Close()
+}
+
+func TestRunEndsAtItsStartWhenAPartFailsAndLeavesNothingOpen(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tests := []struct {
+		name string
+		// prepare breaks one part; it returns what the error must contain
+		prepare func(t *testing.T, files *Files, hostNetwork *fakeNetwork, apiPort int) string
+		// resolverStarts: the resolver ran before the failure and must be
+		// closed after it
+		resolverStarts bool
+	}{
+		{"no directory for secrets", func(_ *testing.T, files *Files, _ *fakeNetwork, _ int) string {
+			files.SecretsDir = ""
+			return "a directory for the stacks' secrets"
+		}, false},
+		{"no host file", func(t *testing.T, files *Files, _ *fakeNetwork, _ int) string {
+			files.Dir = t.TempDir() // no init ran there
+			return "no such file"
+		}, false},
+		{"the interface fails", func(_ *testing.T, _ *Files, hostNetwork *fakeNetwork, _ int) string {
+			hostNetwork.interfaceFails = true
+			return "no such device"
+		}, false},
+		{"the resolver fails", func(_ *testing.T, _ *Files, hostNetwork *fakeNetwork, _ int) string {
+			hostNetwork.resolverFails = true
+			return "address in use"
+		}, false},
+		{"the API's port is taken", func(t *testing.T, _ *Files, _ *fakeNetwork, apiPort int) string {
+			taken, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(apiPort)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = taken.Close() })
+			return "address already in use"
+		}, true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel() // init takes a while
+			files, raftPort, apiPort := initTestHost(t)
+			hostNetwork, hostDocker := &fakeNetwork{}, &fakeDocker{}
+			want := test.prepare(t, &files, hostNetwork, apiPort)
+			parts := HostParts{
+				Network: hostNetwork, Storage: &fakeStorage{dir: t.TempDir()}, Docker: hostDocker,
+				Hoster: (&fakeHoster{}).connect,
+			}
+			err := Run(context.Background(), files, parts, logger)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("Run: %v, want an error with %q", err, want)
+			}
+			if err := listenOn(raftPort); err != nil {
+				t.Errorf("Raft's port is still taken: %v", err)
+			}
+			wantClosed := int32(0)
+			if test.resolverStarts {
+				wantClosed = 1
+			}
+			if closed := hostNetwork.resolver.closed.Load(); closed != wantClosed {
+				t.Errorf("the resolver was closed %d times, want %d", closed, wantClosed)
+			}
+			if len(hostDocker.lines) != 0 {
+				t.Errorf("Docker was asked %q", hostDocker.lines)
+			}
+		})
 	}
 }
 

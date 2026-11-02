@@ -2,9 +2,7 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 )
 
@@ -75,22 +73,17 @@ func (u volumesInUse) user(lv string) (string, bool) {
 	return project, ok
 }
 
-// markInUse adds the LVs a leaver mounts (writeMountedLVs): what it may
-// still use while its containers run. If they cannot be read, it marks
+// markInUse adds the LVs a leaver's containers may hold (readMountedLVs):
+// what it may still use while they run. If they cannot be read, it marks
 // every volume, as wrongly starting a stack beside it could ruin a file
 // system, and waiting costs only a pass.
 func (r *stackRunner) markInUse(inUse volumesInUse, project string) {
 	if _, err := os.Stat(r.files.stackFile(project)); errors.Is(err, os.ErrNotExist) {
 		return // stopped after all
 	}
-	var lvs []string
-	content, err := os.ReadFile(r.files.stackVolumesFile(project))
-	if err == nil {
-		err = json.Unmarshal(content, &lvs)
-	}
+	lvs, err := r.readMountedLVs(project)
 	if err != nil {
-		r.logger.Error("read the volumes of a stack that failed to stop", "project", project,
-			"error", fmt.Errorf("read %s: %w", r.files.stackVolumesFile(project), err))
+		r.logger.Error("read the volumes of a stack that failed to stop", "project", project, "error", err)
 		inUse[anyVolume] = project
 		return
 	}

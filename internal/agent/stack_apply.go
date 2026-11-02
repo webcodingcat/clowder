@@ -1,12 +1,15 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/netip"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -134,22 +137,29 @@ func (r *stackRunner) up(ctx context.Context, stack *state.Stack, rendered []byt
 		return err
 	}
 	r.applied[project] = upNow
+	// The containers of the last Compose file are gone, so the list of LVs
+	// shrinks to the new ones. If that write fails, the longer list stays:
+	// it only makes another stack wait for a volume a bit longer, so the
+	// stack still counts as up.
+	if err := r.writeMountedLVs(project, lvsOf(volumes)); err != nil {
+		r.logger.Warn("shorten the volumes a stack mounts", "project", project, "error", err)
+	}
 	return r.removeStaleSecrets(project, secrets)
 }
 
 // writeStackFiles writes what compose up reads: the LVs the stack mounts
-// (stackVolumesFile), its Compose file and its secrets. It returns the
+// (addMountedLVs), its Compose file and its secrets. It returns the
 // Compose files, the stack's and, if it has secret variables, theirs.
 func (r *stackRunner) writeStackFiles(project string, rendered []byte, secrets stackSecrets,
 	volumes map[string]storage.Volume,
 ) ([]string, error) {
 	// before the Compose file, so a stack that has one has its LVs too
-	if err := r.writeMountedLVs(project, volumes); err != nil {
+	if err := r.addMountedLVs(project, lvsOf(volumes)); err != nil {
 		return nil, err
 	}
 	file := r.files.stackFile(project)
 	if err := atomicfile.Write(file, rendered, 0o600); err != nil {
-		return nil, err
+		return nil, err // it names the file
 	}
 	if err := r.writeSecrets(project, secrets); err != nil {
 		return nil, err
@@ -161,20 +171,60 @@ func (r *stackRunner) writeStackFiles(project string, rendered []byte, secrets s
 	return files, nil
 }
 
-// writeMountedLVs writes the LVs a stack mounts, sorted, from the volumes
-// its Compose file is rendered with: if the stack fails to stop once it
-// left this host, these are what it may still hold (markInUse).
-func (r *stackRunner) writeMountedLVs(project string, volumes map[string]storage.Volume) error {
+// lvsOf are the LVs of a stack's volumes.
+func lvsOf(volumes map[string]storage.Volume) []string {
 	lvs := []string{}
 	for _, volume := range volumes {
 		lvs = append(lvs, volume.LV)
 	}
-	slices.Sort(lvs)
+	return lvs
+}
+
+// addMountedLVs adds the LVs a stack is about to mount to its
+// volumes.json (stackVolumesFile), the LVs its containers may hold: if the
+// stack fails to stop once it left this host, no other stack may take
+// them (markInUse). The LVs listed before stay, as the containers of the
+// last Compose file keep theirs until compose up worked; up then lists
+// only the new ones.
+//
+// When the list does not read, it depends on the Compose file. Without
+// one, the stack has no containers yet, and the list is just the new LVs.
+// With one, its containers may hold any LV: the file is left as it is,
+// and markInUse, which cannot read it either, counts every volume as in
+// use until compose up worked.
+func (r *stackRunner) addMountedLVs(project string, lvs []string) error {
+	held, err := r.readMountedLVs(project)
+	if err != nil {
+		_, statErr := os.Stat(r.files.stackFile(project))
+		if !errors.Is(statErr, os.ErrNotExist) {
+			r.logger.Warn("every volume counts as the stack's until it is up", "project", project, "error", err)
+			return nil
+		}
+	}
+	return r.writeMountedLVs(project, append(held, lvs...))
+}
+
+// writeMountedLVs writes the LVs a stack's containers may hold, sorted.
+func (r *stackRunner) writeMountedLVs(project string, lvs []string) error {
+	lvs = slices.Compact(slices.Sorted(slices.Values(lvs)))
 	encoded, err := json.Marshal(lvs)
 	if err != nil {
 		return fmt.Errorf("write the volumes of %s: %w", project, err)
 	}
 	return atomicfile.Write(r.files.stackVolumesFile(project), encoded, 0o600)
+}
+
+// readMountedLVs reads the LVs a stack's containers may hold.
+func (r *stackRunner) readMountedLVs(project string) ([]string, error) {
+	var lvs []string
+	content, err := os.ReadFile(r.files.stackVolumesFile(project))
+	if err == nil {
+		err = json.Unmarshal(content, &lvs)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", r.files.stackVolumesFile(project), err)
+	}
+	return lvs, nil
 }
 
 // pullRestarted pulls the images of the services a user restarted since
@@ -250,4 +300,29 @@ func (r *stackRunner) reportRunning(ctx context.Context, stack *state.Stack, sec
 		return fmt.Errorf("report the stack running: %w", err)
 	}
 	return nil
+}
+
+// upErrorLength is how much of an error the state keeps of a failing
+// stack (Stack.UpError): enough to tell the cause; the log has the rest.
+const upErrorLength = 200
+
+// reportFailing reports a stack failing with the first line of the error,
+// shortened. A stack that fails again keeps its first error, so a pass that
+// tries in vain writes nothing. A failed report is only logged: the next
+// pass reports again.
+func (r *stackRunner) reportFailing(ctx context.Context, stack *state.Stack, cause error) {
+	if stack.Status == state.StackFailing {
+		return
+	}
+	upError, _, _ := strings.Cut(cause.Error(), "\n")
+	if runes := []rune(upError); len(runes) > upErrorLength {
+		upError = string(runes[:upErrorLength-1]) + "…"
+	}
+	err := commitAsHost(ctx, r.propose, r.host.ID, state.KindSetStackStatus, state.SetStackStatus{
+		ID: stack.ID(), Status: state.StackFailing, Host: stack.Host, Generation: stack.Generation,
+		Restarted: stack.Restarted, UpError: cmp.Or(upError, "an empty error"),
+	})
+	if err != nil {
+		r.logger.Error("report the stack failing", "stack", stack.ID(), "error", err)
+	}
 }

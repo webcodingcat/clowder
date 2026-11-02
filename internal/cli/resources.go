@@ -419,10 +419,10 @@ func printTable(out io.Writer, kind string, objects []resource.Object, withHeade
 				object.Metadata.Generation, status.Digest[:min(len(status.Digest), digestShown)])
 		}
 	case resource.KindStack:
-		// what the stack waits for last: it is long, and empty for most
-		// stacks; a running stack waits too when a volume it names finds no
-		// place
-		header("NAMESPACE\tNAME\tSTATUS\tHOST\tPRIORITY\tGENERATION\tPUSHED OUT\tWAITING FOR")
+		// the reason last: what the stack waits for or why it fails is
+		// long, and empty for most stacks; a running stack waits too when a
+		// volume it names finds no place
+		header("NAMESPACE\tNAME\tSTATUS\tHOST\tPRIORITY\tGENERATION\tPUSHED OUT\tREASON")
 		for _, object := range objects {
 			var status api.StackStatus
 			if err := decodeParts(object, nil, &status); err != nil {
@@ -434,7 +434,7 @@ func printTable(out io.Writer, kind string, objects []resource.Object, withHeade
 			}
 			_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", object.Metadata.Namespace, object.Metadata.Name,
 				status.Status, status.Host, priority, object.Metadata.Generation, strings.Join(status.PushedOut, ","),
-				status.WaitReason)
+				strings.Join(slices.DeleteFunc([]string{status.WaitReason, status.UpError}, func(s string) bool { return s == "" }), "; "))
 		}
 	}
 	return table.Flush()

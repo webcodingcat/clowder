@@ -133,13 +133,14 @@ func newRoom(current *state.State) *room {
 }
 
 // hostOf is where a stack runs or is planned to: false for a stack that
-// has no host or does not run there yet or any more.
+// has no host or does not run there yet or any more. A failing stack keeps
+// its place: its host tries again at every pass.
 func (r *room) hostOf(id string) (state.HostID, bool) {
 	if host, ok := r.placed[id]; ok {
 		return host, true
 	}
 	stack := r.current.Stacks[id]
-	if stack.Host == nil || (stack.Status != state.StackStarting && stack.Status != state.StackRunning) {
+	if stack.Host == nil || stack.Status == state.StackPending {
 		return 0, false
 	}
 	return *stack.Host, true

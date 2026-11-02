@@ -65,8 +65,8 @@ func TestAStackWhoseSecretsDoNotOpenDoesNotComeUp(t *testing.T) {
 			if _, err := os.Stat(runner.files.secretsDir(shopProject)); !os.IsNotExist(err) {
 				t.Errorf("secrets were written: %v", err)
 			}
-			if status := cluster.stack("shop").Status; status != state.StackStarting {
-				t.Errorf("the stack is %s", status)
+			if stack := cluster.stack("shop"); stack.Status != state.StackFailing || !strings.Contains(stack.UpError, "db-password") {
+				t.Errorf("the stack is %s: %q", stack.Status, stack.UpError)
 			}
 
 			// once the secret opens, the next pass brings the stack up

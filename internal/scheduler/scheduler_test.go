@@ -87,7 +87,7 @@ func TestAStackGoesWhereItsVolumesFit(t *testing.T) {
 	stack(current, "shop", map[string]resource.VolumeSpec{"db": volume("fast", 20, 1), "cache": volume("any", 12, 0)})
 	decisions := Plan(current)
 	placements, waiting := decisions.Placements, decisions.Waiting
-	if len(waiting) > 0 || len(placements) != 1 || !placements[0].Place || placements[0].Host != 0 {
+	if len(waiting) > 0 || len(placements) != 1 || !placements[0].SetsHost || placements[0].Host != 0 {
 		t.Fatalf("placements %+v, waiting %+v", placements, waiting)
 	}
 	volumes := map[string]state.Volume{}
@@ -134,7 +134,7 @@ func TestAPlacedStackGetsOnlyItsNewVolumes(t *testing.T) {
 	db.Minor, db.Status, db.Copies = &minor, state.VolumeOK, []state.VolumeCopy{{Host: 0, Class: "fast"}}
 	decisions := Plan(current)
 	placements, waiting := decisions.Placements, decisions.Waiting
-	if len(waiting) > 0 || len(placements) != 1 || placements[0].Place {
+	if len(waiting) > 0 || len(placements) != 1 || placements[0].SetsHost {
 		t.Fatalf("placements %+v, waiting %+v", placements, waiting)
 	}
 	files := placements[0].Volumes

@@ -80,7 +80,9 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		err = errors.Join(err, stopLoops(cancelLoops, &loops, loopsTimeout, logger, resolver, node))
 	}()
 
-	daemon, err := newDaemon(files, host, credentials, node, parts, logger)
+	daemon, err := newDaemon(shared{
+		files: files, host: host, credentials: credentials, node: node, parts: parts, logger: logger,
+	})
 	if err != nil {
 		return err
 	}
@@ -130,14 +132,20 @@ func openNode(ctx context.Context, files Files, host Host, credentials credentia
 	return node, true, nil
 }
 
-// daemon is the running agent: its parts that run in loops or answer the
-// API, and what they share.
-type daemon struct {
+// shared is what every part of the agent is made with.
+type shared struct {
+	files       Files
 	host        Host
 	credentials credentials
 	node        *raftnode.Node
 	parts       HostParts
 	logger      *slog.Logger
+}
+
+// daemon is the running agent: its parts that run in loops or answer the
+// API, and what they share.
+type daemon struct {
+	shared
 	// propose is how every part commits (serverProposer)
 	propose    controller.Propose
 	runner     *stackRunner
@@ -159,42 +167,34 @@ type daemon struct {
 // The signals are made first, so the supervisor needs no runner; the
 // proposer gets the server last, as the server needs the stack runner and
 // the alerts. No loop runs before newDaemon returns.
-func newDaemon(files Files, host Host, credentials credentials, node *raftnode.Node, parts HostParts,
-	logger *slog.Logger,
-) (*daemon, error) {
+func newDaemon(base shared) (*daemon, error) {
 	stacksSignal, traefikSignal := newPassSignal(), newPassSignal()
 	dockerRestarted := func() {
 		stacksSignal.dockerRestarted()
 		traefikSignal.dockerRestarted()
 	}
-	watcher := supervisor.New(parts.Docker, restartRules{node, host.ID}.of, supervisor.DefaultBackoff,
-		dockerRestarted, traefikSignal.now, logger)
+	watcher := supervisor.New(base.parts.Docker, restartRules{base.node, base.host.ID}.of, supervisor.DefaultBackoff,
+		dockerRestarted, traefikSignal.now, base.logger)
 	proposer := &serverProposer{}
 
-	runner, err := newStackRunner(files, host, credentials, node, parts, watcher, stacksSignal, proposer.propose, logger)
+	runner, err := newStackRunner(base, watcher, stacksSignal, proposer.propose)
 	if err != nil {
 		return nil, err
 	}
-	traefik := newTraefikRunner(files, host, credentials, node, parts, watcher, traefikSignal, logger)
-	reporter := newHostReporter(host, node, parts, proposer.propose, logger)
 	conditions := controller.NewConditions()
-	alerts := controller.NewAlerts(node, proposer.propose, credentials.dataKey.Open, conditions, logger)
-	proposer.server = newAPIServer(host, credentials, node, runner, alerts, logger)
+	alerts := controller.NewAlerts(base.node, proposer.propose, base.credentials.dataKey.Open, conditions, base.logger)
+	proposer.server = newAPIServer(base, runner, alerts)
 
 	return &daemon{
-		host:        host,
-		credentials: credentials,
-		node:        node,
-		parts:       parts,
-		logger:      logger,
-		propose:     proposer.propose,
-		runner:      runner,
-		traefik:     traefik,
-		reporter:    reporter,
-		supervisor:  watcher,
-		conditions:  conditions,
-		alerts:      alerts,
-		server:      proposer.server,
+		shared:     base,
+		propose:    proposer.propose,
+		runner:     runner,
+		traefik:    newTraefikRunner(base, watcher, traefikSignal),
+		reporter:   newHostReporter(base, proposer.propose),
+		supervisor: watcher,
+		conditions: conditions,
+		alerts:     alerts,
+		server:     proposer.server,
 	}, nil
 }
 
@@ -210,22 +210,20 @@ func (p *serverProposer) propose(ctx context.Context, cmd state.Command) (uint64
 
 // newStackRunner makes the stack runner, with the key of its secrets'
 // labels derived from the data key.
-func newStackRunner(files Files, host Host, credentials credentials, node *raftnode.Node, parts HostParts,
-	watcher *supervisor.Supervisor, signal *passSignal, propose controller.Propose, logger *slog.Logger,
-) (*stackRunner, error) {
-	digestKey, err := credentials.dataKey.Derive(secretLabelPurpose)
+func newStackRunner(base shared, watcher pauser, signal *passSignal, propose controller.Propose) (*stackRunner, error) {
+	digestKey, err := base.credentials.dataKey.Derive(secretLabelPurpose)
 	if err != nil {
 		return nil, fmt.Errorf("derive the key of the secrets' labels: %w", err)
 	}
 	return &stackRunner{
-		files:       files,
-		host:        host,
-		cluster:     node,
-		docker:      parts.Docker,
-		storage:     parts.Storage,
-		open:        credentials.dataKey.Open,
+		files:       base.files,
+		host:        base.host,
+		cluster:     base.node,
+		docker:      base.parts.Docker,
+		storage:     base.parts.Storage,
+		open:        base.credentials.dataKey.Open,
 		digestKey:   digestKey,
-		logger:      logger,
+		logger:      base.logger,
 		supervisor:  watcher,
 		signal:      signal,
 		propose:     propose,
@@ -236,16 +234,14 @@ func newStackRunner(files Files, host Host, credentials credentials, node *raftn
 }
 
 // newTraefikRunner makes Traefik's runner.
-func newTraefikRunner(files Files, host Host, credentials credentials, node *raftnode.Node, parts HostParts,
-	watcher *supervisor.Supervisor, signal *passSignal, logger *slog.Logger,
-) *traefikRunner {
+func newTraefikRunner(base shared, watcher pauser, signal *passSignal) *traefikRunner {
 	return &traefikRunner{
-		files:      files,
-		host:       host,
-		cluster:    node,
-		docker:     parts.Docker,
-		open:       credentials.dataKey.Open,
-		logger:     logger,
+		files:      base.files,
+		host:       base.host,
+		cluster:    base.node,
+		docker:     base.parts.Docker,
+		open:       base.credentials.dataKey.Open,
+		logger:     base.logger,
 		supervisor: watcher,
 		signal:     signal,
 		unopened:   map[string]bool{},
@@ -253,34 +249,30 @@ func newTraefikRunner(files Files, host Host, credentials credentials, node *raf
 }
 
 // newHostReporter makes the report of this host, of its root file system.
-func newHostReporter(host Host, node *raftnode.Node, parts HostParts, propose controller.Propose,
-	logger *slog.Logger,
-) *hostReporter {
+func newHostReporter(base shared, propose controller.Propose) *hostReporter {
 	return &hostReporter{
-		host:    host,
+		host:    base.host,
 		version: buildinfo.Version,
-		cluster: node,
-		docker:  parts.Docker,
-		storage: parts.Storage,
+		cluster: base.node,
+		docker:  base.parts.Docker,
+		storage: base.parts.Storage,
 		propose: propose,
-		logger:  logger,
+		logger:  base.logger,
 		root:    "/",
 	}
 }
 
 // newAPIServer makes the API server, which answers for the stack runner
 // (a stack's containers) and the alerts.
-func newAPIServer(host Host, credentials credentials, node *raftnode.Node, runner *stackRunner,
-	alerts *controller.Alerts, logger *slog.Logger,
-) *api.Server {
+func newAPIServer(base shared, runner *stackRunner, alerts *controller.Alerts) *api.Server {
 	return api.NewServer(api.ServerConfig{
-		Cluster: node, CA: credentials.ca, Certificate: credentials.certificate,
+		Cluster: base.node, CA: base.credentials.ca, Certificate: base.credentials.certificate,
 		APIAddress: func(id state.HostID) string {
 			// every host has the same API port; tests on 127.0.0.1 have one host
-			return net.JoinHostPort(network.NodeAddress(id).String(), strconv.Itoa(host.APIPort))
+			return net.JoinHostPort(network.NodeAddress(id).String(), strconv.Itoa(base.host.APIPort))
 		},
-		Keys: credentials.dataKey, Version: buildinfo.Version, Logger: logger,
-		HostID: host.ID, Containers: runner, Alerts: alertsAPI{alerts},
+		Keys: base.credentials.dataKey, Version: buildinfo.Version, Logger: base.logger,
+		HostID: base.host.ID, Containers: runner, Alerts: alertsAPI{alerts},
 	})
 }
 

@@ -65,7 +65,7 @@ type stackRunner struct {
 	logger    *slog.Logger
 	// supervisor is paused while compose up or down changes a stack's
 	// containers
-	supervisor *supervisor.Supervisor
+	supervisor pauser
 	// signal is how the supervisor starts a pass and says Docker restarted
 	signal  *passSignal
 	propose controller.Propose
@@ -134,7 +134,7 @@ func (r *stackRunner) run(ctx context.Context) {
 // passes from one stack to another must never be used by both at once:
 // two databases on one file system would ruin it. If a stack fails to stop,
 // it may still use its volumes, and a stack that names one of them waits
-// for the next pass.
+// for the next pass. A stack that fails to come up is reported failing.
 func (r *stackRunner) pass(ctx context.Context) {
 	desired, err := readDesired(r.cluster, r.host.ID)
 	if err != nil {
@@ -144,12 +144,16 @@ func (r *stackRunner) pass(ctx context.Context) {
 	r.logIn(ctx, desired)
 	inUse := r.stopLeavers(ctx, desired)
 	for _, project := range slices.Sorted(maps.Keys(desired.stacks)) {
-		err := r.apply(ctx, desired, desired.stacks[project], inUse)
+		stack := desired.stacks[project]
+		err := r.apply(ctx, desired, stack, inUse)
 		switch {
 		case errors.Is(err, errVolumeInUse): // it waits, at every pass until the stop works
-			r.logger.Info("a stack waits for its volume", "stack", desired.stacks[project].ID(), "reason", err)
+			r.logger.Info("a stack waits for its volume", "stack", stack.ID(), "reason", err)
+		case err != nil && ctx.Err() != nil:
+			return // stopping: the error says nothing about the stack
 		case err != nil:
-			r.logger.Error("run a stack", "stack", desired.stacks[project].ID(), "error", err)
+			r.logger.Error("run a stack", "stack", stack.ID(), "error", err)
+			r.reportFailing(ctx, stack, err)
 		}
 	}
 	r.removeVolumes(ctx, desired)

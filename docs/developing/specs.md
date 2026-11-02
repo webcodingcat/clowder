@@ -25,7 +25,7 @@ write, and how they become what runs.
   | LV, DRBD resource, mount point, Docker volume | `clw-<readable>-<hash8>-g<data generation>` (`names.VolumeName`) |
   | the agent's record of a volume's copies | `volume-records/<namespace>_<volume>.json` (`names.FileName`) |
   | bridge | `cbr-` and 11 hex digits of a hash of the stack's ID (`names.BridgeName`) |
-  | locks, alert keys | `stack/<namespace>/<stack>`, `volume/<volume ID>`, `stack-waiting/<namespace>/<stack>` |
+  | locks, alert keys | `stack/<namespace>/<stack>`, `volume/<volume ID>`, `stack-waiting/<namespace>/<stack>`, `stack-failing/<namespace>/<stack>` |
   | metrics | the labels `namespace` and `stack` |
 
 - **The LV name has the tightest limits:** LVM and DRBD take 127 characters, device-mapper

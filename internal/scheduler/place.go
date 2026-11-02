@@ -27,9 +27,10 @@ import (
 type Placement struct {
 	Stack string // the stack's ID, as every stack in the scheduler's results
 	Host  state.HostID
-	// Place is false for a stack that keeps its host and only gets volumes.
-	Place   bool
-	Volumes []state.Volume
+	// SetsHost is true for a stack that gets Host as its host (set-stack-status
+	// starting), false for one that keeps its host and only gets volumes.
+	SetsHost bool
+	Volumes  []state.Volume
 	// PushedOut are the new pushed-out lists of the stacks a new stack
 	// touches, its own included (set-pushed-out, before the placement).
 	PushedOut map[string][]string
@@ -102,7 +103,7 @@ func Plan(current *state.State) Decisions {
 	}
 	// a pushed-out service comes back only in a pass that changes nothing
 	// else: a waiting stack gets the room first
-	if len(decisions.PushOuts) > 0 || slices.ContainsFunc(decisions.Placements, func(p Placement) bool { return p.Place }) {
+	if len(decisions.PushOuts) > 0 || slices.ContainsFunc(decisions.Placements, func(p Placement) bool { return p.SetsHost }) {
 		return decisions
 	}
 	if ref, ok := planner.room.comingBack(); ok {
@@ -118,7 +119,7 @@ func (d *Decisions) add(placement Placement, reason string) {
 	switch {
 	case reason != "":
 		d.Waiting = append(d.Waiting, Waiting{Stack: placement.Stack, Reason: reason})
-	case placement.Place || len(placement.Volumes) > 0:
+	case placement.SetsHost || len(placement.Volumes) > 0:
 		d.Placements = append(d.Placements, placement)
 	}
 }
@@ -196,7 +197,7 @@ func (p *planner) place(stack *state.Stack) (Placement, string) {
 			continue
 		}
 		return Placement{
-			Stack: stack.ID(), Host: fit.host, Place: true, Volumes: volumes,
+			Stack: stack.ID(), Host: fit.host, SetsHost: true, Volumes: volumes,
 			PushedOut: p.room.accept(stack.ID(), fit),
 		}, ""
 	}

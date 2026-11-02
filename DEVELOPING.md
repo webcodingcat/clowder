@@ -65,10 +65,10 @@ step names the file and function to read; the package's section explains the rul
    `cli/files.go` `readResourceFiles`: the YAML files of the directory, a secret's value
    encrypted in them. `applyRank` sorts them: namespaces, then volumes and secrets, then stacks.
    `api.Client.ApplyResources` sends them in one request (`POST /v1/apply`).
-2. **Any agent takes the request.** `api/resources.go` `applyResources` turns each
+2. **Any agent takes the request.** `api/changes.go` `applyResources` turns each
    resource into a `put-resource` command (`putCommand`): it reads the spec strictly, and
    opens a secret's value with the cluster's key and seals it.
-3. **The leader decides.** `api/resources.go` `runOnLeader` hands the commands to the leader
+3. **The leader decides.** `api/changes.go` `runOnLeader` hands the commands to the leader
    (`internalChanges` on a follower). `runChanges` tries each on a copy of the state and
    proposes only those that change something.
 4. **The state applies.** `state/resources.go` `applyPutResource` checks who may and whose
@@ -81,7 +81,8 @@ step names the file and function to read; the package's section explains the rul
    host. `agent/stack_apply.go` `apply` renders the Compose file (`render`), makes the
    volumes (`ensureVolumes`), and `up` writes the secrets to tmpfs and runs
    `docker compose up`. The host reports `running` (`reportRunning`, through
-   `agent/loops.go` `commitAsHost`).
+   `agent/loops.go` `commitAsHost`), or `failing` with why (`reportFailing`) and tries
+   again at the next pass.
 7. **The supervisor keeps it running.** Docker restarts nothing itself;
    `supervisor.Supervisor` follows Docker's events and restarts what crashes.
 
@@ -94,7 +95,8 @@ What follows from there:
   only the containers whose configuration or secrets changed.
 - A changed secret recreates the containers that use it, without a new generation.
 - The same files applied again change nothing.
-- A stack or volume that finds no place waits, with the reason in `get stacks`.
+- A stack or volume that finds no place waits, with the reason in `get stacks`; so does a
+  stack that is `failing`, with why its host could not bring it up.
 - `clowder stack restart shop [app]` recreates the services named (or all) and those that
   depend on them, with their images pulled again, without a new generation.
 

@@ -144,7 +144,7 @@ func (p *placer) commitPlacement(ctx context.Context, placement scheduler.Placem
 			return err
 		}
 	}
-	if !placement.Place {
+	if !placement.SetsHost {
 		return nil
 	}
 	host := placement.Host

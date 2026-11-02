@@ -29,9 +29,9 @@ func findStack(s *State, id string) *Meta {
 // but meaning the same is unchanged. The state reads the spec itself: it
 // checks it against the cluster (priority categories, privileges, ports
 // and routes of other stacks) and the namespace (its volumes and secrets),
-// and works out what the scheduler needs. A running stack becomes
-// starting until its host reports the new generation up; any other keeps
-// its status, which its host or the placement moves on.
+// and works out what the scheduler needs. A running or failing stack
+// becomes starting until its host reports the new generation up; any other
+// keeps its status, which its host or the placement moves on.
 func putStack(s *State, id string, payload PutResource) (func() *Meta, error) {
 	written, err := decodeSpec[stackspec.Spec](payload.Kind, id, payload.Spec)
 	if err != nil {
@@ -67,10 +67,10 @@ func putStack(s *State, id string, payload PutResource) (func() *Meta, error) {
 				Status: StackPending,
 			}
 			s.Stacks[id] = stored
-		case stored.Status == StackRunning:
+		case stored.Status == StackRunning || stored.Status == StackFailing:
 			// the host reports running again once the new generation is up,
 			// so users can tell when it is
-			stored.Status = StackStarting
+			stored.Status, stored.UpError = StackStarting, ""
 		}
 		stored.Spec, stored.Services = spec, services
 		// a service the new generation no longer has is pushed out no more;
@@ -99,8 +99,8 @@ type RestartStack struct {
 // applyRestartStack records the restart's time for each service. It changes
 // no spec, so the generation stays; and any channel may restart a stack,
 // whoever owns it, so an operator can restart one that GitOps applies.
-// Whether a user may is Authorize's. A running stack is starting until its
-// host reports the recreated containers up.
+// Whether a user may is Authorize's. A running or failing stack is starting
+// until its host reports the recreated containers up.
 func applyRestartStack(s *State, cmd Command, payload RestartStack) (func(), error) {
 	if err := Authorize(cmd.Actor, VerbRestart, resource.KindStack, payload.Namespace); err != nil {
 		return nil, err
@@ -129,8 +129,8 @@ func applyRestartStack(s *State, cmd Command, payload RestartStack) (func(), err
 		for _, service := range stack.Spec.WithDependents(named) {
 			stack.Restarted[service] = cmd.At
 		}
-		if stack.Status == StackRunning {
-			stack.Status = StackStarting
+		if stack.Status == StackRunning || stack.Status == StackFailing {
+			stack.Status, stack.UpError = StackStarting, ""
 		}
 		s.changed(resource.KindStack, &stack.Meta)
 	}, nil
@@ -247,6 +247,9 @@ type SetStackStatus struct {
 	// AppliedSecrets are the digests of the secrets the containers came up
 	// with, by name; the host sends them with running, the leader none.
 	AppliedSecrets map[string]string `json:"applied_secrets,omitempty"`
+	// UpError is why the host could not bring the stack up: only with
+	// failing, which only the host reports.
+	UpError string `json:"up_error,omitempty"`
 }
 
 func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) (func(), error) {
@@ -255,9 +258,16 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) (func(),
 		return nil, fmt.Errorf("no stack %s", payload.ID)
 	}
 	switch payload.Status {
-	case StackPending, StackStarting, StackRunning:
+	case StackPending, StackStarting, StackRunning, StackFailing:
 	default:
 		return nil, fmt.Errorf("stack %s: unknown status %q", payload.ID, payload.Status)
+	}
+	failing := payload.Status == StackFailing
+	switch {
+	case failing && !IsHostActor(cmd.Actor):
+		return nil, fmt.Errorf("stack %s: only its host reports it failing", payload.ID)
+	case failing != (payload.UpError != ""):
+		return nil, fmt.Errorf("stack %s: an error goes with failing, and only with it", payload.ID)
 	}
 	if err := s.checkLiveHost(payload.Host); err != nil {
 		return nil, err
@@ -267,13 +277,19 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) (func(),
 		if err := checkHostReport(stack, cmd.Actor, payload); err != nil {
 			return nil, err
 		}
-		applied = payload.AppliedSecrets
+		// a failing stack's containers of an earlier up may still run
+		// with theirs
+		if !failing {
+			applied = payload.AppliedSecrets
+		}
 	}
-	if stack.Status == payload.Status && samePlace(stack.Host, payload.Host) && maps.Equal(stack.AppliedSecrets, applied) {
+	if stack.Status == payload.Status && samePlace(stack.Host, payload.Host) &&
+		maps.Equal(stack.AppliedSecrets, applied) && stack.UpError == payload.UpError {
 		return nil, errUnchanged
 	}
 	return func() {
 		stack.Status, stack.Host, stack.AppliedSecrets = payload.Status, payload.Host, applied
+		stack.UpError = payload.UpError
 		s.changed(resource.KindStack, &stack.Meta)
 	}, nil
 }

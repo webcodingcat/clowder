@@ -72,7 +72,7 @@ func TestANewStackPushesOutLowerPrioritiesLowestFirst(t *testing.T) {
 				}
 				return
 			}
-			if len(decisions.Placements) != 1 || !decisions.Placements[0].Place {
+			if len(decisions.Placements) != 1 || !decisions.Placements[0].SetsHost {
 				t.Fatalf("decisions %+v", decisions)
 			}
 			lists := decisions.Placements[0].PushedOut

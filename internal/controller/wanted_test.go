@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,6 +77,22 @@ func TestConditionsRaiseAlertsOnlyOnceTheyLasted(t *testing.T) {
 		if !slices.Contains(later, key) {
 			t.Errorf("no %s after six minutes: %v", key, later)
 		}
+	}
+}
+
+func TestAFailingStackRaisesAnAlertWithItsErrorOnceItLasted(t *testing.T) {
+	current := node0(state.Active, 0, 0, 0)
+	current.Stacks = map[string]*state.Stack{"default/shop": {
+		Namespace: "default", Name: "shop", Status: state.StackFailing, UpError: "pull access denied",
+	}}
+	conditions := NewConditions()
+	conditions.Observe(stackFailingKey("default/shop"), true)
+	if keys := alertKeys(current, conditions, time.Now()); len(keys) != 0 {
+		t.Errorf("at once %v", keys)
+	}
+	alert, ok := wantedAlerts(current, conditions, time.Now().Add(stackFailingFor))["stack-failing/default/shop"]
+	if !ok || alert.Severity != clusterspec.SeverityCritical || !strings.Contains(alert.Message, "pull access denied") {
+		t.Errorf("once it lasted: %+v, %v", alert, ok)
 	}
 }
 
