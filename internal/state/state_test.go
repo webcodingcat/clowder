@@ -22,7 +22,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
-	"github.com/webcodingcat/clowder/internal/stackspec"
 )
 
 var testTime = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
@@ -30,9 +29,9 @@ var testTime = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 // testExpiry is when the tests' certificates expire.
 var testExpiry = testTime.AddDate(10, 0, 0)
 
-// addUser is the command that gives a user a certificate.
+// addUser is the command that makes the cluster's user.
 func addUser(name, serial string) AddUser {
-	return AddUser{Name: name, Serial: serial, NotAfter: testExpiry}
+	return AddUser{Name: name, Serial: serial, NotAfter: testExpiry, RecoveryRecipient: "age1recovery"}
 }
 
 // recoveryCode is a code a recovery uses, by its digest; it expires half
@@ -58,6 +57,13 @@ func newCluster(t *testing.T) *cluster {
 		Host:    testHost(0),
 	})
 	return c
+}
+
+// addHost puts a joining host into the state. No command adds one until
+// phase 2 brings the join, so the test writes it in.
+func (c *cluster) addHost(host Host) {
+	host.Phase = Joining
+	c.state.Hosts[host.ID] = &host
 }
 
 func testHost(id HostID) Host {
@@ -191,25 +197,9 @@ func TestCommandsOfUnknownVersionsOrKindsAreRefused(t *testing.T) {
 	}
 }
 
-func TestAddHostChecksTheID(t *testing.T) {
-	c := newCluster(t)
-	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
-	if host := c.state.Hosts[1]; host.Phase != Joining || host.Voter {
-		t.Errorf("a new host joins as non-voter: %+v", host)
-	}
-	c.refuse(KindAddHost, LeaderActor, AddHost{Host: testHost(1)}, "taken")
-	c.refuse(KindAddHost, LeaderActor, AddHost{Host: testHost(MaxHosts)}, "not from 0")
-	sameName := testHost(2)
-	sameName.Name = "node0"
-	c.refuse(KindAddHost, LeaderActor, AddHost{Host: sameName}, "member already")
-	noKey := testHost(3)
-	noKey.WGPublicKey = ""
-	c.refuse(KindAddHost, LeaderActor, AddHost{Host: noKey}, "WireGuard")
-}
-
 func TestAMoveCheckedAgainstAnOldPhaseIsRefused(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
+	c.addHost(testHost(1))
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
 	// a user drained the host after another one checked "active"
 	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 1, Phase: Draining, From: Active})
@@ -245,7 +235,7 @@ func TestHostPhasesMoveOnlyAsAllowed(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			c := newCluster(t)
-			c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
+			c.addHost(testHost(1))
 			c.state.Hosts[1].Phase = test.from
 			payload := SetHostPhase{Host: 1, Phase: test.to}
 			if test.reason != "" {
@@ -270,7 +260,7 @@ func TestEveryPhaseHasAWayOut(t *testing.T) {
 
 func TestOnlyAHostReportsAboutItself(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
+	c.addHost(testHost(1))
 	pools := map[string]Pool{"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: 100 << 30, DataPercent: 81, MetadataPercent: 12}}
 	c.mustApply(KindReportHost, HostActor(0), ReportHost{
 		Host: 0, Version: "1.3.0", Pools: pools, DockerDown: true, RootUsedPercent: 91,
@@ -283,9 +273,6 @@ func TestOnlyAHostReportsAboutItself(t *testing.T) {
 		}, "pool vg/thin")
 	}
 	c.refuse(KindReportHost, HostActor(1), ReportHost{Host: 1, Version: "1.2.9", RootUsedPercent: 120}, "root file system")
-	if got := c.state.MinVersion(); got != "1.2.9" {
-		t.Errorf("MinVersion %s", got)
-	}
 	if host := c.state.Hosts[0]; host.Pools["vg-fast/thin"].DataPercent != 81 || !host.DockerDown || host.RootUsedPercent != 91 {
 		t.Errorf("host %+v", host)
 	}
@@ -297,7 +284,7 @@ func TestTheIngressIsAnActiveHostWithAServerRef(t *testing.T) {
 	c.refuse(KindSetIngress, LeaderActor, SetIngress{Host: 5}, "no host 5")
 	host := testHost(1)
 	host.ServerRef = "4711"
-	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: host})
+	c.addHost(host)
 	c.refuse(KindSetIngress, LeaderActor, SetIngress{Host: 1}, "host node1 is joining, not active")
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
 	c.mustApply(KindSetIngress, LeaderActor, SetIngress{Host: 1})
@@ -306,79 +293,66 @@ func TestTheIngressIsAnActiveHostWithAServerRef(t *testing.T) {
 	}
 }
 
-func TestOnlyOneFirstUserAndItBringsTheRecoveryKey(t *testing.T) {
+func TestTheClusterHasOneUserAndItBringsTheRecoveryKey(t *testing.T) {
 	c := newCluster(t)
-	first := AddUser{Name: "alice", Serial: "a1", NotAfter: testExpiry, First: true}
-	c.refuse(KindAddUser, LeaderActor, first, "recovery key's recipient")
-	first.RecoveryRecipient = "age1first"
-	c.mustApply(KindAddUser, LeaderActor, first)
-	if c.state.RecoveryRecipient != "age1first" {
+	withoutRecipient := addUser("alice", "a1")
+	withoutRecipient.RecoveryRecipient = ""
+	c.refuse(KindAddUser, LeaderActor, withoutRecipient, "recovery key's recipient")
+	c.refuse(KindAddUser, LeaderActor,
+		AddUser{Name: "alice", Serial: "a1", RecoveryRecipient: "age1recovery"}, "no expiry")
+	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
+	if c.state.RecoveryRecipient != "age1recovery" {
 		t.Errorf("recovery recipient %q", c.state.RecoveryRecipient)
 	}
-	second := AddUser{Name: "bob", Serial: "b1", NotAfter: testExpiry, First: true, RecoveryRecipient: "age1b"}
-	c.refuse(KindAddUser, LeaderActor, second, "first user already")
-	second.First = false
-	c.refuse(KindAddUser, LeaderActor, second, "recovery key's recipient")
-}
-
-func TestACertificateComesWithItsExpiry(t *testing.T) {
-	c := newCluster(t)
-	c.refuse(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1"}, "no expiry")
-	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
-	c.refuse(KindRecoverUser, UserActor("alice"), RecoverUser{Name: "alice", Serial: "a2", Code: recoveryCode("c1")},
-		"no expiry")
-	host := testHost(1)
-	host.CertificateNotAfter = time.Time{}
-	c.refuse(KindAddHost, LeaderActor, AddHost{Host: host}, "no expiry")
+	c.refuse(KindAddUser, LeaderActor, addUser("bob", "b1"), "has a user already")
+	// a second certificate comes only through a recovery
+	c.refuse(KindAddUser, LeaderActor, addUser("alice", "a2"), "has a user already")
 }
 
 func TestARecoveredUserKeepsOnlyTheNewCertificate(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
-	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a2"))
-	c.mustApply(KindAddUser, LeaderActor, addUser("bob", "b1"))
 	recovery := func(name, serial string) RecoverUser {
 		return RecoverUser{Name: name, Serial: serial, NotAfter: testExpiry, Code: recoveryCode("code")}
 	}
 	c.refuse(KindRecoverUser, UserActor("carol"), recovery("carol", "c1"), "no user carol")
-	c.refuse(KindRecoverUser, UserActor("alice"), recovery("alice", "b1"), "used already")
+	c.refuse(KindRecoverUser, UserActor("alice"), recovery("alice", "a1"), "used already")
 	c.refuse(KindRecoverUser, UserActor("alice"),
-		RecoverUser{Name: "alice", Serial: "a3", NotAfter: testExpiry}, "no recovery code")
+		RecoverUser{Name: "alice", Serial: "a2", NotAfter: testExpiry}, "no recovery code")
+	c.refuse(KindRecoverUser, UserActor("alice"), RecoverUser{Name: "alice", Serial: "a2", Code: recoveryCode("c1")},
+		"no expiry")
 
-	c.mustApply(KindRecoverUser, UserActor("alice"), recovery("alice", "a3"))
-	if serials := c.state.Users["alice"].Serials; len(serials) != 1 || !serials["a3"].Equal(testExpiry) {
-		t.Errorf("alice keeps only a3: %v", serials)
+	c.mustApply(KindRecoverUser, UserActor("alice"), recovery("alice", "a2"))
+	if serials := c.state.Users["alice"].Serials; len(serials) != 1 || !serials["a2"].Equal(testExpiry) {
+		t.Errorf("alice keeps only a2: %v", serials)
 	}
-	for _, serial := range []string{"a1", "a2"} {
-		if want := (Revocation{At: testTime, NotAfter: testExpiry}); c.state.Revoked[serial] != want {
-			t.Errorf("%s: revoked %v, want %v", serial, c.state.Revoked[serial], want)
-		}
-	}
-	if _, revoked := c.state.Revoked["b1"]; revoked || len(c.state.Users["bob"].Serials) != 1 {
-		t.Error("bob's certificate went with alice's")
+	if want := (Revocation{At: testTime, NotAfter: testExpiry}); c.state.Revoked["a1"] != want {
+		t.Errorf("a1: revoked %v, want %v", c.state.Revoked["a1"], want)
 	}
 }
 
 func TestARevocationGoesAWhileAfterItsCertificateExpired(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddUser, LeaderActor, AddUser{Name: "alice", Serial: "a1", NotAfter: testTime})
-	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a2"))
-	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a3"))
-	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a4"))
-	c.mustApply(KindRevoke, LeaderActor, Revoke{Serial: "a1"})
-
-	// a revocation at the command's time, not the clock's
-	revokeAt := func(serial string, at time.Time) {
+	alice := addUser("alice", "a1")
+	alice.NotAfter = testTime
+	c.mustApply(KindAddUser, LeaderActor, alice)
+	// each recovery revokes the certificate before it, at the command's
+	// time, not the clock's
+	recoverAt := func(at time.Time, serial string) {
 		t.Helper()
-		if _, err := c.applyAt(at, KindRevoke, LeaderActor, Revoke{Serial: serial}); err != nil {
+		code := UsedCode{Digest: "code-" + serial, Expires: at.Add(30 * time.Minute)}
+		_, err := c.applyAt(at, KindRecoverUser, UserActor("alice"),
+			RecoverUser{Name: "alice", Serial: serial, NotAfter: testExpiry, Code: code})
+		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	revokeAt("a2", testTime.Add(revokedKept))
+	recoverAt(testTime, "a2")
+	recoverAt(testTime.Add(revokedKept), "a3")
 	if _, kept := c.state.Revoked["a1"]; !kept {
 		t.Error("a1 went as soon as it expired; a host whose clock runs behind still takes it")
 	}
-	revokeAt("a3", testTime.Add(revokedKept+time.Second))
+	recoverAt(testTime.Add(revokedKept+time.Second), "a4")
 	if _, kept := c.state.Revoked["a1"]; kept {
 		t.Error("a1 stays on the list long after it expired")
 	}
@@ -387,24 +361,9 @@ func TestARevocationGoesAWhileAfterItsCertificateExpired(t *testing.T) {
 	}
 }
 
-func TestOnlyACertificateTheStateKnowsIsRevoked(t *testing.T) {
-	c := newCluster(t)
-	c.refuse(KindRevoke, LeaderActor, Revoke{Serial: "unknown"}, "no user or host")
-	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
-	c.mustApply(KindRevoke, LeaderActor, Revoke{Serial: testHost(1).CertificateSerial})
-	c.refuse(KindRevoke, LeaderActor, Revoke{Serial: testHost(1).CertificateSerial}, "revoked already")
-	// removing the host after its certificate was revoked keeps the first
-	// revocation
-	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 1, Phase: Removed})
-	if revocation := c.state.Revoked[testHost(1).CertificateSerial]; revocation.NotAfter != testExpiry {
-		t.Errorf("the host's certificate: %v", revocation)
-	}
-}
-
 func TestANewRecoveryKeyReplacesTheOld(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddUser, LeaderActor,
-		AddUser{Name: "alice", Serial: "a1", NotAfter: testExpiry, First: true, RecoveryRecipient: "age1first"})
+	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
 	c.refuse(KindSetRecoveryRecipient, UserActor("alice"),
 		SetRecoveryRecipient{Recipient: "AGE-SECRET-KEY-1X", Code: recoveryCode("code")}, "no age key")
 	c.refuse(KindSetRecoveryRecipient, UserActor("alice"), SetRecoveryRecipient{Recipient: "age1second"},
@@ -418,8 +377,7 @@ func TestANewRecoveryKeyReplacesTheOld(t *testing.T) {
 
 func TestARecoveryCodeOpensOnce(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddUser, LeaderActor,
-		AddUser{Name: "alice", Serial: "a1", NotAfter: testExpiry, First: true, RecoveryRecipient: "age1first"})
+	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
 	c.mustApply(KindRecoverUser, UserActor("alice"),
 		RecoverUser{Name: "alice", Serial: "a2", NotAfter: testExpiry, Code: recoveryCode("code")})
 	// whoever saw the code must not take the user's place with it
@@ -462,30 +420,6 @@ func TestAUsedCodeGoesAWhileAfterItExpired(t *testing.T) {
 	}
 	if len(c.state.UsedCodes) != 2 {
 		t.Errorf("the codes that did not expire went too: %v", c.state.UsedCodes)
-	}
-}
-
-func TestRemovingAUserRevokesTheirCertificates(t *testing.T) {
-	c := newCluster(t)
-	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
-	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a2"))
-	c.mustApply(KindAddUser, LeaderActor, addUser("bob", "b1"))
-	c.refuse(KindAddUser, LeaderActor, addUser("carol", "a1"), "used already")
-
-	c.mustApply(KindRevoke, UserActor("alice"), Revoke{Serial: "a1"})
-	if serials := c.state.Users["alice"].Serials; len(serials) != 1 || serials["a2"].IsZero() {
-		t.Errorf("alice keeps only a2: %v", serials)
-	}
-	c.refuse(KindAddUser, LeaderActor, addUser("alice", "a1"), "used already")
-
-	c.mustApply(KindRemoveUser, UserActor("bob"), RemoveUser{Name: "alice"})
-	if _, ok := c.state.Users["alice"]; ok {
-		t.Error("alice is still a user")
-	}
-	for _, serial := range []string{"a1", "a2"} {
-		if want := (Revocation{At: testTime, NotAfter: testExpiry}); c.state.Revoked[serial] != want {
-			t.Errorf("%s: revoked %v, want %v", serial, c.state.Revoked[serial], want)
-		}
 	}
 }
 
@@ -736,7 +670,7 @@ func TestAVolumeRecordKeepsItsInvariantsAndOwnMinor(t *testing.T) {
 func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
-	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
+	c.addHost(testHost(1))
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
 	spec := testVolumeSpec()
 	spec.Replicas = 2
@@ -789,86 +723,6 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	}
 }
 
-func TestOperationsHoldTheirLocks(t *testing.T) {
-	c := newCluster(t)
-	c.putShop(shopSpec())
-	move := Operation{ID: "01A", Kind: "move-stack", Locks: []string{"stack/default/shop", "volume/default/pgdata"}}
-	c.mustApply(KindStartOperation, LeaderActor, StartOperation{Operation: move})
-
-	changed := shopSpec()
-	changed.Services["app"] = stackspec.Service{Image: "y"}
-	c.refuse(KindPutResource, UserActor("alice"), putResource(resource.KindStack, "default", "shop", changed),
-		"locked by operation 01A")
-	c.refuse(KindRestartStack, UserActor("alice"), RestartStack{Namespace: "default", Name: "shop"}, "locked by operation 01A")
-	backup := Operation{ID: "01B", Kind: "backup", Locks: []string{"volume/default/pgdata"}}
-	before := c.encoded()
-	err := c.apply(KindStartOperation, LeaderActor, StartOperation{Operation: backup})
-	var locked *LockedError
-	if !errors.As(err, &locked) || locked.Operation != "01A" {
-		t.Errorf("want a LockedError naming 01A, got %v", err)
-	}
-	if c.encoded() != before {
-		t.Error("a refused operation changed the state")
-	}
-
-	owner := HostID(0)
-	c.mustApply(KindAdvanceOperation, LeaderActor, AdvanceOperation{ID: "01A", Step: 3, Owner: &owner, RollingBack: true})
-	if op := c.state.Operations["01A"]; op.Step != 3 || op.State != OpRollingBack {
-		t.Errorf("operation %+v", op)
-	}
-	c.mustApply(KindFinishOperation, LeaderActor, FinishOperation{ID: "01A", Failed: true, Error: "resync stalled"})
-	if len(c.state.Locks) != 0 || c.state.Operations["01A"].State != OpFailed {
-		t.Errorf("locks %v, operation %+v", c.state.Locks, c.state.Operations["01A"])
-	}
-	c.refuse(KindFinishOperation, LeaderActor, FinishOperation{ID: "01A"}, "finished")
-	c.mustApply(KindStartOperation, LeaderActor, StartOperation{Operation: backup})
-}
-
-func TestLocksNameAStackOrAVolume(t *testing.T) {
-	c := newCluster(t)
-	for _, lock := range []string{"x", "stack/", "stack/shop", "volume/shop", "volume/shop/web/data", "volume/Shop/data"} {
-		c.refuse(KindStartOperation, LeaderActor, StartOperation{Operation: Operation{
-			ID: "01A", Kind: "backup", Locks: []string{lock},
-		}}, "neither stack")
-	}
-}
-
-func TestFailoverTakesOverLocks(t *testing.T) {
-	c := newCluster(t)
-	c.mustApply(KindStartOperation, LeaderActor, StartOperation{Operation: Operation{
-		ID: "01A", Kind: "backup", Locks: []string{"volume/default/pgdata", "volume/default/files"},
-	}})
-	c.mustApply(KindStartOperation, LeaderActor, StartOperation{TakeOver: true, Operation: Operation{
-		ID: "01B", Kind: "failover", Locks: []string{"volume/default/pgdata"},
-	}})
-	if op := c.state.Operations["01A"]; op.State != OpFailed || !strings.Contains(op.Error, "01B") {
-		t.Errorf("the taken-over operation: %+v", op)
-	}
-	if _, held := c.state.Locks["volume/default/files"]; held {
-		t.Error("the failed operation still holds its other lock")
-	}
-	if c.state.Locks["volume/default/pgdata"] != "01B" {
-		t.Errorf("locks %v", c.state.Locks)
-	}
-}
-
-func TestOnlyTheLastFinishedOperationsAreKept(t *testing.T) {
-	c := newCluster(t)
-	for number := range keptFinished + 5 {
-		id := string(rune('A'+number/26)) + string(rune('A'+number%26))
-		c.mustApply(KindStartOperation, LeaderActor, StartOperation{Operation: Operation{
-			ID: id, Kind: "backup", Locks: []string{"volume/default/pgdata"},
-		}})
-		c.mustApply(KindFinishOperation, LeaderActor, FinishOperation{ID: id})
-	}
-	if len(c.state.Operations) != keptFinished {
-		t.Errorf("%d operations kept", len(c.state.Operations))
-	}
-	if _, ok := c.state.Operations["AA"]; ok {
-		t.Error("the oldest operation is still there")
-	}
-}
-
 func TestTheAuditKeepsTheLastEntries(t *testing.T) {
 	c := newCluster(t)
 	for range auditSize + 10 {
@@ -885,7 +739,7 @@ func TestTheAuditKeepsTheLastEntries(t *testing.T) {
 
 func TestSnapshotsGiveTheSameState(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
+	c.addHost(testHost(1))
 	c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
 	c.putShop(shopSpec())
 
@@ -902,7 +756,7 @@ func TestSnapshotsGiveTheSameState(t *testing.T) {
 		t.Errorf("restored state differs:\n%s\n%s", copied.encoded(), c.encoded())
 	}
 	// the restored state goes on taking commands
-	copied.mustApply(KindAddUser, LeaderActor, addUser("bob", "b1"))
+	copied.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
 }
 
 func TestSnapshotsOfUnknownVersionsAreRefused(t *testing.T) {
@@ -919,11 +773,12 @@ func TestSnapshotsOfUnknownVersionsAreRefused(t *testing.T) {
 func TestTwoAgentsApplyingTheSameLogAgree(t *testing.T) {
 	first, second := newCluster(t), newCluster(t)
 	for _, c := range []*cluster{first, second} {
-		c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
-		c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(2)})
+		c.addHost(testHost(1))
+		c.addHost(testHost(2))
 		c.mustApply(KindAddUser, LeaderActor, addUser("alice", "a1"))
-		c.mustApply(KindRemoveUser, LeaderActor, RemoveUser{Name: "alice"})
-		_ = c.apply(KindRevoke, LeaderActor, Revoke{Serial: "a1"}) // refused on both
+		c.mustApply(KindRecoverUser, UserActor("alice"),
+			RecoverUser{Name: "alice", Serial: "a2", NotAfter: testExpiry, Code: recoveryCode("code")})
+		_ = c.apply(KindAddUser, LeaderActor, addUser("bob", "b1")) // refused on both
 	}
 	if first.encoded() != second.encoded() {
 		t.Errorf("the states differ:\n%s\n%s", first.encoded(), second.encoded())
@@ -958,10 +813,23 @@ func gzipped(t *testing.T, plain []byte) []byte {
 
 func TestRemovingAHostRevokesItsCertificate(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
+	c.addHost(testHost(1))
 	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 1, Phase: Removed})
 	want := Revocation{At: testTime, NotAfter: testExpiry}
 	if revocation := c.state.Revoked[testHost(1).CertificateSerial]; revocation != want {
 		t.Errorf("the removed host's certificate is not revoked: %v", c.state.Revoked)
 	}
+}
+
+func TestTheLastHostThatRunsStacksStays(t *testing.T) {
+	c := newCluster(t)
+	c.refuse(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 0, Phase: Removed}, "the last that runs stacks")
+	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 0, Phase: Draining})
+	c.refuse(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 0, Phase: Removed}, "the last that runs stacks")
+
+	// with a second active host, either may go, but not both
+	c.addHost(testHost(1))
+	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
+	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 0, Phase: Removed})
+	c.refuse(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 1, Phase: Removed}, "the last that runs stacks")
 }

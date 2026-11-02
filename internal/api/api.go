@@ -127,14 +127,29 @@ type HostAction struct {
 	Description string
 	From        []state.HostPhase
 	To          state.HostPhase
+	// Final actions cannot be undone; the CLI asks before it sends one.
+	Final bool
 }
 
 // HostActions are the actions on hosts.
 var HostActions = []HostAction{
-	{"drain", "Move the stacks off a host, for maintenance", []state.HostPhase{state.Active}, state.Draining},
-	{"undrain", "Let a drained host take stacks again", []state.HostPhase{state.Draining}, state.Active},
-	{"remove", "Remove a host from the cluster for good", nil, state.Removed},
-	// a disabled host becomes fenced again: the leader may then power it
-	// on, and it recovers as any fenced host does
-	{"enable", "Let a host the flapping brake disabled be powered on again", []state.HostPhase{state.Disabled}, state.Fenced},
+	{
+		// nothing moves a running stack yet: a placed stack keeps its host
+		Name:        "drain",
+		Description: "Keep new stacks off a host; its running stacks stay",
+		From:        []state.HostPhase{state.Active},
+		To:          state.Draining,
+	},
+	{
+		Name:        "undrain",
+		Description: "Let a drained host take new stacks again",
+		From:        []state.HostPhase{state.Draining},
+		To:          state.Active,
+	},
+	{
+		Name:        "remove",
+		Description: "Remove a host from the cluster for good; its certificate is revoked",
+		To:          state.Removed,
+		Final:       true,
+	},
 }

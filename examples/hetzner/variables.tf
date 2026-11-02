@@ -81,8 +81,8 @@ variable "storage_classes" {
 
 variable "clowderd_version" {
   type        = string
-  description = "Version of clowderd to install from clowder's APT repository; empty for the newest. Pin it, so a host made later gets the cluster's version."
-  default     = ""
+  description = "Version of clowderd to install from clowder's APT repository (0.1.0 for the tag v0.1.0). It stays pinned, so a host made later gets the cluster's version; empty takes the newest."
+  default     = "0.1.0"
 }
 
 variable "clowderd_package_url" {

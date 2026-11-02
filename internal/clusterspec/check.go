@@ -64,17 +64,6 @@ func Check(config Config) Problems {
 	}
 	problems = append(problems, checkResources("defaults.reservations", config.Defaults.Reservations)...)
 	problems = append(problems, checkResources("system_reserve", config.SystemReserve)...)
-	if backup := config.Backup; backup != nil {
-		if backup.Target.Type != "restic" {
-			report("backup.target.type %q is not supported (restic)", backup.Target.Type)
-		}
-		if backup.Target.URL == "" {
-			report("backup.target.url is required")
-		}
-		if backup.Password == "" {
-			report("backup.password: a value tagged !secret is required")
-		}
-	}
 	if config.Alerts != nil {
 		for index, channel := range config.Alerts.Channels {
 			problems = append(problems, checkChannel(index, channel)...)

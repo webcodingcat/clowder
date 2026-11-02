@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/raft"
+
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -115,9 +117,11 @@ func bootstrapCommand(t *testing.T) state.Command {
 	})
 }
 
-// addUser is the command that gives a user a certificate.
+// addUser is the command that makes the cluster's user.
 func addUser(t *testing.T, name, serial string) state.Command {
-	return command(t, state.KindAddUser, state.AddUser{Name: name, Serial: serial, NotAfter: time.Now().AddDate(1, 0, 0)})
+	return command(t, state.KindAddUser, state.AddUser{
+		Name: name, Serial: serial, NotAfter: time.Now().AddDate(1, 0, 0), RecoveryRecipient: "age1recovery",
+	})
 }
 
 func users(node *Node) []string {
@@ -142,22 +146,19 @@ func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
 	if _, err := node.Propose(ctx, bootstrapCommand(t)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := node.Propose(ctx, addUser(t, "alice", "a1")); err != nil {
-		t.Fatal(err)
-	}
-	// a refused command comes back as the state's error
-	_, err := node.Propose(ctx, addUser(t, "bob", "a1"))
-	var refused *state.Refused
-	if !errors.As(err, &refused) {
-		t.Errorf("want a refusal for a used serial, got %v", err)
-	}
 	// the snapshot plus the entry after it must give the same state
 	if err := node.raft.Snapshot().Error(); err != nil {
 		t.Fatal(err)
 	}
-	index, err := node.Propose(ctx, addUser(t, "carol", "c1"))
+	index, err := node.Propose(ctx, addUser(t, "alice", "a1"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	// a refused command comes back as the state's error
+	_, err = node.Propose(ctx, addUser(t, "bob", "b1"))
+	var refused *state.Refused
+	if !errors.As(err, &refused) {
+		t.Errorf("want a refusal for a second user, got %v", err)
 	}
 	if err := node.Close(); err != nil {
 		t.Fatal(err)
@@ -174,7 +175,7 @@ func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
 	if err := reopened.WaitIndex(waitCtx, index); err != nil {
 		t.Fatal(err)
 	}
-	if got := users(reopened); len(got) != 2 {
+	if got := users(reopened); len(got) != 1 || got[0] != "alice" {
 		t.Errorf("users after the restart: %v", got)
 	}
 }
@@ -248,7 +249,9 @@ func TestThreeHostsReplicateOverMutualTLS(t *testing.T) {
 	}
 	waitForLeader(t, nodes[0])
 	for id := 1; id < 3; id++ {
-		if err := nodes[0].AddMember(state.HostID(id), addresses[id], true); err != nil {
+		// join comes with phase 2; until then the test adds the voters itself
+		add := nodes[0].raft.AddVoter(serverID(state.HostID(id)), raft.ServerAddress(addresses[id]), 0, proposeTimeout)
+		if err := add.Error(); err != nil {
 			t.Fatal(err)
 		}
 	}

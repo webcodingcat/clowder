@@ -29,19 +29,18 @@ func (f *fakeHoster) AssignFloatingIP(_ context.Context, _ netip.Addr, serverRef
 	return nil
 }
 
-func (*fakeHoster) PowerOff(context.Context, string) error { return nil }
-func (*fakeHoster) PowerOn(context.Context, string) error  { return nil }
-
 // withServers adds the active hosts node1 and node2 with server refs 41 and
-// 42; node0 of newLeader has none.
+// 42; node0 of newLeader has none. No command adds a host until phase 2
+// brings the join, so the test writes them in.
 func withServers(l *leader) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	for id := state.HostID(1); id <= 2; id++ {
-		l.apply(state.KindAddHost, state.LeaderActor, state.AddHost{Host: state.Host{
+		l.state.Hosts[id] = &state.Host{
 			ID: id, Name: "node" + string(rune('0'+id)), Underlay: netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
 			WGPublicKey: "wg", CertificateSerial: "s" + string(rune('0'+id)), ServerRef: "4" + string(rune('0'+id)),
-			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
-		}})
-		l.apply(state.KindSetHostPhase, state.LeaderActor, state.SetHostPhase{Host: id, Phase: state.Active})
+			CertificateNotAfter: time.Now().AddDate(1, 0, 0), Phase: state.Active,
+		}
 	}
 }
 

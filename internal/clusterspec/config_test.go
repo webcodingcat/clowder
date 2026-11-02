@@ -100,7 +100,6 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 		Priorities:  Priorities{Default: "medium", Categories: map[string]int{"top": 2000}},
 		Stacks:      Stacks{Privileged: []string{"Monitoring"}},
 		Defaults:    Defaults{Reservations: Resources{Memory: "lots", CPUs: "-1"}},
-		Backup:      &Backup{Target: BackupTarget{Type: "borg"}},
 		Alerts: &Alerts{
 			Channels: []AlertChannel{
 				{Type: "discord"},
@@ -120,9 +119,9 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 		`hoster.api "api.example.com/v1" is not a full URL`,
 		`network "both"`, "not an IPv4 address", `pool "nopool"`, `reserve "95%"`,
 		`falls back to "slow"`, "storage class empty", "resync_rate", "top: 2000",
-		`default "medium"`, `"Monitoring" is not <namespace>/<stack>`, "reservations.memory", "reservations.cpus", `"borg"`,
+		`default "medium"`, `"Monitoring" is not <namespace>/<stack>`, "reservations.memory", "reservations.cpus",
 		"webhook: a value tagged !secret", "type is not discord", `min_severity "loud"`, "url: a value tagged !secret",
-		"heartbeat.url", `interval "often"`, "backup.target.url", "backup.password",
+		"heartbeat.url", `interval "often"`,
 		"smtp needs host and port", `registries["ghcr.io"].username`, `registries["ghcr.io"].password`,
 		`join_keys[1] names the secret "the-key"`,
 	}

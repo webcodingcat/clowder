@@ -16,7 +16,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   it at every command (see `Copy`). The state's `Index` follows the log either way. The
   tests check what the types cannot, that the checks change nothing: every command a test
   may see refused (`apply`, `changes`, `refuse`) is compared with the state before it.
-- **Commands.** A command has a kind, a payload of the type with the same name (`AddHost`,
+- **Commands.** A command has a kind, a payload of the type with the same name (`AddUser`,
   `PutResource`, ...) and an actor (`leader`, `host/<id>`, `user/<name>`) that the API takes from
   the caller's certificate. Which actor may send which kind is the API's check. The state
   checks only what it alone can tell: a host reports only about itself and never moves
@@ -26,15 +26,15 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | Who | Commands |
   |---|---|
   | `clowderd init` | `bootstrap` |
-  | the user | `apply-config`, `add-user` (the first user), `recover-user` and `set-recovery-recipient` (with a code from a host), `set-host-phase` (host actions), `put-resource` and `delete-resource` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack` |
+  | the user | `apply-config`, `add-user` (the bootstrap's user), `recover-user` and `set-recovery-recipient` (with a code from a host), `set-host-phase` (host actions), `put-resource` and `delete-resource` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack` |
   | the placement, the stack's host | `put-volume`, `set-stack-status`, `set-stack-wait-reason`, `set-pushed-out` |
   | the Floating IP's loop | `set-ingress` |
   | the ACME loop | `put-acme-account`, `put-acme-challenge`, `delete-acme-challenge`, `put-certificate`, `delete-certificate` |
   | the alerts | `put-alert`, `resolve-alert` |
   | each agent | `report-host`, `forget-copy` |
 
-  The other kinds (hosts that join, operations, users beyond the first) are for phase 2
-  and later. They are tested, but nothing sends them yet.
+  Every kind has a sender: a kind comes with the phase that sends it (hosts that join,
+  failover and backups later), not before.
 - **Resources** (phase 1c): namespaces (`Namespaces`), and by `<namespace>/<name>` stacks
   (`Stacks`), volumes (`Volumes`) and secrets (`Secrets`), each with a `Meta`. The kinds
   and their specs are in `internal/resource` (a stack's in `internal/stackspec`), which the
@@ -137,8 +137,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   answering is `failed`; it comes back `active` by itself, or the leader powers it off
   (`fenced`) before its stacks start elsewhere. A fenced host that is back recovers
   (`recovering`, then `active`); one that fails again and again is `disabled` until a user
-  enables it. Any host can be `removed`. Until phase 2, with no hosts that join and no
-  failover, a host is only ever `active`, `draining` or `removed`.
+  enables it. Any host can be `removed`, except the last that runs stacks (`active` or
+  `draining`); the CLI asks first. Until phase 2, with no hosts that join and no
+  failover, a host is only ever `active`, `draining` or `removed`, and a drain only keeps
+  new stacks off the host: nothing moves a running stack yet.
 
 - **Versions.** Until `v1.0.0` the state, the commands and `cluster.yaml` change freely:
   no cluster runs in production, so there are no migrations and no gates, and
@@ -146,17 +148,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   - A release reads its own `CommandVersion` and `SnapshotVersion` and the one before.
   - Payload fields are added, not changed. Unknown fields are ignored, so an agent of the
     release before drops a new field from its state. A field that later commands depend
-    on therefore needs a gate on `State.MinVersion`.
+    on therefore needs a gate on the oldest agent version in the cluster.
   - An agent of the release before refuses a new command kind ("unknown command"), so its
     state misses that command. A kind may come without a gate only if what it changes may
     differ between agents for a while, as the display-only `set-stack-wait-reason`.
   - The json tags of `clusterspec.Config` are part of this format.
-- **Locks.** Operations hold locks (`stack/<namespace>/<stack>`, `volume/<volume ID>`); a
-  change to a locked stack or volume is refused with a `LockedError`, unless the holding
-  operation makes it (`Operation` in the payload). Only failover takes locks over
-  (`TakeOver`). Operations are for phase 2: nothing starts one yet.
 - **Invariants** the state holds itself, as the last place to catch a wrong command: one
-  first user, valid names (`internal/names`), volumes with 0 to 3 replicas and a DRBD minor
+  user, valid names (`internal/names`), volumes with 0 to 3 replicas and a DRBD minor
   exactly when replicated (a pending volume has neither copy nor minor), one copy per host,
   one stack per volume, nothing deleted that a stack names, a removed host's certificate
   revoked.
@@ -165,8 +163,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   the host's `CertificateNotAfter`); `revoke` puts it there. The list grows only there, so
   `revoke` also drops the certificates that expired more than `revokedKept` before the
   command: no handshake takes them any more, and the margin covers a host whose clock runs
-  behind. It goes by the command's `At`, so every agent drops the same. The command
-  `revoke` takes only a serial the state knows, a user's or a host's.
+  behind. It goes by the command's `At`, so every agent drops the same.
 - **Secrets** arrive sealed (`Sealed`, age for the data key); `state` never sees them in
   clear. Those of `cluster.yaml` are `ClusterSecrets`, by name (`clusterspec.SecretPlaces`),
   each with a digest; the namespaces' are `Secrets`. Readers find a value through the
@@ -182,7 +179,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   every loop reads and none changes; a dry run, which applies commands to its copy, makes
   its own.
 - Snapshots are gzip-compressed JSON (`WriteSnapshot`, `ReadSnapshot`). The audit keeps the
-  last `auditSize` commands, finished operations the last `keptFinished`.
+  last `auditSize` commands.
 
 ## Certificates (`internal/pki`)
 
@@ -213,7 +210,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   changes it in place. `WaitIndex` lets a read follow a write made through another member.
   `Changes` answers the watch from the member's ring of changes (API, The watch).
 - `Bootstrap` makes the first host a cluster of its own; on a member with a log it does
-  nothing. `AddMember` is for joins.
+  nothing. Adding members comes with the join (phase 2).
 - The data key is an age identity in a file only root reads. `Seal` and `Open` turn secrets
   into `state.Sealed` and back; joining hosts get the key with their join answer.
 - The tests run real members on 127.0.0.1: a restart from disk, three hosts over mTLS,
@@ -236,8 +233,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   follower forwards (`userKinds`, exactly the kinds the user routes, the bootstrap and the
   recovery make),
   and a host's report about itself (`hostKinds`); `/v1/internal/changes` takes a user's
-  resource commands only (Resources, below). The leader's own commands (operations,
-  placements, new hosts) are made on the leader and never come in from outside; a host never
+  resource commands only (Resources, below). The leader's own commands
+  (placements, the ingress) are made on the leader and never come in from outside; a host never
   speaks for another host or for the leader.
 - **A host certificate may speak for any user.** The user's certificate ends at the first
   agent, so the leader cannot check that a forwarded command really came from the user it
@@ -317,7 +314,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   user's certificate. An agent whose certificate is of another CA than the credentials'
   is named as such (`foreignCA`: a cluster of the same name, or set up anew) instead of
   with x509's words alone: `cluster status|apply|diff|schema`,
-  `host list|drain|undrain|remove|enable`, `apply`, `get`, `delete`, `stack ps|logs|restart`.
+  `host list|drain|undrain|remove`, `apply`, `get`, `delete`, `stack ps|logs|restart`.
 - **Exit codes**, the same for every command:
 
   | Code | When |
@@ -406,7 +403,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   space at either end, or starts like a marker shows as `base64:`; one that does not open
   or is meant for another place shows as `error:` with the reason, and the command fails
   after printing every line.
-- **The first user** has no certificate yet (`cluster bootstrap`). `GET /v1/bootstrap` gives
+- **The user** has no certificate yet (`cluster bootstrap`). `GET /v1/bootstrap` gives
   the CA certificate with a `pki.TrustProof` for each valid bootstrap key, and the CLI trusts
   the CA only if one matches its key (`api.FindCluster`). The offer also says whether the
   cluster has a user already (`bootstrapped`): then the CLI stops before it makes a
@@ -415,8 +412,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   into a new file (`--recovery-out`, for scripts); nothing has reached the cluster yet.
   `POST /v1/bootstrap`, over TLS checked against that CA, carries the user's public key
   and the recovery key's recipient with an HMAC of the bootstrap key and a time
-  (`bootstrapMaxAge`); the state keeps the recipient with the first user (`add-user`). It
-  works once: when the cluster has a user, users add the others. The CLI then writes the
+  (`bootstrapMaxAge`); the state keeps the recipient with the user (`add-user`). It
+  works once: a cluster has one user, and further certificates come only through
+  `user recover`. The CLI then writes the
   credentials (`clusterdir.WriteCredentials`), checks that the cluster's recovery
   recipient is the key it made, and writes `cluster.yaml` with the bootstrap key encrypted
   (`clusterdir.Create`).

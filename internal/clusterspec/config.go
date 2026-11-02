@@ -44,7 +44,6 @@ type Config struct {
 	Stacks         Stacks                  `yaml:"stacks,omitempty" json:"stacks,omitempty"`
 	Defaults       Defaults                `yaml:"defaults,omitempty" json:"defaults,omitempty"`
 	SystemReserve  Resources               `yaml:"system_reserve,omitempty" json:"system_reserve,omitempty"`
-	Backup         *Backup                 `yaml:"backup,omitempty" json:"backup,omitempty"`
 	Alerts         *Alerts                 `yaml:"alerts,omitempty" json:"alerts,omitempty"`
 	ACME           ACME                    `yaml:"acme,omitempty" json:"acme,omitempty"`
 }
@@ -133,7 +132,7 @@ func (p Priorities) withDefaults() Priorities {
 }
 
 // Hoster is the cloud the hosts run in; Type picks the plugin, like the
-// types of backup targets and alert channels.
+// types of alert channels.
 type Hoster struct {
 	Type  string    `yaml:"type" json:"type" jsonschema:"required,enum=hetzner"`
 	Token SecretRef `yaml:"token" json:"token" jsonschema:"required"`
@@ -206,18 +205,6 @@ type Defaults struct {
 type Resources struct {
 	Memory string `yaml:"memory,omitempty" json:"memory,omitempty"`
 	CPUs   string `yaml:"cpus,omitempty" json:"cpus,omitempty"`
-}
-
-// Backup is where restic writes.
-type Backup struct {
-	Target   BackupTarget `yaml:"target" json:"target" jsonschema:"required"`
-	Password SecretRef    `yaml:"password" json:"password" jsonschema:"required"`
-}
-
-// BackupTarget is a restic repository.
-type BackupTarget struct {
-	Type string `yaml:"type" json:"type" jsonschema:"required,enum=restic"`
-	URL  string `yaml:"url" json:"url" jsonschema:"required"`
 }
 
 // Alerts are the channels and the optional heartbeat.

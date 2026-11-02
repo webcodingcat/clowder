@@ -31,7 +31,6 @@ type Command struct {
 const (
 	KindBootstrap            = "bootstrap"
 	KindApplyConfig          = "apply-config"
-	KindAddHost              = "add-host"
 	KindSetHostPhase         = "set-host-phase"
 	KindReportHost           = "report-host"
 	KindSetIngress           = "set-ingress"
@@ -43,8 +42,6 @@ const (
 	KindAddUser              = "add-user"
 	KindRecoverUser          = "recover-user"
 	KindSetRecoveryRecipient = "set-recovery-recipient"
-	KindRemoveUser           = "remove-user"
-	KindRevoke               = "revoke"
 	KindPutResource          = "put-resource"
 	KindDeleteResource       = "delete-resource"
 	KindRestartStack         = "restart-stack"
@@ -55,9 +52,6 @@ const (
 	KindResolveAlert         = "resolve-alert"
 	KindPutVolume            = "put-volume"
 	KindForgetCopy           = "forget-copy"
-	KindStartOperation       = "start-operation"
-	KindAdvanceOperation     = "advance-operation"
-	KindFinishOperation      = "finish-operation"
 )
 
 // LeaderActor is the leader acting on its own (its control loops).
@@ -108,7 +102,6 @@ type handler func(s *State, cmd Command) (change func(), err error)
 var handlers = map[string]handler{
 	KindBootstrap:            decoded(applyBootstrap),
 	KindApplyConfig:          decoded(applyConfig),
-	KindAddHost:              decoded(applyAddHost),
 	KindSetHostPhase:         decoded(applySetHostPhase),
 	KindReportHost:           decoded(applyReportHost),
 	KindSetIngress:           decoded(applySetIngress),
@@ -120,8 +113,6 @@ var handlers = map[string]handler{
 	KindAddUser:              decoded(applyAddUser),
 	KindRecoverUser:          decoded(applyRecoverUser),
 	KindSetRecoveryRecipient: decoded(applySetRecoveryRecipient),
-	KindRemoveUser:           decoded(applyRemoveUser),
-	KindRevoke:               decoded(applyRevoke),
 	KindPutResource:          decoded(applyPutResource),
 	KindDeleteResource:       decoded(applyDeleteResource),
 	KindRestartStack:         decoded(applyRestartStack),
@@ -132,9 +123,6 @@ var handlers = map[string]handler{
 	KindResolveAlert:         decoded(applyResolveAlert),
 	KindPutVolume:            decoded(applyPutVolume),
 	KindForgetCopy:           decoded(applyForgetCopy),
-	KindStartOperation:       decoded(applyStartOperation),
-	KindAdvanceOperation:     decoded(applyAdvanceOperation),
-	KindFinishOperation:      decoded(applyFinishOperation),
 }
 
 // decoded turns a function of a typed payload into a handler. Unknown fields
@@ -258,12 +246,6 @@ func (s *State) makeMaps() {
 	}
 	if s.Volumes == nil {
 		s.Volumes = map[string]*Volume{}
-	}
-	if s.Operations == nil {
-		s.Operations = map[string]*Operation{}
-	}
-	if s.Locks == nil {
-		s.Locks = map[string]string{}
 	}
 }
 

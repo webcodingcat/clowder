@@ -44,7 +44,7 @@ func TestTheExampleDirectoryLoadsWithItsValuesApart(t *testing.T) {
 		t.Errorf("classes or priorities: %+v %+v", config.StorageClasses, config.Priorities)
 	}
 	want := []string{
-		"alerts.channels[0].webhook", "backup.password", "hoster.token", "join_keys[0]",
+		"alerts.channels[0].webhook", "hoster.token", "join_keys[0]",
 		`registries["ghcr.io"].password`,
 	}
 	if got := slices.Sorted(maps.Keys(directory.Encrypted)); !slices.Equal(got, want) {
@@ -65,9 +65,9 @@ func TestASecretStandsOnlyWhereOneMay(t *testing.T) {
 		want   string
 	}{
 		{"in clear", func(content string) string {
-			return strings.Replace(content, "  password: !secret |\n    -----BEGIN AGE ENCRYPTED FILE-----\n"+
-				"    YmFja3Vw\n    -----END AGE ENCRYPTED FILE-----\n", "  password: backup.password\n", 1)
-		}, "backup.password: write the value encrypted"},
+			return strings.Replace(content, "    password: !secret |\n      -----BEGIN AGE ENCRYPTED FILE-----\n"+
+				"      cmVnaXN0cnk=\n      -----END AGE ENCRYPTED FILE-----\n", "    password: registry.password\n", 1)
+		}, `registries["ghcr.io"].password: write the value encrypted`},
 		{"elsewhere", func(content string) string {
 			return strings.Replace(content, "username: robot", "username: !secret |\n      abc", 1)
 		}, `registries["ghcr.io"].username: !secret is not allowed here`},

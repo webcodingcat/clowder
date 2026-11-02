@@ -59,10 +59,6 @@ linters:
               desc: "agent only (clowderd); compiles anywhere but the CLI has no use for it"
             - pkg: github.com/webcodingcat/clowder/internal/datakey
               desc: "agent only (clowderd): the data key never leaves the hosts"
-            - pkg: github.com/vishvananda/netlink
-              desc: Linux only
-            - pkg: golang.zx2c4.com/wireguard/wgctrl
-              desc: Linux only
         # Every agent must apply the same commands to the same state: the
         # state reads no files, network, clock or randomness (the time comes
         # with the command).

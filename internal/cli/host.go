@@ -1,12 +1,17 @@
 package cli
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/webcodingcat/clowder/internal/api"
 )
@@ -44,40 +49,76 @@ func newHost(g *globals) *cobra.Command {
 		},
 	})
 	for _, action := range api.HostActions {
-		host.AddCommand(&cobra.Command{
-			Use:   action.Name + " <host>",
-			Short: action.Description,
-			Args:  cobra.ExactArgs(1),
-			RunE: func(cmd *cobra.Command, args []string) error {
-				client, _, err := g.connect()
-				if err != nil {
-					return err
-				}
-				var hosts []api.HostInfo
-				if err := client.Get(cmd.Context(), "/v1/hosts", &hosts); err != nil {
-					return err
-				}
-				id, err := findHost(hosts, args[0])
-				if err != nil {
-					return err
-				}
-				if _, err := client.Post(cmd.Context(), "/v1/hosts/"+strconv.Itoa(id)+"/"+action.Name, nil); err != nil {
-					return err
-				}
-				_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s: %s done\n", args[0], action.Name)
-				return err
-			},
-		})
+		host.AddCommand(newHostAction(g, action))
 	}
 	return host
 }
 
+// newHostAction makes the subcommand of one action; a final one asks first.
+func newHostAction(g *globals, action api.HostAction) *cobra.Command {
+	var yes bool
+	command := &cobra.Command{
+		Use:   action.Name + " <host>",
+		Short: action.Description,
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, _, err := g.connect()
+			if err != nil {
+				return err
+			}
+			var hosts []api.HostInfo
+			if err := client.Get(cmd.Context(), "/v1/hosts", &hosts); err != nil {
+				return err
+			}
+			host, err := findHost(hosts, args[0])
+			if err != nil {
+				return err
+			}
+			if action.Final && !yes {
+				if err := confirmHost(cmd, action.Name, host.Name); err != nil {
+					return err
+				}
+			}
+			if _, err := client.Post(cmd.Context(), "/v1/hosts/"+strconv.Itoa(host.ID)+"/"+action.Name, nil); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s: %s done\n", args[0], action.Name)
+			return err
+		},
+	}
+	if action.Final {
+		command.Flags().BoolVar(&yes, "yes", false, "do it without asking")
+	}
+	return command
+}
+
+// confirmHost asks for the host's name before an action that cannot be
+// undone; without a terminal, --yes is the only way. The question goes to
+// stderr, so it shows even when the output is redirected.
+func confirmHost(cmd *cobra.Command, action, name string) error {
+	in, ok := cmd.InOrStdin().(*os.File)
+	if !ok || !term.IsTerminal(int(in.Fd())) {
+		return fmt.Errorf("host %s cannot be undone: confirm it with --yes", action)
+	}
+	if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "host %s %s cannot be undone. Type the host's name to go on: ", action, name); err != nil {
+		return err
+	}
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) { // at EOF the line is what was typed
+		return fmt.Errorf("read the confirmation: %w", err)
+	}
+	if strings.TrimSpace(line) != name {
+		return fmt.Errorf("host %s was not confirmed; nothing was sent to the cluster", action)
+	}
+	return nil
+}
+
 // findHost takes a host's name or ID.
-func findHost(hosts []api.HostInfo, nameOrID string) (int, error) {
+func findHost(hosts []api.HostInfo, nameOrID string) (api.HostInfo, error) {
 	for _, host := range hosts {
 		if host.Name == nameOrID || strconv.Itoa(host.ID) == nameOrID {
-			return host.ID, nil
+			return host, nil
 		}
 	}
-	return 0, fmt.Errorf("no host %q (clowder host list shows them)", nameOrID)
+	return api.HostInfo{}, fmt.Errorf("no host %q (clowder host list shows them)", nameOrID)
 }

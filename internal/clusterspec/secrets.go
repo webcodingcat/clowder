@@ -34,9 +34,6 @@ func SecretPlaces(config Config) []SecretPlace {
 		registry := yamlpath.Key(yamlpath.Key("", "registries"), host)
 		add(yamlpath.Key(registry, "password"), config.Registries[host].Password)
 	}
-	if config.Backup != nil {
-		add(yamlpath.Key(yamlpath.Key("", "backup"), "password"), config.Backup.Password)
-	}
 	if config.Alerts != nil {
 		alerts := yamlpath.Key("", "alerts")
 		for index, channel := range config.Alerts.Channels {

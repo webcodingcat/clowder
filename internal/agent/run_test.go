@@ -69,9 +69,6 @@ func (f *fakeHoster) AssignFloatingIP(_ context.Context, _ netip.Addr, serverRef
 	return nil
 }
 
-func (*fakeHoster) PowerOff(context.Context, string) error { return nil }
-func (*fakeHoster) PowerOn(context.Context, string) error  { return nil }
-
 // waitForTarget fails the test unless the Floating IP comes to the server.
 func (f *fakeHoster) waitForTarget(t *testing.T, serverRef, token string) {
 	t.Helper()
@@ -405,7 +402,7 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	}
 	secondRecovery := filepath.Join(t.TempDir(), "r")
 	if err := bootstrap("bob", "other", t.TempDir(), theKey, "--recovery-out", secondRecovery); err == nil ||
-		!strings.Contains(err.Error(), "first user already") {
+		!strings.Contains(err.Error(), "has a user already") {
 		t.Errorf("a second bootstrap: %v", err)
 	}
 	if _, err := os.Stat(secondRecovery); err == nil {

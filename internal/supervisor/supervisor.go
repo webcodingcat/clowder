@@ -53,8 +53,9 @@ type Supervisor struct {
 	rules   Rules
 	backoff Backoff
 	// missed is called when the events broke off and are followed again:
-	// what died in between went unseen (a restart of Docker kills every
-	// container), so the agent starts its stacks as after a boot
+	// what died in between went unseen (Docker restarted: live-restore keeps
+	// the containers running, but not their events), so the agent brings its
+	// stacks up as after a boot
 	missed func()
 	// seen is called after each event, so whoever follows the containers
 	// (the routes to them) looks again

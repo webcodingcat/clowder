@@ -27,7 +27,7 @@ import (
 
 // InitOptions are what cloud-init gives clowderd init.
 type InitOptions struct {
-	// BootstrapKey is the key OpenTofu made; it lets the first user in and
+	// BootstrapKey is the key OpenTofu made; it lets the user in and
 	// later hosts join.
 	BootstrapKey string
 	Name         string

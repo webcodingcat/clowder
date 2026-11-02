@@ -12,24 +12,25 @@ import (
 // expired: a host whose clock runs behind still takes it for valid.
 const revokedKept = 7 * 24 * time.Hour
 
-// AddUser records a certificate the leader issued to a user; a new name
-// creates the user.
+// AddUser records the cluster's one user, whom the bootstrap makes, with
+// their first certificate. Only a cluster without a user takes it: two
+// bootstraps at once cannot both get in. Further certificates come only
+// through RecoverUser.
 type AddUser struct {
 	Name   string `json:"name"`
 	Serial string `json:"serial"`
-	// NotAfter is when the certificate expires; a revocation is kept until
-	// then.
+	// NotAfter is when the certificate expires; once it is revoked, it stays
+	// on the revocation list until then.
 	NotAfter time.Time `json:"not_after"`
-	// First is the bootstrap's user, who may only come into a cluster
-	// without users: two bootstraps at once cannot both get in.
-	First bool `json:"first,omitempty"`
-	// RecoveryRecipient comes with the first user: the public half of the
-	// recovery key the bootstrap made (State.RecoveryRecipient).
-	RecoveryRecipient string `json:"recovery_recipient,omitempty"`
+	// RecoveryRecipient is the public half of the recovery key the
+	// bootstrap made (State.RecoveryRecipient).
+	RecoveryRecipient string `json:"recovery_recipient"`
 }
 
 func applyAddUser(s *State, _ Command, payload AddUser) (func(), error) {
 	switch {
+	case len(s.Users) > 0:
+		return nil, errors.New("the cluster has a user already, and a cluster has only one")
 	case payload.Name == "":
 		return nil, errors.New("the user has no name")
 	case payload.Serial == "":
@@ -38,21 +39,12 @@ func applyAddUser(s *State, _ Command, payload AddUser) (func(), error) {
 		return nil, errors.New("the certificate has no expiry")
 	case s.serialInUse(payload.Serial):
 		return nil, fmt.Errorf("serial %s is used already", payload.Serial)
-	case payload.First && len(s.Users) > 0:
-		return nil, errors.New("the cluster has its first user already; users add others")
-	case payload.First != strings.HasPrefix(payload.RecoveryRecipient, "age1"):
-		return nil, errors.New("the first user, and only the first, brings the recovery key's recipient (age1...)")
+	case !strings.HasPrefix(payload.RecoveryRecipient, "age1"):
+		return nil, errors.New("the recovery key's recipient is no age key (age1...)")
 	}
 	return func() {
-		if payload.First {
-			s.RecoveryRecipient = payload.RecoveryRecipient
-		}
-		user, ok := s.Users[payload.Name]
-		if !ok {
-			user = &User{Name: payload.Name, Serials: map[string]time.Time{}}
-			s.Users[payload.Name] = user
-		}
-		user.Serials[payload.Serial] = payload.NotAfter
+		s.RecoveryRecipient = payload.RecoveryRecipient
+		s.Users[payload.Name] = &User{Name: payload.Name, Serials: map[string]time.Time{payload.Serial: payload.NotAfter}}
 	}, nil
 }
 
@@ -169,65 +161,6 @@ func (s *State) useCode(code UsedCode, at time.Time) {
 		return at.Sub(expires) > usedCodeKept
 	})
 	s.UsedCodes[code.Digest] = code.Expires
-}
-
-// RemoveUser removes a user and revokes all their certificates.
-type RemoveUser struct {
-	Name string `json:"name"`
-}
-
-func applyRemoveUser(s *State, cmd Command, payload RemoveUser) (func(), error) {
-	user, ok := s.Users[payload.Name]
-	if !ok {
-		return nil, fmt.Errorf("no user %s", payload.Name)
-	}
-	return func() {
-		for serial, notAfter := range user.Serials {
-			s.revoke(serial, notAfter, cmd.At)
-		}
-		delete(s.Users, payload.Name)
-	}, nil
-}
-
-// Revoke puts one certificate of a user or a host on the revocation list:
-// a lost laptop, or a host that is gone. The state knows when the
-// certificate expires, so it refuses a serial it has not recorded.
-type Revoke struct {
-	Serial string `json:"serial"`
-}
-
-func applyRevoke(s *State, cmd Command, payload Revoke) (func(), error) {
-	if payload.Serial == "" {
-		return nil, errors.New("the serial is empty")
-	}
-	if _, revoked := s.Revoked[payload.Serial]; revoked {
-		return nil, fmt.Errorf("serial %s is revoked already", payload.Serial)
-	}
-	notAfter, ok := s.certificateExpiry(payload.Serial)
-	if !ok {
-		return nil, fmt.Errorf("no user or host has the certificate with serial %s", payload.Serial)
-	}
-	return func() {
-		s.revoke(payload.Serial, notAfter, cmd.At)
-		for _, user := range s.Users {
-			delete(user.Serials, payload.Serial)
-		}
-	}, nil
-}
-
-// certificateExpiry tells when the certificate of a user or a host expires.
-func (s *State) certificateExpiry(serial string) (time.Time, bool) {
-	for _, user := range s.Users {
-		if notAfter, ok := user.Serials[serial]; ok {
-			return notAfter, true
-		}
-	}
-	for _, host := range s.Hosts {
-		if host.CertificateSerial == serial {
-			return host.CertificateNotAfter, true
-		}
-	}
-	return time.Time{}, false
 }
 
 // revoke puts a certificate on the revocation list. The list grows only

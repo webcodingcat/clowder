@@ -17,6 +17,9 @@
 #             examples/hetzner makes a host, test/live drives it (about 20
 #             minutes; needs HLAB=<path to HLab's bin/hlab> and /dev/kvm).
 #             What a failed run leaves stays for a look.
+#   live release <tag>  the live tests on a release, on a checkout of its
+#             tag, without the test hook: the host installs clowderd from the
+#             APT repository, the CLI comes from the GitHub release
 #   live down destroy what the live tests left and stop their lab
 set -euo pipefail
 # Docker gets Windows paths from pwd -W; Git Bash must not rewrite them. Native
@@ -61,6 +64,8 @@ readonly PACKAGE_PORT=8099
 readonly REGISTRY_PORT=5000
 readonly SMTP_PORT=1025
 readonly MAIL_API_PORT=8025
+# Where the releases' CLI archives are (bin/dev live release).
+readonly RELEASES_URL=https://github.com/webcodingcat/clowder/releases/download
 
 # in_image <image> <command...>: Run a command in an image with the repository
 # mounted at /src as the working directory.
@@ -71,15 +76,33 @@ in_image() {
     -e GOFLAGS=-buildvcs=false "${image}" "$@"
 }
 
-# version: Print the version for the build without a leading v: a tag
-# (v1.2.3 -> 1.2.3, v1.2.3-rc1 -> 1.2.3~rc1, which sorts before 1.2.3 in
-# Debian's version order), otherwise 0.0.0~dev+<commit>, which sorts before
-# any release.
+# release_tag: Print the tag the build is for: the one the release workflow
+# runs on (a final tag may share its commit with the release candidate),
+# else the checked-out commit's; fail without one.
+# Globals:
+#   GITHUB_REF_TYPE, GITHUB_REF_NAME (read; set by GitHub Actions)
+release_tag() {
+  if [[ "${GITHUB_REF_TYPE:-}" == tag ]]; then
+    echo "${GITHUB_REF_NAME}"
+    return
+  fi
+  (cd "${ROOT}" && git describe --tags --exact-match 2>/dev/null)
+}
+
+# package_version <tag>: Print the Debian version of a tag, without the
+# leading v (v1.2.3 -> 1.2.3, v1.2.3-rc1 -> 1.2.3~rc1, which sorts before
+# 1.2.3 in Debian's version order).
+package_version() {
+  local tag="${1#v}"
+  echo "${tag//-/\~}"
+}
+
+# version: Print the version for the build: the tag's package version, or
+# 0.0.0~dev+<commit> without a tag, which sorts before any release.
 version() {
   local tag commit
-  if tag="$(cd "${ROOT}" && git describe --tags --exact-match 2>/dev/null)"; then
-    tag="${tag#v}"
-    echo "${tag//-/\~}"
+  if tag="$(release_tag)"; then
+    package_version "${tag}"
     return
   fi
   commit="$(cd "${ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -275,41 +298,83 @@ start_mail() {
     --smtp-require-starttls --smtp-auth-accept-any >/dev/null
 }
 
-# cmd_live: Run the live tests on a new host; tear it down if they pass.
+# serve_package: Serve the clowderd package of dist/ in the lab's network;
+# print the test hook's variables for examples/hetzner.
+# Globals:
+#   HLAB_NETWORK (read)
+serve_package() {
+  local sha256
+  sha256="$(in_lab "${GO_IMAGE}" sh -c 'mkdir /work/www && cp dist/clowderd_*_amd64.deb /work/www/clowderd.deb \
+    && sha256sum /work/www/clowderd.deb' | cut -d ' ' -f 1)"
+  docker rm -f "${LIVE_PACKAGES}" >/dev/null 2>&1 || true
+  docker run -d --rm --name "${LIVE_PACKAGES}" --network "${HLAB_NETWORK}" \
+    -v "${LIVE_VOLUME}:/work:ro" "${BUSYBOX_IMAGE}" \
+    httpd -f -p "${LAB_ADDRESS}:${PACKAGE_PORT}" -h /work/www >/dev/null
+  echo "clowderd_package_url    = \"http://${LAB_ADDRESS}:${PACKAGE_PORT}/clowderd.deb\""
+  echo "clowderd_package_sha256 = \"${sha256}\""
+}
+
+# fetch_release_cli <tag>: Download the release's CLI for Linux into
+# /work/cli; print the variable that pins the release's clowderd for
+# examples/hetzner.
+fetch_release_cli() {
+  local tag="$1"
+  # outside the lab's network, where GitHub is reachable
+  docker run --rm -v "${LIVE_VOLUME}:/work" "${GO_IMAGE}" sh -c \
+    'mkdir /work/cli && curl -fsSL "$1" | tar -xz -C /work/cli clowder' \
+    sh "${RELEASES_URL}/${tag}/clowder_${tag}_linux-amd64.tar.gz"
+  echo "clowderd_version = \"$(package_version "${tag}")\""
+}
+
+# cmd_live [<tag>]: Run the live tests on a new host; tear it down if they
+# pass. With a tag, on that release instead of dist/; the tests come from the
+# checkout, so it must be at the tag.
 cmd_live() {
-  local sha256 public_key status=0
-  cmd_package
+  local tag="${1:-}" clowder=/src/dist/linux-amd64/clowder package_variables public_key
+  local status=0
+  if [[ -n "${tag}" ]]; then
+    if [[ "$(cd "${ROOT}" && git rev-parse "${tag}^{commit}" 2>/dev/null)" != "$(cd "${ROOT}" && git rev-parse HEAD)" ]]; then
+      echo "bin/dev live release: check out the tag ${tag} first" >&2
+      return 1
+    fi
+    if [[ -n "$(cd "${ROOT}" && git status --porcelain)" ]]; then
+      echo "bin/dev live release: the tests come from the checkout; commit or stash its changes first" >&2
+      return 1
+    fi
+    clowder=/work/cli/clowder
+  else
+    cmd_package
+  fi
   lab up
   eval "$(lab env)"
   if live_host_left; then
     echo "bin/dev live: an earlier run left its host; bin/dev live down removes it" >&2
     return 1
   fi
-  in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/* && mkdir /work/www \
+  in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/* \
     && ssh-keygen -q -t ed25519 -N "" -C clowder-live -f /work/id_ed25519'
-  sha256="$(in_lab "${GO_IMAGE}" sh -c 'cp dist/clowderd_*_amd64.deb /work/www/clowderd.deb \
-    && sha256sum /work/www/clowderd.deb' | cut -d ' ' -f 1)"
+  if [[ -n "${tag}" ]]; then
+    package_variables="$(fetch_release_cli "${tag}")"
+  else
+    package_variables="$(serve_package)"
+  fi
   public_key="$(in_lab "${GO_IMAGE}" cat /work/id_ed25519.pub)"
   in_lab "${GO_IMAGE}" sh -c 'cat >/work/live.tfvars' <<EOF
-ssh_public_key          = "${public_key}"
-admin_cidrs             = ["${LAB_ADDRESS}/32"]
-clowderd_package_url    = "http://${LAB_ADDRESS}:${PACKAGE_PORT}/clowderd.deb"
-clowderd_package_sha256 = "${sha256}"
-storage_classes         = { fast = 20, bulk = 20, small = 10 }
-published_ports         = ["udp/9987"]
+ssh_public_key  = "${public_key}"
+admin_cidrs     = ["${LAB_ADDRESS}/32"]
+storage_classes = { fast = 20, bulk = 20, small = 10 }
+published_ports = ["udp/9987"]
+${package_variables}
 EOF
-  docker rm -f "${LIVE_PACKAGES}" >/dev/null 2>&1 || true
-  docker run -d --rm --name "${LIVE_PACKAGES}" --network "${HLAB_NETWORK}" \
-    -v "${LIVE_VOLUME}:/work:ro" "${BUSYBOX_IMAGE}" \
-    httpd -f -p "${LAB_ADDRESS}:${PACKAGE_PORT}" -h /work/www >/dev/null
   start_registry
   start_mail
   live_tofu 'tofu apply -input=false -auto-approve -state=/work/terraform.tfstate \
     -var-file=/work/live.tfvars && tofu output -json -state=/work/terraform.tfstate >/work/outputs.json' \
-    && in_lab "${GO_IMAGE}" env LIVE_DIR=/work CLOWDER=/src/dist/linux-amd64/clowder \
+    && in_lab "${GO_IMAGE}" env LIVE_DIR=/work CLOWDER="${clowder}" \
       go test -tags live -count=1 -timeout 90m -v ./test/live \
     || status=$?
-  docker rm -f "${LIVE_PACKAGES}" "${LIVE_REGISTRY}" "${LIVE_MAIL}" >/dev/null
+  # the package server runs only without release
+  docker rm -f "${LIVE_PACKAGES}" "${LIVE_REGISTRY}" "${LIVE_MAIL}" >/dev/null 2>&1 || true
   if ((status != 0)); then
     echo "bin/dev live: failed; the host stays for a look (ssh from the lab's network with" \
       "/work/id_ed25519 in the volume ${LIVE_VOLUME}); bin/dev live down removes it" >&2
@@ -347,11 +412,15 @@ main() {
     test) cmd_test "${@:2}" ;;
     test-tools) cmd_test_tools ;;
     live)
-      if [[ "${2:-}" == down ]]; then
-        cmd_live_down
-      else
-        cmd_live
-      fi
+      case "${2:-}" in
+        "") cmd_live ;;
+        down) cmd_live_down ;;
+        release) cmd_live "${3:?bin/dev live release needs a tag}" ;;
+        *)
+          echo "bin/dev live: unknown mode ${2} (release <tag>, down)" >&2
+          exit 2
+          ;;
+      esac
       ;;
     *)
       sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' >&2

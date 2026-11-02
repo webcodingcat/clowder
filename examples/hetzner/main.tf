@@ -11,7 +11,7 @@ provider "hcloud" {
 }
 
 resource "random_password" "bootstrap" {
-  # the key that lets the first user in and later hosts join: the only defence
+  # the key that lets the user in and later hosts join: the only defence
   # of the bootstrap route, so long, and plain enough for YAML, a shell and a file
   length  = 48
   special = false

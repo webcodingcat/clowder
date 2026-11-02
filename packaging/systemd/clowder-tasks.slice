@@ -1,7 +1,0 @@
-[Unit]
-Description=Short-lived tasks of the clowder agent (docker compose, drbdadm, ...)
-
-[Slice]
-# The tasks must not push the payload out; restic runs in its own scope with
-# a higher limit.
-MemoryMax=512M

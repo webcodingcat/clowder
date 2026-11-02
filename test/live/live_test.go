@@ -174,7 +174,7 @@ func waitForSetup(t *testing.T, server host) {
 	checkMemory(t, server, "idle")
 }
 
-// bootstrap makes the test the first user, its recovery key in a file, and
+// bootstrap makes the test the user, its recovery key in a file, and
 // fills in cluster.yaml from the module's outputs, with the hoster token
 // and the registry's login encrypted next to the bootstrap's join key, then
 // applies it.

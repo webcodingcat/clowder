@@ -78,24 +78,6 @@ func (c *Client) AssignFloatingIP(ctx context.Context, ip netip.Addr, serverRef 
 		fmt.Sprintf("assign the Floating IP %s to server %s", ip, serverRef))
 }
 
-// PowerOff cuts the server's power and waits until it is off.
-func (c *Client) PowerOff(ctx context.Context, serverRef string) error {
-	server, err := serverID(serverRef)
-	if err != nil {
-		return err
-	}
-	return c.act(ctx, fmt.Sprintf("/servers/%d/actions/poweroff", server), nil, "power off server "+serverRef)
-}
-
-// PowerOn starts the server and waits until it runs.
-func (c *Client) PowerOn(ctx context.Context, serverRef string) error {
-	server, err := serverID(serverRef)
-	if err != nil {
-		return err
-	}
-	return c.act(ctx, fmt.Sprintf("/servers/%d/actions/poweron", server), nil, "power on server "+serverRef)
-}
-
 // findFloatingIP looks the address up among the project's Floating IPs:
 // the API can list them but not find one by its address.
 func (c *Client) findFloatingIP(ctx context.Context, ip netip.Addr) (floatingIP, error) {

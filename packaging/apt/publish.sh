@@ -23,7 +23,8 @@ import_key() {
 }
 
 # write_config <repository> <fingerprint>: reprepro's configuration. conf/ and
-# db/ stay in the repository: the next release adds to them.
+# db/ stay in the repository: the next release adds to them. Limit: 0 keeps
+# every version, so a host pinned to an older one still finds it.
 write_config() {
   local repository="$1" fingerprint="$2"
   mkdir -p "${repository}/conf"
@@ -34,6 +35,7 @@ Codename: ${CODENAME}
 Architectures: amd64
 Components: main
 Description: clowder packages for Debian 13
+Limit: 0
 SignWith: ${fingerprint}
 EOF
 }

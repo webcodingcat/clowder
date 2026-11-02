@@ -217,7 +217,7 @@ func (s *Server) recoverUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	// the user acts, as the bootstrap's first user does: the code proved
+	// the user acts, as at the bootstrap: the code proved
 	// it, and the command's kind tells the audit that it was a recovery.
 	// No time here: the leader stamps its own (proposeHere).
 	cmd, err := state.NewCommand(state.KindRecoverUser, time.Time{}, state.UserActor(request.User),

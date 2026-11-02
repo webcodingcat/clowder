@@ -152,7 +152,6 @@ func startCluster(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current.RecoveryRecipient = recovery.Recipient().String()
 	host := &oneHost{state: current, changed: make(chan struct{})}
 	host.changes.Reset(current.Index)
 	agent := api.NewServer(api.ServerConfig{
@@ -184,7 +183,10 @@ func startCluster(t *testing.T) string {
 		t.Fatal(err)
 	}
 	addAlice, err := state.NewCommand(state.KindAddUser, time.Now(), state.LeaderActor,
-		state.AddUser{Name: "alice", Serial: pki.Serial(parsed), NotAfter: parsed.NotAfter})
+		state.AddUser{
+			Name: "alice", Serial: pki.Serial(parsed), NotAfter: parsed.NotAfter,
+			RecoveryRecipient: recovery.Recipient().String(),
+		})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,11 +315,24 @@ func TestHostCommandsTalkToTheCluster(t *testing.T) {
 		t.Errorf("cluster status:\n%s", out)
 	}
 
-	if _, err := run(t, "--cluster", dir, "host", "enable", "node0"); err == nil ||
-		!strings.Contains(err.Error(), "enable works on a host that is disabled") {
+	if _, err := run(t, "--cluster", dir, "host", "drain", "node0"); err == nil ||
+		!strings.Contains(err.Error(), "drain works on a host that is active") {
 		t.Errorf("want the state's refusal, got %v", err)
 	}
 	if _, err := run(t, "--cluster", dir, "host", "drain", "node9"); err == nil || !strings.Contains(err.Error(), `no host "node9"`) {
 		t.Errorf("want an unknown host, got %v", err)
+	}
+}
+
+func TestRemovingAHostNeedsAConfirmation(t *testing.T) {
+	dir := startCluster(t)
+	// the test's stdin is no terminal, so only --yes confirms
+	if _, err := run(t, "--cluster", dir, "host", "remove", "node0"); err == nil ||
+		!strings.Contains(err.Error(), "confirm it with --yes") {
+		t.Errorf("want a refusal without --yes, got %v", err)
+	}
+	if _, err := run(t, "--cluster", dir, "host", "remove", "node0", "--yes"); err == nil ||
+		!strings.Contains(err.Error(), "the last that runs stacks") {
+		t.Errorf("want the state's refusal for the only host, got %v", err)
 	}
 }

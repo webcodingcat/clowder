@@ -6,12 +6,9 @@
 package state
 
 import (
-	"maps"
 	"net/netip"
-	"slices"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
@@ -76,10 +73,7 @@ type State struct {
 	Retired []RetiredCopy `json:"retired,omitempty"`
 	// Alerts are the open alerts by key.
 	Alerts map[string]*Alert `json:"alerts,omitempty"`
-	// Operations and their Locks are for phase 2: nothing starts one yet.
-	Operations map[string]*Operation `json:"operations,omitempty"`
-	Locks      map[string]string     `json:"locks,omitempty"` // "stack/<stack ID>" or "volume/<volume ID>" -> operation
-	Audit      []AuditEntry          `json:"audit,omitempty"`
+	Audit  []AuditEntry      `json:"audit,omitempty"`
 	// changes are the resources the command being applied changed (Apply
 	// returns them); not part of the state.
 	changes []Change
@@ -190,8 +184,8 @@ type Meta struct {
 	// Namespace is empty for a namespace, which lives in none.
 	Namespace string `json:"namespace,omitempty"`
 	Name      string `json:"name"`
-	// Owner is the channel that applied the resource (OwnerCLI or
-	// GitOpsOwner): only it changes or deletes the resource. names.Default
+	// Owner is the channel that applied the resource (OwnerCLI so far):
+	// only it changes or deletes the resource. names.Default
 	// belongs to no channel.
 	Owner string `json:"owner,omitempty"`
 	// Generation counts the changes of the spec.
@@ -282,14 +276,9 @@ type Service struct {
 	DependsOn []string `json:"depends_on,omitempty"`
 }
 
-// OwnerCLI owns the resources users apply with the CLI.
+// OwnerCLI owns the resources users apply with the CLI. A resource has one
+// owner, so a later channel (GitOps) and the CLI never overwrite each other.
 const OwnerCLI = "cli"
-
-// GitOpsOwner owns the resources of a GitOps source; a resource has one
-// owner, so the CLI and a source never overwrite each other.
-func GitOpsOwner(source string) string {
-	return "gitops:" + source
-}
 
 // StackStatus says what the stack is doing.
 type StackStatus string
@@ -359,20 +348,3 @@ type AuditEntry struct {
 
 // auditSize is how many audit entries the state keeps.
 const auditSize = 10000
-
-// MinVersion is the oldest agent version in the cluster (hosts that have not
-// reported one count as unknown and are skipped); the leader uses new
-// command kinds only when every agent knows them.
-func (s *State) MinVersion() string {
-	var oldest string
-	for _, id := range slices.Sorted(maps.Keys(s.Hosts)) {
-		host := s.Hosts[id]
-		if host.Phase == Removed || host.Version == "" {
-			continue
-		}
-		if oldest == "" || buildinfo.Compare(host.Version, oldest) < 0 {
-			oldest = host.Version
-		}
-	}
-	return oldest
-}

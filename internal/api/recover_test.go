@@ -53,8 +53,13 @@ func TestARecoveredUserIsBackAndTheOldCertificateIsOut(t *testing.T) {
 	cluster := newTestCluster(t)
 	cluster.withRealCA()
 	stolen := cluster.userCertificate("alice")
-	cmd, err := state.NewCommand(state.KindAddUser, time.Now(), state.LeaderActor,
-		state.AddUser{Name: "alice", Serial: pki.Serial(stolen.Leaf), NotAfter: stolen.Leaf.NotAfter})
+	// alice's only certificate is the one that gets stolen: the user exists
+	// already, so it comes in as an earlier recovery
+	cmd, err := state.NewCommand(state.KindRecoverUser, time.Now(), state.UserActor("alice"),
+		state.RecoverUser{
+			Name: "alice", Serial: pki.Serial(stolen.Leaf), NotAfter: stolen.Leaf.NotAfter,
+			Code: state.UsedCode{Digest: "earlier", Expires: time.Now().Add(time.Hour)},
+		})
 	if err != nil {
 		t.Fatal(err)
 	}

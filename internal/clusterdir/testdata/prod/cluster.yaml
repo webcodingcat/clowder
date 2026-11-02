@@ -34,12 +34,6 @@ priorities:
 defaults:
   reservations: {memory: 128M, cpus: "0.1"}
 system_reserve: {memory: 512M, cpus: "0.25"}
-backup:
-  target: {type: restic, url: "sftp:u12345@u12345.your-storagebox.de:/clowder"}
-  password: !secret |
-    -----BEGIN AGE ENCRYPTED FILE-----
-    YmFja3Vw
-    -----END AGE ENCRYPTED FILE-----
 alerts:
   channels:
     - type: discord

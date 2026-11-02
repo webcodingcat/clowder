@@ -51,7 +51,7 @@ func TestAStackIsPutOnceAndOnlyByItsChannel(t *testing.T) {
 		t.Errorf("the same stack written out: changes %v, %v", changes, err)
 	}
 	gitops := putResource(resource.KindStack, "default", "shop", shopSpec())
-	gitops.Owner = GitOpsOwner("main")
+	gitops.Owner = "gitops:main" // another channel
 	c.refuse(KindPutResource, LeaderActor, gitops, "belongs to cli")
 }
 
@@ -201,7 +201,7 @@ func TestAStackNamesVolumesAndSecretsOfItsNamespace(t *testing.T) {
 func TestAPlacedStackNamesNoVolumeWhoseDataIsOnAnotherHost(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
-	c.mustApply(KindAddHost, LeaderActor, AddHost{Host: testHost(1)})
+	c.addHost(testHost(1))
 	c.putShop(shopSpec())
 	host := HostID(0)
 	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackStarting, Host: &host})

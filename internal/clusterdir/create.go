@@ -26,7 +26,7 @@ type NewDirectory struct {
 // into path: not over a cluster.yaml, and not over credentials of a cluster
 // of the same name unless force says so (a cluster set up anew). The CLI
 // asks before it contacts the cluster, so nothing fails after the cluster
-// has its first user.
+// has its user.
 func CheckBootstrap(path, cluster string, force bool) error {
 	if err := checkNoConfig(path); err != nil {
 		return err

@@ -24,7 +24,7 @@ are not needed on the host.
 | `bin/dev build` | `clowderd` for Linux, `clowder` for Linux, macOS and Windows into `dist/` |
 | `bin/dev package` | build, then the Debian packages into `dist/` |
 | `bin/dev all` | lint, test, test-tools, package – what CI runs |
-| `bin/dev live` | the live tests: a host from `examples/hetzner` in an HLab lab of their own, driven by `test/live` (about 20 minutes; `HLAB` points at HLab's `bin/hlab`, needs `/dev/kvm`); `bin/dev live down` removes what a failed run left |
+| `bin/dev live` | the live tests: a host from `examples/hetzner` in an HLab lab of their own, driven by `test/live` (about 20 minutes; `HLAB` points at HLab's `bin/hlab`, needs `/dev/kvm`); `bin/dev live down` removes what a failed run left; `bin/dev live release <tag>` tests a published release (Shipping, Release checklist) |
 
 Run the live tests only at the end of a piece of work, on its finished state, and only while
 no one else uses the lab `clowder-live`.

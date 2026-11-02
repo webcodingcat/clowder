@@ -95,10 +95,12 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   secret file changes its services' digest label, which recreates them ([Rendering](specs.md#rendering-internalcompose), Labels).
 - **After a boot no container runs** (`restart: "no"`). The runner remembers only in memory
   what each stack came up with, so its first pass runs `compose up` for every stack. A
-  restart of Docker also stops every container. The supervisor notices it (its event
-  stream breaks off) and starts a pass at once (`loop.Signal.DockerRestarted`). The runner
-  stores Docker's restart count with each stack it brought up (`loop.BroughtUp`), so after a
-  restart, even one during `compose up`, every stack comes up again. The first pass waits
+  restart of Docker leaves the containers running (`live-restore` in `daemon.json`), but
+  what dies meanwhile goes unseen. The supervisor notices the restart (its event stream
+  breaks off) and starts a pass at once (`loop.Signal.DockerRestarted`). The runner stores
+  Docker's restart count with each stack it brought up (`loop.BroughtUp`), so after a
+  restart, even one during `compose up`, it runs `compose up` for every stack again, which
+  starts what died and leaves the rest alone. The first pass waits
   until the state has caught up with the Raft log, so a host that was away does not start
   a stack that has since moved to another host.
 - The agent also logs Docker in to the registries of `cluster.yaml`, once per login
@@ -199,8 +201,8 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   the stack's project, so the supervisor does not fight it.
 - A start that fails counts as another crash; a container that is gone
   (`docker.ErrNoContainer`) is let be. `destroy` events drop what the supervisor knew about a
-  container. When the events break off, what died in between went unseen (a restart of
-  Docker kills every container): the supervisor tells the agent, which then runs
+  container. When the events break off, what died in between went unseen (Docker
+  restarted; its containers keep running): the supervisor tells the agent, which then runs
   `compose up` for every stack as after a boot.
 
 ## Host check (`internal/hostcheck`, `clowderd check`)

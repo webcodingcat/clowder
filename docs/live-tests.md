@@ -10,6 +10,7 @@ from where the tools reach the hosts. Point `HLAB` at its wrapper:
 export HLAB=/path/to/hlab/bin/hlab
 bin/dev live         # about 20 minutes; tears everything down if it passes
 bin/dev live down    # after a failure: destroy the host, stop the lab
+bin/dev live release v1.2.3-rc1   # on a checkout of the tag: the release, without the test hook
 ```
 
 Run them only at the end of a piece of work, on its finished state, and only while no one
@@ -20,14 +21,15 @@ tests: lint, the unit tests, the renderers against the real tools, the packages.
 
 - It builds the packages and starts the lab `clowder-live` (`test/live/lab.yaml`, with
   ports apart from other labs).
-- In the lab's network it serves the `clowderd` package over HTTP.
+- In the lab's network it serves the `clowderd` package over HTTP (not with `release`).
 - It runs a private registry on `192.0.2.2:5000`, with TLS from a throw-away CA and a
   password.
 - It runs a mail server for the alerts on `192.0.2.2:1025`: mailpit, with STARTTLS from
   the registry's certificate, any login, and its API on `:8025`.
-- It applies `examples/hetzner` with the test hook: the package's URL and SHA-256,
-  `admin_cidrs` = `192.0.2.2/32`, a third storage class `small` of 10 GB, and the
-  published port `udp/9987`.
+- It applies `examples/hetzner` with `admin_cidrs` = `192.0.2.2/32`, a third storage
+  class `small` of 10 GB, the published port `udp/9987`, and the test hook: the package's
+  URL and SHA-256. With `release <tag>` there is no hook: `clowderd_version` names the
+  release, and the tests use the CLI from the release's archive.
 - It runs `go test -tags live ./test/live`, which gets HLab's ACME directory and CA from
   `hlab env`.
 

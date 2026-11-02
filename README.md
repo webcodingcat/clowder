@@ -25,23 +25,46 @@ says how far it is. Until `v1.0.0`, a new release may need a cluster set up anew
 
 ## Getting started on Hetzner Cloud
 
-[`examples/hetzner`](examples/hetzner) is an OpenTofu module for the first host. It
-installs and checks everything and starts the agent; this takes about 5 minutes
-(`journalctl -u clowder-setup` shows how far it is).
+You need two things on your machine:
+
+- **The CLI `clowder`:** the archive for Linux, macOS or Windows from a
+  [release](https://github.com/webcodingcat/clowder/releases), or on Debian and Ubuntu
+  (amd64) the package `clowder` from clowder's APT repository
+  (`https://webcodingcat.github.io/clowder-apt`, distribution `trixie`, component `main`).
+- **The module [`examples/hetzner`](examples/hetzner)** for the first host, checked out at
+  the same release, and [OpenTofu](https://opentofu.org). The module installs and checks
+  everything and starts the agent; this takes about 5 minutes
+  (`journalctl -u clowder-setup` shows how far it is).
+
+You work in two directories: the module's, which holds the OpenTofu state, and the
+**cluster directory** of your own, which `cluster bootstrap` makes and which you can share
+in a repository. Keep them apart: the state holds the bootstrap key in clear. Commands in
+the cluster directory find it themselves; elsewhere name it with `--cluster <directory>` or
+`CLOWDER_CLUSTER`.
 
 ```bash
+git clone --branch v0.1.0 https://github.com/webcodingcat/clowder.git
+cd clowder/examples/hetzner
 export HCLOUD_TOKEN=...
 tofu init
 tofu apply -var 'ssh_public_key=ssh-ed25519 AAAA...' -var 'admin_cidrs=["203.0.113.7/32"]'
-tofu output -raw bootstrap_key > bootstrap-key
-clowder cluster bootstrap me --name prod --seed "$(tofu output -raw public_address)" \
-  --key-file bootstrap-key
+mkdir ~/prod && cd ~/prod      # the cluster directory
+clowder cluster bootstrap me --name prod \
+  --seed "$(tofu -chdir=<module directory> output -raw public_address)" \
+  --key-file <(tofu -chdir=<module directory> output -raw bootstrap_key)
 ```
+
+`<(...)` hands the bootstrap key over without a file. Without Bash, write it to a file
+outside the cluster directory and delete it after the bootstrap: the key lets anyone in
+who reaches the API, and later lets hosts join.
 
 The bootstrap shows the cluster's **recovery key** once and asks you to type its last 8
 characters (`--recovery-out <file>` writes it to a file instead). Keep it in your password
 manager and offline. If the cluster is lost, the recovery key still opens the values in
 your files (`secret decrypt`) and moves them to a new cluster (`secret rekey --identity`).
+
+A cluster has **one user**, the one the bootstrap makes. Do not share its credentials;
+more users come later.
 
 Lost your credentials, or your laptop? Get a code as root on a host (the Hetzner console
 works without SSH): `clowderd user recovery-code me`. Then
@@ -52,8 +75,9 @@ replaces the recovery key; then encrypt your files for it with
 `clowder secret rekey -f <directory>`. Each code is valid for 15 to 30 minutes and works
 once.
 
-The bootstrap writes `cluster.yaml` into the current directory. Fill it in from
-`tofu output cluster_yaml`, add the hoster's token, then run `clowder cluster apply`:
+The bootstrap writes `cluster.yaml` into the cluster directory. Fill it in from
+`tofu output cluster_yaml` in the module's directory, add the hoster's token, then run
+`clowder cluster apply`:
 
 ```yaml
 hoster:
@@ -135,6 +159,8 @@ Good to know:
   clowder refuses a secret in clear.
 - Until clowder has permissions, every user can read every secret, through a stack.
 - Names are lowercase letters, digits and `-`, at most 63 characters.
+- Backups come with phase 3. Until then a volume's data is only on its hosts' disks,
+  and `cluster.yaml` refuses `backup:`.
 
 ## Compatibility
 

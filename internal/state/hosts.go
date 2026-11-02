@@ -23,7 +23,7 @@ const FirstJoinKey = "join_keys[0]"
 
 // applyBootstrap makes the first host the cluster. Until the first
 // cluster.yaml is applied, the config is revision 0 and names only the
-// bootstrap key, so the first user and the next hosts get in with it.
+// bootstrap key, so the user and the next hosts get in with it.
 func applyBootstrap(s *State, _ Command, payload Bootstrap) (func(), error) {
 	switch {
 	case s.Keys != nil:
@@ -48,32 +48,6 @@ func applyBootstrap(s *State, _ Command, payload Bootstrap) (func(), error) {
 		s.Hosts[host.ID] = &host
 		s.Namespaces[names.Default] = &Namespace{Meta: Meta{Name: names.Default, Generation: 1}}
 	}, nil
-}
-
-// AddHost adds a host that joins; the leader has picked its free ID.
-type AddHost struct {
-	Host Host `json:"host"`
-}
-
-func applyAddHost(s *State, _ Command, payload AddHost) (func(), error) {
-	host := payload.Host
-	if host.ID < 0 || host.ID >= MaxHosts {
-		return nil, fmt.Errorf("host ID %d is not from 0 to %d", host.ID, MaxHosts-1)
-	}
-	// IDs of removed hosts stay taken until every DRBD peer has forgotten them
-	if _, taken := s.Hosts[host.ID]; taken {
-		return nil, fmt.Errorf("host ID %d is taken", host.ID)
-	}
-	if err := checkNewHost(host); err != nil {
-		return nil, err
-	}
-	for _, other := range s.Hosts {
-		if other.Name == host.Name && other.Phase != Removed {
-			return nil, fmt.Errorf("a host named %s is a member already", host.Name)
-		}
-	}
-	host.Voter, host.Phase = false, Joining
-	return func() { s.Hosts[host.ID] = &host }, nil
 }
 
 // checkNewHost checks what a host must bring.
@@ -116,7 +90,9 @@ const (
 )
 
 // phaseChanges are the allowed moves; any phase may also go to Removed, by
-// the leader.
+// the leader or a user, unless the host is the last that runs stacks.
+// The table is the lifecycle of phase 2: nothing reaches joining or passive
+// before the join, nor failed, fenced, recovering or disabled before failover.
 var phaseChanges = map[HostPhase]map[HostPhase]mover{
 	Joining:    {Passive: byLeaderOrUser, Active: byLeaderOrUser},
 	Passive:    {Active: byLeaderOrUser},
@@ -126,6 +102,28 @@ var phaseChanges = map[HostPhase]map[HostPhase]mover{
 	Fenced:     {Recovering: byTheHost, Disabled: byLeaderOrUser},
 	Recovering: {Active: byTheHost},
 	Disabled:   {Fenced: byLeaderOrUser},
+}
+
+// runsStacks tells whether a host in this phase runs stacks: a draining
+// host keeps those it has.
+func runsStacks(phase HostPhase) bool {
+	return phase == Active || phase == Draining
+}
+
+// checkRemoval refuses to remove the last host that runs stacks: the
+// cluster would go on without placement, ingress or alerts, and nothing
+// brings a removed host back. A host that runs none (failed, fenced) may
+// go, so a dead host can always be given up.
+func (s *State) checkRemoval(host *Host) error {
+	if !runsStacks(host.Phase) {
+		return nil
+	}
+	for _, other := range s.Hosts {
+		if other.ID != host.ID && runsStacks(other.Phase) {
+			return nil
+		}
+	}
+	return fmt.Errorf("host %s is the last that runs stacks; the cluster cannot do without it", host.Name)
 }
 
 func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), error) {
@@ -141,6 +139,9 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), err
 	}
 	who, allowed := phaseChanges[host.Phase][payload.Phase]
 	if payload.Phase == Removed {
+		if err := s.checkRemoval(host); err != nil {
+			return nil, err
+		}
 		who, allowed = byLeaderOrUser, true
 	}
 	if !allowed {
@@ -151,7 +152,7 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), err
 	case who == byTheHost && cmd.Actor != HostActor(host.ID):
 		return nil, fmt.Errorf("only host %s itself reports %s", host.Name, payload.Phase)
 	case who == byLeaderOrUser && fromHost:
-		return nil, fmt.Errorf("%s cannot move host %s to %s; only the leader does", cmd.Actor, host.Name, payload.Phase)
+		return nil, fmt.Errorf("%s cannot move host %s to %s; only the leader or a user does", cmd.Actor, host.Name, payload.Phase)
 	}
 	return func() {
 		host.Phase = payload.Phase
@@ -161,7 +162,7 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), err
 		if host.Phase == Removed {
 			host.Voter = false
 			s.revoke(host.CertificateSerial, host.CertificateNotAfter, cmd.At)
-			// a removed host forgets nothing any more
+			// nobody is left to remove the host's retired copies
 			s.Retired = slices.DeleteFunc(s.Retired, func(c RetiredCopy) bool { return c.Host == host.ID })
 		}
 	}, nil

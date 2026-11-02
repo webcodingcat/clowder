@@ -1,7 +1,6 @@
 // Package hoster is the cloud the hosts run in, as the leader uses it: it
-// routes the Floating IP to the ingress host and, for fencing (phase 2),
-// powers servers off and on. Servers are named by their ServerRef, the
-// hoster's own ID of the server.
+// routes the Floating IP to the ingress host. Servers are named by their
+// ServerRef, the hoster's own ID of the server.
 package hoster
 
 import (
@@ -21,10 +20,6 @@ type Hoster interface {
 	// AssignFloatingIP routes the Floating IP to the server and returns once
 	// the hoster has done it.
 	AssignFloatingIP(ctx context.Context, ip netip.Addr, serverRef string) error
-	// PowerOff cuts the server's power and returns once it is off.
-	PowerOff(ctx context.Context, serverRef string) error
-	// PowerOn starts the server and returns once it runs.
-	PowerOn(ctx context.Context, serverRef string) error
 }
 
 // New is the plugin cluster.yaml names, with the token in clear.

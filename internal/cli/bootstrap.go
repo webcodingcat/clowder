@@ -32,10 +32,10 @@ func newBootstrap(g *globals) *cobra.Command {
 	var flags bootstrapFlags
 	command := &cobra.Command{
 		Use:   "bootstrap <user>",
-		Short: "Become the first user of a new cluster and set up its directory",
+		Short: "Become the user of a new cluster and set up its directory",
 		Long: "Asks the first host for the cluster's CA and trusts it only if the host proves it knows\n" +
 			"the bootstrap key. Makes the recovery key, shows it once and asks for its last 8\n" +
-			"characters (or writes it to --recovery-out), then gets the first user's certificate.\n" +
+			"characters (or writes it to --recovery-out), then gets the user's first certificate.\n" +
 			"Writes your credentials into your config directory, under the cluster's name, and\n" +
 			"cluster.yaml to fill in into the cluster directory.",
 		Args: cobra.ExactArgs(1),
@@ -48,7 +48,7 @@ func newBootstrap(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// before the cluster is asked: once it has its first user, a
+			// before the cluster is asked: once it has its user, a
 			// bootstrap cannot be repeated
 			if err := clusterdir.CheckBootstrap(path, flags.name, flags.force); err != nil {
 				return err
@@ -64,7 +64,7 @@ func newBootstrap(g *globals) *cobra.Command {
 			// before a recovery key is made: nobody may hold two and not know
 			// which one counts
 			if cluster.Bootstrapped {
-				return fmt.Errorf("the cluster has its first user already. If that was an earlier try of "+
+				return fmt.Errorf("the cluster has a user already, and a cluster has only one. If that was an earlier try of "+
 					"yours, the recovery key it gave out is the one that counts; %s",
 					accessByCode(user, flags.name, flags.seed))
 			}
@@ -79,10 +79,10 @@ func newBootstrap(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// the credentials first: without them the cluster's first user
+			// the credentials first: without them the cluster's user
 			// is lost, while cluster.yaml can be written by hand
 			if err := clusterdir.WriteCredentials(flags.name, credentials); err != nil {
-				return fmt.Errorf("%w. The cluster has %s as its first user and the recovery key just made counts; "+
+				return fmt.Errorf("%w. The cluster has %s as its user and the recovery key just made counts; "+
 					"%s, and write cluster.yaml after the README's example", err, user,
 					accessByCode(user, flags.name, flags.seed))
 			}
@@ -90,7 +90,7 @@ func newBootstrap(g *globals) *cobra.Command {
 			if err := createDirectory(cmd.Context(), newDirectory, credentials, cluster, recovery, bootstrapKey); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s is the first user of cluster %s. Next:\n"+
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s is the user of cluster %s. Next:\n"+
 				"  1. fill in cluster.yaml: the hoster with its token (clowder secret encrypt --cluster-yaml),\n"+
 				"     the Floating IP, the storage classes\n"+
 				"  2. clowder cluster apply\n", user, flags.name)

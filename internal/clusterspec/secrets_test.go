@@ -10,7 +10,6 @@ func TestSecretPlacesNameEveryPlaceThatHoldsASecret(t *testing.T) {
 		Hoster:     Hoster{Token: "hoster.token"},
 		JoinKeys:   []SecretRef{"join_keys[0]", "join_keys[1]"},
 		Registries: map[string]Registry{"ghcr.io": {Password: "a"}, "localhost": {Password: "b"}, "[::1]:5000": {}},
-		Backup:     &Backup{Password: "backup.password"},
 		Alerts: &Alerts{
 			Channels: []AlertChannel{
 				{Webhook: "w"}, {URL: "u"}, {SMTP: &SMTP{Password: "p"}}, {SMTP: &SMTP{}},
@@ -24,7 +23,7 @@ func TestSecretPlacesNameEveryPlaceThatHoldsASecret(t *testing.T) {
 	}
 	want := []string{
 		"alerts.channels[0].webhook", "alerts.channels[1].url", "alerts.channels[2].smtp.password",
-		"alerts.heartbeat.url", "backup.password", "hoster.token", "join_keys[0]", "join_keys[1]",
+		"alerts.heartbeat.url", "hoster.token", "join_keys[0]", "join_keys[1]",
 		"registries.localhost.password", `registries["ghcr.io"].password`,
 	}
 	if !slices.Equal(paths, want) {

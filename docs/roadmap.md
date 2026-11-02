@@ -19,6 +19,22 @@ Secrets, encrypted for the cluster and the recovery key (`secret encrypt`, `reke
 `decrypt`), with the credentials in the user's config directory and access back through a
 code from a host (`user recover`, `recovery rotate`). Phase 2 is next: three hosts.
 
+Before it, the first release became installable and the commands honest: the APT
+repository keeps every version, `examples/hetzner` pins `0.1.0`, `bin/dev live release
+<tag>` tests a published release (the [release checklist](developing/shipping.md#release-checklist)),
+an upgrade restarts the agent, `host remove` asks first and keeps the last host that runs
+stacks, `host drain` says that it moves nothing, and a cluster has one user. The
+tag `v0.1.0` is still to set, as a release candidate first.
+
+Code without a caller went then; each phase brings back what it needs:
+
+- phase 2: the join (a command that adds a host, Raft members added at run time),
+  fencing (powering servers off and on through the hoster), operations with locks on
+  stacks and volumes, a gate on the oldest agent version for new command kinds, the
+  hosts' own phase reports and `host enable` after the flapping brake;
+- phase 3: `backup:` in `cluster.yaml`, and resources owned by a GitOps source;
+- user management: more users per cluster, removing a user, revoking one certificate.
+
 Until `v1.0.0`, the state and `cluster.yaml` may change between releases without a way
 to upgrade a running cluster.
 
@@ -65,7 +81,7 @@ They matter once there are several hosts; on one, they cost at most time.
 
 ## Before users get permissions
 
-Users have none yet: every user may do everything.
+A cluster has one user so far, and it may do everything.
 
 - The leader trusts the actor a host names for a user's command it forwards
   (`/v1/internal/propose`, `/v1/internal/changes`). That holds while root on any host has

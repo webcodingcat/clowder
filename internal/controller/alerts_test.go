@@ -165,6 +165,7 @@ func TestTheConditionsOfGoneStacksAndHostsAreForgotten(t *testing.T) {
 		t.Fatal("a condition was forgotten while its stack and host are there")
 	}
 	deleteResource(l, resource.KindStack, "shop")
+	withServers(l) // the last host that runs stacks cannot go
 	l.apply(state.KindSetHostPhase, state.UserActor("alice"), state.SetHostPhase{Host: 0, Phase: state.Removed})
 	alerts.pass(context.Background())
 	for _, key := range []string{shop, node0} {

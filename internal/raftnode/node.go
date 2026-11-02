@@ -122,19 +122,6 @@ func (n *Node) Bootstrap() error {
 	return nil
 }
 
-// AddMember adds a host to the Raft group, as a voter or not. Only the leader
-// can (join, and the promotions when the third host arrives).
-func (n *Node) AddMember(id state.HostID, address string, voter bool) error {
-	add := n.raft.AddNonvoter
-	if voter {
-		add = n.raft.AddVoter
-	}
-	if err := add(serverID(id), raft.ServerAddress(address), 0, proposeTimeout).Error(); err != nil {
-		return fmt.Errorf("add host %d to Raft: %w", id, err)
-	}
-	return nil
-}
-
 // Propose commits a command through the leader and returns its index. The
 // error is the state's refusal or why the command did not commit (not the
 // leader, no quorum, a timeout).

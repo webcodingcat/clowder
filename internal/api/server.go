@@ -426,21 +426,20 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 // its route does.
 var userKinds = map[string]bool{
 	state.KindApplyConfig: true, state.KindSetHostPhase: true, state.KindRestartStack: true,
-	state.KindAddUser:              true, // the bootstrap's first user
+	state.KindAddUser:              true, // the bootstrap's user
 	state.KindRecoverUser:          true, // a user back with a code from a host
 	state.KindSetRecoveryRecipient: true,
 }
 
-// hostKinds are what a host reports about itself. advance-operation joins
-// them with the operations that hosts carry out (phase 2).
+// hostKinds are what a host reports about itself.
 var hostKinds = map[string]bool{
-	state.KindReportHost: true, state.KindSetHostPhase: true,
+	state.KindReportHost:     true,
 	state.KindSetStackStatus: true, state.KindForgetCopy: true,
 }
 
 // internalPropose is where a follower forwards a user's write and where an
 // agent proposes what it reports about itself. Nothing else comes in from
-// outside: the leader's own commands (operations, placements, new hosts)
+// outside: the leader's own commands (placements, the ingress)
 // are made on the leader. A host may name the user it forwards for, since the
 // user's certificate ended at the first agent; it may never speak for another
 // host or for the leader.

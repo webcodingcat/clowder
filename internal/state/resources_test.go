@@ -60,7 +60,7 @@ func TestAResourceBelongsToTheChannelThatAppliedIt(t *testing.T) {
 	shop := putResource(resource.KindNamespace, "", "shop", nil)
 	c.mustApply(KindPutResource, UserActor("alice"), shop)
 	gitops := shop
-	gitops.Owner = GitOpsOwner("infra")
+	gitops.Owner = "gitops:infra" // another channel
 	// refused even though nothing would change: another channel learns nothing
 	c.refuse(KindPutResource, UserActor("alice"), gitops, "belongs to cli, not to gitops:infra")
 	c.refuse(KindDeleteResource, UserActor("alice"),

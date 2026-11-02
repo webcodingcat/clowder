@@ -18,11 +18,8 @@ depends:
   - wireguard-tools
   - nftables
   - iptables
-  - conntrack
   - lvm2
   - thin-provisioning-tools
-  - restic
-  - git
   - e2fsprogs
   - util-linux
   - linux-headers-amd64
@@ -39,10 +36,6 @@ contents:
       mode: 0755
   - src: packaging/systemd/clowderd.service
     dst: /usr/lib/systemd/system/clowderd.service
-    file_info:
-      mode: 0644
-  - src: packaging/systemd/clowder-tasks.slice
-    dst: /usr/lib/systemd/system/clowder-tasks.slice
     file_info:
       mode: 0644
   - dst: /var/lib/clowder

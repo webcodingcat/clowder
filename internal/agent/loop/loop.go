@@ -45,8 +45,9 @@ func Run(ctx context.Context, cluster Cluster, wake <-chan struct{}, pass func()
 
 // Signal is how the supervisor reaches a runner (the stack runner,
 // Traefik's): it starts the runner's next pass at once and counts Docker's
-// restarts. A restart stops every container, and nothing starts them again
-// (restart: "no"), so the runner brings up anew what it brought up before.
+// restarts. With live-restore the containers outlive a restart, but what
+// died meanwhile went unseen and nothing starts it again (restart: "no"),
+// so the runner brings up anew what it brought up before.
 type Signal struct {
 	// wake is buffered (1): one pass due is enough
 	wake chan struct{}

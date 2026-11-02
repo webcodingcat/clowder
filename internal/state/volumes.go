@@ -100,9 +100,6 @@ func removeVolumeResource(s *State, id string) (func(), error) {
 	}); stack != "" {
 		return nil, fmt.Errorf("volume %s is stack %s's; change or delete the stack first", id, stack)
 	}
-	if err := s.checkUnlocked(volumeLock(id), ""); err != nil {
-		return nil, err
-	}
 	return func() {
 		s.retire(volume, nil)
 		delete(s.Volumes, id)
@@ -114,8 +111,6 @@ func removeVolumeResource(s *State, id string) (func(), error) {
 // sets.
 type PutVolume struct {
 	Volume Volume `json:"volume"`
-	// Operation is set when the operation holding the lock makes the change.
-	Operation string `json:"operation,omitempty"`
 }
 
 // applyPutVolume takes the copies a record no longer has as retired: their
@@ -137,9 +132,6 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 	volume.Meta = old.Meta
 	if sameJSON(*old, volume) {
 		return nil, errUnchanged
-	}
-	if err := s.checkUnlocked(volumeLock(id), payload.Operation); err != nil {
-		return nil, err
 	}
 	if err := checkVolume(volume); err != nil {
 		return nil, err

@@ -56,9 +56,6 @@ func putStack(s *State, id string, payload PutResource) (func() *Meta, error) {
 	if err := s.checkStack(id, payload.Namespace, host, spec); err != nil {
 		return nil, err
 	}
-	if err := s.checkUnlocked(stackLock(id), ""); err != nil {
-		return nil, err
-	}
 	return func() *Meta {
 		switch {
 		case !exists:
@@ -114,9 +111,6 @@ func applyRestartStack(s *State, cmd Command, payload RestartStack) (func(), err
 		if _, ok := stack.Spec.Services[service]; !ok {
 			return nil, fmt.Errorf("stack %s has no service %s", id, service)
 		}
-	}
-	if err := s.checkUnlocked(stackLock(id), ""); err != nil {
-		return nil, err
 	}
 	named := payload.Services
 	if len(named) == 0 {
@@ -225,9 +219,6 @@ func (s *State) checkStack(id, namespace string, host *HostID, spec stackspec.Sp
 // removeStack removes a stack; its volumes stay, with their data, for the
 // next stack that names them.
 func removeStack(s *State, id string) (func(), error) {
-	if err := s.checkUnlocked(stackLock(id), ""); err != nil {
-		return nil, err
-	}
 	return func() { delete(s.Stacks, id) }, nil
 }
 

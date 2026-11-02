@@ -129,11 +129,6 @@ func (c *Client) Put(ctx context.Context, path string, in any) (Written, error) 
 	return c.sendChange(ctx, http.MethodPut, path, in)
 }
 
-// Delete removes what is at path. Reads after it wait for the write.
-func (c *Client) Delete(ctx context.Context, path string) (Written, error) {
-	return c.sendChange(ctx, http.MethodDelete, path, nil)
-}
-
 // Stream copies what path answers to out as it comes (logs that follow);
 // it has no timeout of its own, ctx ends it.
 func (c *Client) Stream(ctx context.Context, path string, out io.Writer) error {

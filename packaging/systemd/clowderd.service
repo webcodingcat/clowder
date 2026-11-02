@@ -3,8 +3,8 @@ Description=clowder agent
 Documentation=https://github.com/webcodingcat/clowder
 Wants=network-online.target docker.service
 After=network-online.target docker.service
-# Restart without limit and never give up: a broken agent shows up as a failed
-# host and the cluster's fencing takes over.
+# Restart without limit and never give up: the agent is the host's only way
+# to the cluster.
 StartLimitIntervalSec=0
 
 [Service]
@@ -12,8 +12,7 @@ Type=notify
 # The package installs the unit without enabling it; clowderd init (and
 # later join) enables and starts it.
 ExecStart=/usr/bin/clowderd run
-# The agent reports to systemd every few seconds; a hung agent is restarted
-# well within the 45 s after which the cluster counts a host as failed.
+# The agent reports to systemd every few seconds; a hung agent is restarted.
 WatchdogSec=15
 Restart=always
 RestartSec=2

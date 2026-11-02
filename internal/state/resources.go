@@ -66,7 +66,7 @@ type PutResource struct {
 	// Namespace is empty for a namespace, which lives in none.
 	Namespace string `json:"namespace,omitempty"`
 	Name      string `json:"name"`
-	Owner     string `json:"owner"` // the channel: OwnerCLI or GitOpsOwner(source)
+	Owner     string `json:"owner"` // the channel: OwnerCLI so far
 	// Spec is the kind's: none for a namespace, resource.VolumeSpec,
 	// SealedSecret, stackspec.Spec.
 	Spec json.RawMessage `json:"spec,omitempty"`

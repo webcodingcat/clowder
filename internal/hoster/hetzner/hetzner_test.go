@@ -109,25 +109,11 @@ func TestAssigningWaitsForTheAction(t *testing.T) {
 	}
 }
 
-func TestPowerActionsNameTheServer(t *testing.T) {
-	api := &fakeAPI{t: t}
-	client := newClient(t, api)
-	if err := client.PowerOff(context.Background(), "42"); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.PowerOn(context.Background(), "42"); err != nil {
-		t.Fatal(err)
-	}
-	if api.requests[0] != "POST /v1/servers/42/actions/poweroff" || api.requests[2] != "POST /v1/servers/42/actions/poweron" {
-		t.Errorf("requests %v", api.requests)
-	}
-}
-
 func TestAFailedActionSaysWhy(t *testing.T) {
 	api := &fakeAPI{t: t, actionFails: true}
 	client := newClient(t, api)
-	err := client.PowerOff(context.Background(), "42")
-	if err == nil || !strings.Contains(err.Error(), "power off server 42: server not found (server_not_found)") {
+	err := client.AssignFloatingIP(context.Background(), netip.MustParseAddr("198.51.100.7"), "42")
+	if err == nil || !strings.Contains(err.Error(), "assign the Floating IP 198.51.100.7 to server 42: server not found (server_not_found)") {
 		t.Errorf("got %v", err)
 	}
 }
@@ -151,7 +137,7 @@ func TestAServerRefMustBeAServerID(t *testing.T) {
 		t.Errorf("api %s", client.api)
 	}
 	for _, ref := range []string{"", "node0", "-1", "0"} {
-		if err := client.PowerOn(context.Background(), ref); err == nil || !strings.Contains(err.Error(), "not a Hetzner server ID") {
+		if err := client.AssignFloatingIP(context.Background(), netip.MustParseAddr("198.51.100.7"), ref); err == nil || !strings.Contains(err.Error(), "not a Hetzner server ID") {
 			t.Errorf("ref %q: %v", ref, err)
 		}
 	}

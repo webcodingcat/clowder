@@ -22,18 +22,18 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// The first user's way in: the cluster has no user yet, so nobody has a
+// The user's way in: the cluster has no user yet, so nobody has a
 // certificate. Whoever holds the bootstrap key (OpenTofu made it, cloud-init
 // gave it to init) proves it with HMACs instead.
 //
 //  1. GET /v1/bootstrap: the agent sends its CA certificate and, for every
 //     valid bootstrap key, pki.TrustProof over it. The CLI trusts the CA only
 //     if one proof matches its key. The offer also tells whether the cluster
-//     has its first user already, so the CLI stops before it makes a
+//     has its user already, so the CLI stops before it makes a
 //     recovery key that would never count.
 //  2. POST /v1/bootstrap over TLS checked against that CA: the user's name
 //     and public key and the recovery key's recipient, signed with the
-//     bootstrap key. The agent issues the first user certificate; after
+//     bootstrap key. The agent issues the user's first certificate; after
 //     that, the endpoint refuses.
 
 // BootstrapOffer is the agent's answer to the first contact. It comes
@@ -45,7 +45,7 @@ type BootstrapOffer struct {
 	Bootstrapped  bool     `json:"bootstrapped"`
 }
 
-// BootstrapRequest asks for the first user's certificate.
+// BootstrapRequest asks for the user's first certificate.
 type BootstrapRequest struct {
 	User      string `json:"user"`
 	PublicKey []byte `json:"public_key"` // Ed25519
@@ -75,7 +75,7 @@ func (r *BootstrapRequest) mac(bootstrapKey []byte) []byte {
 	return mac.Sum(nil)
 }
 
-// BootstrapAnswer is the first user's certificate.
+// BootstrapAnswer is the user's first certificate.
 type BootstrapAnswer struct {
 	Certificate string `json:"certificate"`
 }
@@ -87,7 +87,7 @@ type TrustedCluster struct {
 	bootstrapKey  []byte
 	CA            *x509.Certificate
 	CAPEM         string
-	// Bootstrapped tells that the cluster has its first user already.
+	// Bootstrapped tells that the cluster has its user already.
 	Bootstrapped bool
 }
 
@@ -118,7 +118,7 @@ func FindCluster(ctx context.Context, seed string, bootstrapKey []byte, version 
 	}, nil
 }
 
-// Bootstrap gets the first user's certificate (PEM), over TLS checked
+// Bootstrap gets the user's first certificate (PEM), over TLS checked
 // against the trusted CA, and brings the recovery key's recipient.
 func (c *TrustedCluster) Bootstrap(ctx context.Context, user string, public ed25519.PublicKey,
 	recoveryRecipient string,
@@ -186,7 +186,7 @@ func (s *Server) bootstrapOffer(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, offer)
 }
 
-// bootstrap issues the first user's certificate.
+// bootstrap issues the user's first certificate.
 func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	// not strict: a CLI of the next release may send a field this agent does
 	// not know, and the MAC covers every field the bootstrap reads
@@ -196,12 +196,12 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// first, before any key is opened: after the bootstrap, every request
-	// here ends at once. The state decides (AddUser.First); this spares the
+	// here ends at once. The state decides (AddUser); this spares the
 	// work. The offer tells anyone as much.
 	var hasUsers bool
 	s.config.Cluster.Read(func(current *state.State) { hasUsers = len(current.Users) > 0 })
 	if hasUsers {
-		writeError(w, http.StatusConflict, errors.New("the cluster has its first user already; users add others"))
+		writeError(w, http.StatusConflict, errors.New("the cluster has a user already, and a cluster has only one"))
 		return
 	}
 	if age := time.Since(request.Time); age > bootstrapMaxAge || age < -bootstrapMaxAge {
@@ -248,7 +248,7 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	cmd, err := state.NewCommand(state.KindAddUser, time.Time{}, state.UserActor(request.User),
 		state.AddUser{
 			Name: request.User, Serial: pki.Serial(certificate), NotAfter: certificate.NotAfter,
-			First: true, RecoveryRecipient: request.RecoveryRecipient,
+			RecoveryRecipient: request.RecoveryRecipient,
 		})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)

@@ -134,7 +134,8 @@ EOF
   printf '[Manager]\nRuntimeWatchdogSec=60\n' >/etc/systemd/system.conf.d/watchdog.conf
   systemctl daemon-reexec
   cat >/etc/apt/apt.conf.d/52clowder-unattended <<'EOF'
-// the kernel, Docker, DRBD and clowder are updated only after clowder host drain
+// the kernel, Docker, DRBD and clowder are updated by hand, in a maintenance
+// window: their updates restart the stacks or the host
 Unattended-Upgrade::Package-Blacklist { "linux-"; "docker"; "drbd"; "clowder"; };
 EOF
 }

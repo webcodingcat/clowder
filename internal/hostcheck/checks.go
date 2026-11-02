@@ -254,7 +254,7 @@ func checkCompose(ctx context.Context, host Host, _ Options) (Status, string) {
 }
 
 // checkUnattendedUpgrades: the kernel, Docker, DRBD and clowder are only
-// updated after a drain.
+// updated by hand, in a maintenance window.
 func checkUnattendedUpgrades(ctx context.Context, host Host, _ Options) (Status, string) {
 	// a removed package whose configuration is left is listed too, so look at
 	// its status, not only whether dpkg knows it
@@ -281,7 +281,7 @@ func checkUnattendedUpgrades(ctx context.Context, host Host, _ Options) (Status,
 	}
 	if len(missing) > 0 {
 		return Fail, "Unattended-Upgrade::Package-Blacklist lacks " + strings.Join(missing, ", ") +
-			" (they are updated only after clowder host drain)"
+			" (they are updated by hand, in a maintenance window)"
 	}
 	return OK, ""
 }

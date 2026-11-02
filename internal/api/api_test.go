@@ -197,11 +197,12 @@ func bootstrappedState(t *testing.T) *state.State {
 			CertificateNotAfter: notAfter,
 		},
 	})
-	apply(2, state.KindAddHost, state.AddHost{Host: state.Host{
+	// no command adds a host until phase 2 brings the join
+	current.Hosts[1] = &state.Host{
 		ID: 1, Name: "node1", Underlay: netip.MustParseAddr("10.0.0.3"), WGPublicKey: "wg", CertificateSerial: "s1",
-		CertificateNotAfter: notAfter,
-	}})
-	apply(3, state.KindAddUser, state.AddUser{Name: "alice", Serial: "a1", NotAfter: notAfter})
+		CertificateNotAfter: notAfter, Phase: state.Joining,
+	}
+	apply(2, state.KindAddUser, state.AddUser{Name: "alice", Serial: "a1", NotAfter: notAfter, RecoveryRecipient: "age1recovery"})
 	return current
 }
 
@@ -300,9 +301,9 @@ func TestAFollowerForwardsWritesToTheLeader(t *testing.T) {
 
 	// a refusal of the state comes back as such
 	// the API checks the phase a user action starts from
-	_, err = client.Post(ctx, "/v1/hosts/1/enable", nil)
-	if statusOf(err) != http.StatusConflict || !strings.Contains(err.Error(), "enable works on a host that is disabled") {
-		t.Errorf("want 409 for enabling a joining host, got %v", err)
+	_, err = client.Post(ctx, "/v1/hosts/1/undrain", nil)
+	if statusOf(err) != http.StatusConflict || !strings.Contains(err.Error(), "undrain works on a host that is draining") {
+		t.Errorf("want 409 for undraining a joining host, got %v", err)
 	}
 	// the leader's state refuses what the API lets through: removing twice
 	if _, err := client.Post(ctx, "/v1/hosts/1/remove", nil); err != nil {
@@ -388,8 +389,8 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 			true,
 		},
 		{
-			"a user's write it forwards", state.KindAddUser, state.UserActor("alice"),
-			state.AddUser{Name: "alice", Serial: "a2", NotAfter: time.Now().AddDate(1, 0, 0)},
+			"a user's write it forwards", state.KindSetHostPhase, state.UserActor("alice"),
+			state.SetHostPhase{Host: 1, Phase: state.Active},
 			true,
 		},
 		{
@@ -408,8 +409,8 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 			false,
 		},
 		{
-			"the leader's own work for a user", state.KindStartOperation, state.UserActor("alice"),
-			state.StartOperation{Operation: state.Operation{ID: "01A", Kind: "backup", Locks: []string{"x"}}},
+			"the leader's own work for a user", state.KindSetIngress, state.UserActor("alice"),
+			state.SetIngress{Host: 0},
 			false,
 		},
 	}

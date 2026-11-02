@@ -25,7 +25,7 @@ write, and how they become what runs.
   | LV, DRBD resource, mount point, Docker volume | `clw-<readable>-<hash8>-g<data generation>` (`names.VolumeName`) |
   | the agent's record of a volume's copies | `volume-records/<namespace>_<volume>.json` (`names.FileName`) |
   | bridge | `cbr-` and 11 hex digits of a hash of the stack's ID (`names.BridgeName`) |
-  | locks, alert keys | `stack/<namespace>/<stack>`, `volume/<volume ID>`, `stack-waiting/<namespace>/<stack>`, `stack-failing/<namespace>/<stack>` |
+  | alert keys | `stack-waiting/<namespace>/<stack>`, `stack-failing/<namespace>/<stack>` |
   | metrics | the labels `namespace` and `stack` |
 
 - **The LV name has the tightest limits:** LVM and DRBD take 127 characters, device-mapper
@@ -118,7 +118,7 @@ on a host (`compose.Render`).
   no I/O.
 - **Secrets in `cluster.yaml`** stand at their places, encrypted and tagged `!secret`
   (Encrypted values, below): the hoster's token, `join_keys`, the registries' passwords,
-  the alert channels' URLs and passwords, the heartbeat's URL, the backup's password.
+  the alert channels' URLs and passwords, the heartbeat's URL.
   `clusterspec.SecretPlaces` lists these places, the one list of them. In `Config` a
   secret is its name (`SecretRef`), which is its path (`hoster.token`, `join_keys[0]`):
   `Check` holds each name to its place, so no CLI can name a secret otherwise than the
@@ -145,9 +145,9 @@ on a host (`compose.Render`).
   a temporary directory.
 - **`cluster bootstrap`** checks first (`CheckBootstrap`) that it writes over neither a
   `cluster.yaml` nor credentials of a cluster of the same name (`--force` replaces those),
-  since once the cluster has its first user a bootstrap cannot be repeated. It writes the
+  since once the cluster has its user a bootstrap cannot be repeated. It writes the
   credentials before the cluster directory: `cluster.yaml` can be written by hand, the
-  first user's key cannot be had again.
+  user's key cannot be had again.
 - **Files next to `cluster.yaml`** (`acme.ca`): `clusterspec.FileNames` lists those it
   names, by paths relative to it and written with `/` (the CLI runs on Windows too), and
   `Check` refuses
