@@ -27,7 +27,7 @@ func (c *cluster) runningShop(applied map[string]string) *Stack {
 	c.t.Helper()
 	c.putShop(shopSpec())
 	host := HostID(0)
-	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackStarting, Host: &host})
+	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{PlannedAt: c.index, ID: "default/shop", Status: StackStarting, Host: &host})
 	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{
 		ID: "default/shop", Status: StackRunning, Host: &host, Generation: 1, AppliedSecrets: applied,
 	})
@@ -69,8 +69,8 @@ func TestOnlyItsHostReportsAStackWhereItIs(t *testing.T) {
 		"only its host")
 	c.refuse(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackPending}, "only where it is")
 	gone := HostID(7)
-	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &gone}, "not a member")
-	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: "dancing"}, "unknown status")
+	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{PlannedAt: c.index, ID: "default/shop", Status: StackRunning, Host: &gone}, "not a member")
+	c.refuse(KindSetStackStatus, LeaderActor, SetStackStatus{PlannedAt: c.index, ID: "default/shop", Status: "dancing"}, "unknown status")
 }
 
 func TestANewGenerationStartsUntilItsHostReportsIt(t *testing.T) {
@@ -204,12 +204,12 @@ func TestAPlacedStackNamesNoVolumeWhoseDataIsOnAnotherHost(t *testing.T) {
 	c.addHost(testHost(1))
 	c.putShop(shopSpec())
 	host := HostID(0)
-	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackStarting, Host: &host})
+	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{PlannedAt: c.index, ID: "default/shop", Status: StackStarting, Host: &host})
 	c.mustApply(KindPutResource, UserActor("alice"), putResource(resource.KindVolume, "default", "data", testVolumeSpec()))
 	elsewhere := *c.state.Volumes["default/data"]
 	minor := 0
 	elsewhere.Status, elsewhere.Minor, elsewhere.Copies = VolumeOK, &minor, []VolumeCopy{{Host: 1, Class: "fast"}}
-	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: elsewhere})
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: elsewhere})
 
 	uses := shopSpec()
 	uses.Services["app"] = stackspec.Service{Image: "x", Volumes: []stackspec.Mount{{Volume: "data", Path: "/data"}}}
@@ -239,7 +239,7 @@ func TestARestartTakesAlongWhatDependsOnItAndKeepsTheGeneration(t *testing.T) {
 	}}
 	c.putShop(spec)
 	host := HostID(0)
-	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackStarting, Host: &host})
+	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{PlannedAt: c.index, ID: "default/shop", Status: StackStarting, Host: &host})
 	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &host, Generation: 1})
 	stack := c.state.Stacks["default/shop"]
 
@@ -285,17 +285,17 @@ func TestPushedOutServicesAreTheStacksAndANewGenerationDropsGoneOnes(t *testing.
 		"app": {Image: "x", DependsOn: []string{"db"}}, "db": {Image: "x"}, "cache": {Image: "x"},
 	}}
 	c.putShop(spec)
-	c.refuse(KindSetPushedOut, LeaderActor, SetPushedOut{Stacks: map[string][]string{"default/shop": {"web"}}},
+	c.refuse(KindSetPushedOut, LeaderActor, SetPushedOut{PlannedAt: c.index, Stacks: map[string][]string{"default/shop": {"web"}}},
 		"stack default/shop has no service web")
-	c.refuse(KindSetPushedOut, LeaderActor, SetPushedOut{Stacks: map[string][]string{"default/blog": {}}},
+	c.refuse(KindSetPushedOut, LeaderActor, SetPushedOut{PlannedAt: c.index, Stacks: map[string][]string{"default/blog": {}}},
 		"no stack default/blog")
 	c.mustApply(KindSetPushedOut, LeaderActor,
-		SetPushedOut{Stacks: map[string][]string{"default/shop": {"cache", "app", "cache"}}})
+		SetPushedOut{PlannedAt: c.index, Stacks: map[string][]string{"default/shop": {"cache", "app", "cache"}}})
 	if got := c.state.Stacks["default/shop"].PushedOut; !slices.Equal(got, []string{"app", "cache"}) {
 		t.Errorf("pushed out %v", got)
 	}
 	if changes, err := c.changes(KindSetPushedOut, LeaderActor,
-		SetPushedOut{Stacks: map[string][]string{"default/shop": {"app", "cache"}}}); err != nil || len(changes) != 0 {
+		SetPushedOut{PlannedAt: c.index, Stacks: map[string][]string{"default/shop": {"app", "cache"}}}); err != nil || len(changes) != 0 {
 		t.Errorf("the same list again: changes %v, %v", changes, err)
 	}
 	delete(spec.Services, "cache")
@@ -309,7 +309,7 @@ func TestOnlyItsHostReportsAStackFailingAndWithWhy(t *testing.T) {
 	c := newCluster(t)
 	c.putShop(shopSpec())
 	host := HostID(0)
-	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackStarting, Host: &host})
+	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{PlannedAt: c.index, ID: "default/shop", Status: StackStarting, Host: &host})
 	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{
 		ID: "default/shop", Status: StackRunning, Host: &host, Generation: 1, AppliedSecrets: map[string]string{"key": "d"},
 	})

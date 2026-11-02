@@ -75,6 +75,10 @@ type SetHostPhase struct {
 	// From, when set, is the phase the sender checked the move against; the
 	// move is refused if the host has left it since.
 	From HostPhase `json:"from,omitempty"`
+	// Operation is the leader's operation that makes the move, if any:
+	// while one holds the host's lock (fencing, drain, remove), only it
+	// moves the host, and the host itself reports no phase either.
+	Operation uint64 `json:"operation,omitempty"`
 }
 
 // mover says who may make a phase change: the leader (on its own or for a
@@ -136,6 +140,12 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), err
 	}
 	if payload.From != "" && payload.From != host.Phase {
 		return nil, fmt.Errorf("host %s is %s now, no longer %s; try again", host.Name, host.Phase, payload.From)
+	}
+	if payload.Operation != 0 && cmd.Actor != LeaderActor {
+		return nil, fmt.Errorf("%s cannot act for operation %d; only the leader runs operations", cmd.Actor, payload.Operation)
+	}
+	if err := s.checkUnlocked(hostLock(host.ID), payload.Operation); err != nil {
+		return nil, err
 	}
 	who, allowed := phaseChanges[host.Phase][payload.Phase]
 	if payload.Phase == Removed {

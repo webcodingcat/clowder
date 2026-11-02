@@ -10,7 +10,7 @@ clowder is built in phases; each ends with live tests on HLab
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done, passes the live tests |
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
-| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions |
+| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions, the leader's plans and the locks |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -32,6 +32,13 @@ cannot read stops (exit status 3, which systemd does not restart) instead of lea
 out; the leader writes a new kind of command only once the oldest agent reads it; before
 `v1.0.0` only the same minor version works together, development builds with a warning;
 and [Updating a cluster](developing/shipping.md#updating-a-cluster) says in which order.
+Then the leader's plans and the locks: the placement's commands name the state they were
+planned with, and the state refuses one about a stack or volume that changed since; the
+leader places only stacks that have no host yet. Operations came back into the state,
+with locks on stacks, volumes and hosts that every handler of theirs minds, and steps
+that only their owner records, each once. Nothing starts an operation yet: moving a
+stack and fencing bring the first, with their steps, deadlines and rollbacks, and the
+placement then leaves locked stacks alone.
 
 Before it, the first release became installable and the commands honest: the APT
 repository keeps every version, `examples/hetzner` pins `0.1.0`, `bin/dev live release
@@ -43,8 +50,8 @@ out; its release candidate passed the live tests without the test hook.
 Code without a caller went then; each phase brings back what it needs:
 
 - phase 2: the join (a command that adds a host, Raft members added at run time),
-  fencing (powering servers off and on through the hoster), operations with locks on
-  stacks and volumes, the hosts' own phase reports and `host enable` after the flapping brake;
+  fencing (powering servers off and on through the hoster), the hosts' own phase reports
+  and `host enable` after the flapping brake;
 - phase 3: `backup:` in `cluster.yaml`, and resources owned by a GitOps source;
 - user management: more users per cluster, removing a user, revoking one certificate.
 

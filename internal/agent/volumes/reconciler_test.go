@@ -85,7 +85,7 @@ func placeData(cluster *agenttest.Cluster) {
 	minor := 5
 	volume.Minor, volume.Status = &minor, state.VolumeOK
 	volume.Copies = []state.VolumeCopy{{Host: 0, Class: "fast"}}
-	cluster.Apply(state.KindPutVolume, state.LeaderActor, state.PutVolume{Volume: volume})
+	cluster.Apply(state.KindPutVolume, state.LeaderActor, state.PutVolume{Volume: volume, PlannedAt: cluster.Index()})
 }
 
 // placeBlog places the stack blog, which mounts data, on host 0.
@@ -271,7 +271,7 @@ func TestATiebreakerHereIsNotKeptYet(t *testing.T) {
 	minor := 5
 	volume.Minor, volume.Status = &minor, state.VolumeOK
 	volume.Copies = []state.VolumeCopy{{Host: 0, Tiebreaker: true}}
-	r.cluster.Apply(state.KindPutVolume, state.LeaderActor, state.PutVolume{Volume: volume})
+	r.cluster.Apply(state.KindPutVolume, state.LeaderActor, state.PutVolume{Volume: volume, PlannedAt: r.cluster.Index()})
 	r.settle()
 	if _, _, err := r.Mounted(dataLV); !errors.Is(err, errTiebreakerHere) {
 		t.Errorf("want errTiebreakerHere, got %v", err)

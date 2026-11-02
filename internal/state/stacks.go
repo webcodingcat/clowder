@@ -42,6 +42,9 @@ func putStack(s *State, id string, payload PutResource) (func() *Meta, error) {
 	if exists && sameJSON(stored.Spec, spec) {
 		return nil, errUnchanged
 	}
+	if err := s.checkUnlocked(stackLock(id), 0); err != nil {
+		return nil, err
+	}
 	if problems := stackspec.Check(spec); len(problems) > 0 {
 		return nil, fmt.Errorf("stack %s: %w", id, problems)
 	}
@@ -106,6 +109,9 @@ func applyRestartStack(s *State, cmd Command, payload RestartStack) (func(), err
 	stack, ok := s.Stacks[id]
 	if !ok {
 		return nil, fmt.Errorf("no stack %s", id)
+	}
+	if err := s.checkUnlocked(stackLock(id), 0); err != nil {
+		return nil, err
 	}
 	for _, service := range payload.Services {
 		if _, ok := stack.Spec.Services[service]; !ok {
@@ -219,6 +225,9 @@ func (s *State) checkStack(id, namespace string, host *HostID, spec stackspec.Sp
 // removeStack removes a stack; its volumes stay, with their data, for the
 // next stack that names them.
 func removeStack(s *State, id string) (func(), error) {
+	if err := s.checkUnlocked(stackLock(id), 0); err != nil {
+		return nil, err
+	}
 	return func() { delete(s.Stacks, id) }, nil
 }
 
@@ -227,6 +236,12 @@ type SetStackStatus struct {
 	ID     string      `json:"id"` // the stack's
 	Status StackStatus `json:"status"`
 	Host   *HostID     `json:"host,omitempty"`
+	// PlannedAt is the index of the state the leader planned with
+	// (checkPlanned); a host leaves it 0.
+	PlannedAt uint64 `json:"planned_at,omitempty"`
+	// Operation is the leader's operation that makes the change, if any:
+	// only the one that holds the stack's lock changes it, and moves it.
+	Operation uint64 `json:"operation,omitempty"`
 	// Generation is the one the host ran when it reports; the leader leaves
 	// it 0. A report about an older generation is refused: an apply came in
 	// between, and that generation has yet to come up.
@@ -265,6 +280,9 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) (func(),
 	}
 	applied := stack.AppliedSecrets
 	if IsHostActor(cmd.Actor) {
+		// A host's report minds no lock: it tells what runs where, which
+		// an operation that moves the stack waits to hear. checkHostReport
+		// holds it to the stack's place as the state has it.
 		if err := checkHostReport(stack, cmd.Actor, payload); err != nil {
 			return nil, err
 		}
@@ -273,6 +291,8 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) (func(),
 		if !failing {
 			applied = payload.AppliedSecrets
 		}
+	} else if err := s.checkLeaderStatus(stack, payload); err != nil {
+		return nil, err
 	}
 	if stack.Status == payload.Status && samePlace(stack.Host, payload.Host) &&
 		maps.Equal(stack.AppliedSecrets, applied) && stack.UpError == payload.UpError {
@@ -283,6 +303,26 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) (func(),
 		stack.UpError = payload.UpError
 		s.changed(resource.KindStack, &stack.Meta)
 	}, nil
+}
+
+// checkLeaderStatus refuses the leader's change of a stack's status that it
+// planned on an older stack (checkPlanned), that another operation's lock
+// forbids, or that moves the stack: the leader places only a stack that has
+// no host yet, as a move needs an operation that holds the stack's lock.
+func (s *State) checkLeaderStatus(stack *Stack, payload SetStackStatus) error {
+	if err := checkPlanned(resource.KindStack, payload.ID, &stack.Meta, payload.PlannedAt); err != nil {
+		return err
+	}
+	lock := stackLock(payload.ID)
+	if err := s.checkUnlocked(lock, payload.Operation); err != nil {
+		return err
+	}
+	moves := payload.Host != nil && stack.Host != nil && *payload.Host != *stack.Host
+	if moves && (payload.Operation == 0 || s.Locks[lock] != payload.Operation) {
+		return fmt.Errorf("stack %s runs on host %d; only an operation that holds its lock moves it",
+			payload.ID, *stack.Host)
+	}
+	return nil
 }
 
 // checkHostReport refuses a host's report that does not match the stack as
@@ -310,6 +350,9 @@ func checkHostReport(stack *Stack, actor string, payload SetStackStatus) error {
 // pushes out, possibly in several stacks, or brings one service back.
 type SetPushedOut struct {
 	Stacks map[string][]string `json:"stacks"` // by the stack's ID
+	// PlannedAt is the index of the state the leader planned with
+	// (checkPlanned).
+	PlannedAt uint64 `json:"planned_at"`
 }
 
 func applySetPushedOut(s *State, _ Command, payload SetPushedOut) (func(), error) {
@@ -319,6 +362,12 @@ func applySetPushedOut(s *State, _ Command, payload SetPushedOut) (func(), error
 		stack, ok := s.Stacks[id]
 		if !ok {
 			return nil, fmt.Errorf("no stack %s", id)
+		}
+		if err := checkPlanned(resource.KindStack, id, &stack.Meta, payload.PlannedAt); err != nil {
+			return nil, err
+		}
+		if err := s.checkUnlocked(stackLock(id), 0); err != nil {
+			return nil, err
 		}
 		for _, service := range payload.Stacks[id] {
 			if _, ok := stack.Services[service]; !ok {
@@ -358,6 +407,9 @@ func applySetStackWaitReason(s *State, cmd Command, payload SetStackWaitReason) 
 		return nil, fmt.Errorf("no stack %s", payload.ID)
 	case stack.WaitReason == payload.Reason:
 		return nil, errUnchanged
+	}
+	if err := s.checkUnlocked(stackLock(payload.ID), 0); err != nil {
+		return nil, err
 	}
 	return func() {
 		switch {

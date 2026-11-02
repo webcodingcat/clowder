@@ -23,7 +23,8 @@ func findVolume(s *State, id string) *Meta {
 
 // putVolumeResource makes a volume. It is placed together with the first
 // stack that names it, on that stack's host; until then it waits
-// (VolumePending).
+// (VolumePending). It needs no look at the volume's lock: it changes no
+// volume there is, and only a volume there is can be locked.
 func putVolumeResource(s *State, id string, payload PutResource) (func() *Meta, error) {
 	spec, err := decodeSpec[resource.VolumeSpec](payload.Kind, id, payload.Spec)
 	if err != nil {
@@ -100,6 +101,9 @@ func removeVolumeResource(s *State, id string) (func(), error) {
 	}); stack != "" {
 		return nil, fmt.Errorf("volume %s is stack %s's; change or delete the stack first", id, stack)
 	}
+	if err := s.checkUnlocked(volumeLock(id), 0); err != nil {
+		return nil, err
+	}
 	return func() {
 		s.retire(volume, nil)
 		delete(s.Volumes, id)
@@ -111,6 +115,12 @@ func removeVolumeResource(s *State, id string) (func(), error) {
 // sets.
 type PutVolume struct {
 	Volume Volume `json:"volume"`
+	// PlannedAt is the index of the state the leader planned with
+	// (checkPlanned).
+	PlannedAt uint64 `json:"planned_at"`
+	// Operation is the leader's operation that makes the change, if any:
+	// only the one that holds the volume's lock changes it.
+	Operation uint64 `json:"operation,omitempty"`
 }
 
 // applyPutVolume takes the copies a record no longer has as retired: their
@@ -121,9 +131,16 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 	volume := payload.Volume
 	id := volume.ID()
 	old, ok := s.Volumes[id]
-	switch {
-	case !ok:
+	if !ok {
 		return nil, fmt.Errorf("no volume %s", id)
+	}
+	if err := checkPlanned(resource.KindVolume, id, &old.Meta, payload.PlannedAt); err != nil {
+		return nil, err
+	}
+	if err := s.checkUnlocked(volumeLock(id), payload.Operation); err != nil {
+		return nil, err
+	}
+	switch {
 	case volume.Spec != old.Spec:
 		return nil, fmt.Errorf("volume %s: its spec changes only with an apply", id)
 	case old.Status != VolumePending && (volume.Status == VolumePending || len(volume.Copies) == 0):
@@ -214,7 +231,8 @@ type SetVolumeInitialized struct {
 
 // applySetVolumeInitialized takes the word of a host that has a copy with
 // a disk in the volume's data generation: a host that took long to tell
-// must not mark a newer generation, whose LV is another one.
+// must not mark a newer generation, whose LV is another one. It minds no
+// lock: the host tells what its copy holds, which no operation can undo.
 func applySetVolumeInitialized(s *State, cmd Command, payload SetVolumeInitialized) (func(), error) {
 	volume, ok := s.Volumes[payload.Volume]
 	if !ok {

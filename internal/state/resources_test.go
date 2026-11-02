@@ -131,34 +131,34 @@ func TestAVolumeWaitsForItsStackAndCannotChangeYet(t *testing.T) {
 	placed.Status = VolumeOK
 	placed.Copies = []VolumeCopy{{Host: 0, Class: "fast"}}
 	placed.Spec.Replicas = 0
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: placed}, "its spec changes only with an apply")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: placed}, "its spec changes only with an apply")
 	placed.Spec.Replicas = 1
 	// the record as it is, with a Meta the sender read long ago: nothing changes
 	stale := *volume
 	stale.ResourceVersion = 1
-	if changes, err := c.changes(KindPutVolume, LeaderActor, PutVolume{Volume: stale}); err != nil || len(changes) != 0 {
+	if changes, err := c.changes(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: stale}); err != nil || len(changes) != 0 {
 		t.Errorf("a pending volume as it is: changes %v, %v", changes, err)
 	}
 	pendingWithCopy := *volume
 	pendingWithCopy.Copies = placed.Copies
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: pendingWithCopy}, "a pending volume has no copies")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: pendingWithCopy}, "a pending volume has no copies")
 	minor := 3
 	placed.Minor = &minor
-	changes, err := c.changes(KindPutVolume, LeaderActor, PutVolume{Volume: placed})
+	changes, err := c.changes(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: placed})
 	if err != nil || len(changes) != 1 || changes[0].Name != "data" {
 		t.Errorf("placed: changes %v, %v", changes, err)
 	}
-	if changes, err := c.changes(KindPutVolume, LeaderActor, PutVolume{Volume: *c.state.Volumes["default/data"]}); err != nil ||
+	if changes, err := c.changes(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: *c.state.Volumes["default/data"]}); err != nil ||
 		len(changes) != 0 {
 		t.Errorf("the same record again: changes %v, %v", changes, err)
 	}
 	// placed, it keeps a copy: only its delete gives up its data
 	backToPending := *c.state.Volumes["default/data"]
 	backToPending.Status, backToPending.Copies, backToPending.Minor = VolumePending, nil, nil
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: backToPending}, "holds data")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: backToPending}, "holds data")
 	noCopy := *c.state.Volumes["default/data"]
 	noCopy.Copies = nil
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: noCopy}, "holds data")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: noCopy}, "holds data")
 	// a volume made again after its delete starts above its retired copies
 	c.mustApply(KindDeleteResource, UserActor("alice"),
 		DeleteResource{Kind: resource.KindVolume, Namespace: "default", Name: "data", Owner: OwnerCLI})
@@ -182,7 +182,7 @@ func TestClusterYAMLKeepsTheClassACopyIsIn(t *testing.T) {
 	placed := *c.state.Volumes["default/data"]
 	minor := 0
 	placed.Status, placed.Minor, placed.Copies = VolumeOK, &minor, []VolumeCopy{{Host: 0, Class: "bulk"}}
-	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: placed})
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: placed})
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets()},
 		"volume default/data has storage class bulk, so the class must stay")
 }

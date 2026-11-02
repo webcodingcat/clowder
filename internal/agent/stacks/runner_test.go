@@ -326,7 +326,9 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 		t.Errorf("%d compose ups, the last with %v", ups, docker.UpFiles)
 	}
 
-	cluster.Apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{ID: "default/shop", Status: state.StackPending})
+	cluster.Apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{
+		ID: "default/shop", Status: state.StackPending, PlannedAt: cluster.Index(),
+	})
 	runner.pass(context.Background())
 	if _, err := os.Stat(runner.files.secretsDir(shopProject)); !os.IsNotExist(err) {
 		t.Errorf("the secrets of a stack that left stayed: %v", err)

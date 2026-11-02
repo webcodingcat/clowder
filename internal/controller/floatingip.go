@@ -82,7 +82,7 @@ func holdFloatingIP(ctx context.Context, cluster Cluster, propose Propose, open 
 	}
 	if copied.Ingress == nil || *copied.Ingress != host.ID {
 		logger.Info("the ingress moves", "host", host.Name)
-		if err := commit(ctx, propose, state.KindSetIngress, state.SetIngress{Host: host.ID}); err != nil {
+		if _, err := commit(ctx, propose, state.KindSetIngress, state.SetIngress{Host: host.ID}); err != nil {
 			return false, fmt.Errorf("record the ingress host: %w", err)
 		}
 	}

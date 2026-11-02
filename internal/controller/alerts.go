@@ -220,7 +220,7 @@ func (a *Alerts) pass(ctx context.Context) {
 // commitOrLog writes one command and tells whether it committed; a failure
 // is logged, and the next pass tries again.
 func (a *Alerts) commitOrLog(ctx context.Context, kind string, payload any) bool {
-	if err := commit(ctx, a.propose, kind, payload); err != nil {
+	if _, err := commit(ctx, a.propose, kind, payload); err != nil {
 		a.logger.Error("raise the alerts", "command", kind, "error", err)
 		return false
 	}

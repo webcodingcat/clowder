@@ -3,6 +3,7 @@ package state
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -28,6 +29,27 @@ func (s *State) changed(kind string, meta *Meta) {
 	s.changes = append(s.changes, Change{
 		Kind: kind, Namespace: meta.Namespace, Name: meta.Name, ResourceVersion: s.Index,
 	})
+}
+
+// ErrStale is the answer to a leader's command that was planned on a state
+// in which a stack or a volume it changes was another: the leader plans
+// again on the new one.
+var ErrStale = errors.New("changed since the plan")
+
+// checkPlanned refuses a leader's change to a resource that changed after
+// the state the leader planned with (the index plannedAt): changed, or
+// deleted and made anew under the same name, whose ResourceVersion is then
+// the index of its making. The leader plans on a copy of the state and
+// commits after, so without this check it would write over what came in
+// between.
+func checkPlanned(kind, id string, stored *Meta, plannedAt uint64) error {
+	switch {
+	case plannedAt == 0:
+		return fmt.Errorf("%s %s: the leader's command names no state it was planned with", kind, id)
+	case stored.ResourceVersion > plannedAt:
+		return fmt.Errorf("%s %s at %d, planned at %d: %w", kind, id, stored.ResourceVersion, plannedAt, ErrStale)
+	}
+	return nil
 }
 
 // deleted records that the command being applied removed a resource.

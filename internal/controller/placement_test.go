@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -239,6 +240,44 @@ func TestAServicePushedOutComesBackAfterItFitAMinute(t *testing.T) {
 	l.Read(func(current *state.State) {
 		if len(current.Stacks["default/shop"].PushedOut) != 0 {
 			t.Errorf("app is still pushed out: %v", current.Stacks["default/shop"].PushedOut)
+		}
+	})
+}
+
+func TestAPlacementPlannedOnAnOlderStackIsPlannedAgain(t *testing.T) {
+	l := newLeader(t, 100<<30)
+	placement := newPlacer(l)
+	// a user's apply comes in between the leader's plan and its commit of
+	// the stack's host
+	changed := stackspec.Spec{Services: map[string]stackspec.Service{
+		"app":   {Image: "x", Volumes: []stackspec.Mount{{Volume: "db", Path: "/db"}}},
+		"cache": {Image: "x"},
+	}}
+	var refused error
+	placement.propose = func(ctx context.Context, cmd state.Command) (uint64, error) {
+		if cmd.Kind != state.KindSetStackStatus || refused != nil {
+			return l.propose(ctx, cmd)
+		}
+		putResource(l, resource.KindStack, "shop", changed)
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		index := l.state.Index + 1
+		_, refused = l.state.Apply(index, cmd)
+		return index, refused
+	}
+	placement.pass(context.Background())
+	if !errors.Is(refused, state.ErrStale) {
+		t.Fatalf("want the stack's host refused as stale, got %v", refused)
+	}
+	l.Read(func(current *state.State) {
+		if stack := current.Stacks["default/shop"]; stack.Host != nil || current.Volumes["default/db"].Status != state.VolumeOK {
+			t.Errorf("after the stale pass: stack on %v, volume %s", stack.Host, current.Volumes["default/db"].Status)
+		}
+	})
+	placement.pass(context.Background())
+	l.Read(func(current *state.State) {
+		if stack := current.Stacks["default/shop"]; stack.Host == nil || stack.Generation != 2 {
+			t.Errorf("the next pass placed generation %d on %v", stack.Generation, stack.Host)
 		}
 	})
 }

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"maps"
 	"slices"
@@ -29,6 +30,9 @@ type placer struct {
 	// conditions hold the hosts whose highest priority alone reserves more
 	// than they offer, for the alert
 	conditions *Conditions
+	// plannedAt is the index of the state the pass plans with, which its
+	// commands name (state.ErrStale)
+	plannedAt uint64
 }
 
 // RunPlacement places stacks and their new volumes, pushes services out
@@ -64,6 +68,7 @@ func (p *placer) pass(ctx context.Context) time.Duration {
 		p.logger.Error("place the stacks", "error", err)
 		return 0
 	}
+	p.plannedAt = copied.Index
 	decisions := scheduler.Plan(copied)
 	p.noteOverCapacity(copied, decisions.OverCapacity)
 	// A push-out holds, for each stack it touches, the stack's new list of
@@ -72,7 +77,7 @@ func (p *placer) pass(ctx context.Context) time.Duration {
 	// contrast, stands alone, so the others still go.
 	for _, pushOut := range decisions.PushOuts {
 		p.logger.Warn("pushing out services: the host's stacks reserve more than it offers", "pushed_out", pushOut)
-		if !p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: pushOut}) {
+		if !p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: pushOut, PlannedAt: p.plannedAt}) {
 			return 0
 		}
 	}
@@ -84,11 +89,23 @@ func (p *placer) pass(ctx context.Context) time.Duration {
 }
 
 // commitOrLog writes one command and tells whether it committed; a failure
-// is logged, and the next pass plans again.
+// is logged, and the next pass plans again. A command that directly
+// follows the state the pass plans with (plannedAt) becomes part of it, so
+// the pass's next commands may change what it changed. One that does not
+// leaves plannedAt: then something else came in between, and the state
+// refuses a command about what that changed.
 func (p *placer) commitOrLog(ctx context.Context, kind string, payload any) bool {
-	if err := commit(ctx, p.propose, kind, payload); err != nil {
+	index, err := commit(ctx, p.propose, kind, payload)
+	switch {
+	case errors.Is(err, state.ErrStale):
+		p.logger.Info("the state changed since the plan; planning again", "command", kind, "reason", err)
+		return false
+	case err != nil:
 		p.logger.Error("place the stacks", "command", kind, "error", err)
 		return false
+	}
+	if index == p.plannedAt+1 {
+		p.plannedAt = index
 	}
 	return true
 }
@@ -138,18 +155,18 @@ func (p *placer) commitWaitReasons(ctx context.Context, copied *state.State, wai
 // again.
 func (p *placer) commitPlacement(ctx context.Context, placement scheduler.Placement) {
 	if placement.PushedOut != nil &&
-		!p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: placement.PushedOut}) {
+		!p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: placement.PushedOut, PlannedAt: p.plannedAt}) {
 		return
 	}
 	for _, volume := range placement.Volumes {
-		if !p.commitOrLog(ctx, state.KindPutVolume, state.PutVolume{Volume: volume}) {
+		if !p.commitOrLog(ctx, state.KindPutVolume, state.PutVolume{Volume: volume, PlannedAt: p.plannedAt}) {
 			return
 		}
 	}
 	if placement.SetsHost {
 		host := placement.Host
 		p.commitOrLog(ctx, state.KindSetStackStatus, state.SetStackStatus{
-			ID: placement.Stack, Status: state.StackStarting, Host: &host,
+			ID: placement.Stack, Status: state.StackStarting, Host: &host, PlannedAt: p.plannedAt,
 		})
 	}
 }
@@ -172,7 +189,9 @@ func (p *placer) comeBack(ctx context.Context, back *scheduler.ComeBack) time.Du
 		return left
 	}
 	p.logger.Info("bringing a pushed-out service back", "stack", back.Stack, "service", back.Service)
-	p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: map[string][]string{back.Stack: back.PushedOut}})
+	p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{
+		Stacks: map[string][]string{back.Stack: back.PushedOut}, PlannedAt: p.plannedAt,
+	})
 	p.fitting = ""
 	return 0
 }

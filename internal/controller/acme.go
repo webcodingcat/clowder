@@ -199,7 +199,7 @@ func (r *acmeRunner) failed(domain string, now time.Time, err error) {
 // commitOrLog writes a command that needs no answer; a failure is logged,
 // and the next pass tries again.
 func (r *acmeRunner) commitOrLog(ctx context.Context, kind string, payload any) {
-	if err := commit(ctx, r.propose, kind, payload); err != nil {
+	if _, err := commit(ctx, r.propose, kind, payload); err != nil {
 		r.logger.Warn("keep the certificates", "command", kind, "error", err)
 	}
 }
@@ -319,7 +319,7 @@ func (r *acmeRunner) connect(ctx context.Context, copied *state.State) (*acme.Cl
 	if err != nil {
 		return nil, err
 	}
-	err = commit(ctx, r.propose, state.KindPutACMEAccount, state.PutACMEAccount{Account: state.ACMEAccount{
+	_, err = commit(ctx, r.propose, state.KindPutACMEAccount, state.PutACMEAccount{Account: state.ACMEAccount{
 		Directory: client.DirectoryURL, URL: account.URI, Key: sealed,
 	}})
 	if err != nil {
@@ -392,9 +392,10 @@ func (r *acmeRunner) order(ctx context.Context, client *acme.Client, domain stri
 	for _, der := range chain {
 		chainPEM = append(chainPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
 	}
-	return commit(ctx, r.propose, state.KindPutCertificate, state.PutCertificate{Certificate: state.Certificate{
+	_, err = commit(ctx, r.propose, state.KindPutCertificate, state.PutCertificate{Certificate: state.Certificate{
 		Domain: domain, Key: sealed, Chain: chainPEM, NotBefore: leaf.NotBefore, NotAfter: leaf.NotAfter,
 	}})
+	return err
 }
 
 // authorize proves to the CA that the cluster serves the domain: it
@@ -422,7 +423,7 @@ func (r *acmeRunner) authorize(ctx context.Context, client *acme.Client, url, do
 	if err != nil {
 		return err
 	}
-	err = commit(ctx, r.propose, state.KindPutACMEChallenge, state.PutACMEChallenge{
+	_, err = commit(ctx, r.propose, state.KindPutACMEChallenge, state.PutACMEChallenge{
 		Token: challenge.Token, KeyAuthorization: keyAuthorization,
 	})
 	if err != nil {

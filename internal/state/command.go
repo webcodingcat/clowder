@@ -55,6 +55,9 @@ const (
 	KindPutVolume            = "put-volume"
 	KindForgetCopy           = "forget-copy"
 	KindSetVolumeInitialized = "set-volume-initialized"
+	KindStartOperation       = "start-operation"
+	KindAdvanceOperation     = "advance-operation"
+	KindFinishOperation      = "finish-operation"
 )
 
 // LeaderActor is the leader acting on its own (its control loops).
@@ -135,6 +138,9 @@ var commandKinds = map[string]commandKind{
 	KindPutVolume:            {"0.1.0", decoded(applyPutVolume)},
 	KindForgetCopy:           {"0.1.0", decoded(applyForgetCopy)},
 	KindSetVolumeInitialized: {"0.2.0", decoded(applySetVolumeInitialized)},
+	KindStartOperation:       {"0.2.0", decoded(applyStartOperation)},
+	KindAdvanceOperation:     {"0.2.0", decoded(applyAdvanceOperation)},
+	KindFinishOperation:      {"0.2.0", decoded(applyFinishOperation)},
 }
 
 // decoded turns a function of a typed payload into a handler. Unknown fields
@@ -313,6 +319,12 @@ func (s *State) makeMaps() {
 	}
 	if s.Volumes == nil {
 		s.Volumes = map[string]*Volume{}
+	}
+	if s.Operations == nil {
+		s.Operations = map[uint64]*Operation{}
+	}
+	if s.Locks == nil {
+		s.Locks = map[string]uint64{}
 	}
 }
 

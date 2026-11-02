@@ -685,7 +685,7 @@ func TestAWaitReasonChangesNothingElse(t *testing.T) {
 	c := newCluster(t)
 	c.putShop(shopSpec())
 	host := HostID(0)
-	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{ID: "default/shop", Status: StackStarting, Host: &host})
+	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{PlannedAt: c.index, ID: "default/shop", Status: StackStarting, Host: &host})
 	c.mustApply(KindSetStackStatus, HostActor(0), SetStackStatus{ID: "default/shop", Status: StackRunning, Host: &host, Generation: 1})
 
 	// a running stack whose new volume fits nowhere keeps running where it is
@@ -710,35 +710,35 @@ func TestAVolumeRecordKeepsItsInvariantsAndOwnMinor(t *testing.T) {
 	minor := 5
 	volume := *c.state.Volumes["default/pgdata"]
 	volume.Minor, volume.Copies, volume.Status = &minor, []VolumeCopy{{Host: 0, Class: "fast"}}, VolumeOK
-	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: volume})
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: volume})
 
 	other := *c.state.Volumes["default/cache"]
 	other.Minor, other.Copies, other.Status = &minor, volume.Copies, VolumeOK
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: other}, "minor 5 belongs to default/pgdata")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: other}, "minor 5 belongs to default/pgdata")
 	orphan := volume
 	orphan.Name = "blog"
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: orphan}, "no volume default/blog")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: orphan}, "no volume default/blog")
 	tooOld := volume
 	tooOld.DataGeneration = names.MaxDataGeneration + 1
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: tooOld}, "data generation 1000000 is not from 0 to 999999")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: tooOld}, "data generation 1000000 is not from 0 to 999999")
 	older := volume
 	older.DataGeneration = 0
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: older}, "older")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: older}, "older")
 	tooHigh := 1000
 	other.Minor = &tooHigh
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: other}, "not from 0 to 999")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: other}, "not from 0 to 999")
 	twice := volume
 	twice.Copies = []VolumeCopy{{Host: 0, Class: "fast"}, {Host: 0, Class: "fast"}}
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: twice}, "2 copies for 1 replicas")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: twice}, "2 copies for 1 replicas")
 	respec := volume
 	respec.Spec.Replicas = 2
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: respec}, "its spec changes only with an apply")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: respec}, "its spec changes only with an apply")
 	strange := volume
 	strange.Status = "melting"
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: strange}, "unknown status")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: strange}, "unknown status")
 	withoutMinor := volume
 	withoutMinor.Minor = nil
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: withoutMinor}, "a DRBD minor exactly when")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: withoutMinor}, "a DRBD minor exactly when")
 }
 
 func TestOnlyACopysHostMarksItsGenerationInitialized(t *testing.T) {
@@ -755,7 +755,7 @@ func TestOnlyACopysHostMarksItsGenerationInitialized(t *testing.T) {
 	volume := *c.state.Volumes["default/pgdata"]
 	volume.Minor, volume.Status = &minor, VolumeOK
 	volume.Copies = []VolumeCopy{{Host: 0, Class: "fast"}, {Host: 1, Tiebreaker: true}}
-	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: volume})
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: volume})
 
 	c.refuse(KindSetVolumeInitialized, HostActor(1), SetVolumeInitialized{Volume: "default/pgdata", DataGeneration: 1},
 		"host/1 has no copy of volume default/pgdata with a disk")
@@ -771,14 +771,14 @@ func TestOnlyACopysHostMarksItsGenerationInitialized(t *testing.T) {
 	// the placement's record keeps it, and cannot set it
 	moved := volume
 	moved.Copies = []VolumeCopy{{Host: 0, Class: "fast"}}
-	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: moved})
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: moved})
 	if !c.state.Volumes["default/pgdata"].Initialized {
 		t.Error("a put-volume of the same generation lost it")
 	}
 	// a new generation is a new LV, not initialized yet
 	restored := moved
 	restored.DataGeneration, restored.Initialized = 2, true
-	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: restored})
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: restored})
 	if c.state.Volumes["default/pgdata"].Initialized {
 		t.Error("a new data generation came initialized")
 	}
@@ -796,7 +796,7 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	volume := *c.state.Volumes["default/pgdata"]
 	volume.Minor, volume.Status = &minor, VolumeOK
 	volume.Copies = []VolumeCopy{{Host: 0, Class: "fast"}, {Host: 1, Class: "fast"}}
-	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: volume})
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: volume})
 	if len(c.state.Retired) != 0 {
 		t.Fatalf("a new volume retired %v", c.state.Retired)
 	}
@@ -804,11 +804,11 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	// the copy on host 1 leaves; the one on host 0 stays
 	moved := volume
 	moved.Copies = []VolumeCopy{{Host: 0, Class: "fast"}}
-	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: moved})
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: moved})
 	// a new generation retires the copies of the old one
 	restored := moved
 	restored.DataGeneration = 2
-	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: restored})
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: restored})
 	want := []RetiredCopy{
 		{Volume: "default/pgdata", DataGeneration: 1, Host: 1},
 		{Volume: "default/pgdata", DataGeneration: 1, Host: 0},

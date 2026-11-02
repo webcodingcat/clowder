@@ -150,7 +150,9 @@ func TestTheSecretsOfAStackThatLeftGoOnlyOnceItStopped(t *testing.T) {
 		}
 	}
 
-	cluster.Apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{ID: "default/shop", Status: state.StackPending})
+	cluster.Apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{
+		ID: "default/shop", Status: state.StackPending, PlannedAt: cluster.Index(),
+	})
 	docker.FailedDowns = 1
 	runner.pass(context.Background())
 	exists := func(project string) bool {

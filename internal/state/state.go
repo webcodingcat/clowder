@@ -73,7 +73,12 @@ type State struct {
 	Retired []RetiredCopy `json:"retired,omitempty"`
 	// Alerts are the open alerts by key.
 	Alerts map[string]*Alert `json:"alerts,omitempty"`
-	Audit  []AuditEntry      `json:"audit,omitempty"`
+	// Operations are the running ones and the last keptFinished finished,
+	// by ID.
+	Operations map[uint64]*Operation `json:"operations,omitempty"`
+	// Locks are what running operations hold: lock -> operation ID.
+	Locks map[string]uint64 `json:"locks,omitempty"`
+	Audit []AuditEntry      `json:"audit,omitempty"`
 	// changes are the resources the command being applied changed (Apply
 	// returns them); not part of the state.
 	changes []Change

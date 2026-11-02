@@ -489,8 +489,16 @@ func (c *Cluster) Place(name string) {
 	c.t.Helper()
 	host := state.HostID(0)
 	c.Apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{
-		ID: names.ID(names.Default, name), Status: state.StackStarting, Host: &host,
+		ID: names.ID(names.Default, name), Status: state.StackStarting, Host: &host, PlannedAt: c.Index(),
 	})
+}
+
+// Index is the state's index: the leader's commands of a test plan on the
+// state as it is (state.SetStackStatus.PlannedAt).
+func (c *Cluster) Index() uint64 {
+	c.Lock()
+	defer c.Unlock()
+	return c.State.Index
 }
 
 // PlaceVolume places a volume of the namespace default on host 0 in a data
@@ -501,7 +509,7 @@ func (c *Cluster) PlaceVolume(name string, generation int64) {
 	c.Read(func(current *state.State) { volume = *current.Volumes[names.ID(names.Default, name)] })
 	volume.DataGeneration, volume.Status = generation, state.VolumeOK
 	volume.Copies = []state.VolumeCopy{{Host: 0, Class: "fast"}}
-	c.Apply(state.KindPutVolume, state.LeaderActor, state.PutVolume{Volume: volume})
+	c.Apply(state.KindPutVolume, state.LeaderActor, state.PutVolume{Volume: volume, PlannedAt: c.Index()})
 }
 
 // Stack returns a stack of the namespace default.

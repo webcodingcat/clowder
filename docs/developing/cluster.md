@@ -32,9 +32,12 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | the ACME loop | `put-acme-account`, `put-acme-challenge`, `delete-acme-challenge`, `put-certificate`, `delete-certificate` |
   | the alerts | `put-alert`, `resolve-alert` |
   | each agent | `report-host`, `forget-copy`, `set-volume-initialized` |
+  | nothing yet | `start-operation`, `advance-operation`, `finish-operation` |
 
   Every kind has a sender: a kind comes with the phase that sends it (hosts that join,
-  failover and backups later), not before.
+  failover and backups later), not before. The operations are the one exception: the
+  state holds and checks them, and their locks guard stacks, volumes and hosts, before
+  moving a stack and fencing a host (phase 2) start the first ones.
 - **Resources** (phase 1c): namespaces (`Namespaces`), and by `<namespace>/<name>` stacks
   (`Stacks`), volumes (`Volumes`) and secrets (`Secrets`), each with a `Meta`. The kinds
   and their specs are in `internal/resource` (a stack's in `internal/stackspec`), which the
@@ -114,6 +117,29 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
     volume it names (`WaitReason`). It changes nothing else, so it never unplaces a stack
     that runs. The state is the placement's memory of the reason: it writes a change once,
     also after a change of leader, and clears it when the stack no longer waits.
+  - **Planned on a state.** The leader plans on a copy of the state and commits after, and
+    a user's apply may come in between. So its `set-stack-status`, `set-pushed-out` and
+    `put-volume` name the index of the state they were planned with (`PlannedAt`), and
+    the handler refuses a change to a stack or volume whose `ResourceVersion` is higher
+    (`checkPlanned`, `ErrStale`): changed since, or deleted and made anew under the same
+    name. The placement then plans again. A host's reports name no plan: they are held to
+    the stack's generation, restarts and host instead. The leader places only a stack that
+    has no host yet; moving a placed one is for an operation that holds its lock.
+- **Operations and locks.** An operation is a long task in steps, such as moving a stack
+  or fencing a host. The leader starts it (`start-operation`) and takes its locks
+  (`stack/<id>`, `volume/<id>`, `host/<id>`), each on something the state has; another
+  operation that holds one of them makes the start fail. Its ID is the index of the start.
+  Whoever owns the current step, a host or the leader, records it done
+  (`advance-operation`) and names the next owner; the command names the step it saw last
+  (`FromStep`), so a step told twice, after a slow host or a change of leader, is refused.
+  The leader finishes it (`finish-operation`), which frees the locks; the state keeps the
+  last `keptFinished` finished ones. While an operation holds a lock, every handler that
+  changes a stack, a volume or a host's phase refuses the change (`checkUnlocked`), unless
+  the leader makes it for that operation (`Operation` in `set-stack-status`, `put-volume`
+  and `set-host-phase`). A host's reports mind no lock: `set-stack-status` from the host
+  tells what runs where, which the operation waits for, and `set-volume-initialized` what
+  a copy holds. A table test holds every kind of command to this
+  (`TestEveryKindOfCommandIsCheckedForLocks`): a new kind needs a case or a reason.
 - **Retired copies.** A volume copy's data goes only when the state says so:
   `delete-resource` of a volume, and a `put-volume` that changes the data generation or
   takes a copy off a host each add the copies they give up to `Retired` (volume, data
@@ -146,7 +172,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   enables it. Any host can be `removed`, except the last that runs stacks (`active` or
   `draining`); the CLI asks first. Until phase 2, with no hosts that join and no
   failover, a host is only ever `active`, `draining` or `removed`, and a drain only keeps
-  new stacks off the host: nothing moves a running stack yet.
+  new stacks off the host: nothing moves a running stack yet. While an operation holds
+  `host/<id>` (fencing, drain, remove), only it moves the host, and the host's own
+  reports of a phase are refused too.
 
 - **Versions.** Every agent must apply every entry of the log, or the states drift apart
   for good (a `revoke` left out, and a certificate goes on working there). So:
@@ -555,6 +583,11 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   touches), then the volumes (`put-volume`), then the stack's host and `starting`
   (`set-stack-status`). If the leader changes in between, the services stay pushed out
   without the new stack and come back by the rule above. The stack's host does the rest.
+  Each command names the state the pass planned with (`PlannedAt`, starting at the copy's
+  index). A command of the pass that directly follows it (index + 1) becomes part of it,
+  so the next command may change what it changed; when something else came in between,
+  the state refuses a command about what that changed (`ErrStale`, logged as info), and
+  the next pass plans again.
 - **On the host** a pushed-out service is left out of `compose up` (`--scale <service>=0`,
   which also removes its running container), and the supervisor's rule for it is "no
   restart". Only the leader changes `Stack.PushedOut`; a host's status report no longer
