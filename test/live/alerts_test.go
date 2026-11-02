@@ -15,6 +15,16 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 )
 
+// TestAlerts sends alerts to every kind of channel and lets Prometheus
+// scrape the agent.
+func TestAlerts(t *testing.T) {
+	server, _ := baseline(t)
+	runSteps(t, []step{
+		{"alerts reach every channel", func(t *testing.T) { alertsReachTheChannels(t, server) }},
+		{"Prometheus scrapes /metrics", func(t *testing.T) { scrapeMetrics(t, server) }},
+	})
+}
+
 // The mail server bin/dev live runs in the lab's network: STARTTLS with the
 // registry's certificate, any login, and an API to read what came.
 const (
@@ -158,6 +168,11 @@ func fillPool(t *testing.T, server host, received *receiver) {
 			return fmt.Errorf("no all-clear")
 		}
 		return nil
+	})
+	changeConfig(t, func(config *clusterspec.Config) {
+		small := config.StorageClasses["small"]
+		small.Reserve = ""
+		config.StorageClasses["small"] = small
 	})
 }
 

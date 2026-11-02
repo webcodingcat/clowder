@@ -64,6 +64,11 @@ func rotateRecoveryKey(t *testing.T, server host) {
 	if output, err := clowder("secret", "decrypt", "--identity", oldKey, "-f", stackFile("shop")); err == nil {
 		t.Errorf("the old recovery key still opens the stack's file:\n%s", output)
 	}
+	// the new key takes the old one's place, where the next run of
+	// TestStacks looks for it
+	if err := os.Rename(newKey, oldKey); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // recoveryCode is the user's code of now for the command that takes it

@@ -34,10 +34,11 @@ const commandTimeout = 5 * time.Minute
 
 // outputs are the outputs of examples/hetzner (tofu output -json).
 type outputs struct {
-	PublicAddress struct{ Value string }         `json:"public_address"`
-	FloatingIP    struct{ Value string }         `json:"floating_ip"`
-	BootstrapKey  struct{ Value string }         `json:"bootstrap_key"`
-	ClusterYAML   struct{ Value map[string]any } `json:"cluster_yaml"`
+	PublicAddress  struct{ Value string }         `json:"public_address"`
+	PrivateAddress struct{ Value string }         `json:"private_address"`
+	FloatingIP     struct{ Value string }         `json:"floating_ip"`
+	BootstrapKey   struct{ Value string }         `json:"bootstrap_key"`
+	ClusterYAML    struct{ Value map[string]any } `json:"cluster_yaml"`
 }
 
 func readOutputs(t *testing.T) outputs {

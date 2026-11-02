@@ -8,6 +8,7 @@ package live
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -101,29 +102,112 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	if workDir == "" || clowderBinary == "" {
-		fmt.Fprintln(os.Stderr, "set LIVE_DIR and CLOWDER; bin/dev live does")
+	if workDir == "" || clowderBinary == "" || os.Getenv("HLAB_CONTROL") == "" {
+		fmt.Fprintln(os.Stderr, "set LIVE_DIR, CLOWDER and HLab's variables; bin/dev live does")
 		os.Exit(2)
 	}
 	os.Exit(m.Run())
 }
 
-// TestOneHost runs a host's way from the first boot to a deleted stack. The
-// steps build on each other, so the first failure ends the test.
-func TestOneHost(t *testing.T) {
-	tofu := readOutputs(t)
-	server := host{address: tofu.PublicAddress.Value}
+// step is a part of a scenario; the steps of one build on each other.
+type step struct {
+	name string
+	run  func(t *testing.T)
+}
+
+// runSteps runs a scenario's steps as subtests; the first failure ends it.
+func runSteps(t *testing.T, steps []step) {
+	t.Helper()
+	for _, step := range steps {
+		if !t.Run(step.name, step.run) {
+			return
+		}
+	}
+}
+
+// watchHost prints the host's state at the end of a test that failed.
+func watchHost(t *testing.T, server host) {
 	t.Cleanup(func() {
 		if t.Failed() {
 			diagnose(t, server)
 		}
 	})
-	steps := []struct {
-		name string
-		run  func(t *testing.T)
-	}{
+}
+
+// baselineConfigFile holds cluster.yaml as TestSetup applied it, without
+// the values of its secrets, for baseline to compare.
+const baselineConfigFile = "baseline-config.json"
+
+// baseline checks where every scenario starts, so each runs alone and in any
+// order (bin/dev live run -run <test>): the host that bin/dev live up made,
+// its cluster bootstrapped with a leader and cluster.yaml applied as
+// TestSetup left it, no stack or volume in any namespace, and no fault in
+// the lab. A scenario that fails leaves what it made for a look; the next one
+// stops here and names it.
+func baseline(t *testing.T) (host, outputs) {
+	t.Helper()
+	tofu := readOutputs(t)
+	server := host{address: tofu.PublicAddress.Value}
+	watchHost(t, server)
+	want, err := os.ReadFile(filepath.Join(workDir, baselineConfigFile))
+	if err != nil {
+		t.Fatalf("the cluster is not bootstrapped (bin/dev live up does it): %v", err)
+	}
+	server.must(t, "test -e "+setupMarker+" && systemctl is-active clowderd")
+	if status := clusterStatus(t); strings.Contains(status, "leader none") {
+		t.Fatalf("the cluster has no leader:\n%s", status)
+	}
+	if got := clusterConfigJSON(t); !bytes.Equal(got, want) {
+		t.Fatalf("an earlier scenario left cluster.yaml changed:\n%s\nwant, as TestSetup applied it:\n%s", got, want)
+	}
+	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "nothing to apply") {
+		t.Fatalf("cluster.yaml is not applied:\n%s", diff)
+	}
+	// a deleted volume is listed until its host removed its copy
+	eventually(t, time.Minute, "no stack or volume left", func() error {
+		for _, kind := range []string{"stacks", "volumes"} {
+			if left := resourcesInAllNamespaces(t, kind); len(left) > 0 {
+				return fmt.Errorf("an earlier scenario left the %s %s; clowder delete removes them",
+					kind, strings.Join(left, ", "))
+			}
+		}
+		return nil
+	})
+	checkNoFaults(t)
+	return server, tofu
+}
+
+// resourcesInAllNamespaces lists a kind's resources as namespace/name.
+func resourcesInAllNamespaces(t *testing.T, kind string) []string {
+	t.Helper()
+	var objects []resource.Object
+	if err := json.Unmarshal([]byte(mustClowder(t, "get", kind, "-A", "-o", "json")), &objects); err != nil {
+		t.Fatalf("read get %s: %v", kind, err)
+	}
+	var names []string
+	for _, object := range objects {
+		names = append(names, object.Metadata.Namespace+"/"+object.Metadata.Name)
+	}
+	return names
+}
+
+// TestSetup makes the first host and bootstraps its cluster: the baseline
+// of the other scenarios. bin/dev live up runs it, once per host.
+func TestSetup(t *testing.T) {
+	tofu := readOutputs(t)
+	server := host{address: tofu.PublicAddress.Value}
+	watchHost(t, server)
+	runSteps(t, []step{
 		{"the setup makes the first host", func(t *testing.T) { waitForSetup(t, server) }},
 		{"the user bootstraps and applies the cluster", func(t *testing.T) { bootstrap(t, server, tofu) }},
+	})
+}
+
+// TestStacks runs a stack's way from the first apply through restarts, a
+// reboot and changed secrets to its delete.
+func TestStacks(t *testing.T) {
+	server, tofu := baseline(t)
+	runSteps(t, []step{
 		{"a stack runs from a private registry with volumes and secrets", func(t *testing.T) { runStack(t, server) }},
 		{"the same files again change nothing", func(t *testing.T) { applyAgainChangesNothing(t, server) }},
 		{"a dry run makes nothing", func(t *testing.T) { dryRunMakesNothing(t, server) }},
@@ -143,21 +227,7 @@ func TestOneHost(t *testing.T) {
 		{"a volume that fits nowhere waits with its reason", func(t *testing.T) { fullPool(t, server) }},
 		{"twenty stacks run", func(t *testing.T) { runManyStacks(t, server) }},
 		{"the stack is deleted with its volumes", func(t *testing.T) { deleteStack(t, server) }},
-		{"the Floating IP comes back when moved by hand", func(t *testing.T) { holdFloatingIP(t, tofu) }},
-		{"HTTPS with a certificate from the ACME CA", func(t *testing.T) { serveHTTPS(t, tofu) }},
-		{"a UDP service sees the client's address", func(t *testing.T) { udpSeesClient(t, tofu) }},
-		{"a container reaches the domain through the Floating IP", func(t *testing.T) { hairpin(t, server) }},
-		{"the certificate is renewed once", func(t *testing.T) { renewCertificate(t, tofu) }},
-		{"alerts reach every channel", func(t *testing.T) { alertsReachTheChannels(t, server) }},
-		{"Prometheus scrapes /metrics", func(t *testing.T) { scrapeMetrics(t, server) }},
-		{"higher priorities push services out", func(t *testing.T) { pushOut(t, server) }},
-		{"the agent's memory", func(t *testing.T) { checkMemory(t, server, "at the end") }},
-	}
-	for _, step := range steps {
-		if !t.Run(step.name, step.run) {
-			return
-		}
-	}
+	})
 }
 
 // waitForSetup waits until clowder-setup has made the host the first of a
@@ -235,6 +305,9 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	status := mustClowder(t, "cluster", "status")
 	if strings.Contains(status, "leader none") {
 		t.Errorf("the cluster has no leader:\n%s", status)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, baselineConfigFile), clusterConfigJSON(t), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

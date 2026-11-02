@@ -13,14 +13,19 @@
 #             into dist/
 #   package   build, then the Debian packages of clowder and clowderd into dist/
 #   all       lint, test, test-tools, package (what CI runs)
-#   live      package, then the live tests in an HLab lab of their own:
-#             examples/hetzner makes a host, test/live drives it (about 20
-#             minutes; needs HLAB=<path to HLab's bin/hlab> and /dev/kvm).
-#             What a failed run leaves stays for a look.
-#   live release <tag>  the live tests on a release, on a checkout of its
-#             tag, without the test hook: the host installs clowderd from the
-#             APT repository, the CLI comes from the GitHub release
+#   live      the live tests in an HLab lab of their own: live up, live run,
+#             and live down once they pass (about 20 minutes; needs
+#             HLAB=<path to HLab's bin/hlab> and /dev/kvm). What a failed run
+#             leaves stays for a look.
+#   live up [<tag>]  package, start the lab unless it runs, make a host with
+#             examples/hetzner and bootstrap its cluster (test/live: TestSetup).
+#             With a tag, on a checkout of it, the release without the test
+#             hook: the host installs clowderd from the APT repository, the CLI
+#             comes from the GitHub release
+#   live run [<go test flags>]  the scenarios of test/live on the host that
+#             live up made, e.g. bin/dev live run -run TestIngress
 #   live down destroy what the live tests left and stop their lab
+#   live release <tag>  live up <tag>, live run, live down
 set -euo pipefail
 # Docker gets Windows paths from pwd -W; Git Bash must not rewrite them. Native
 # tools that take a path (git) are called after a cd instead.
@@ -46,8 +51,9 @@ readonly DEBIAN_IMAGE=debian:trixie-slim
 # Go's module and build cache survive between runs.
 readonly CACHE_VOLUME=clowder-gocache
 readonly BUSYBOX_IMAGE=busybox:1.37.0
-# What the live tests keep between runs, so bin/dev live down finds it after
-# a failure: the OpenTofu state, the SSH key, the cluster directory.
+# What the live tests keep between runs, so bin/dev live run and down find
+# it: the OpenTofu state, the SSH key, the CLI, the cluster directory, and
+# the lock that keeps two runs apart (live_lock).
 readonly LIVE_VOLUME=clowder-live
 # The container that serves the clowderd package to the host.
 readonly LIVE_PACKAGES=clowder-live-packages
@@ -223,7 +229,45 @@ in_lab() {
   shift
   docker run --rm -i --network "${HLAB_NETWORK}" -v "${DOCKER_ROOT}:/src" -w /src \
     -v "${CACHE_VOLUME}:/go" -v "${LIVE_VOLUME}:/work" -e HCLOUD_ENDPOINT -e HCLOUD_TOKEN \
-    -e HLAB_ACME_DIRECTORY -e HLAB_ACME_CA -e GOFLAGS=-buildvcs=false "${image}" "$@"
+    -e HLAB_CONTROL -e HLAB_ACME_DIRECTORY -e HLAB_ACME_CA -e GOFLAGS=-buildvcs=false "${image}" "$@"
+}
+
+# live_lock: Take the live tests' lock, held until bin/dev ends, or fail if
+# another bin/dev holds it: two runs would share the lab and the volume.
+# flock in a container holds it while the container's stdin is open; that is
+# a pipe from this shell, which closes however bin/dev ends. The lock file is
+# a dot file, which rm -rf /work/* keeps.
+# Globals:
+#   LIVE_LOCK, LIVE_LOCK_PID (set by coproc)
+live_lock() {
+  local answer=""
+  if [[ -n "${LIVE_LOCK_PID:-}" ]]; then
+    return 0
+  fi
+  coproc LIVE_LOCK {
+    docker run --rm -i -v "${LIVE_VOLUME}:/work" "${BUSYBOX_IMAGE}" \
+      flock -n /work/.lock sh -c 'echo locked && exec cat >/dev/null'
+  }
+  read -r answer <&"${LIVE_LOCK[0]}" || true
+  if [[ "${answer}" != locked ]]; then
+    echo "bin/dev live: another run holds the lab ${LIVE_VOLUME}, or its lock failed" >&2
+    exit 1
+  fi
+}
+
+# lab_runs: Tell whether the live tests' lab runs: hlab status asks the
+# lab's control and fails without a running lab.
+lab_runs() {
+  lab status >/dev/null 2>&1
+}
+
+# live_lab: Start the live tests' lab unless it runs (hlab up would start a
+# running lab afresh and shut its servers down), and set its variables.
+live_lab() {
+  if ! lab_runs; then
+    lab up
+  fi
+  eval "$(lab env)"
 }
 
 # live_tofu <command>: A shell command with OpenTofu on examples/hetzner in
@@ -243,7 +287,9 @@ live_tofu() {
 # to destroy the host.
 live_host_left() {
   local answer
-  answer="$(in_lab "${GO_IMAGE}" sh -c 'if test -e /work/terraform.tfstate; then echo yes; else echo no; fi')"
+  # outside the lab's network: bin/dev live up asks before the lab runs
+  answer="$(docker run --rm -v "${LIVE_VOLUME}:/work" "${BUSYBOX_IMAGE}" \
+    sh -c 'if test -e /work/terraform.tfstate; then echo yes; else echo no; fi')"
   case "${answer}" in
     yes) return 0 ;;
     no) return 1 ;;
@@ -326,12 +372,18 @@ fetch_release_cli() {
   echo "clowderd_version = \"$(package_version "${tag}")\""
 }
 
-# cmd_live [<tag>]: Run the live tests on a new host; tear it down if they
-# pass. With a tag, on that release instead of dist/; the tests come from the
-# checkout, so it must be at the tag.
-cmd_live() {
-  local tag="${1:-}" clowder=/src/dist/linux-amd64/clowder package_variables public_key
-  local status=0
+# cmd_live_up [<tag>]: Make a host in the lab, started unless it runs, and
+# bootstrap its cluster (TestSetup); the registry and the mail server run on
+# until bin/dev live down. With a tag, on that release instead of dist/; the
+# tests come from the checkout, so it must be at the tag.
+cmd_live_up() {
+  local tag="${1:-}" package_variables public_key
+  live_lock
+  if live_host_left; then
+    echo "bin/dev live up: a host is left (its OpenTofu state is in the volume ${LIVE_VOLUME});" \
+      "bin/dev live run tests it, bin/dev live down removes it" >&2
+    return 1
+  fi
   if [[ -n "${tag}" ]]; then
     if [[ "$(cd "${ROOT}" && git rev-parse "${tag}^{commit}" 2>/dev/null)" != "$(cd "${ROOT}" && git rev-parse HEAD)" ]]; then
       echo "bin/dev live release: check out the tag ${tag} first" >&2
@@ -341,22 +393,17 @@ cmd_live() {
       echo "bin/dev live release: the tests come from the checkout; commit or stash its changes first" >&2
       return 1
     fi
-    clowder=/work/cli/clowder
   else
     cmd_package
   fi
-  lab up
-  eval "$(lab env)"
-  if live_host_left; then
-    echo "bin/dev live: an earlier run left its host; bin/dev live down removes it" >&2
-    return 1
-  fi
+  live_lab
   in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/* \
     && ssh-keygen -q -t ed25519 -N "" -C clowder-live -f /work/id_ed25519'
   if [[ -n "${tag}" ]]; then
     package_variables="$(fetch_release_cli "${tag}")"
   else
     package_variables="$(serve_package)"
+    in_lab "${GO_IMAGE}" sh -c 'mkdir /work/cli && cp dist/linux-amd64/clowder /work/cli/'
   fi
   public_key="$(in_lab "${GO_IMAGE}" cat /work/id_ed25519.pub)"
   in_lab "${GO_IMAGE}" sh -c 'cat >/work/live.tfvars' <<EOF
@@ -368,25 +415,68 @@ ${package_variables}
 EOF
   start_registry
   start_mail
-  live_tofu 'tofu apply -input=false -auto-approve -state=/work/terraform.tfstate \
+  if ! live_tofu 'tofu apply -input=false -auto-approve -state=/work/terraform.tfstate \
     -var-file=/work/live.tfvars && tofu output -json -state=/work/terraform.tfstate >/work/outputs.json' \
-    && in_lab "${GO_IMAGE}" env LIVE_DIR=/work CLOWDER="${clowder}" \
-      go test -tags live -count=1 -timeout 90m -v ./test/live \
-    || status=$?
-  # the package server runs only without release
-  docker rm -f "${LIVE_PACKAGES}" "${LIVE_REGISTRY}" "${LIVE_MAIL}" >/dev/null 2>&1 || true
-  if ((status != 0)); then
-    echo "bin/dev live: failed; the host stays for a look (ssh from the lab's network with" \
-      "/work/id_ed25519 in the volume ${LIVE_VOLUME}); bin/dev live down removes it" >&2
-    return "${status}"
+    || ! live_go_test -run '^TestSetup$'; then
+    live_failed "bin/dev live down, then up, makes it anew"
   fi
+}
+
+# cmd_live_run [<go test flags>]: Run the scenarios on the host that
+# bin/dev live up made; it stays, whatever the outcome.
+cmd_live_run() {
+  live_lock
+  # not live_lab: a lab started now would have no host
+  if ! lab_runs; then
+    echo "bin/dev live run: the lab is not up; bin/dev live up starts it" >&2
+    return 1
+  fi
+  eval "$(lab env)"
+  if ! live_host_left; then
+    echo "bin/dev live run: there is no host; bin/dev live up makes one" >&2
+    return 1
+  fi
+  # a new registry would not have the image that TestSetup pushed
+  if ! container_runs "${LIVE_REGISTRY}" || ! container_runs "${LIVE_MAIL}"; then
+    echo "bin/dev live run: the registry or the mail server stopped; bin/dev live down, then up" >&2
+    return 1
+  fi
+  live_go_test -skip '^TestSetup$' "$@" \
+    || live_failed "bin/dev live run -run <test> runs a scenario again, bin/dev live down removes it all"
+}
+
+# container_runs <name>: Tell whether the container runs.
+container_runs() {
+  [[ "$(docker inspect --format '{{.State.Running}}' "$1" 2>/dev/null)" == true ]]
+}
+
+# live_go_test <go test flags>: Run test/live in the lab's network with the
+# CLI that bin/dev live up put in /work/cli; the first failure ends it.
+live_go_test() {
+  in_lab "${GO_IMAGE}" env LIVE_DIR=/work CLOWDER=/work/cli/clowder \
+    go test -tags live -count=1 -failfast -timeout 90m -v "$@" ./test/live
+}
+
+# live_failed <next>: Say that the host stays after a failure, and how to go
+# on; fail.
+live_failed() {
+  echo "bin/dev live: failed; the host stays for a look (ssh from the lab's network with" \
+    "/work/id_ed25519 in the volume ${LIVE_VOLUME}); $1" >&2
+  return 1
+}
+
+# cmd_live [<tag>]: Make a host, run the scenarios on it and tear it down
+# once they pass; a failure ends bin/dev before (set -e), and the host stays.
+cmd_live() {
+  cmd_live_up "$@"
+  cmd_live_run
   cmd_live_down
 }
 
 # cmd_live_down: Destroy what the live tests left and stop their lab.
 cmd_live_down() {
-  lab up
-  eval "$(lab env)"
+  live_lock
+  live_lab
   docker rm -f "${LIVE_PACKAGES}" "${LIVE_REGISTRY}" "${LIVE_MAIL}" >/dev/null 2>&1 || true
   if live_host_left; then
     live_tofu 'tofu destroy -input=false -auto-approve -state=/work/terraform.tfstate \
@@ -414,10 +504,12 @@ main() {
     live)
       case "${2:-}" in
         "") cmd_live ;;
+        up) cmd_live_up "${3:-}" ;;
+        run) cmd_live_run "${@:3}" ;;
         down) cmd_live_down ;;
         release) cmd_live "${3:?bin/dev live release needs a tag}" ;;
         *)
-          echo "bin/dev live: unknown mode ${2} (release <tag>, down)" >&2
+          echo "bin/dev live: unknown mode ${2} (up [<tag>], run [<go test flags>], down, release <tag>)" >&2
           exit 2
           ;;
       esac

@@ -15,9 +15,18 @@ import (
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// storeStack is the stack of step 25 in docs/live-tests.md: db at critical
-// (900), app at the stack's high (700) and depending on db, cache at low
-// (200); each reserves 200M.
+// TestPriorities lets stacks of higher priority push others' services out.
+func TestPriorities(t *testing.T) {
+	server, _ := baseline(t)
+	runSteps(t, []step{
+		{"higher priorities push services out", func(t *testing.T) { pushOut(t, server) }},
+		{"the agent's memory after the churn", func(t *testing.T) { checkMemory(t, server, "after the churn") }},
+	})
+}
+
+// storeStack is the stack of TestPriorities: db at critical (900), app at
+// the stack's high (700) and depending on db, cache at low (200); each
+// reserves 200M.
 var storeStack = document(resource.KindStack, "store", `priority: high
 services:
   db:
@@ -63,9 +72,6 @@ const pushOutDeadline = 5 * time.Minute
 // A stack whose second service finds nothing below its priority starts
 // with that service pushed out.
 func pushOut(t *testing.T, server host) {
-	// echo's services run at the default priority (500), below app's: they
-	// would go before app
-	removeStack(t, "echo")
 	createAndApply(t, "store", storeStack)
 	waitRunning(t, "store", 1)
 	// system_reserve takes what is free now but 100M: the host then has
@@ -127,5 +133,6 @@ func pushOut(t *testing.T, server host) {
 		t.Error("mixed should run api and not worker")
 	}
 	removeStack(t, "mixed")
+	removeStack(t, "store")
 	changeConfig(t, func(config *clusterspec.Config) { config.SystemReserve.Memory = "" })
 }

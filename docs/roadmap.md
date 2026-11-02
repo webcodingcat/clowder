@@ -10,14 +10,19 @@ clowder is built in phases; each ends with live tests on HLab
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done, passes the live tests |
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
-| 2 | three hosts: replication, failover with fencing | |
+| 2 | three hosts: replication, failover with fencing | started: the live tests |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
 Phase 1d replaced SOPS with values of their own: tagged `!secret` in `cluster.yaml` and in
 Secrets, encrypted for the cluster and the recovery key (`secret encrypt`, `rekey`,
 `decrypt`), with the credentials in the user's config directory and access back through a
-code from a host (`user recover`, `recovery rotate`). Phase 2 is next: three hosts.
+code from a host (`user recover`, `recovery rotate`).
+
+Phase 2 began with the live tests, before any code for several hosts: `bin/dev live up`,
+`run` and `down` apart, with a lock against two runs; scenarios that each check their
+baseline and run alone (`run -run <test>`); and `TestBoundaries`, which pins what a
+container reaches on one host before the network changes for several.
 
 Before it, the first release became installable and the commands honest: the APT
 repository keeps every version, `examples/hetzner` pins `0.1.0`, `bin/dev live release
@@ -76,6 +81,8 @@ They matter once there are several hosts; on one, they cost at most time.
 - A host that falls silent raises no alert: `docker-down` and the pools come from the
   host's own report, which a dead host does not send. On one host the heartbeat covers it;
   with several, the leader needs an alert for a host whose reports stop.
+- `TestBoundaries` checks one host. With several, containers must not reach the other
+  hosts' underlay either, and a packet with a spoofed source must be dropped.
 - `examples/hetzner` ignores later changes to the server's user data, so a storage class
   added later gets a volume but no thin pool on an existing host.
 

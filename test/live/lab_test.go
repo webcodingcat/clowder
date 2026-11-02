@@ -69,7 +69,46 @@ func cloud(t *testing.T, method, path string, body, out any) {
 	}
 }
 
-// download reads a URL of the lab (HLab's ACME CA).
+// checkNoFaults fails the test while HLab injects a fault (hlab fault):
+// scenarios make their faults through HLab's lab control (HLAB_CONTROL), and
+// one that failed may have left its fault behind.
+func checkNoFaults(t *testing.T) {
+	t.Helper()
+	var status struct {
+		Faults   []json.RawMessage          `json:"faults"`
+		Netem    map[string]json.RawMessage `json:"netem"`
+		APIFault struct {
+			Count   int `json:"count"`
+			DelayMS int `json:"delay_ms"`
+		} `json:"api_fault"`
+		Servers []struct {
+			Name     string `json:"name"`
+			PublicIP string `json:"public_ip"`
+			Dead     bool   `json:"dead"`
+		} `json:"servers"`
+	}
+	if err := json.Unmarshal(download(t, os.Getenv("HLAB_CONTROL")+"/status"), &status); err != nil {
+		t.Fatalf("read the lab's status: %v", err)
+	}
+	if len(status.Faults) > 0 || len(status.Netem) > 0 || status.APIFault.Count > 0 || status.APIFault.DelayMS > 0 {
+		t.Fatalf("the lab injects faults (hlab status shows them, hlab fault clear ends them): %d faults, "+
+			"netem on %d, API fault %+v", len(status.Faults), len(status.Netem), status.APIFault)
+	}
+	// a renamed field reads as zero and would pass unseen: the test's own
+	// host must be listed
+	listed := false
+	for _, server := range status.Servers {
+		if server.Dead {
+			t.Fatalf("the lab's server %s is dead (hlab fault alive %s)", server.Name, server.Name)
+		}
+		listed = listed || server.PublicIP == readOutputs(t).PublicAddress.Value
+	}
+	if !listed {
+		t.Fatal("the lab's status does not list the test's host; has its format changed?")
+	}
+}
+
+// download reads a URL of the lab (HLab's ACME CA, its status).
 func download(t *testing.T, url string) []byte {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -100,6 +139,22 @@ func changeConfig(t *testing.T, change func(config *clusterspec.Config)) {
 	change(&directory.Config)
 	writeConfig(t, directory.Config, directory.Encrypted)
 	mustClowder(t, "cluster", "apply")
+}
+
+// clusterConfigJSON is the test's cluster.yaml as JSON: its settings, with
+// the names of its secrets and not their values, which change at each
+// encrypt.
+func clusterConfigJSON(t *testing.T) []byte {
+	t.Helper()
+	directory, err := clusterdir.Load(clusterDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := json.MarshalIndent(directory.Config, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content
 }
 
 // encrypted are the values of cluster.yaml the test set, by name (their
@@ -186,8 +241,14 @@ func writeClusterFile(t *testing.T, name string, content []byte) {
 // runs tells whether a service of a stack has a running container.
 func (h host) runs(t *testing.T, stack, service string) bool {
 	t.Helper()
+	return h.container(t, stack, service) != ""
+}
+
+// container is the ID of a service's running container; "" if none runs.
+func (h host) container(t *testing.T, stack, service string) string {
+	t.Helper()
 	return h.must(t, "docker ps -q --filter label=com.docker.compose.project="+project(stack)+
-		" --filter label=com.docker.compose.service="+service) != ""
+		" --filter label=com.docker.compose.service="+service)
 }
 
 // project is a stack's Compose project on the host: the tests' stacks are in

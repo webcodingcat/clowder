@@ -27,6 +27,24 @@ const (
 	domain = "shop." + zone
 )
 
+// TestIngress serves a stack under a domain with a certificate from HLab's
+// ACME CA, through the Floating IP, and measures the agent with Traefik.
+func TestIngress(t *testing.T) {
+	server, tofu := baseline(t)
+	runSteps(t, []step{
+		{"the Floating IP comes back when moved by hand", func(t *testing.T) { holdFloatingIP(t, tofu) }},
+		{"HTTPS with a certificate from the ACME CA", func(t *testing.T) { serveHTTPS(t, tofu) }},
+		{"a UDP service sees the client's address", func(t *testing.T) { udpSeesClient(t, tofu) }},
+		{"a container reaches the domain through the Floating IP", func(t *testing.T) { hairpin(t, server) }},
+		{"the certificate is renewed once", func(t *testing.T) { renewCertificate(t, tofu) }},
+		{"the agent's memory with Traefik", func(t *testing.T) { checkMemory(t, server, "serving HTTPS") }},
+		{"the stack and the ACME settings go", func(t *testing.T) {
+			removeStack(t, "echo")
+			changeConfig(t, func(config *clusterspec.Config) { config.ACME = clusterspec.ACME{} })
+		}},
+	})
+}
+
 // The image of the echo stack; the host pulls it from Docker Hub.
 const pythonImage = "python:3.13-alpine3.22"
 
