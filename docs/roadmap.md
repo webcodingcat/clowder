@@ -23,8 +23,8 @@ Before it, the first release became installable and the commands honest: the APT
 repository keeps every version, `examples/hetzner` pins `0.1.0`, `bin/dev live release
 <tag>` tests a published release (the [release checklist](developing/shipping.md#release-checklist)),
 an upgrade restarts the agent, `host remove` asks first and keeps the last host that runs
-stacks, `host drain` says that it moves nothing, and a cluster has one user. The
-tag `v0.1.0` is still to set, as a release candidate first.
+stacks, `host drain` says that it moves nothing, and a cluster has one user. `v0.1.0` is
+out; its release candidate passed the live tests without the test hook.
 
 Code without a caller went then; each phase brings back what it needs:
 
