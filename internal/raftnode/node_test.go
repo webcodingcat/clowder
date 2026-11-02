@@ -180,6 +180,34 @@ func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
 	}
 }
 
+func TestTheLeaderHoldsBackAKindAnOlderAgentCannotRead(t *testing.T) {
+	cluster := newTestCluster(t)
+	node := cluster.open(0, t.TempDir(), freeAddress(t))
+	defer func() { _ = node.Close() }()
+	if err := node.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	waitForLeader(t, node)
+	ctx := context.Background()
+	if _, err := node.Propose(ctx, bootstrapCommand(t)); err != nil {
+		t.Fatal(err)
+	}
+	report, err := state.NewCommand(state.KindReportHost, time.Now(), state.HostActor(0),
+		state.ReportHost{Host: 0, Version: "0.1.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := node.Propose(ctx, report); err != nil {
+		t.Fatal(err)
+	}
+	initialized := command(t, state.KindSetVolumeInitialized, state.SetVolumeInitialized{Volume: "shop/data"})
+	_, err = node.Propose(ctx, initialized)
+	var refused *state.Refused
+	if !errors.Is(err, state.ErrNotReadByAll) || errors.As(err, &refused) {
+		t.Errorf("a kind of 0.2.0 with an agent of 0.1.0: %v", err)
+	}
+}
+
 func TestTheWatchSeesWhatTheLogChangedAfterItsSnapshot(t *testing.T) {
 	cluster := newTestCluster(t)
 	dir, address := t.TempDir(), freeAddress(t)

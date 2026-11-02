@@ -3,6 +3,7 @@ package raftnode
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -29,24 +30,52 @@ type fsm struct {
 	// readers, who hold mu only to read
 	sharedMu sync.Mutex
 	shared   *state.State
+	// halted closes when an entry or a snapshot could not be read
+	// (state.ErrUnreadable), and haltErr says which. From then on the fsm
+	// applies, restores and snapshots nothing: Raft goes on handing it
+	// entries until the agent stops, and a snapshot would claim an index
+	// the state never reached.
+	halted  chan struct{}
+	haltErr error
 }
 
 func newFSM() *fsm {
-	return &fsm{state: &state.State{}, changed: make(chan struct{})}
+	return &fsm{state: &state.State{}, changed: make(chan struct{}), halted: make(chan struct{})}
 }
 
 // Apply applies one command. Its error goes back to the proposer as the
-// response; for Raft the entry is applied either way.
+// response; for Raft the entry is applied either way, even one the state
+// could not read.
 func (f *fsm) Apply(entry *raft.Log) any {
 	f.mu.Lock()
 	// defers run backwards: unlock first, then wake, which takes the lock
 	// again to swap the channel
 	defer f.wake()
 	defer f.mu.Unlock()
+	if f.haltErr != nil {
+		return f.haltErr
+	}
 	changes, err := f.state.ApplyEntry(entry.Index, entry.Data)
+	if errors.Is(err, state.ErrUnreadable) {
+		f.halt(err)
+		return err
+	}
 	f.changes.Add(changes)
 	f.shared = nil
 	return err
+}
+
+// halt stops the fsm for good; f.mu must be held.
+func (f *fsm) halt(err error) {
+	f.haltErr = err
+	close(f.halted)
+}
+
+// haltError returns why the fsm halted, nil while it did not.
+func (f *fsm) haltError() error {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.haltErr
 }
 
 // wake tells the waiters that the state changed.
@@ -62,6 +91,9 @@ func (f *fsm) wake() {
 func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
+	if f.haltErr != nil {
+		return nil, fmt.Errorf("no snapshot of a halted state: %w", f.haltErr)
+	}
 	var encoded bytes.Buffer
 	if err := f.state.WriteSnapshot(&encoded); err != nil {
 		return nil, err
@@ -73,10 +105,19 @@ func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 func (f *fsm) Restore(snapshotFile io.ReadCloser) error {
 	defer func() { _ = snapshotFile.Close() }() // read only
 	restored, err := state.ReadSnapshot(snapshotFile)
-	if err != nil {
+	f.mu.Lock()
+	switch {
+	case f.haltErr != nil:
+		f.mu.Unlock()
+		return f.haltErr
+	case errors.Is(err, state.ErrUnreadable):
+		f.halt(err)
+		f.mu.Unlock()
+		return err
+	case err != nil:
+		f.mu.Unlock()
 		return err
 	}
-	f.mu.Lock()
 	f.state = restored
 	// what came before the snapshot is in it, not in the ring
 	f.changes.Reset(restored.Index)

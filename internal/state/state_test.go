@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net/netip"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
@@ -178,22 +180,94 @@ func TestNothingButTheBootstrapRunsOnAnEmptyState(t *testing.T) {
 	}
 }
 
-func TestCommandsOfUnknownVersionsOrKindsAreRefused(t *testing.T) {
+func TestAnEntryTheAgentCannotReadLeavesTheStateAndItsIndex(t *testing.T) {
 	c := newCluster(t)
+	before, index := c.encoded(), c.state.Index
+	payload := `"payload":{"name":"alice","serial":"a1"}`
 	for _, test := range []struct {
-		version int
-		kind    string
-		want    string
+		name, entry string
 	}{
-		{CommandVersion + 1, KindAddUser, "not readable"},
-		{CommandVersion - 2, KindAddUser, "not readable"},
-		{0, KindAddUser, "not readable"}, // a command without a version field
-		{CommandVersion, "make-coffee", "unknown command"},
+		{"not JSON", `{"version":`},
+		{"a newer version", fmt.Sprintf(`{"version":%d,"kind":"add-user",%s}`, CommandVersion+1, payload)},
+		{"an older version", fmt.Sprintf(`{"version":%d,"kind":"add-user",%s}`, CommandVersion-2, payload)},
+		{"no version", `{"kind":"add-user",` + payload + `}`},
+		{"an unknown kind", fmt.Sprintf(`{"version":%d,"kind":"make-coffee",%s}`, CommandVersion, payload)},
 	} {
-		cmd := Command{Version: test.version, Kind: test.kind, At: testTime, Actor: LeaderActor, Payload: []byte("{}")}
-		if _, err := c.state.Apply(99, cmd); err == nil || !strings.Contains(err.Error(), test.want) {
-			t.Errorf("%d %s: want %q, got %v", test.version, test.kind, test.want, err)
+		if _, err := c.state.ApplyEntry(index+1, []byte(test.entry)); !errors.Is(err, ErrUnreadable) {
+			t.Errorf("%s: want ErrUnreadable, got %v", test.name, err)
 		}
+		if c.state.Index != index || c.encoded() != before {
+			t.Errorf("%s: the state changed, index %d", test.name, c.state.Index)
+		}
+	}
+}
+
+func TestARefusedCommandMovesTheIndexOn(t *testing.T) {
+	c := newCluster(t)
+	err := c.apply(KindBootstrap, LeaderActor, Bootstrap{})
+	var refusal *CommandError
+	if !errors.As(err, &refusal) || errors.Is(err, ErrUnreadable) {
+		t.Fatalf("want a CommandError, got %v", err)
+	}
+	if c.state.Index != c.index {
+		t.Errorf("index %d, want %d", c.state.Index, c.index)
+	}
+}
+
+func TestEveryKindOfCommandNamesTheReleaseThatBroughtIt(t *testing.T) {
+	for kind, known := range commandKinds {
+		if known.since == "" || buildinfo.IsDevelopment(known.since) {
+			t.Errorf("%s: release %q", kind, known.since)
+		}
+	}
+}
+
+func TestTheLeaderWritesANewKindOnlyOnceEveryAgentReadsIt(t *testing.T) {
+	c := newCluster(t)
+	c.addHost(testHost(1))
+	c.addHost(testHost(2))
+	tests := []struct {
+		name     string
+		versions [3]string
+		known    bool
+	}{
+		{"no agent reported yet", [3]string{"", "", ""}, true},
+		{"every agent has the release", [3]string{"0.2.0", "0.2.1", "0.3.0"}, true},
+		{"its release candidate", [3]string{"0.2.0", "0.2.0~rc1", "0.2.0"}, true},
+		{"one agent is older", [3]string{"0.2.0", "0.1.0", "0.2.0"}, false},
+		{"development builds", [3]string{"0.0.0~dev+abc", "dev", "0.2.0"}, true},
+		{"development builds and an old release", [3]string{"0.0.0~dev+abc", "0.1.0", "0.0.0~dev+abc"}, false},
+	}
+	for _, test := range tests {
+		for id, version := range test.versions {
+			c.state.Hosts[HostID(id)].Version = version
+		}
+		err := c.state.CheckKnown(KindSetVolumeInitialized) // since 0.2.0
+		if (err == nil) != test.known || (err != nil && !errors.Is(err, ErrNotReadByAll)) {
+			t.Errorf("%s: %v", test.name, err)
+		}
+		if err := c.state.CheckKnown(KindAddUser); err != nil {
+			t.Errorf("%s: a kind of 0.1.0: %v", test.name, err)
+		}
+	}
+	if err := c.state.CheckKnown("make-coffee"); err == nil {
+		t.Error("an unknown kind passed")
+	}
+}
+
+func TestMinVersionSkipsRemovedHostsAndDevelopmentBuilds(t *testing.T) {
+	c := newCluster(t)
+	c.addHost(testHost(1))
+	c.addHost(testHost(2))
+	c.state.Hosts[0].Version = "0.3.0"
+	c.state.Hosts[1].Version = "0.0.0~dev+abc"
+	c.state.Hosts[2].Version = "0.2.0"
+	if got := c.state.MinVersion(); got != "0.2.0" {
+		t.Errorf("MinVersion %q", got)
+	}
+	c.state.Hosts[2].Phase = Removed
+	if got := c.state.MinVersion(); got != "0.3.0" {
+		t.Errorf("MinVersion without the removed host %q", got)
 	}
 }
 
@@ -808,8 +882,11 @@ func TestSnapshotsOfUnknownVersionsAreRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	future := bytes.Replace(gunzip(t, buffer.Bytes()), []byte(`"version":1`), []byte(`"version":2`), 1)
-	if _, err := ReadSnapshot(bytes.NewReader(gzipped(t, future))); err == nil || !strings.Contains(err.Error(), "not readable") {
-		t.Errorf("want a version error, got %v", err)
+	if _, err := ReadSnapshot(bytes.NewReader(gzipped(t, future))); !errors.Is(err, ErrUnreadable) {
+		t.Errorf("want ErrUnreadable for a newer version, got %v", err)
+	}
+	if _, err := ReadSnapshot(bytes.NewReader([]byte("no gzip"))); !errors.Is(err, ErrUnreadable) {
+		t.Errorf("want ErrUnreadable for a broken file, got %v", err)
 	}
 }
 

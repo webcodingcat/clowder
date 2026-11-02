@@ -10,7 +10,7 @@ clowder is built in phases; each ends with live tests on HLab
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done, passes the live tests |
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
-| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler |
+| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -27,7 +27,11 @@ reconciler: every host keeps the copies the state places on it, with or without 
 a copy no stack there uses is unmounted and secondary; the state knows whether a volume
 holds data (`set-volume-initialized`), and only a volume that does not is promoted with
 `--force` and formatted; and the steps that write to a volume run in a job per volume,
-which no pass waits for.
+which no pass waits for. Then versions: an agent that meets a Raft entry or snapshot it
+cannot read stops (exit status 3, which systemd does not restart) instead of leaving it
+out; the leader writes a new kind of command only once the oldest agent reads it; before
+`v1.0.0` only the same minor version works together, development builds with a warning;
+and [Updating a cluster](developing/shipping.md#updating-a-cluster) says in which order.
 
 Before it, the first release became installable and the commands honest: the APT
 repository keeps every version, `examples/hetzner` pins `0.1.0`, `bin/dev live release
@@ -40,8 +44,7 @@ Code without a caller went then; each phase brings back what it needs:
 
 - phase 2: the join (a command that adds a host, Raft members added at run time),
   fencing (powering servers off and on through the hoster), operations with locks on
-  stacks and volumes, a gate on the oldest agent version for new command kinds, the
-  hosts' own phase reports and `host enable` after the flapping brake;
+  stacks and volumes, the hosts' own phase reports and `host enable` after the flapping brake;
 - phase 3: `backup:` in `cluster.yaml`, and resources owned by a GitOps source;
 - user management: more users per cluster, removing a user, revoking one certificate.
 

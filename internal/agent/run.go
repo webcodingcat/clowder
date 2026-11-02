@@ -137,16 +137,27 @@ func openNode(ctx context.Context, files Files, host Host, credentials credentia
 		Dir: files.raftDir(), ID: host.ID, Bind: host.raftAddress(), Advertise: host.raftAddress(),
 		Certificate: credentials.certificate, CA: credentials.ca, Logger: logger,
 	})
+	if errors.Is(err, state.ErrUnreadable) {
+		// Open restores the last snapshot, and could not read it
+		return nil, false, haltError(err)
+	}
 	if err != nil {
 		return nil, false, err
 	}
 	catchUp, cancel := context.WithTimeout(ctx, catchUpTimeout)
 	defer cancel()
-	if err := node.CatchUp(catchUp); err != nil {
+	err = node.CatchUp(catchUp)
+	if err != nil {
 		logger.Warn("serving before the state caught up with the Raft log", "error", err)
-		return node, false, nil
 	}
-	return node, true, nil
+	// A halt this early ends the agent before its loops start. A follower
+	// may still meet the entry later, as CatchUp does not wait for it to
+	// apply the leader's log (roadmap); then watch ends the agent.
+	if err := node.HaltError(); err != nil {
+		_ = node.Close() // the log is on disk; nothing is lost
+		return nil, false, haltError(err)
+	}
+	return node, err == nil, nil
 }
 
 // shared is what every part of the agent is made with.
@@ -407,9 +418,17 @@ func waitForState(ctx context.Context, node *raftnode.Node, logger *slog.Logger)
 	return false
 }
 
-// watch runs until ctx ends or the API fails, and feeds systemd's watchdog
-// while the state answers: a deadlocked agent stops feeding it and systemd
-// restarts it.
+// haltError says why the agent stops at a Raft entry or snapshot it cannot
+// read, and what helps: the error stays a state.ErrUnreadable, which ends
+// the process with an exit status of its own.
+func haltError(err error) error {
+	return fmt.Errorf("stopped at what this agent cannot read in the Raft log: written by a newer "+
+		"version (install the version the leader runs), or damaged: %w", err)
+}
+
+// watch runs until ctx ends, the API fails or the Raft member halts, and
+// feeds systemd's watchdog while the state answers: a deadlocked agent stops
+// feeding it and systemd restarts it.
 func watch(ctx context.Context, node *raftnode.Node, serveErrors <-chan error, logger *slog.Logger) error {
 	interval := watchdogInterval()
 	var tick <-chan time.Time
@@ -424,6 +443,8 @@ func watch(ctx context.Context, node *raftnode.Node, serveErrors <-chan error, l
 			return nil
 		case err := <-serveErrors:
 			return err
+		case <-node.Halted():
+			return haltError(node.HaltError())
 		case <-tick:
 			node.Read(func(*state.State) {}) // hangs if the state's lock does
 			if err := notify("WATCHDOG=1"); err != nil {

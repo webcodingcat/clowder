@@ -80,23 +80,47 @@ func rank(value bool) int {
 	return 0
 }
 
-// Compatible tells whether a CLI and an agent may talk: releases of the same
-// major version at most one minor version apart (N and N-1 run side by side
-// during an upgrade). Development builds talk to everything, and so does a
-// caller without a version it can read (curl, a script): the check is there
-// to explain a mismatch, not to keep anyone out.
+// Compatible tells whether two builds may talk (a CLI and an agent, or two
+// agents). Before 1.0.0 only builds of the same minor version: the state and
+// the commands may change with any minor release, while a patch release
+// changes neither. From 1.0.0, builds of the same major version at most one
+// minor version apart, as N and N-1 run side by side during an upgrade.
+// Development builds talk to everything (callers warn about that), and so
+// does a caller without a version it can read (curl, a script): the check is
+// there to explain a mismatch, not to keep anyone out.
 func Compatible(a, b string) bool {
-	first, firstOK := parse(a)
-	second, secondOK := parse(b)
-	if !firstOK || !secondOK || isDevelopment(first) || isDevelopment(second) {
+	if IsDevelopment(a) || IsDevelopment(b) {
 		return true
 	}
-	if first.numbers[0] != second.numbers[0] {
+	first, _ := parse(a)
+	second, _ := parse(b)
+	major, minorA, minorB := first.numbers[0], first.numbers[1], second.numbers[1]
+	switch {
+	case major != second.numbers[0]:
 		return false
+	case major == 0:
+		return minorA == minorB
+	default:
+		return max(minorA, minorB)-min(minorA, minorB) <= 1
 	}
-	return max(first.numbers[1], second.numbers[1])-min(first.numbers[1], second.numbers[1]) <= 1
 }
 
-func isDevelopment(version parsed) bool {
-	return strings.HasPrefix(version.suffix, "~dev")
+// IsDevelopment tells whether a version is a development build's, or one
+// that does not read as a version at all (a build without one, "dev").
+func IsDevelopment(text string) bool {
+	version, ok := parse(text)
+	return !ok || strings.HasPrefix(version.suffix, "~dev")
+}
+
+// Includes tells whether a build has what release brought: the build's
+// numbers are the release's or later ones, whatever its suffix (1.2.0~rc1
+// includes 1.2.0). A development build is built from the current code and
+// includes every release.
+func Includes(build, release string) bool {
+	if IsDevelopment(build) {
+		return true
+	}
+	first, _ := parse(build)
+	second, _ := parse(release)
+	return slices.Compare(first.numbers[:], second.numbers[:]) >= 0
 }

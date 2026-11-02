@@ -3,7 +3,6 @@ package state
 import (
 	"compress/gzip"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 )
@@ -52,22 +51,23 @@ func (s *State) Copy() (*State, error) {
 }
 
 // ReadSnapshot reads a state written by WriteSnapshot of this release or the
-// one before.
+// one before. Every error is an ErrUnreadable: like an entry of the log, a
+// snapshot the agent cannot read stops it.
 func ReadSnapshot(in io.Reader) (*State, error) {
 	compressed, err := gzip.NewReader(in)
 	if err != nil {
-		return nil, fmt.Errorf("read the snapshot: %w", err)
+		return nil, fmt.Errorf("the snapshot: %w: %w", ErrUnreadable, err)
 	}
 	defer func() { _ = compressed.Close() }() // a reader: nothing to flush
 	var file snapshot
 	if err := json.NewDecoder(compressed).Decode(&file); err != nil {
-		return nil, fmt.Errorf("read the snapshot: %w", err)
+		return nil, fmt.Errorf("the snapshot: %w: %w", ErrUnreadable, err)
 	}
 	switch {
 	case file.Version < max(1, SnapshotVersion-1) || file.Version > SnapshotVersion:
-		return nil, fmt.Errorf("snapshot version %d is not readable by this agent (%d)", file.Version, SnapshotVersion)
+		return nil, fmt.Errorf("snapshot version %d is %w (it reads %d)", file.Version, ErrUnreadable, SnapshotVersion)
 	case file.State == nil:
-		return nil, errors.New("the snapshot holds no state")
+		return nil, fmt.Errorf("the snapshot holds no state: %w", ErrUnreadable)
 	}
 	return file.State, nil
 }

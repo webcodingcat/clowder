@@ -148,16 +148,35 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   failover, a host is only ever `active`, `draining` or `removed`, and a drain only keeps
   new stacks off the host: nothing moves a running stack yet.
 
-- **Versions.** Until `v1.0.0` the state, the commands and `cluster.yaml` change freely:
-  no cluster runs in production, so there are no migrations and no gates, and
-  `CommandVersion` and `SnapshotVersion` stay at 1. **From `v1.0.0`** these rules hold:
-  - A release reads its own `CommandVersion` and `SnapshotVersion` and the one before.
-  - Payload fields are added, not changed. Unknown fields are ignored, so an agent of the
-    release before drops a new field from its state. A field that later commands depend
-    on therefore needs a gate on the oldest agent version in the cluster.
-  - An agent of the release before refuses a new command kind ("unknown command"), so its
-    state misses that command. A kind may come without a gate only if what it changes may
-    differ between agents for a while, as the display-only `set-stack-wait-reason`.
+- **Versions.** Every agent must apply every entry of the log, or the states drift apart
+  for good (a `revoke` left out, and a certificate goes on working there). So:
+  - **Fail-stop.** An entry the agent cannot read (not JSON, a `CommandVersion` it does
+    not read, a kind it does not know) is no refusal: `Apply` leaves the state and its
+    index as they are and returns `state.ErrUnreadable`; so does `ReadSnapshot` for a
+    snapshot it cannot read. The fsm halts (`raftnode.Node.Halted`): it applies,
+    restores and snapshots nothing more. The agent ends with exit status 3, which
+    systemd does not restart (Shipping), and the other hosts see it fail. A refusal
+    (`CommandError`, and `ErrNotBootstrapped`) is the same on every agent of a version,
+    so it moves the index on.
+  - **The gate.** Each kind names the release that brought it (`commandKinds`).
+    `Node.Propose` commits a kind only once `State.MinVersion`, the oldest release an
+    agent reported, includes that release (`buildinfo.Includes`: `0.2.0~rc1` includes
+    `0.2.0`); else the command fails with `state.ErrNotReadByAll`, no refusal, and its
+    caller tries again later. Development builds read every kind of their code and do
+    not count, nor do hosts that have not reported a version yet (a host that joins);
+    fail-stop catches what slips through.
+  - **Until `v1.0.0`** the state, the commands and `cluster.yaml` change freely, with no
+    migrations: only agents and CLIs of the same minor version work together
+    (`buildinfo.Compatible`), and a patch release changes neither the state nor the
+    commands. `CommandVersion` and `SnapshotVersion` stay at 1, so fail-stop and the gate
+    catch a new kind, not a payload whose fields changed their meaning: that is why
+    different minor versions must not run side by side. A cluster is updated host by host
+    only within a minor version (Shipping, Updating a cluster).
+  - **From `v1.0.0`** a release reads its own `CommandVersion` and `SnapshotVersion` and
+    the one before, and CLI and agents work together across one minor version. Payload
+    fields are added, not changed. Unknown fields are ignored, so an agent of the release
+    before drops a new field from its state; a field that later commands depend on
+    therefore needs a gate of its own on `MinVersion`.
   - The json tags of `clusterspec.Config` are part of this format.
 - **Invariants** the state holds itself, as the last place to catch a wrong command: one
   user, valid names (`internal/names`), volumes with 0 to 3 replicas and a DRBD minor
@@ -308,9 +327,11 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   snake_case.
 - `api.HostActions` lists the user's host actions with the phases they start from; the server
   checks them and the CLI makes its subcommands from them.
-- CLI and agent refuse each other more than one minor version apart (`X-Clowder-Version`,
-  `buildinfo.Compatible`); development builds and callers without a version talk to
-  everything.
+- An agent refuses a caller, CLI or agent, whose version is not compatible with its own
+  (`X-Clowder-Version`, `buildinfo.Compatible`: the same minor version before `v1.0.0`,
+  then at most one minor version apart). Development builds and callers without a
+  version talk to everything; the agent logs a warning once per version when a
+  development build talks to another build.
 - **The client** tries the seeds of `cluster.yaml` in turn and trusts any host certificate of
   the cluster's CA, whatever name the seed has. A read goes on to the next seed after any
   network error; a write only if it never left (`httptrace`), since one that was sent may

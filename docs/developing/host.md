@@ -24,7 +24,9 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   1. `clowder0` with the node address: a dummy interface, so the address exists on a host
      without peers.
   2. The Raft member. It waits up to `catchUpTimeout` for its state to catch up with the
-     Raft log.
+     Raft log. If the state met an entry or snapshot it cannot read by then, the agent
+     ends here, before its loops start; a follower may meet it later (`CatchUp` does not
+     wait for a follower to apply the leader's log, see the roadmap).
   3. The containers' DNS resolver.
   4. `newDaemon` makes the parts, each from what they all share (`shared`: the files,
      this host, its keys, the Raft member, the host's parts, the logger); then the API, once each on the underlay, the node
@@ -45,6 +47,10 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   the resolver and the Raft member close (`stopLoops`). A loop left behind may still use
   them, so then they stay open and the agent exits with an error: the end of the process
   closes them, and systemd restarts the agent. Raft's log is on disk and survives that.
+
+  The agent also stops when its Raft member halts at an entry it cannot read
+  (`Node.Halted`, [Versions](cluster.md)). It then exits with status 3 (`exitUnreadable`
+  in `cmd/clowderd`), which systemd does not restart (Shipping).
 - `HostParts` are what the agent changes on its host (the network, the storage driver and
   Docker) and the hoster's API. `clowderd run` passes the real ones, the tests fakes.
 - **Reconcilers** run after a change of the state and every `loop.Interval`, to repair

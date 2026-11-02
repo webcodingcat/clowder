@@ -169,5 +169,7 @@ Good to know:
 | `clowder` | the CLI | Linux, macOS, Windows |
 | `clowderd` | the agent on each host | Debian 13 (amd64) |
 
-CLI and agent work together across one minor version. How the code works and how to build
-it: [DEVELOPING.md](DEVELOPING.md).
+Before `v1.0.0`, CLI and agents work together only within one minor version: update all
+hosts and the CLI together to a new minor version, host by host only to a patch release
+(the followers first, the leader last). How the code works and how to build it:
+[DEVELOPING.md](DEVELOPING.md).

@@ -15,10 +15,33 @@ with them.
 - `clowderd.service`: `Type=notify` with a watchdog, `Restart=always` without a start limit,
   `KillMode=process` (helpers finish their step; containers belong to dockerd). The package
   installs it without enabling it; `clowderd init` enables and starts it.
-- An upgrade restarts a running agent (`postinstall.sh`, `systemctl try-restart`). A helper
-  of the old agent (`docker compose up`, `drbdadm`) may still run then, and the new agent's
-  first pass may start the same step for the same stack beside it; nothing guards against
-  that yet. So upgrade in a maintenance window, while no stack changes.
+- An agent that stopped at a Raft entry or snapshot it cannot read exits with status 3
+  ([Versions](cluster.md)), and `RestartPreventExitStatus=3` keeps systemd from starting
+  it again: it would stop at the same entry, and a Raft member that comes and goes every
+  few seconds would hide from the other hosts that it failed. The unit stays `failed`,
+  with the reason in the journal; nothing reboots the host.
+- An upgrade restarts a running agent (`postinstall.sh`, `systemctl try-restart`), and
+  starts one that failed, so an agent stopped at an entry it could not read goes on with
+  the version that reads it. A helper of the old agent (`docker compose up`, `drbdadm`) may
+  still run then, and the new agent's first pass may start the same step for the same
+  stack beside it; nothing guards against that yet. So upgrade in a maintenance window,
+  while no stack changes.
+
+## Updating a cluster
+
+- Update the followers first, one after another, and the leader last (`clowder cluster
+  status` names it). Go on with the next host only once the updated one is back: `clowder
+  host list` shows its version.
+- Before `v1.0.0` only agents of the same minor version work together, so update host by
+  host only to a patch release of the same minor version (`0.2.0` to `0.2.3`). For a new
+  minor version, stop the agent on every host (`systemctl stop clowderd`; the containers
+  keep running), install the new package on every host (an upgrade starts no stopped
+  agent), then start the agents again and update the CLI.
+- The order keeps the cluster working, the gate keeps it consistent: the leader writes a
+  new kind of command only once every agent reads it, and an agent that meets an entry it
+  cannot read stops instead of leaving it out ([Versions](cluster.md)). Before `v1.0.0`
+  that catches new kinds only, not a changed meaning of a field, so it does not make
+  mixing minor versions safe.
 
 ## CI
 

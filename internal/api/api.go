@@ -19,8 +19,8 @@ const Port = 7443
 
 // Headers of the API.
 const (
-	// VersionHeader carries the caller's version; agent and CLI refuse each
-	// other when they are more than one minor version apart.
+	// VersionHeader carries the caller's version; an agent refuses a caller
+	// whose version is not compatible with its own (buildinfo.Compatible).
 	VersionHeader = "X-Clowder-Version"
 	// IndexHeader carries the Raft index of a write in its answer.
 	IndexHeader = "X-Clowder-Index"

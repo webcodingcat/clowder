@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/buildinfo"
@@ -104,6 +105,9 @@ type Server struct {
 	// the routes without a certificate count their tries, each pair for
 	// itself, so that strangers at the bootstrap do not block a recovery
 	bootstraps, recoveries limiter
+	// warnedVersions are the callers' versions checkVersion has warned
+	// about, so the log says it once
+	warnedVersions sync.Map
 }
 
 // NewServer sets up the routes.
@@ -205,6 +209,7 @@ func (s *Server) handle(pattern string, role pki.Role, handler http.HandlerFunc)
 		if !s.checkVersion(w, r) {
 			return
 		}
+		s.warnAboutDevelopment(r.Header.Get(VersionHeader))
 		if err := s.waitForMinIndex(r); err != nil {
 			writeError(w, http.StatusGatewayTimeout, err)
 			return
@@ -224,15 +229,32 @@ func (s *Server) handleOpen(pattern string, handler http.HandlerFunc) {
 	})
 }
 
-// checkVersion refuses a caller too far from this agent's version.
+// checkVersion refuses a caller too far from this agent's version
+// (buildinfo.Compatible).
 func (s *Server) checkVersion(w http.ResponseWriter, r *http.Request) bool {
-	if caller := r.Header.Get(VersionHeader); !buildinfo.Compatible(caller, s.config.Version) {
+	caller := r.Header.Get(VersionHeader)
+	if !buildinfo.Compatible(caller, s.config.Version) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf(
-			"version %s cannot talk to agent %s (at most one minor version apart); update the older one",
-			caller, s.config.Version))
+			"version %s cannot talk to agent %s (before 1.0.0 the same minor version, then at most one "+
+				"minor version apart); update the older one", caller, s.config.Version))
 		return false
 	}
 	return true
+}
+
+// warnAboutDevelopment logs once per version that a development build talks
+// to another build, which Compatible lets through. Only callers with a
+// certificate reach it: on the open routes anyone could fill the log and
+// the map with versions.
+func (s *Server) warnAboutDevelopment(caller string) {
+	development := buildinfo.IsDevelopment(caller) || buildinfo.IsDevelopment(s.config.Version)
+	if caller == "" || caller == s.config.Version || !development {
+		return
+	}
+	if _, warned := s.warnedVersions.LoadOrStore(caller, true); !warned {
+		s.config.Logger.Warn("a development build talks to another build; their formats may differ",
+			"caller", caller, "agent", s.config.Version)
+	}
 }
 
 func (s *Server) revoked(serial string) bool {

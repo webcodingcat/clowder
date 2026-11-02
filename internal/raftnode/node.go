@@ -100,7 +100,9 @@ func Open(cfg Config) (*Node, error) {
 	if err != nil {
 		_ = transport.Close()
 		_ = store.Close()
-		return nil, fmt.Errorf("start Raft: %w", err)
+		// Raft only says it found no snapshot it could restore; the fsm
+		// knows that the state could not read one
+		return nil, fmt.Errorf("start Raft: %w", cmp.Or(machine.haltError(), err))
 	}
 	return &Node{raft: member, fsm: machine, transport: transport, store: store, id: config.LocalID}, nil
 }
@@ -124,8 +126,13 @@ func (n *Node) Bootstrap() error {
 
 // Propose commits a command through the leader and returns its index. The
 // error is the state's refusal or why the command did not commit (not the
-// leader, no quorum, a timeout).
+// leader, no quorum, a timeout, a kind not every agent reads yet).
 func (n *Node) Propose(ctx context.Context, cmd state.Command) (uint64, error) {
+	var unknown error
+	n.fsm.read(func(current *state.State) { unknown = current.CheckKnown(cmd.Kind) })
+	if unknown != nil {
+		return 0, fmt.Errorf("commit %s: %w", cmd.Kind, unknown)
+	}
 	encoded, err := json.Marshal(cmd)
 	if err != nil {
 		return 0, fmt.Errorf("encode %s: %w", cmd.Kind, err)
@@ -209,6 +216,18 @@ func (n *Node) Changed() <-chan struct{} {
 	n.fsm.mu.RLock()
 	defer n.fsm.mu.RUnlock()
 	return n.fsm.changed
+}
+
+// Halted returns a channel that closes when this member met an entry or a
+// snapshot it cannot read (state.ErrUnreadable): it applies nothing more,
+// and the agent must stop. HaltError says which.
+func (n *Node) Halted() <-chan struct{} {
+	return n.fsm.halted
+}
+
+// HaltError returns why the member halted, nil while it did not.
+func (n *Node) HaltError() error {
+	return n.fsm.haltError()
 }
 
 // IsLeader tells whether this member leads.

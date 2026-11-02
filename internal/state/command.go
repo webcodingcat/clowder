@@ -8,11 +8,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/webcodingcat/clowder/internal/buildinfo"
 )
 
 // CommandVersion is the format of the commands this build writes. Apply also
-// reads the version before it: agents of two neighboring releases run side
-// by side during an upgrade.
+// reads the version before it: from v1.0.0, agents of two neighboring
+// releases run side by side during an upgrade.
 const CommandVersion = 1
 
 // Command is one entry of the Raft log.
@@ -100,31 +102,39 @@ func NewCommand(kind string, at time.Time, actor string, payload any) (Command, 
 // trace, without the cost of working on a copy of the state.
 type handler func(s *State, cmd Command) (change func(), err error)
 
-var handlers = map[string]handler{
-	KindBootstrap:            decoded(applyBootstrap),
-	KindApplyConfig:          decoded(applyConfig),
-	KindSetHostPhase:         decoded(applySetHostPhase),
-	KindReportHost:           decoded(applyReportHost),
-	KindSetIngress:           decoded(applySetIngress),
-	KindPutACMEAccount:       decoded(applyPutACMEAccount),
-	KindPutACMEChallenge:     decoded(applyPutACMEChallenge),
-	KindDeleteACMEChallenge:  decoded(applyDeleteACMEChallenge),
-	KindPutCertificate:       decoded(applyPutCertificate),
-	KindDeleteCertificate:    decoded(applyDeleteCertificate),
-	KindAddUser:              decoded(applyAddUser),
-	KindRecoverUser:          decoded(applyRecoverUser),
-	KindSetRecoveryRecipient: decoded(applySetRecoveryRecipient),
-	KindPutResource:          decoded(applyPutResource),
-	KindDeleteResource:       decoded(applyDeleteResource),
-	KindRestartStack:         decoded(applyRestartStack),
-	KindSetStackStatus:       decoded(applySetStackStatus),
-	KindSetStackWaitReason:   decoded(applySetStackWaitReason),
-	KindSetPushedOut:         decoded(applySetPushedOut),
-	KindPutAlert:             decoded(applyPutAlert),
-	KindResolveAlert:         decoded(applyResolveAlert),
-	KindPutVolume:            decoded(applyPutVolume),
-	KindForgetCopy:           decoded(applyForgetCopy),
-	KindSetVolumeInitialized: decoded(applySetVolumeInitialized),
+// commandKind is how Apply runs one kind of command, and the release that
+// brought the kind: the leader writes a kind only once every agent reads it
+// (State.CheckKnown).
+type commandKind struct {
+	since string
+	apply handler
+}
+
+var commandKinds = map[string]commandKind{
+	KindBootstrap:            {"0.1.0", decoded(applyBootstrap)},
+	KindApplyConfig:          {"0.1.0", decoded(applyConfig)},
+	KindSetHostPhase:         {"0.1.0", decoded(applySetHostPhase)},
+	KindReportHost:           {"0.1.0", decoded(applyReportHost)},
+	KindSetIngress:           {"0.1.0", decoded(applySetIngress)},
+	KindPutACMEAccount:       {"0.1.0", decoded(applyPutACMEAccount)},
+	KindPutACMEChallenge:     {"0.1.0", decoded(applyPutACMEChallenge)},
+	KindDeleteACMEChallenge:  {"0.1.0", decoded(applyDeleteACMEChallenge)},
+	KindPutCertificate:       {"0.1.0", decoded(applyPutCertificate)},
+	KindDeleteCertificate:    {"0.1.0", decoded(applyDeleteCertificate)},
+	KindAddUser:              {"0.1.0", decoded(applyAddUser)},
+	KindRecoverUser:          {"0.1.0", decoded(applyRecoverUser)},
+	KindSetRecoveryRecipient: {"0.1.0", decoded(applySetRecoveryRecipient)},
+	KindPutResource:          {"0.1.0", decoded(applyPutResource)},
+	KindDeleteResource:       {"0.1.0", decoded(applyDeleteResource)},
+	KindRestartStack:         {"0.1.0", decoded(applyRestartStack)},
+	KindSetStackStatus:       {"0.1.0", decoded(applySetStackStatus)},
+	KindSetStackWaitReason:   {"0.1.0", decoded(applySetStackWaitReason)},
+	KindSetPushedOut:         {"0.1.0", decoded(applySetPushedOut)},
+	KindPutAlert:             {"0.1.0", decoded(applyPutAlert)},
+	KindResolveAlert:         {"0.1.0", decoded(applyResolveAlert)},
+	KindPutVolume:            {"0.1.0", decoded(applyPutVolume)},
+	KindForgetCopy:           {"0.1.0", decoded(applyForgetCopy)},
+	KindSetVolumeInitialized: {"0.2.0", decoded(applySetVolumeInitialized)},
 }
 
 // decoded turns a function of a typed payload into a handler. Unknown fields
@@ -144,13 +154,18 @@ func decoded[Payload any](apply func(s *State, cmd Command, payload Payload) (fu
 // the cluster has one.
 var ErrNotBootstrapped = errors.New("the cluster is not bootstrapped yet")
 
-// ApplyEntry applies a Raft log entry: a command as JSON. An entry that does
-// not read as one is refused like any other wrong command.
+// ErrUnreadable marks a log entry or a snapshot this agent cannot read: not
+// JSON, a version it does not read, a kind it does not know. That is no
+// refusal: the agents that read it apply it, and one that went on without
+// it would differ from them for good. So the state stays as it is, its
+// index too, and the agent stops (raftnode.Node.Halted).
+var ErrUnreadable = errors.New("not readable by this agent")
+
+// ApplyEntry applies a Raft log entry: a command as JSON.
 func (s *State) ApplyEntry(index uint64, data []byte) ([]Change, error) {
 	var cmd Command
 	if err := json.Unmarshal(data, &cmd); err != nil {
-		s.Index = index
-		return nil, fmt.Errorf("read the command at index %d: %w", index, err)
+		return nil, fmt.Errorf("the command at index %d: %w: %w", index, ErrUnreadable, err)
 	}
 	return s.Apply(index, cmd)
 }
@@ -158,23 +173,20 @@ func (s *State) ApplyEntry(index uint64, data []byte) ([]Change, error) {
 // Apply applies the command at the given Raft index and returns the
 // resources it changed, each with the index as its ResourceVersion. A
 // refused command returns an error and leaves the state as it was, apart
-// from the index: the log entry is applied either way.
+// from the index: the log entry is applied either way. A command this agent
+// cannot read (ErrUnreadable) leaves the index as it was too.
 func (s *State) Apply(index uint64, cmd Command) ([]Change, error) {
+	kind, err := readable(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("the command at index %d: %w", index, err)
+	}
 	s.Index = index
 	s.changes = nil
-	if cmd.Version < max(1, CommandVersion-1) || cmd.Version > CommandVersion {
-		return nil, fmt.Errorf("%s: command version %d is not readable by this agent (%d)",
-			cmd.Kind, cmd.Version, CommandVersion)
-	}
-	apply, ok := handlers[cmd.Kind]
-	if !ok {
-		return nil, fmt.Errorf("unknown command %q", cmd.Kind)
-	}
 	if s.Keys == nil && cmd.Kind != KindBootstrap {
 		return nil, fmt.Errorf("%s: %w", cmd.Kind, ErrNotBootstrapped)
 	}
 	s.makeMaps()
-	change, err := apply(s, cmd)
+	change, err := kind.apply(s, cmd)
 	switch {
 	case errors.Is(err, errUnchanged):
 		// no audit entry: a GitOps loop applies the same files every few
@@ -191,6 +203,59 @@ func (s *State) Apply(index uint64, cmd Command) ([]Change, error) {
 	changes := s.changes
 	s.changes = nil
 	return changes, nil
+}
+
+// readable returns how to apply a command whose version and kind this agent
+// reads, else an ErrUnreadable.
+func readable(cmd Command) (commandKind, error) {
+	if cmd.Version < max(1, CommandVersion-1) || cmd.Version > CommandVersion {
+		return commandKind{}, fmt.Errorf("%s: command version %d is %w (it reads %d)",
+			cmd.Kind, cmd.Version, ErrUnreadable, CommandVersion)
+	}
+	kind, ok := commandKinds[cmd.Kind]
+	if !ok {
+		return commandKind{}, fmt.Errorf("unknown command %q: %w", cmd.Kind, ErrUnreadable)
+	}
+	return kind, nil
+}
+
+// ErrNotReadByAll is CheckKnown's answer for a kind an agent of the cluster
+// may not read yet. It is no refusal: the command may commit later, once
+// every agent runs the release that brought the kind.
+var ErrNotReadByAll = errors.New("not every agent reads it yet")
+
+// CheckKnown returns an error while an agent of the cluster may not read a
+// kind of command yet (ErrNotReadByAll). An agent stops at an entry it
+// cannot read, so the leader writes a kind only once the oldest agent
+// (MinVersion) runs the release that brought it.
+func (s *State) CheckKnown(kind string) error {
+	known, ok := commandKinds[kind]
+	if !ok {
+		return fmt.Errorf("unknown command %q", kind)
+	}
+	if oldest := s.MinVersion(); oldest != "" && !buildinfo.Includes(oldest, known.since) {
+		return fmt.Errorf("%s: %w: it came with %s, the oldest agent runs %s",
+			kind, ErrNotReadByAll, known.since, oldest)
+	}
+	return nil
+}
+
+// MinVersion is the oldest release an agent of the cluster runs, empty if
+// none runs one. Removed hosts, hosts that have not reported a version yet
+// and development builds do not count: a development build reads every kind
+// of its code. A host that joined counts from its first report on; until
+// then, should the leader write a kind it cannot read, it stops at it.
+func (s *State) MinVersion() string {
+	var oldest string
+	for _, host := range s.Hosts {
+		if host.Phase == Removed || host.Version == "" || buildinfo.IsDevelopment(host.Version) {
+			continue
+		}
+		if oldest == "" || buildinfo.Compare(host.Version, oldest) < 0 {
+			oldest = host.Version
+		}
+	}
+	return oldest
 }
 
 // CommandError is a command that its handler refused: the command's kind,
