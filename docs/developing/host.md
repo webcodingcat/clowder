@@ -35,8 +35,9 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
      serve, only an API that fails ends the agent: without the other two the host still
      runs its stacks, so their failure is logged.
   5. The loops (`startLoops`): this host's that start no container (nft rules,
-     supervisor, trim), the leader's, which do nothing while it does not lead, and, once
-     the state caught up (`runOnceCaughtUp`), the report, Traefik and the stack runner.
+     supervisor), the leader's, which do nothing while it does not lead, and, once the
+     state caught up (`runOnceCaughtUp`), the report, Traefik, the volume reconciler with
+     its trim, and the stack runner.
   6. It tells systemd `READY=1` and feeds the watchdog as long as the state's lock answers.
 
   When it stops, it ends its loops and waits for them, at most `loopsTimeout`: a host tool
@@ -48,35 +49,62 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   Docker) and the hoster's API. `clowderd run` passes the real ones, the tests fakes.
 - **Reconcilers** run after a change of the state and every `loop.Interval`, to repair
   what someone changed by hand: `reconcileNetwork` keeps the nft rules as the state says,
-  and the stack runner keeps the stacks.
+  the volume reconciler the volume copies, and the stack runner the stacks.
+- **The volume reconciler** (`agent/volumes`, `volumes.Reconciler`) keeps every copy the
+  state places on this host, whether or not a stack here uses it. Its target for a copy:
+  primary and mounted when a stack placed here names the volume; left as it is while a
+  stack's `volumes.json` lists its LV (`stacks.Files.HeldLVs`: a leaver whose
+  `compose down` has not worked yet; every copy while a list does not read); otherwise
+  unmounted and secondary, so a stack on another host can take the volume. A pass only
+  reads: the state, the held LVs, and what the host has (`storage.Driver.Observe`: `lvs`
+  per volume group, `drbdsetup status --json`, `findmnt`, once each for all copies).
+  `plan` (pure, in `plan.go`) turns target and observation into steps: `ensure`,
+  `promote` or `promote --force`, `mount` or `mount --format`, `set initialized`,
+  `unmount`, `demote`. With the copy in place there are none, and the pass runs no tool
+  for it. `--force` and `--format` only for a volume the state does not know as
+  initialized ([Cluster state](cluster.md#cluster-state-internalstate), Initialized
+  volumes); a plain copy whose LV is gone while the volume holds data, and another device
+  at the mount point, are errors for a human.
+  The steps of a volume run in a job, a goroutine of their own: mkfs, `mkdir data/`, a
+  mount or an unmount write to the volume and hang while DRBD suspends I/O, and they must
+  hold up neither the other volumes nor the agent. A volume has one job at a time
+  (`busy`); the pass does not wait for it, and the job starts the next pass when it ends.
+  `Run` waits for the jobs when it stops, within the agent's `loopsTimeout`. The stack
+  runner asks `Mounted(lv)`: the mount point once the copy is ready, the error that keeps
+  it from getting there (it is logged once, when it is new), or neither while it is on its
+  way. A copy that becomes ready starts a pass of the stack runner. Retired copies are
+  removed in a job too and forgotten ([Cluster state](cluster.md#cluster-state-internalstate), Retired copies), once no stack holds them. A copy
+  the state neither places nor retires here stays, with a warning once per run. The pass
+  is in `reconciler.go`, the targets in `desired.go`, the records in `records.go`, the
+  trim in `trim.go`.
 - **The stack runner** (`agent/stacks`, `stacks.Runner`) keeps everything of a stack under its project
   (`names.Project`). A pass first stops the stacks that left the host (`compose down`), and
-  only then, for each stack the state places here, renders its Compose file, `Ensure`s its
-  volume copies, writes its secrets, runs `compose up` unless all of it came up before, and
-  reports `running`: a volume that passes from one stack to another is never used by both
-  at once. A stack that fails to come up (any step, from its secrets to `compose up`) is
+  only then, for each stack the state places here, renders its Compose file with its
+  mounted volume copies, writes its secrets, runs `compose up` unless all of it came up
+  before, and reports `running`: a volume that passes from one stack to another is never
+  used by both at once. A stack that fails to come up (any step, from its secrets to
+  `compose up`, or a copy the reconciler cannot mount) is
   reported `failing` with the first line of the error (`reportFailing`, `Stack.UpError`),
   once, and tried again at every pass; the leader raises `stack-failing` if it lasts. A
-  stack that waits for a leaver's volume is not failing. Before `compose up` the
+  stack that waits for a leaver's volume, or for a copy on its way, is not failing. Before `compose up` the
   runner pulls the images of the services a user restarted since their containers came up:
   their `clowder.restarted` label differs from the state's time. An image may have changed
-  under the same tag. Docker keeps the label, so a reboot pulls nothing again. Last, volume
-  copies the state retired here are removed and forgotten ([Cluster state](cluster.md#cluster-state-internalstate), Retired copies). A copy
-  the state neither places nor retires here stays, with a warning once per run. The pass
-  is in `runner.go`; one stack's steps in `apply.go`, the leavers in `leavers.go`,
-  the volume copies in `volumes.go` and their records in `records.go`. The agent hands the
-  runner its parts (`stacks.Parts`): where its files are (`stacks.Files`), this host, the
-  Raft member, Docker, the storage driver, the data key and the supervisor.
+  under the same tag. Docker keeps the label, so a reboot pulls nothing again. The pass
+  is in `runner.go`; one stack's steps in `apply.go`, the leavers in `leavers.go`. The
+  agent hands the runner its parts (`stacks.Parts`): where its files are
+  (`stacks.Files`), this host, the Raft member, Docker, the volume reconciler, the data key
+  and the supervisor.
 - **A leaver that fails to stop** may still use its volumes, and no other stack may take
   them until it stopped: two databases on one file system would ruin it. Its volumes are
   the LVs in its `volumes.json` beside `compose.yaml`. Before `compose up` the runner adds
   the LVs of the new Compose file to it, as the containers of the last one keep theirs
   until `compose up` worked; after that, the file lists only the new ones. Without a
   readable file, the leaver counts as using every volume, and every stack waits a pass.
-- **Crashes leave nothing unknown.** The files tell how far the runner got. A volume's
-  record (`volume-records/`, one file per volume, apart from the stacks) lists its copies
-  on this host before they are made, and loses one only after it is removed, so a copy is
-  found whatever became of its stack. A stack's `compose.yaml` exists until `compose down`
+- **Crashes leave nothing unknown.** The files tell how far the runner and the reconciler
+  got. A volume's record (`volume-records/`, one file per volume, apart from the stacks)
+  lists its copies on this host before they are made, and loses one only after it is
+  removed, so a copy is found whatever became of its stack; only its volume's job writes
+  it. A stack's `compose.yaml` exists until `compose down`
   worked, its directory goes right after, and its secrets go once `compose.yaml` is gone.
 - **Secrets live on tmpfs only** (`Files.SecretsDir`, `DefaultSecretsDir`). The agent makes
   the directory itself; a systemd `RuntimeDirectory` would go at each stop of the agent while
@@ -107,7 +135,10 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   (`logIn`), runs the
   supervisor and, while it leads, the leader's loops: the placement
   (`controller.RunPlacement`) and those in [Ingress, certificates, alerts and
-  metrics](loops.md). Every `trimInterval` it trims the volumes.
+  metrics](loops.md). Every `trimInterval` it trims the copies the reconciler last saw
+  mounted, each with its volume claimed like a job's, so no job unmounts it meanwhile;
+  the driver skips a copy no longer mounted (fstrim on an empty mount point would trim the
+  root file system).
 - **The host's report** (`hostReporter`, `report-host`): version, memory, CPUs, the pools'
   data and metadata use, whether Docker answers a ping (`DockerDown`) and how full the root
   file system is: the inputs of the alerts. It runs in a loop of its own, after the state
@@ -122,19 +153,29 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   notify socket, the user's bootstrap, apply and diff, the Floating IP reaching the nft
   rules, and a volume and a stack applied, listed and deleted; `Run` that fails at its
   start leaves nothing open; `restart_test.go`: the supervisor's restart rules. The fakes
-  of Docker, the storage driver and a cluster in memory are in `agent/agenttest`; the
+  of Docker, the storage driver (which keeps each copy's state in memory), the volume
+  reconciler and a cluster in memory are in `agent/agenttest`; the
   cluster fails a test whose loop writes into its copy of the state
   (`statetest.ReadOnlyCopy`). In `agent/stacks`, `runner_test.go` runs single passes of the
-  runner against that cluster, with a fake supervisor and fake Docker: a failed `compose up`
-  reported `failing`, compose only while the supervisor is paused, a new data generation, a
-  volume that outlives its stack, secrets written, changed and removed, the label changing
+  runner against that cluster, with a fake supervisor, fake Docker and a fake reconciler:
+  a failed `compose up` reported `failing`, compose only while the supervisor is paused, a
+  new data generation, a stack that waits for its copy and fails with its error, the LVs
+  the stacks hold, secrets written, changed and removed, the label changing
   with a secret, the secrets the containers came up with reported. `leavers_test.go`: a
   volume passes to the next stack only once the old one stopped, and waits while a stop
   fails, while the leavers cannot be listed, and while a failed `compose up` leaves old
-  containers on old volumes. `containers_test.go`: registry logins, `compose ps`. `secrets_test.go`, `records_test.go` and `volumes_test.go` run the same way: a
-  secret that does not open keeps its stack down, only changed secret files are replaced,
-  and a stack's secrets go only once its containers stopped; each copy recorded once, a
-  record that does not read left alone, the weekly trim across restarts. That docker
+  containers on old volumes. `containers_test.go`: registry logins, `compose ps`.
+  `secrets_test.go` runs the same way: a secret that does not open keeps its stack down,
+  only changed secret files are replaced, and a stack's secrets go only once its
+  containers stopped. In `agent/volumes`, `plan_test.go` is the table of target and
+  observation (missing, down after a boot, secondary, primary, mounted, never initialized,
+  held by a leaver, another device); `reconciler_test.go` runs passes and waits for their
+  jobs against the cluster and the fake driver: a copy formatted once and then left
+  alone, a copy without a stack secondary and unmounted and found again by the next stack
+  without `--force`, a held copy left alone, a hanging job that holds up no other volume,
+  an error that reaches the stack, a plain copy of data never made anew, a new data
+  generation, a copy the state lost, removal once no stack holds it, the records, the
+  weekly trim of mounted copies across restarts. That docker
   compose fails on a missing secret file and recreates exactly the containers that changed
   is for the live tests: CI has no Docker daemon.
 
@@ -163,25 +204,34 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   plain LV. A copy's LV is `names.VolumeName(volume ID, data generation)` and its resource
   and mount point (`volumes/<LV>`) have the same name, so a restored volume (a new
   generation) is a new LV next to the old one, mounted apart from it.
-- **`Ensure` does only what is missing:** the LV, the resource, the primary role, ext4, the
-  mount and `data/` in it. Markers in the driver's `StateDir` let it pick up after a crash at
-  any point (`created`: clowder made the LV; `metadata`: DRBD metadata written; `primary`:
-  the first promotion, made with `--force`, worked). It refuses an LV it did not create and
-  never wrote metadata on or formatted (plain or replicated), and a device with another file
-  system: those it leaves to a
-  human. A crash between `lvcreate` and its marker leaves an empty LV that a human must look
-  at.
+- **Each step is a method, and does only what is missing.** `Ensure` makes the LV and, with
+  replicas, brings the resource up (`drbdadm adjust`, which also applies new peers); a new
+  resource comes up secondary, and `Ensure` changes no role and mounts nothing. `Promote`
+  (with `force` only for a volume that never held data) and `Mount` (ext4, the mount and
+  `data/`; `format` only for such a volume) make a copy usable here; `Unmount` and `Demote`
+  give it up. Which steps a copy needs, the volume reconciler decides from `Observe`, which
+  only reads: the volume groups' LVs, the roles of all resources (`drbdsetup status
+  --json`; a resource that is down is not listed), the mount table, and whether the
+  resource file is current. Markers in the driver's `StateDir` let `Ensure` pick up after a
+  crash at any point (`created`: clowder made the LV; `metadata`: DRBD metadata written).
+  Whether a volume holds data is no marker: the state knows, for every host
+  (`Volume.Initialized`). The driver refuses an LV it did not create and never wrote
+  metadata on or formatted (plain or replicated), a device with another file system, and a
+  device without one when the volume holds data: those it leaves to a human. A crash
+  between `lvcreate` and its marker leaves an empty LV that a human must look at.
 - **It never guesses.** Only a tool's own answer means "not there": `blkid`'s exit code 2,
   `findmnt`'s 1, and for an LV its name missing from the volume group's list (`lvs` has no
   exit code of its own for that). Any other failure, a timeout or a device not ready, stops
-  `Ensure`, so a guess never creates over or formats real data. A mount point with another
-  device mounted stops it too: that data would reach the containers as the volume's.
+  the step, and a table that does not read stops `Observe`, so a guess never creates over
+  or formats real data. A mount point with another device mounted stops it too: that data
+  would reach the containers as the volume's.
 - **The mount guard:** containers get `data/`, which exists only in the mounted file system,
   so a container whose volume is not mounted fails to start instead of writing to the root
   file system.
 - `Remove` picks up after a crash at any point: a resource without its file is down
   already, an LV that `lvs` does not find is gone already.
-- `PoolUsage` reads a pool's size and use; `Trim` (fstrim) gives deleted blocks back.
+- `PoolUsage` reads a pool's size and use; `Trim` (fstrim) gives the deleted blocks of
+  mounted copies back.
 
 ## Containers (`internal/docker`, `internal/supervisor`)
 

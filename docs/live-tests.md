@@ -106,9 +106,11 @@ The stack `shop` lives from the first step to the last.
 6. `stack restart` recreates the unchanged stack's container, and `get stacks --watch`,
    running meanwhile, shows it `starting`, then `running`.
 7. Namespaces: a stack `shop` in the namespace `other` shares no project, container,
-   network or LV with default's. Its volume outlives it: the stack is deleted and, right
-   after, a new stack that names the volume finds the data. A second stack on that volume,
-   a delete of it while a stack names it, and a delete without `--with-data` are refused.
+   network or LV with default's. Its replicated volume outlives it: the stack is deleted
+   and, right after, a new stack that names the volume finds the data. A second stack on
+   that volume, a delete of it while a stack names it, and a delete without `--with-data`
+   are refused. Without a stack the copy is unmounted and `Secondary`, and the next stack
+   finds the data again (no `--force`, no new file system).
 8. An agent restart leaves its containers running, unchanged.
 9. The supervisor: a crashed container (`kill -9` of its process; `docker kill` would be a
    stop by hand) runs again within 2 s by Docker's own times, an `unhealthy` one is

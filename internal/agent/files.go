@@ -13,6 +13,7 @@ import (
 	"strconv"
 
 	"github.com/webcodingcat/clowder/internal/agent/stacks"
+	"github.com/webcodingcat/clowder/internal/agent/volumes"
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/datakey"
 	"github.com/webcodingcat/clowder/internal/ingress"
@@ -60,14 +61,15 @@ func (f Files) storageDir() string { return filepath.Join(f.Dir, "storage") }
 func (f Files) lastTrim() string   { return filepath.Join(f.storageDir(), "last-trim") }
 
 // stackFiles are where the stack runner keeps the stacks on this host: a
-// directory per stack, a record per volume, the secrets on the tmpfs.
+// directory per stack, the secrets on the tmpfs.
 func (f Files) stackFiles() stacks.Files {
-	return stacks.Files{
-		StacksDir:        filepath.Join(f.Dir, "stacks"),
-		VolumeRecordsDir: filepath.Join(f.Dir, "volume-records"),
-		SecretsDir:       f.SecretsDir,
-		LastTrim:         f.lastTrim(),
-	}
+	return stacks.Files{StacksDir: filepath.Join(f.Dir, "stacks"), SecretsDir: f.SecretsDir}
+}
+
+// volumeFiles are where the volume reconciler keeps the copies on this
+// host: a record per volume, the time of the last trim.
+func (f Files) volumeFiles() volumes.Files {
+	return volumes.Files{RecordsDir: filepath.Join(f.Dir, "volume-records"), LastTrim: f.lastTrim()}
 }
 
 // Traefik's files sit beside stacks/, so the search for stacks that left

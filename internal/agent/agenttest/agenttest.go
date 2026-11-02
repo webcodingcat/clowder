@@ -1,6 +1,6 @@
-// Package agenttest has the fakes that the tests of the agent and of its
-// stack runner share: a cluster that applies what is proposed, Docker and
-// the storage driver. Each fake is a sync.Locker: a test changes its fields
+// Package agenttest has the fakes that the tests of the agent, its stack
+// runner and its volume reconciler share: a cluster that applies what is
+// proposed, Docker, the storage driver and the volume reconciler. Each fake is a sync.Locker: a test changes its fields
 // under its lock while a loop runs.
 package agenttest
 
@@ -91,36 +91,120 @@ func (c *Calls) WaitFor(t *testing.T, line string) {
 	t.Errorf("no call %q; the calls: %q", line, c.Lines())
 }
 
-// Storage stands in for the storage driver: every pool has 100 GiB,
-// DataPercent full, unless reading it fails (PoolFails). A trim fails while
-// TrimFails is set.
+// Storage stands in for the storage driver: it keeps what the host has of
+// each copy (Copies) as the driver's steps would leave it, and records each
+// step as "<step> <LV>". Every pool has 100 GiB, DataPercent full, unless
+// reading it fails (PoolFails). A trim fails while TrimFails is set.
 type Storage struct {
 	Calls
 	Dir         string
 	DataPercent float64
 	PoolFails   bool
 	TrimFails   bool
+	// Copies are what the host has of each copy, by LV
+	Copies map[string]storage.Observed
+	// Fails makes every step on an LV fail with its error
+	Fails map[string]error
+	// Hold makes the steps on an LV wait until its channel closes, as a
+	// write to a suspended volume hangs
+	Hold map[string]chan struct{}
 }
 
-// Ensure records the call.
-func (f *Storage) Ensure(_ context.Context, volume storage.Volume) error {
-	f.Add("ensure %s", volume.LV)
+// step records a step on a copy, waits while Hold says so, fails while
+// Fails says so, and otherwise changes the copy.
+func (f *Storage) step(ctx context.Context, name string, volume storage.Volume, change func(*storage.Observed)) error {
+	f.Add("%s %s", name, volume.LV)
+	f.Lock()
+	hold, failure := f.Hold[volume.LV], f.Fails[volume.LV]
+	f.Unlock()
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if failure != nil {
+		return failure
+	}
+	f.Lock()
+	defer f.Unlock()
+	if f.Copies == nil {
+		f.Copies = map[string]storage.Observed{}
+	}
+	copyNow := f.Copies[volume.LV]
+	change(&copyNow)
+	f.Copies[volume.LV] = copyNow
 	return nil
 }
 
-// Remove records the call.
-func (f *Storage) Remove(_ context.Context, volume storage.Volume) error {
-	f.Add("remove %s", volume.LV)
-	return nil
+// Copy is what the host has of a copy.
+func (f *Storage) Copy(lv string) storage.Observed {
+	f.Lock()
+	defer f.Unlock()
+	return f.Copies[lv]
+}
+
+// Observe returns Copies.
+func (f *Storage) Observe(_ context.Context, volumes []storage.Volume) (map[string]storage.Observed, error) {
+	f.Lock()
+	defer f.Unlock()
+	observed := map[string]storage.Observed{}
+	for _, volume := range volumes {
+		observed[volume.LV] = f.Copies[volume.LV]
+	}
+	return observed, nil
+}
+
+// Ensure makes the LV and brings the resource up secondary.
+func (f *Storage) Ensure(ctx context.Context, volume storage.Volume) error {
+	return f.step(ctx, "ensure", volume, func(copyNow *storage.Observed) {
+		copyNow.LV = true
+		if volume.Resource != nil {
+			copyNow.ResourceFileCurrent = true
+			if copyNow.Role == storage.RoleDown {
+				copyNow.Role = storage.RoleSecondary
+			}
+		}
+	})
+}
+
+// Promote makes the copy primary.
+func (f *Storage) Promote(ctx context.Context, volume storage.Volume, force bool) error {
+	name := "promote"
+	if force {
+		name = "promote --force"
+	}
+	return f.step(ctx, name, volume, func(copyNow *storage.Observed) { copyNow.Role = storage.RolePrimary })
+}
+
+// Mount mounts the copy.
+func (f *Storage) Mount(ctx context.Context, volume storage.Volume, format bool) error {
+	name := "mount"
+	if format {
+		name = "mount --format"
+	}
+	return f.step(ctx, name, volume, func(copyNow *storage.Observed) { copyNow.Mounted = true })
+}
+
+// Unmount unmounts the copy.
+func (f *Storage) Unmount(ctx context.Context, volume storage.Volume) error {
+	return f.step(ctx, "unmount", volume, func(copyNow *storage.Observed) { copyNow.Mounted = false })
+}
+
+// Demote makes the copy secondary.
+func (f *Storage) Demote(ctx context.Context, volume storage.Volume) error {
+	return f.step(ctx, "demote", volume, func(copyNow *storage.Observed) { copyNow.Role = storage.RoleSecondary })
+}
+
+// Remove takes the copy away.
+func (f *Storage) Remove(ctx context.Context, volume storage.Volume) error {
+	return f.step(ctx, "remove", volume, func(copyNow *storage.Observed) { *copyNow = storage.Observed{} })
 }
 
 // Trim records the call and fails while TrimFails is set.
-func (f *Storage) Trim(_ context.Context, volumes []storage.Volume) error {
-	var lvs []string
-	for _, volume := range volumes {
-		lvs = append(lvs, volume.LV)
-	}
-	f.Add("trim %s", strings.Join(lvs, " "))
+func (f *Storage) Trim(_ context.Context, volume storage.Volume) error {
+	f.Add("trim %s", volume.LV)
 	f.Lock()
 	defer f.Unlock()
 	if f.TrimFails {
@@ -142,6 +226,25 @@ func (f *Storage) PoolUsage(context.Context, string) (int64, float64, float64, e
 // MountPoint is a directory under Dir.
 func (f *Storage) MountPoint(volume storage.Volume) string {
 	return filepath.Join(f.Dir, volume.LV)
+}
+
+// Volumes stands in for the volume reconciler: every copy is mounted under
+// Dir, unless NotReady or Errors say otherwise.
+type Volumes struct {
+	sync.Mutex
+	Dir      string
+	NotReady map[string]bool
+	Errors   map[string]error
+}
+
+// Mounted tells about a copy, by its LV.
+func (f *Volumes) Mounted(lv string) (string, bool, error) {
+	f.Lock()
+	defer f.Unlock()
+	if err := f.Errors[lv]; err != nil {
+		return "", false, err
+	}
+	return filepath.Join(f.Dir, lv), !f.NotReady[lv], nil
 }
 
 // Docker stands in for Docker: it sends no events and has one container

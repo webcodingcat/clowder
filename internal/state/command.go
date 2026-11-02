@@ -52,6 +52,7 @@ const (
 	KindResolveAlert         = "resolve-alert"
 	KindPutVolume            = "put-volume"
 	KindForgetCopy           = "forget-copy"
+	KindSetVolumeInitialized = "set-volume-initialized"
 )
 
 // LeaderActor is the leader acting on its own (its control loops).
@@ -123,6 +124,7 @@ var handlers = map[string]handler{
 	KindResolveAlert:         decoded(applyResolveAlert),
 	KindPutVolume:            decoded(applyPutVolume),
 	KindForgetCopy:           decoded(applyForgetCopy),
+	KindSetVolumeInitialized: decoded(applySetVolumeInitialized),
 }
 
 // decoded turns a function of a typed payload into a handler. Unknown fields

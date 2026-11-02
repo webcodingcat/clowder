@@ -150,17 +150,19 @@ func otherStack(name, command string) string {
 
 // namespacesKeepTheirStacksApart runs a stack shop in the namespace other
 // beside default's: on the host they share no project, container, network
-// or LV. Its volume then outlives it: the stack goes, and right after, in
-// the same pass of the agent, a new stack names the volume and finds the
-// data. A second stack on that volume, a delete of it while a stack names
-// it, and a delete without --with-data are refused.
+// or LV. Its replicated volume then outlives it: the stack goes, and right
+// after a new stack names the volume and finds the data. A second stack on
+// that volume, a delete of it while a stack names it, and a delete without
+// --with-data are refused. Without a stack the copy is unmounted and
+// secondary, and the next stack finds the data again: the volume is
+// promoted without --force and keeps its file system.
 func namespacesKeepTheirStacksApart(t *testing.T, server host) {
 	resources := filepath.Join(stackDir("other"), "other.yaml")
 	if err := os.MkdirAll(stackDir("other"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(resources, []byte(documentIn("", resource.KindNamespace, "other", "")+
-		documentIn("other", resource.KindVolume, "kept", "class: bulk\nsize: 1G\nreplicas: 0")), 0o644); err != nil {
+		documentIn("other", resource.KindVolume, "kept", "class: bulk\nsize: 1G\nreplicas: 2")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	mustClowder(t, "apply", "-f", resources)
@@ -210,9 +212,25 @@ func namespacesKeepTheirStacksApart(t *testing.T, server host) {
 		t.Errorf("a delete without --with-data: %v\n%s", err, output)
 	}
 
+	kept := names.VolumeName(names.ID("other", "kept"), 1)
+	mustClowder(t, "delete", "stack", "other/reader")
+	eventually(t, stackDeadline, "the copy without a stack unmounted and secondary", func() error {
+		if output, err := server.run("findmnt --noheadings --mountpoint /var/lib/clowder/volumes/" + kept); err == nil {
+			return fmt.Errorf("still mounted: %s", output)
+		}
+		if role := server.must(t, "drbdadm role "+kept); role != "Secondary" {
+			return fmt.Errorf("its role is %s", role)
+		}
+		return nil
+	})
+	apply(otherStack("reader", "exec sleep infinity"))
+	waitRunningIn(t, "other", "reader")
+	if note := server.must(t, "docker exec "+reader+" cat /data/note"); note != "kept" {
+		t.Errorf("the stack after the copy was secondary found %q in the volume", note)
+	}
+
 	mustClowder(t, "delete", "stack", "other/reader")
 	mustClowder(t, "delete", "--with-data", "-f", resources)
-	kept := names.VolumeName(names.ID("other", "kept"), 1)
 	eventually(t, stackDeadline, "the volume's LV removed", func() error {
 		if lvs := server.must(t, "lvs --noheadings -o lv_name"); strings.Contains(lvs, kept) {
 			return fmt.Errorf("%s still there", kept)

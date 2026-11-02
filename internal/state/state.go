@@ -303,6 +303,11 @@ type Volume struct {
 	Minor          *int         `json:"minor,omitempty"` // DRBD minor; nil with replicas 0
 	Copies         []VolumeCopy `json:"copies,omitempty"`
 	Status         VolumeStatus `json:"status"`
+	// Initialized says that a copy of this data generation was made
+	// primary and got its file system (set-volume-initialized). Until then
+	// a host may promote with --force and format; after that, never: a copy
+	// without a file system then has lost its data, it is not new.
+	Initialized bool `json:"initialized,omitempty"`
 }
 
 // ID is the volume's key in State.Volumes.

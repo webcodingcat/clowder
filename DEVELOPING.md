@@ -77,10 +77,12 @@ step names the file and function to read; the package's section explains the rul
 5. **The placement finds a host.** `controller/placement.go` `RunPlacement` runs on the
    leader. `scheduler/place.go` `Plan` picks a host for the stack and a pool for each new
    volume. The controller commits `put-volume` and `set-stack-status starting`.
-6. **The host runs it.** `agent/stacks/runner.go` `Runner.pass` sees the stack placed on
-   its host. `agent/stacks/apply.go` `apply` renders the Compose file (`render`), makes the
-   volumes (`ensureVolumes`), and `up` writes the secrets to tmpfs and runs
-   `docker compose up`. The host reports `running` (`reportRunning`, through
+6. **The host runs it.** `agent/volumes/reconciler.go` `Reconciler.pass` sees the volume
+   copies placed on its host and a stack that names them: `plan` decides the steps, and a
+   job per volume makes the copy, makes it primary and mounts it. `agent/stacks/runner.go`
+   `Runner.pass` sees the stack placed on its host and waits until its copies are mounted
+   (`stackVolumes`). `agent/stacks/apply.go` `apply` renders the Compose file (`render`),
+   and `up` writes the secrets to tmpfs and runs `docker compose up`. The host reports `running` (`reportRunning`, through
    `agent/loop` `CommitAsHost`), or `failing` with why (`reportFailing`) and tries
    again at the next pass.
 7. **The supervisor keeps it running.** Docker restarts nothing itself;
@@ -164,10 +166,12 @@ The package layout is planned for the whole of v1; packages appear as the phases
 - **Changes the host**: `agent`, `supervisor`, `raftnode` (Raft over mTLS), `datakey` (the
   key file), `command` (host tools with a timeout) and the drivers `network`, `storage`,
   `docker`, `ingress` (Traefik's files; it renders, the agent writes). Within the agent,
-  `agent/stacks` is the stack runner and `agent/loop` what all of the agent's loops share
-  (when a pass runs, the supervisor's signal, committing as the host); `agent` imports both,
-  `agent/stacks` imports `agent/loop`, and neither imports `agent`. `agent/agenttest` has
-  the fakes the tests of all three share.
+  `agent/stacks` is the stack runner, `agent/volumes` the volume reconciler and
+  `agent/loop` what all of the agent's loops share (when a pass runs, the supervisor's
+  signal, committing as the host); `agent` imports all three, `agent/stacks` and
+  `agent/volumes` import `agent/loop` and not each other (each reaches the other through
+  what the agent hands it: an interface, a function), and none imports `agent`.
+  `agent/agenttest` has the fakes the tests of all four share.
 - **Reads the host**: `hostcheck` (for `clowderd check`). It compiles anywhere, but only the
   agent uses it, so depguard keeps it out of the CLI like the packages above.
 
@@ -190,11 +194,11 @@ volume in its own loops and never waits for a process that does. Work on volumes
 snapshot, copy) runs in separate processes that the agent watches for progress. Health
 reports never depend on a volume.
 
-One exception holds until phase 2: `storage.Ensure` runs `mkfs` and `mkdir data/` from the
-stack runner's loop. Both run through `internal/command` with a timeout, so if one hangs,
-only that process is left behind, not the agent. But a long `mkfs` delays the other stacks
-of the same pass. The roadmap's gaps for phase 2 name the fix: each stack or volume is
-worked on separately.
+The volume reconciler's passes only read (the state, the LVs, the DRBD roles, the mount
+table). What writes to a volume (`mkfs`, `mkdir data/`, a mount, an unmount, a promotion)
+runs in a job per volume, a goroutine the pass does not wait for, and each tool in it
+through `internal/command` with a timeout. A job that hangs holds up only its own volume,
+and the stacks that wait for it.
 
 ## Logging and errors
 

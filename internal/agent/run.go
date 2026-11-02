@@ -13,6 +13,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/agent/loop"
 	"github.com/webcodingcat/clowder/internal/agent/stacks"
+	"github.com/webcodingcat/clowder/internal/agent/volumes"
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/compose"
@@ -54,10 +55,10 @@ type Docker interface {
 	Ping(ctx context.Context) error
 }
 
-// Storage is what the agent and the stack runner need from the storage
-// driver; storage.Driver is the real one.
+// Storage is what the agent and the volume reconciler need from the
+// storage driver; storage.Driver is the real one.
 type Storage interface {
-	stacks.Storage
+	volumes.Storage
 	PoolUsage(ctx context.Context, pool string) (sizeBytes int64, dataPercent, metadataPercent float64, err error)
 }
 
@@ -164,6 +165,7 @@ type daemon struct {
 	shared
 	// propose is how every part commits (serverProposer)
 	propose    controller.Propose
+	volumes    *volumes.Reconciler
 	runner     *stacks.Runner
 	traefik    *traefikRunner
 	reporter   *hostReporter
@@ -176,8 +178,10 @@ type daemon struct {
 // newDaemon makes the agent's parts; it starts nothing. Who calls whom:
 //
 //	supervisor ──wakes (loop.Signal)──▶ stack runner, Traefik
+//	volume reconciler ──wakes (loop.Signal)──▶ stack runner
+//	stack runner ──asks (Mounted)──▶ volume reconciler
 //	stack runner, Traefik ──call Pause on──▶ supervisor
-//	stack runner, report, alerts, leader's loops ──commit through (serverProposer)──▶ API server
+//	stack runner, volume reconciler, report, alerts, leader's loops ──commit through (serverProposer)──▶ API server
 //	API server ──answers for──▶ stack runner (containers), alerts
 //
 // The signals are made first, so the supervisor needs no runner; the
@@ -193,7 +197,8 @@ func newDaemon(base shared) (*daemon, error) {
 		dockerRestarted, traefikSignal.Now, base.logger)
 	proposer := &serverProposer{}
 
-	runner, err := newStackRunner(base, watcher, stacksSignal, proposer.propose)
+	reconciler := newVolumeReconciler(base, stacksSignal, proposer.propose)
+	runner, err := newStackRunner(base, watcher, stacksSignal, reconciler, proposer.propose)
 	if err != nil {
 		return nil, err
 	}
@@ -204,6 +209,7 @@ func newDaemon(base shared) (*daemon, error) {
 	return &daemon{
 		shared:     base,
 		propose:    proposer.propose,
+		volumes:    reconciler,
 		runner:     runner,
 		traefik:    newTraefikRunner(base, watcher, traefikSignal),
 		reporter:   newHostReporter(base, proposer.propose),
@@ -224,11 +230,28 @@ func (p *serverProposer) propose(ctx context.Context, cmd state.Command) (uint64
 	return p.server.Propose(ctx, cmd)
 }
 
+// newVolumeReconciler makes the volume reconciler, which leaves alone the
+// copies the stacks' containers may hold and wakes the stack runner when a
+// copy is mounted.
+func newVolumeReconciler(base shared, stacksSignal *loop.Signal, propose controller.Propose) *volumes.Reconciler {
+	return volumes.New(volumes.Parts{
+		Files:       base.files.volumeFiles(),
+		Host:        base.host.ID,
+		Cluster:     base.node,
+		Storage:     base.parts.Storage,
+		Held:        base.files.stackFiles().HeldLVs,
+		Signal:      loop.NewSignal(),
+		StacksReady: stacksSignal.Now,
+		Propose:     propose,
+		Logger:      base.logger,
+	})
+}
+
 // newStackRunner makes the stack runner, with the key of its secrets'
 // labels derived from the data key.
-func newStackRunner(base shared, watcher loop.Pauser, signal *loop.Signal, propose controller.Propose) (
-	*stacks.Runner, error,
-) {
+func newStackRunner(base shared, watcher loop.Pauser, signal *loop.Signal, volumes stacks.Volumes,
+	propose controller.Propose,
+) (*stacks.Runner, error) {
 	digestKey, err := base.credentials.dataKey.Derive(stacks.SecretLabelPurpose)
 	if err != nil {
 		return nil, fmt.Errorf("derive the key of the secrets' labels: %w", err)
@@ -239,7 +262,7 @@ func newStackRunner(base shared, watcher loop.Pauser, signal *loop.Signal, propo
 		NodeAddress: base.host.NodeAddress,
 		Cluster:     base.node,
 		Docker:      base.parts.Docker,
-		Storage:     base.parts.Storage,
+		Volumes:     volumes,
 		Open:        base.credentials.dataKey.Open,
 		DigestKey:   digestKey,
 		Supervisor:  watcher,
@@ -300,7 +323,6 @@ func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup, caughtUp
 	// this host's loops that start no container
 	loops.Go(func() { reconcileNetwork(ctx, node, d.parts.Network, logger) })
 	loops.Go(func() { d.supervisor.Run(ctx, compose.LabelStack) })
-	loops.Go(func() { d.runner.Trim(ctx) })
 
 	// the leader's loops: each does nothing while this host does not lead
 	loops.Go(func() { controller.RunPlacement(ctx, node, propose, d.conditions, logger) })
@@ -315,10 +337,11 @@ func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup, caughtUp
 	loops.Go(func() { d.runOnceCaughtUp(ctx, loops, caughtUp) })
 }
 
-// runOnceCaughtUp runs the stacks, Traefik and the report once the state
-// caught up. Until then the state may still place a stack on this host
-// that has already moved to another one, so containers must not start yet.
-// The report waits too, as it compares the host with the state.
+// runOnceCaughtUp runs the volumes, the stacks, Traefik and the report once
+// the state caught up. Until then the state may still place a stack on
+// this host that has already moved to another one, so containers must not
+// start yet, nor its volume become primary here. The report waits too, as
+// it compares the host with the state.
 func (d *daemon) runOnceCaughtUp(ctx context.Context, loops *sync.WaitGroup, caughtUp bool) {
 	if !caughtUp && !waitForState(ctx, d.node, d.logger) {
 		return
@@ -327,6 +350,8 @@ func (d *daemon) runOnceCaughtUp(ctx context.Context, loops *sync.WaitGroup, cau
 	// returned yet: adding to it from here is allowed
 	loops.Go(func() { d.reporter.run(ctx) })
 	loops.Go(func() { d.traefik.run(ctx) })
+	loops.Go(func() { d.volumes.Run(ctx) })
+	loops.Go(func() { d.volumes.Trim(ctx) })
 	d.runner.Run(ctx)
 }
 

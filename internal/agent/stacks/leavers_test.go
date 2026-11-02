@@ -36,7 +36,7 @@ var logsLV = names.VolumeName(names.ID(names.Default, "logs"), 1)
 // mountedLVs reads the LVs shop's containers may hold.
 func mountedLVs(t *testing.T, runner *Runner) []string {
 	t.Helper()
-	lvs, err := runner.readMountedLVs(shopProject)
+	lvs, err := runner.files.readMountedLVs(shopProject)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func mountedLVs(t *testing.T, runner *Runner) []string {
 }
 
 func TestAVolumePassesOnlyOnceItsStackStopped(t *testing.T) {
-	runner, cluster, docker, storage := newTestRunner(t)
+	runner, cluster, docker, _ := newTestRunner(t)
 	runner.pass(context.Background())
 	handOver(cluster)
 	runner.pass(context.Background())
@@ -54,8 +54,8 @@ func TestAVolumePassesOnlyOnceItsStackStopped(t *testing.T) {
 	if down < 0 || up < 0 || down > up {
 		t.Errorf("docker %q: shop must go down before blog comes up", lines)
 	}
-	if storage.Count("remove "+agenttest.DBLV(1)) != 0 || cluster.Stack("blog").Status != state.StackRunning {
-		t.Errorf("storage %q, blog %s", storage.Lines(), cluster.Stack("blog").Status)
+	if blog := cluster.Stack("blog"); blog.Status != state.StackRunning {
+		t.Errorf("blog %s", blog.Status)
 	}
 	if _, err := os.Stat(runner.files.stackDir(shopProject)); !os.IsNotExist(err) {
 		t.Errorf("the directory of the stopped stack is left: %v", err)

@@ -667,6 +667,49 @@ func TestAVolumeRecordKeepsItsInvariantsAndOwnMinor(t *testing.T) {
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{Volume: withoutMinor}, "a DRBD minor exactly when")
 }
 
+func TestOnlyACopysHostMarksItsGenerationInitialized(t *testing.T) {
+	c := newCluster(t)
+	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.addHost(testHost(1))
+	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
+	spec := testVolumeSpec()
+	spec.Replicas = 2
+	c.mustApply(KindPutResource, UserActor("alice"), putResource(resource.KindVolume, "default", "pgdata", spec))
+	c.refuse(KindSetVolumeInitialized, HostActor(0), SetVolumeInitialized{Volume: "default/pgdata", DataGeneration: 1},
+		"host/0 has no copy")
+	minor := 5
+	volume := *c.state.Volumes["default/pgdata"]
+	volume.Minor, volume.Status = &minor, VolumeOK
+	volume.Copies = []VolumeCopy{{Host: 0, Class: "fast"}, {Host: 1, Tiebreaker: true}}
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: volume})
+
+	c.refuse(KindSetVolumeInitialized, HostActor(1), SetVolumeInitialized{Volume: "default/pgdata", DataGeneration: 1},
+		"host/1 has no copy of volume default/pgdata with a disk")
+	c.refuse(KindSetVolumeInitialized, HostActor(0), SetVolumeInitialized{Volume: "default/pgdata", DataGeneration: 2},
+		"in data generation 1, not 2")
+	c.refuse(KindSetVolumeInitialized, HostActor(0), SetVolumeInitialized{Volume: "default/blog", DataGeneration: 1},
+		"no volume default/blog")
+	c.mustApply(KindSetVolumeInitialized, HostActor(0), SetVolumeInitialized{Volume: "default/pgdata", DataGeneration: 1})
+	if !c.state.Volumes["default/pgdata"].Initialized {
+		t.Fatal("not initialized")
+	}
+
+	// the placement's record keeps it, and cannot set it
+	moved := volume
+	moved.Copies = []VolumeCopy{{Host: 0, Class: "fast"}}
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: moved})
+	if !c.state.Volumes["default/pgdata"].Initialized {
+		t.Error("a put-volume of the same generation lost it")
+	}
+	// a new generation is a new LV, not initialized yet
+	restored := moved
+	restored.DataGeneration, restored.Initialized = 2, true
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{Volume: restored})
+	if c.state.Volumes["default/pgdata"].Initialized {
+		t.Error("a new data generation came initialized")
+	}
+}
+
 func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	c := newCluster(t)
 	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})

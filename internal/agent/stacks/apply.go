@@ -22,13 +22,12 @@ import (
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/state"
-	"github.com/webcodingcat/clowder/internal/storage"
 )
 
 // apply runs one stack: it opens its secrets, finds its volume copies,
-// renders its Compose file, makes the copies, brings the stack up and
-// reports it running. inUse are the LVs that a stack which failed to stop
-// (stopLeavers) may still write to, so no other stack may take them yet.
+// renders its Compose file, brings the stack up and reports it running.
+// inUse are the LVs that a stack which failed to stop (stopLeavers) may
+// still write to, so no other stack may take them yet.
 func (r *Runner) apply(ctx context.Context, desired desiredState, stack *state.Stack, inUse volumesInUse) error {
 	secrets, err := r.openSecrets(desired, stack)
 	if err != nil {
@@ -38,13 +37,8 @@ func (r *Runner) apply(ctx context.Context, desired desiredState, stack *state.S
 	if err != nil {
 		return err
 	}
-	// rendered before any volume is made, so a stack that cannot run leaves
-	// nothing behind
 	rendered, err := r.render(desired, stack, volumes, secrets)
 	if err != nil {
-		return err
-	}
-	if err := r.ensureVolumes(ctx, volumes); err != nil {
 		return err
 	}
 	if err := r.up(ctx, stack, rendered, secrets, volumes); err != nil {
@@ -53,26 +47,48 @@ func (r *Runner) apply(ctx context.Context, desired desiredState, stack *state.S
 	return r.reportRunning(ctx, stack, secrets)
 }
 
-// stackVolumes are this host's copies of the volumes a stack names, by
-// name. It returns errVolumeInUse when a stack that failed to stop may
-// still use one of them.
-func (r *Runner) stackVolumes(desired desiredState, stack *state.Stack, inUse volumesInUse) (map[string]storage.Volume, error) {
-	volumes := map[string]storage.Volume{}
+// errVolumeNotReady is apply's answer for a stack that must wait: the
+// volume reconciler has not mounted one of its copies yet.
+var errVolumeNotReady = errors.New("a volume is not mounted on this host yet")
+
+// stackVolumes are this host's mounted copies of the volumes a stack names,
+// by name. It returns errVolumeInUse when a stack that failed to stop may
+// still use one of them, and errVolumeNotReady while one is not mounted.
+//
+// The answer may be outdated by compose up: the reconciler may read a
+// newer state, in which the stack left, before writeStackFiles lists the
+// LVs as held, and unmount a copy. Then compose up fails on the missing
+// data/ (the mount guard), and the next pass stops the stack.
+func (r *Runner) stackVolumes(desired desiredState, stack *state.Stack, inUse volumesInUse) (
+	map[string]compose.MountedVolume, error,
+) {
+	volumes := map[string]compose.MountedVolume{}
 	for _, name := range stack.Spec.VolumeNames() {
-		volume, err := r.describe(desired, names.ID(stack.Namespace, name))
-		if err != nil {
-			return nil, err
+		id := names.ID(stack.Namespace, name)
+		volume, ok := desired.volumes[id]
+		// the placement commits a stack's volumes before its host, so this
+		// is a bug in the placement, not something to wait for
+		if !ok || !slices.ContainsFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host }) {
+			return nil, fmt.Errorf("volume %s has no copy on this host", name)
 		}
-		if user, ok := inUse.user(volume.LV); ok {
+		lv := names.VolumeName(id, volume.DataGeneration)
+		if user, ok := inUse.user(lv); ok {
 			return nil, fmt.Errorf("%w: volume %s, by %s", errVolumeInUse, name, user)
 		}
-		volumes[name] = volume
+		dir, ready, err := r.volumes.Mounted(lv)
+		switch {
+		case err != nil:
+			return nil, err
+		case !ready:
+			return nil, fmt.Errorf("%w: volume %s", errVolumeNotReady, name)
+		}
+		volumes[name] = compose.MountedVolume{Dir: dir, Name: lv}
 	}
 	return volumes, nil
 }
 
 // render renders a stack's Compose file for this host.
-func (r *Runner) render(desired desiredState, stack *state.Stack, volumes map[string]storage.Volume,
+func (r *Runner) render(desired desiredState, stack *state.Stack, volumes map[string]compose.MountedVolume,
 	secrets stackSecrets,
 ) ([]byte, error) {
 	// before the first cluster apply there is no Floating IP
@@ -80,13 +96,9 @@ func (r *Runner) render(desired desiredState, stack *state.Stack, volumes map[st
 	if err != nil {
 		return nil, fmt.Errorf("the Floating IP of cluster.yaml: %w", err)
 	}
-	mounted := map[string]compose.MountedVolume{}
-	for name, volume := range volumes {
-		mounted[name] = compose.MountedVolume{Dir: r.storage.MountPoint(volume), Name: volume.LV}
-	}
 	rendered, err := compose.Render(stack.Name, stack.Spec, compose.Target{
 		Namespace: stack.Namespace, FloatingIP: floatingIP, NodeAddress: r.nodeAddress,
-		Resolver: network.Resolver, Volumes: mounted, SecretsDir: r.files.secretFilesDir(stack.Project()),
+		Resolver: network.Resolver, Volumes: volumes, SecretsDir: r.files.secretFilesDir(stack.Project()),
 		SecretLabels: secrets.labels, Restarted: stack.Restarted,
 	})
 	if err != nil {
@@ -95,26 +107,12 @@ func (r *Runner) render(desired desiredState, stack *state.Stack, volumes map[st
 	return rendered, nil
 }
 
-// ensureVolumes makes a stack's volume copies. They are recorded before they
-// exist, so a copy made by a crashed pass is still found and removed later.
-func (r *Runner) ensureVolumes(ctx context.Context, volumes map[string]storage.Volume) error {
-	if err := r.recordCopies(slices.Collect(maps.Values(volumes))); err != nil {
-		return err
-	}
-	for _, volume := range volumes {
-		if err := r.storage.Ensure(ctx, volume); err != nil {
-			return fmt.Errorf("make volume %s: %w", volume.ID, err)
-		}
-	}
-	return nil
-}
-
 // up writes a stack's files and runs compose up without the pushed-out
 // services, unless all of it came up before. It pulls the images of the
 // services a user restarted since their containers came up first. A failed
 // pull or compose up is tried again at the next pass.
 func (r *Runner) up(ctx context.Context, stack *state.Stack, rendered []byte, secrets stackSecrets,
-	volumes map[string]storage.Volume,
+	volumes map[string]compose.MountedVolume,
 ) error {
 	project := stack.Project()
 	hash := upHash(rendered, secrets, stack.PushedOut)
@@ -152,7 +150,7 @@ func (r *Runner) up(ctx context.Context, stack *state.Stack, rendered []byte, se
 // (addMountedLVs), its Compose file and its secrets. It returns the
 // Compose files, the stack's and, if it has secret variables, theirs.
 func (r *Runner) writeStackFiles(project string, rendered []byte, secrets stackSecrets,
-	volumes map[string]storage.Volume,
+	volumes map[string]compose.MountedVolume,
 ) ([]string, error) {
 	// before the Compose file, so a stack that has one has its LVs too
 	if err := r.addMountedLVs(project, lvsOf(volumes)); err != nil {
@@ -173,10 +171,10 @@ func (r *Runner) writeStackFiles(project string, rendered []byte, secrets stackS
 }
 
 // lvsOf are the LVs of a stack's volumes.
-func lvsOf(volumes map[string]storage.Volume) []string {
+func lvsOf(volumes map[string]compose.MountedVolume) []string {
 	lvs := []string{}
 	for _, volume := range volumes {
-		lvs = append(lvs, volume.LV)
+		lvs = append(lvs, volume.Name)
 	}
 	return lvs
 }
@@ -194,7 +192,7 @@ func lvsOf(volumes map[string]storage.Volume) []string {
 // and markInUse, which cannot read it either, counts every volume as in
 // use until compose up worked.
 func (r *Runner) addMountedLVs(project string, lvs []string) error {
-	held, err := r.readMountedLVs(project)
+	held, err := r.files.readMountedLVs(project)
 	if err != nil {
 		_, statErr := os.Stat(r.files.stackFile(project))
 		if !errors.Is(statErr, os.ErrNotExist) {
@@ -216,14 +214,14 @@ func (r *Runner) writeMountedLVs(project string, lvs []string) error {
 }
 
 // readMountedLVs reads the LVs a stack's containers may hold.
-func (r *Runner) readMountedLVs(project string) ([]string, error) {
+func (f Files) readMountedLVs(project string) ([]string, error) {
 	var lvs []string
-	content, err := os.ReadFile(r.files.stackVolumesFile(project))
+	content, err := os.ReadFile(f.stackVolumesFile(project))
 	if err == nil {
 		err = json.Unmarshal(content, &lvs)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", r.files.stackVolumesFile(project), err)
+		return nil, fmt.Errorf("read %s: %w", f.stackVolumesFile(project), err)
 	}
 	return lvs, nil
 }

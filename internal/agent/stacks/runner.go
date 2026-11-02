@@ -1,9 +1,9 @@
 // Package stacks is the agent's stack runner: it runs the stacks the state
-// places on this host with docker compose, makes their volume copies and
-// writes their secrets, and stops the stacks that left. A pass is in this
-// file; how it runs one stack is in apply.go, how it stops the stacks that
-// left in leavers.go, and the volume copies are in volumes.go and
-// records.go.
+// places on this host with docker compose, writes their secrets, and stops
+// the stacks that left. The volume reconciler (agent/volumes) keeps their
+// volume copies; the runner waits until those are mounted. A pass is in
+// this file; how it runs one stack is in apply.go, how it stops the stacks
+// that left in leavers.go.
 package stacks
 
 import (
@@ -14,15 +14,14 @@ import (
 	"log/slog"
 	"maps"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"slices"
 
 	"github.com/webcodingcat/clowder/internal/agent/loop"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/docker"
-	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/state"
-	"github.com/webcodingcat/clowder/internal/storage"
 )
 
 // Docker is what the runner needs from Docker; docker.Client is the real
@@ -37,13 +36,12 @@ type Docker interface {
 	Containers(ctx context.Context, label string) ([]docker.Container, error)
 }
 
-// Storage is what the runner needs from the storage driver; storage.Driver
-// is the real one.
-type Storage interface {
-	Ensure(ctx context.Context, volume storage.Volume) error
-	Remove(ctx context.Context, volume storage.Volume) error
-	Trim(ctx context.Context, volumes []storage.Volume) error
-	MountPoint(volume storage.Volume) string
+// Volumes is what the runner needs from the volume reconciler;
+// volumes.Reconciler is the real one. Mounted tells about this host's copy
+// of a volume, by its LV: its mount point once it is ready for a stack, an
+// error if it cannot get there, neither while it is on its way.
+type Volumes interface {
+	Mounted(lv string) (dir string, ready bool, err error)
 }
 
 // Files are where the runner keeps what it knows of the stacks on this
@@ -52,13 +50,9 @@ type Files struct {
 	// StacksDir has a directory per stack, by its Compose project
 	// (names.Project): its rendered Compose file and the LVs it mounts
 	StacksDir string
-	// VolumeRecordsDir has a file per volume with its copies on this host
-	VolumeRecordsDir string
 	// SecretsDir holds the stacks' secrets in clear, on tmpfs; clowder's
 	// own projects keep theirs beside them
 	SecretsDir string
-	// LastTrim is the file whose time is the last trim
-	LastTrim string
 }
 
 func (f Files) stackDir(project string) string { return filepath.Join(f.StacksDir, project) }
@@ -69,10 +63,6 @@ func (f Files) stackFile(project string) string {
 
 func (f Files) stackVolumesFile(project string) string {
 	return filepath.Join(f.stackDir(project), "volumes.json")
-}
-
-func (f Files) volumeRecord(volumeID string) string {
-	return filepath.Join(f.VolumeRecordsDir, names.FileName(volumeID)+".json")
 }
 
 // The files of a stack's secrets, by its project: a file per secret a
@@ -92,6 +82,33 @@ func (f Files) secretFile(project, name string) string {
 	return filepath.Join(f.secretFilesDir(project), name)
 }
 
+// HeldLVs are the LVs that the containers of the stacks on this host may
+// hold: those in the volumes.json of each stack that has a compose.yaml,
+// placed here or a leaver that has not stopped yet. The volume reconciler
+// leaves such a copy as it is. A list that does not read is an error: then
+// any LV may be held.
+func (f Files) HeldLVs() (map[string]bool, error) {
+	entries, err := os.ReadDir(f.StacksDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("list the stacks of this host: %w", err)
+	}
+	held := map[string]bool{}
+	for _, entry := range entries {
+		project := entry.Name()
+		if _, err := os.Stat(f.stackFile(project)); errors.Is(err, os.ErrNotExist) {
+			continue // stopped
+		}
+		lvs, err := f.readMountedLVs(project)
+		if err != nil {
+			return nil, err
+		}
+		for _, lv := range lvs {
+			held[lv] = true
+		}
+	}
+	return held, nil
+}
+
 // Parts are what the runner works with, from the agent.
 type Parts struct {
 	Files Files
@@ -101,7 +118,7 @@ type Parts struct {
 	NodeAddress netip.Addr
 	Cluster     loop.Cluster
 	Docker      Docker
-	Storage     Storage
+	Volumes     Volumes
 	// Open unseals the secrets' values (datakey.Key.Open)
 	Open func(sealed state.Sealed) ([]byte, error)
 	// DigestKey keys the labels of secret files, derived from the data key
@@ -110,7 +127,8 @@ type Parts struct {
 	// Supervisor is paused while compose up or down changes a stack's
 	// containers
 	Supervisor loop.Pauser
-	// Signal is how the supervisor starts a pass and says Docker restarted
+	// Signal is how the supervisor and the volume reconciler start a pass,
+	// and how the supervisor says Docker restarted
 	Signal *loop.Signal
 	// Propose commits a command (a controller.Propose, spelled out as in
 	// loop.CommitAsHost)
@@ -120,14 +138,14 @@ type Parts struct {
 
 // Runner runs the stacks the state places on this host. It keeps its parts
 // in fields of its own, unexported, so nothing but New sets them and no
-// one changes them while the runner's loops run.
+// one changes them while the runner's loop runs.
 type Runner struct {
 	files       Files
 	host        state.HostID
 	nodeAddress netip.Addr
 	cluster     loop.Cluster
 	docker      Docker
-	storage     Storage
+	volumes     Volumes
 	open        func(sealed state.Sealed) ([]byte, error)
 	digestKey   []byte
 	supervisor  loop.Pauser
@@ -136,8 +154,6 @@ type Runner struct {
 	logger      *slog.Logger
 
 	// Only the runner's loop (Run) uses what follows, so it needs no lock.
-	// Trim runs in a loop of its own, so it must use only the fields above
-	// and the record files.
 
 	// applied is what each stack last came up with (by project). It starts
 	// empty, so every stack comes up again after the agent started: after
@@ -146,18 +162,15 @@ type Runner struct {
 	// logins holds a hash of each registry's login, so the agent logs in
 	// again only when it changed
 	logins map[string][32]byte
-	// unexplained are the LVs of copies kept without a reason, warned
-	// about once
-	unexplained map[string]bool
 }
 
 // New makes the runner; it starts nothing.
 func New(parts Parts) *Runner {
 	return &Runner{
 		files: parts.Files, host: parts.Host, nodeAddress: parts.NodeAddress, cluster: parts.Cluster,
-		docker: parts.Docker, storage: parts.Storage, open: parts.Open, digestKey: parts.DigestKey,
+		docker: parts.Docker, volumes: parts.Volumes, open: parts.Open, digestKey: parts.DigestKey,
 		supervisor: parts.Supervisor, signal: parts.Signal, propose: parts.Propose, logger: parts.Logger,
-		applied: map[string]loop.BroughtUp{}, logins: map[string][32]byte{}, unexplained: map[string]bool{},
+		applied: map[string]loop.BroughtUp{}, logins: map[string][32]byte{},
 	}
 }
 
@@ -169,10 +182,7 @@ type desiredState struct {
 	stacks     map[string]*state.Stack
 	volumes    map[string]*state.Volume
 	secrets    map[string]*state.Secret
-	hostNames  map[state.HostID]string
 	registries map[string]state.RegistryLogin
-	// retired are the copies the cluster gave up, on any host
-	retired []state.RetiredCopy
 }
 
 // readDesired reads what this host should run: a copy of the state,
@@ -185,16 +195,12 @@ func readDesired(cluster loop.Cluster, self state.HostID) (desiredState, error) 
 	}
 	desired := desiredState{
 		config: copied.Config.Spec, stacks: map[string]*state.Stack{}, volumes: copied.Volumes,
-		secrets: copied.Secrets, hostNames: map[state.HostID]string{}, registries: copied.RegistryLogins(),
-		retired: copied.Retired,
+		secrets: copied.Secrets, registries: copied.RegistryLogins(),
 	}
 	for _, stack := range copied.Stacks {
 		if stack.Host != nil && *stack.Host == self {
 			desired.stacks[stack.Project()] = stack
 		}
-	}
-	for id, host := range copied.Hosts {
-		desired.hostNames[id] = host.Name
 	}
 	return desired, nil
 }
@@ -209,7 +215,8 @@ func (r *Runner) Run(ctx context.Context) {
 // passes from one stack to another must never be used by both at once:
 // two databases on one file system would ruin it. If a stack fails to stop,
 // it may still use its volumes, and a stack that names one of them waits
-// for the next pass. A stack that fails to come up is reported failing.
+// for the next pass; so does a stack whose volume is not mounted yet. A
+// stack that fails to come up is reported failing.
 func (r *Runner) pass(ctx context.Context) {
 	desired, err := readDesired(r.cluster, r.host)
 	if err != nil {
@@ -222,7 +229,9 @@ func (r *Runner) pass(ctx context.Context) {
 		stack := desired.stacks[project]
 		err := r.apply(ctx, desired, stack, inUse)
 		switch {
-		case errors.Is(err, errVolumeInUse): // it waits, at every pass until the stop works
+		case errors.Is(err, errVolumeInUse), errors.Is(err, errVolumeNotReady):
+			// it waits, at every pass until the stop worked or the volume
+			// is mounted
 			r.logger.Info("a stack waits for its volume", "stack", stack.ID(), "reason", err)
 		case err != nil && ctx.Err() != nil:
 			return // stopping: the error says nothing about the stack
@@ -231,6 +240,5 @@ func (r *Runner) pass(ctx context.Context) {
 			r.reportFailing(ctx, stack, err)
 		}
 	}
-	r.removeVolumes(ctx, desired)
 	r.removeSecretsOfOthers(desired)
 }

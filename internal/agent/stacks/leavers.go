@@ -11,9 +11,9 @@ import (
 // stopLeavers stops the stacks that left this host. The files tell how far
 // a leaver got, so a crash at any point is picked up: its compose.yaml
 // exists until compose down worked (stop), then its directory goes, and its
-// secrets go once compose.yaml is gone (removeSecretsOfOthers). Its volume
-// copies have records of their own (removeVolumes). It returns the volumes
-// that leavers which failed to stop may still use.
+// secrets go once compose.yaml is gone (removeSecretsOfOthers). The volume
+// reconciler leaves its volume copies alone until then (Files.HeldLVs). It
+// returns the volumes that leavers which failed to stop may still use.
 func (r *Runner) stopLeavers(ctx context.Context, desired desiredState) volumesInUse {
 	inUse := volumesInUse{}
 	entries, err := os.ReadDir(r.files.StacksDir)
@@ -83,7 +83,7 @@ func (r *Runner) markInUse(inUse volumesInUse, project string) {
 	if _, err := os.Stat(r.files.stackFile(project)); errors.Is(err, os.ErrNotExist) {
 		return // stopped after all
 	}
-	lvs, err := r.readMountedLVs(project)
+	lvs, err := r.files.readMountedLVs(project)
 	if err != nil {
 		r.logger.Error("read the volumes of a stack that failed to stop", "project", project, "error", err)
 		inUse[anyVolume] = project

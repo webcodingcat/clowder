@@ -10,7 +10,7 @@ clowder is built in phases; each ends with live tests on HLab
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done, passes the live tests |
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
-| 2 | three hosts: replication, failover with fencing | started: the live tests |
+| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -22,7 +22,12 @@ code from a host (`user recover`, `recovery rotate`).
 Phase 2 began with the live tests, before any code for several hosts: `bin/dev live up`,
 `run` and `down` apart, with a lock against two runs; scenarios that each check their
 baseline and run alone (`run -run <test>`); and `TestBoundaries`, which pins what a
-container reaches on one host before the network changes for several.
+container reaches on one host before the network changes for several. Then the volume
+reconciler: every host keeps the copies the state places on it, with or without a stack;
+a copy no stack there uses is unmounted and secondary; the state knows whether a volume
+holds data (`set-volume-initialized`), and only a volume that does not is promoted with
+`--force` and formatted; and the steps that write to a volume run in a job per volume,
+which no pass waits for.
 
 Before it, the first release became installable and the commands honest: the APT
 repository keeps every version, `examples/hetzner` pins `0.1.0`, `bin/dev live release
@@ -55,21 +60,17 @@ They matter once there are several hosts; on one, they cost at most time.
 - `CatchUp` runs once, when the agent starts. A host that becomes leader later may not
   have applied every committed entry yet, and its loops and `runOnLeader` would act on that
   state. It needs a barrier when it gains the lead, before they act.
-- The agent runs its stacks one after another in one loop. A long image pull or `mkfs`
-  holds up the others, and a command left behind on a suspended DRBD volume leaves a
-  goroutine behind at every pass. It also runs `Ensure` on every volume at every pass,
-  which it should skip when nothing changed.
+- The agent runs its stacks one after another in one loop. A long image pull holds up
+  the others, and a `compose` command left behind on a suspended DRBD volume leaves a
+  goroutine behind at every pass.
 - A placement is several commands in a row (push-outs, volumes, the stack's host). A new
   leader repairs what one left half done in its next pass; with failover, one command per
   placement would leave fewer states between.
-- `storage.Ensure` promotes a resource with `--force` when this host has no `primary`
-  marker. That is right for a new volume on one host; after a failover it would force an
-  outdated copy. Whether a volume was ever initialised must come from the state, not a
-  local file.
-- A volume's copy that no stack on its host uses stays mounted, and with replicas its DRBD
-  resource stays primary: on one host the next stack that names it takes it over once the
-  old one stopped. With several hosts a copy without a stack must be unmounted and
-  secondary, so a stack on another host can take the volume.
+- A stack that moves to another host takes its volume once the old host's copy is
+  secondary. Until `move-stack` orders that, the new host's `promote` fails while the
+  old copy is still primary, and the stack is `failing` until a later pass promotes.
+- A tiebreaker copy on a host (diskless) is refused with an error: the placement over
+  hosts brings it.
 - A stack whose placed volumes sit on different hosts (left by deleted stacks) waits; on
   one host it cannot happen.
 - The ACME self-check asks the Floating IP, which reaches the leader's own Traefik; with

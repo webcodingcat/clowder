@@ -31,7 +31,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | the Floating IP's loop | `set-ingress` |
   | the ACME loop | `put-acme-account`, `put-acme-challenge`, `delete-acme-challenge`, `put-certificate`, `delete-certificate` |
   | the alerts | `put-alert`, `resolve-alert` |
-  | each agent | `report-host`, `forget-copy` |
+  | each agent | `report-host`, `forget-copy`, `set-volume-initialized` |
 
   Every kind has a sender: a kind comes with the phase that sends it (hosts that join,
   failover and backups later), not before.
@@ -120,6 +120,12 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   generation, host). The host removes those and forgets each with `forget-copy`; a removed
   host's go with it. A copy that is merely missing from the state stays: a bug in the
   placement must not cost data.
+- **Initialized volumes.** `Volume.Initialized` says that a copy of the current data
+  generation was primary with its file system. The first host that has its copy so tells
+  with `set-volume-initialized` (only a host with a copy with a disk in that generation).
+  Until then a host may promote with `--force` and format; after that never, on any host:
+  a copy without a file system then lacks the data, it is not new. `put-volume` keeps the
+  flag within a data generation and clears it with a new one (a new LV).
 - **Host phases** (`phaseChanges`; L = the leader, on its own or for a user; H = the host
   itself):
 

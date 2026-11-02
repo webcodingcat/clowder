@@ -130,6 +130,9 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 		return nil, fmt.Errorf("volume %s holds data: it keeps a copy until it is deleted", id)
 	}
 	volume.Meta = old.Meta
+	// only the hosts tell (set-volume-initialized); a new data generation
+	// is a new LV, never initialized yet
+	volume.Initialized = old.Initialized && volume.DataGeneration == old.DataGeneration
 	if sameJSON(*old, volume) {
 		return nil, errUnchanged
 	}
@@ -200,6 +203,39 @@ func applyForgetCopy(s *State, cmd Command, payload ForgetCopy) (func(), error) 
 			payload.Copy.Volume, payload.Copy.DataGeneration, payload.Copy.Host)
 	}
 	return func() { s.Retired = slices.Delete(s.Retired, index, index+1) }, nil
+}
+
+// SetVolumeInitialized is a host telling that its copy of a volume is
+// primary and has its file system.
+type SetVolumeInitialized struct {
+	Volume         string `json:"volume"` // the volume's ID
+	DataGeneration int64  `json:"data_generation"`
+}
+
+// applySetVolumeInitialized takes the word of a host that has a copy with
+// a disk in the volume's data generation: a host that took long to tell
+// must not mark a newer generation, whose LV is another one.
+func applySetVolumeInitialized(s *State, cmd Command, payload SetVolumeInitialized) (func(), error) {
+	volume, ok := s.Volumes[payload.Volume]
+	if !ok {
+		return nil, fmt.Errorf("no volume %s", payload.Volume)
+	}
+	if volume.DataGeneration != payload.DataGeneration {
+		return nil, fmt.Errorf("volume %s is in data generation %d, not %d",
+			payload.Volume, volume.DataGeneration, payload.DataGeneration)
+	}
+	if !slices.ContainsFunc(volume.Copies, func(c VolumeCopy) bool {
+		return HostActor(c.Host) == cmd.Actor && !c.Tiebreaker
+	}) {
+		return nil, fmt.Errorf("%s has no copy of volume %s with a disk", cmd.Actor, payload.Volume)
+	}
+	if volume.Initialized {
+		return nil, errUnchanged
+	}
+	return func() {
+		volume.Initialized = true
+		s.changed(resource.KindVolume, &volume.Meta)
+	}, nil
 }
 
 // checkVolume holds what a volume's record must be on its own: the state is

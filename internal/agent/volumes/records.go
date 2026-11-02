@@ -1,4 +1,4 @@
-package stacks
+package volumes
 
 import (
 	"encoding/json"
@@ -10,31 +10,44 @@ import (
 	"strings"
 
 	"github.com/webcodingcat/clowder/internal/atomicfile"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/storage"
 )
 
 // The record of a volume lists its copies on this host, one per generation
-// that is still here: a file per volume, apart from the stacks, so a copy
-// is found whatever happened to the stack that used it.
+// that is still here: a file per volume, so a copy is found whatever
+// happened to the state's record of it. A copy is recorded before it is
+// made, and loses its entry only once it is removed. Only the job of the
+// volume writes its record (Reconciler.busy).
 
-// recordCopies adds volume copies to their volumes' records.
-func (r *Runner) recordCopies(volumes []storage.Volume) error {
-	for _, volume := range volumes {
-		recorded, err := r.readRecord(r.files.volumeRecord(volume.ID))
-		if err != nil {
-			return err
-		}
-		recorded = slices.DeleteFunc(recorded, func(old storage.Volume) bool { return old.LV == volume.LV })
-		if err := r.writeRecord(volume.ID, append(recorded, volume)); err != nil {
-			return err
-		}
+func (r *Reconciler) recordFile(volumeID string) string {
+	return filepath.Join(r.files.RecordsDir, names.FileName(volumeID)+".json")
+}
+
+// recordCopy adds a copy to its volume's record, or replaces the entry of
+// the same LV.
+func (r *Reconciler) recordCopy(volume storage.Volume) error {
+	recorded, err := r.readRecord(r.recordFile(volume.ID))
+	if err != nil {
+		return err
 	}
-	return nil
+	recorded = slices.DeleteFunc(recorded, func(old storage.Volume) bool { return old.LV == volume.LV })
+	return r.writeRecord(volume.ID, append(recorded, volume))
+}
+
+// forgetCopy takes a removed copy out of its volume's record.
+func (r *Reconciler) forgetCopy(volume storage.Volume) error {
+	recorded, err := r.readRecord(r.recordFile(volume.ID))
+	if err != nil {
+		return err
+	}
+	recorded = slices.DeleteFunc(recorded, func(old storage.Volume) bool { return old.LV == volume.LV })
+	return r.writeRecord(volume.ID, recorded)
 }
 
 // writeRecord replaces a volume's record; without copies the file goes.
-func (r *Runner) writeRecord(volumeID string, volumes []storage.Volume) error {
-	file := r.files.volumeRecord(volumeID)
+func (r *Reconciler) writeRecord(volumeID string, volumes []storage.Volume) error {
+	file := r.recordFile(volumeID)
 	if len(volumes) == 0 {
 		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("forget the copies of %s: %w", volumeID, err)
@@ -50,7 +63,7 @@ func (r *Runner) writeRecord(volumeID string, volumes []storage.Volume) error {
 }
 
 // readRecord reads a volume's record; a missing file has no copies.
-func (r *Runner) readRecord(file string) ([]storage.Volume, error) {
+func (r *Reconciler) readRecord(file string) ([]storage.Volume, error) {
 	content, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -66,14 +79,14 @@ func (r *Runner) readRecord(file string) ([]storage.Volume, error) {
 }
 
 // recordedCopies are all volume copies on this host, by volume ID.
-func (r *Runner) recordedCopies() (map[string][]storage.Volume, error) {
-	entries, err := os.ReadDir(r.files.VolumeRecordsDir)
+func (r *Reconciler) recordedCopies() (map[string][]storage.Volume, error) {
+	entries, err := os.ReadDir(r.files.RecordsDir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("list the volume copies of this host: %w", err)
 	}
 	volumes := map[string][]storage.Volume{}
 	for _, entry := range entries {
-		recorded, err := r.readRecord(filepath.Join(r.files.VolumeRecordsDir, entry.Name()))
+		recorded, err := r.readRecord(filepath.Join(r.files.RecordsDir, entry.Name()))
 		if err != nil {
 			return nil, err
 		}

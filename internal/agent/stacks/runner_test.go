@@ -2,6 +2,7 @@ package stacks
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"maps"
@@ -26,21 +27,18 @@ import (
 // newTestRunner is a runner on host 0 of agenttest.NewCluster: the stack
 // shop of the namespace default, with one service that mounts the volume
 // db (data generation 1), both placed on host 0.
-func newTestRunner(t *testing.T) (*Runner, *agenttest.Cluster, *agenttest.Docker, *agenttest.Storage) {
+func newTestRunner(t *testing.T) (*Runner, *agenttest.Cluster, *agenttest.Docker, *agenttest.Volumes) {
 	t.Helper()
 	cluster := agenttest.NewCluster(t)
-	docker, storage := &agenttest.Docker{}, &agenttest.Storage{Dir: t.TempDir()}
-	dir := t.TempDir()
+	docker, volumes := &agenttest.Docker{}, &agenttest.Volumes{Dir: t.TempDir()}
 	runner := New(Parts{
-		Files: Files{
-			StacksDir: filepath.Join(dir, "stacks"), VolumeRecordsDir: filepath.Join(dir, "volume-records"),
-			SecretsDir: t.TempDir(), LastTrim: filepath.Join(dir, "last-trim"),
-		},
-		Host: 0, NodeAddress: netip.MustParseAddr("10.77.0.1"), Cluster: cluster, Docker: docker, Storage: storage,
+		Files:       Files{StacksDir: filepath.Join(t.TempDir(), "stacks"), SecretsDir: t.TempDir()},
+		Host:        0,
+		NodeAddress: netip.MustParseAddr("10.77.0.1"), Cluster: cluster, Docker: docker, Volumes: volumes,
 		Open: cluster.Keys.Open, DigestKey: []byte("the test's digest key"), Supervisor: fakePauser{&docker.Calls},
 		Signal: loop.NewSignal(), Propose: cluster.Propose, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	return runner, cluster, docker, storage
+	return runner, cluster, docker, volumes
 }
 
 // fakePauser stands for the supervisor: it adds each pause and resume to
@@ -207,69 +205,71 @@ func TestAPushedOutServiceIsLeftOut(t *testing.T) {
 	}
 }
 
-func TestANewDataGenerationReplacesTheLV(t *testing.T) {
-	runner, cluster, docker, storage := newTestRunner(t)
+func TestANewDataGenerationBringsTheStackUpOnTheNewLV(t *testing.T) {
+	runner, cluster, docker, _ := newTestRunner(t)
 	runner.pass(context.Background())
 	cluster.PlaceVolume("db", 2) // a restore
 	runner.pass(context.Background())
-	old, current := agenttest.DBLV(1), agenttest.DBLV(2)
-	if storage.Count("ensure "+current) != 1 || storage.Count("remove "+old) != 1 || storage.Count("remove "+current) != 0 {
-		t.Errorf("storage calls %q", storage.Lines())
-	}
 	if ups := docker.Count("up " + shopProject); ups != 2 {
 		t.Errorf("%d compose ups, want 2 (the new volume)", ups)
 	}
-	if retired := cluster.State.Retired; len(retired) != 0 {
-		t.Errorf("the removed copy is not forgotten: %v", retired)
+	if lvs := mountedLVs(t, runner); !slices.Equal(lvs, []string{agenttest.DBLV(2)}) {
+		t.Errorf("the stack holds %v, want only the new LV", lvs)
 	}
 }
 
-func TestACopyTheStateLostIsKept(t *testing.T) {
-	runner, cluster, _, storage := newTestRunner(t)
+func TestAStackWaitsForItsVolumeAndFailsWithIt(t *testing.T) {
+	runner, cluster, docker, volumes := newTestRunner(t)
+	lv := agenttest.DBLV(1)
+	volumes.Lock()
+	volumes.NotReady = map[string]bool{lv: true}
+	volumes.Unlock()
 	runner.pass(context.Background())
-	// a bug, not a command, takes the volume and its stack out of the state
-	cluster.Lock()
-	delete(cluster.State.Volumes, "default/db")
-	delete(cluster.State.Stacks, "default/shop")
-	cluster.Unlock()
-	runner.pass(context.Background())
-	runner.pass(context.Background())
-	if storage.Count("remove "+agenttest.DBLV(1)) != 0 {
-		t.Errorf("a copy that is neither placed nor retired was removed: %q", storage.Lines())
+	if docker.Count("up "+shopProject) != 0 || cluster.Stack("shop").Status != state.StackStarting {
+		t.Errorf("docker %q, shop %s: a stack whose volume is on its way waits", docker.Lines(), cluster.Stack("shop").Status)
 	}
-	if !runner.unexplained[agenttest.DBLV(1)] {
-		t.Error("no warning about the kept copy")
+
+	volumes.Lock()
+	volumes.Errors = map[string]error{lv: errors.New("volume default/db holds data, but its only LV is gone")}
+	volumes.Unlock()
+	runner.pass(context.Background())
+	if shop := cluster.Stack("shop"); shop.Status != state.StackFailing || !strings.Contains(shop.UpError, "its only LV is gone") {
+		t.Errorf("shop %s (%q): a stack whose volume cannot be mounted fails with why", shop.Status, shop.UpError)
+	}
+
+	volumes.Lock()
+	volumes.NotReady, volumes.Errors = nil, nil
+	volumes.Unlock()
+	runner.pass(context.Background())
+	if docker.Count("up "+shopProject) != 1 || cluster.Stack("shop").Status != state.StackRunning {
+		t.Errorf("docker %q, shop %s", docker.Lines(), cluster.Stack("shop").Status)
 	}
 }
 
-func TestAVolumeOutlivesItsStack(t *testing.T) {
-	runner, cluster, docker, storage := newTestRunner(t)
+func TestTheStacksHoldTheLVsOfTheirComposeFiles(t *testing.T) {
+	runner, cluster, _, _ := newTestRunner(t)
 	runner.pass(context.Background())
+	held, err := runner.files.HeldLVs()
+	if err != nil || !maps.Equal(held, map[string]bool{agenttest.DBLV(1): true}) {
+		t.Errorf("held %v, %v", held, err)
+	}
 
+	// once compose down worked, the stack holds nothing
 	cluster.Remove(resource.KindStack, "shop")
 	runner.pass(context.Background())
-	runner.pass(context.Background())
-	if docker.Count("down "+shopProject) != 1 || storage.Count("remove "+agenttest.DBLV(1)) != 0 {
-		t.Errorf("docker %q, storage %q", docker.Lines(), storage.Lines())
-	}
-	// the stack's files go with compose down, the copy's record stays
-	if _, err := os.Stat(runner.files.stackDir(shopProject)); !os.IsNotExist(err) {
-		t.Errorf("the stack's directory is left: %v", err)
-	}
-	if _, err := os.Stat(runner.files.volumeRecord("default/db")); err != nil {
-		t.Errorf("the record of the copy left with the stack: %v", err)
+	if held, err := runner.files.HeldLVs(); err != nil || len(held) != 0 {
+		t.Errorf("held %v, %v after the stack stopped", held, err)
 	}
 
-	cluster.Remove(resource.KindVolume, "db")
-	runner.pass(context.Background())
-	if storage.Count("remove "+agenttest.DBLV(1)) != 1 {
-		t.Errorf("storage %q", storage.Lines())
+	// a list that does not read may hold any LV
+	if err := os.MkdirAll(runner.files.stackDir("default_blog"), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if retired := cluster.State.Retired; len(retired) != 0 {
-		t.Errorf("the removed copy is not forgotten: %v", retired)
+	if err := os.WriteFile(runner.files.stackFile("default_blog"), nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(runner.files.volumeRecord("default/db")); !os.IsNotExist(err) {
-		t.Errorf("the record of the removed copy is left: %v", err)
+	if _, err := runner.files.HeldLVs(); err == nil {
+		t.Error("a stack without a readable list held nothing")
 	}
 }
 
