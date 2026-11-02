@@ -34,12 +34,13 @@ A tag `v<major>.<minor>.<patch>` starts `.github/workflows/release.yml`:
 1. `bin/dev all` (lint, test, test-tools, package); the version comes from the tag.
 2. CLI archives for Linux, macOS (`.tar.gz`) and Windows (`.zip`).
 3. `packaging/apt/publish.sh` adds the Debian packages to the public APT repository
-   `webcodingcat/clowder-apt` with reprepro and signs it; GitHub Pages serves it at
+   `webcodingcat/clowder-apt` with `apt-ftparchive` and signs it; GitHub Pages serves it at
    `https://webcodingcat.github.io/clowder-apt` (distribution `trixie`, component `main`,
    public key `clowder.asc`). Its `README.md` shows how a host adds it.
 4. A GitHub release with the packages and the archives. It comes last: a version is out once
    it is in the APT repository. If only this step fails, create the release by hand
-   (`gh release create`); re-running the workflow would publish the version again.
+   (`gh release create`); re-running the workflow fails, as `publish.sh` publishes a
+   version once.
 
 The workflow needs two secrets in this repository:
 
@@ -49,10 +50,12 @@ The workflow needs two secrets in this repository:
 | `APT_DEPLOY_KEY` | private SSH key; its public half is a deploy key with write access on `webcodingcat/clowder-apt` |
 
 `publish.sh` imports the key into a throw-away keyring and publishes the public half as
-`clowder.asc`; `conf/` and `db/` stay in the APT repository so the next release adds to it.
-`Limit: 0` keeps every version of a package, so a host pinned to an older release still
-installs it. A release candidate (`v1.2.3-rc1`, Debian version `1.2.3~rc1`) lands in the
-same distribution; only a host without a pin would take it.
+`clowder.asc`. The packages stay in the APT repository's pool, and the index lists every
+version there, so a host pinned to an older release still installs it (Debian's reprepro
+5.3 in Debian 13 has no `Limit` and keeps one version per package, so it is not used). A release candidate (`v1.2.3-rc1`,
+Debian version `1.2.3~rc1`) lands in the same distribution; only a host without a pin
+would take it. The APT repository still holds reprepro's `conf/` and `db/` from `v0.0.1`;
+nothing reads them.
 
 ### Release checklist
 
