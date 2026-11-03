@@ -1,7 +1,6 @@
 package volumes
 
 import (
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -20,22 +19,21 @@ type wantedCopy struct {
 	dataGeneration int64
 	target         target
 	initialized    bool
+	// synced is the state's word on the copy (VolumeCopy.Synced)
+	synced bool
 	// err says why the copy cannot be described (its class has no pool)
 	err error
 }
 
-// errTiebreakerHere: a diskless copy on this host comes with the placement
-// over hosts.
-var errTiebreakerHere = errors.New("this host holds a tiebreaker of the volume, which clowder cannot keep yet")
-
 // desired are the copies the state places on this host, sorted by volume
-// ID: a copy that a stack placed here names is mounted; one that a stack
+// ID: a copy that a stack placed here names is mounted, unless the stack
+// stops for a move (State.StopsForMove); one that a stack
 // here may still hold (held, or any while holdAll) is kept as it is; any
 // other is secondary.
 func (r *Reconciler) desired(copied *state.State, held map[string]bool, holdAll bool) []wantedCopy {
 	named := map[string]bool{}
 	for _, stack := range copied.Stacks {
-		if stack.Host != nil && *stack.Host == r.host {
+		if stack.Host != nil && *stack.Host == r.host && !copied.StopsForMove(stack.ID()) {
 			for _, name := range stack.Spec.VolumeNames() {
 				named[names.ID(stack.Namespace, name)] = true
 			}
@@ -44,12 +42,14 @@ func (r *Reconciler) desired(copied *state.State, held map[string]bool, holdAll 
 	var wanted []wantedCopy
 	for _, id := range slices.Sorted(maps.Keys(copied.Volumes)) {
 		volume := copied.Volumes[id]
-		if !slices.ContainsFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host }) {
+		index := slices.IndexFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host })
+		if index < 0 {
 			continue
 		}
 		described, err := r.describe(copied, volume)
 		want := wantedCopy{
-			volume: described, dataGeneration: volume.DataGeneration, initialized: volume.Initialized, err: err,
+			volume: described, dataGeneration: volume.DataGeneration, initialized: volume.Initialized,
+			synced: volume.Copies[index].Synced, err: err,
 		}
 		switch {
 		case named[id]:
@@ -77,13 +77,14 @@ func (r *Reconciler) describe(copied *state.State, volume *state.Volume) (storag
 	config := copied.Config.Spec
 	index := slices.IndexFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host })
 	if volume.Copies[index].Tiebreaker {
-		return described, errTiebreakerHere
+		described.Diskless = true
+	} else {
+		pool, err := poolOf(config, id, volume.Copies[index].Class)
+		if err != nil {
+			return described, err
+		}
+		described.Pool = pool
 	}
-	pool, err := poolOf(config, id, volume.Copies[index].Class)
-	if err != nil {
-		return described, err
-	}
-	described.Pool = pool
 	if volume.Minor == nil {
 		return described, nil // replicas 0: a plain LV
 	}

@@ -111,7 +111,12 @@ func newHostAction(g *globals, action api.HostAction) *cobra.Command {
 					return err
 				}
 			}
-			if _, err := client.Post(cmd.Context(), "/v1/hosts/"+strconv.Itoa(host.ID)+"/"+action.Name, nil); err != nil {
+			var answer api.HostActionAnswer
+			if err := client.Act(cmd.Context(), "/v1/hosts/"+strconv.Itoa(host.ID)+"/"+action.Name, nil, &answer); err != nil {
+				return err
+			}
+			if answer.Leaving {
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s: drains, and goes once its stacks and volume copies moved off\n", args[0])
 				return err
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s: %s done\n", args[0], action.Name)

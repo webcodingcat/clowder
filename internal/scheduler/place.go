@@ -6,7 +6,9 @@
 // cluster's default); a host offers what it reported less system_reserve.
 // A new stack goes to a host where all of it fits, else to one where its
 // services push out services of lower effective priority, one service
-// after the other (fitStack).
+// after the other (fitStack). A host that has the stack's data comes
+// before one that must get a copy first; such a stack moves there (Move).
+// The copies of the volumes are kept in copies.go.
 package scheduler
 
 import (
@@ -15,9 +17,11 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/units"
 )
@@ -34,6 +38,20 @@ type Placement struct {
 	// PushedOut are the new pushed-out lists of the stacks a new stack
 	// touches, its own included (set-pushed-out, before the placement).
 	PushedOut map[string][]string
+}
+
+// Move is a decision to move a stack to another host with a move-stack
+// operation: a stack that runs elsewhere, or one without a host whose
+// volumes are elsewhere.
+type Move struct {
+	Stack string
+	// From is the stack's host; nil for a stack that has none yet.
+	From *state.HostID
+	To   state.HostID
+	// PushedOut are the pushed-out lists on To, as for a placement.
+	PushedOut map[string][]string
+	// Why is what the log says: a user asked, the host drains, ...
+	Why string
 }
 
 // Waiting is a stack that finds no place, with the reason.
@@ -58,7 +76,11 @@ type Decisions struct {
 	// priority alone reserves more than they offer.
 	OverCapacity []state.HostID
 	Placements   []Placement
-	Waiting      []Waiting
+	Moves        []Move
+	// Copies are the volumes' records with a copy added, a surplus copy
+	// given up or the tiebreaker set (copies.go), one put-volume each.
+	Copies  []state.Volume
+	Waiting []Waiting
 	// ComeBack is the pushed-out service that fits again first, if any; it
 	// comes only when the plan places nothing and pushes nothing out, so a
 	// waiting stack gets room before a pushed-out service does.
@@ -67,9 +89,12 @@ type Decisions struct {
 
 // Plan makes hosts over capacity fit, places the volumes that placed stacks
 // have gained and the stacks that have no host yet (highest priority
-// first), and names the pushed-out service that may come back.
-func Plan(current *state.State) Decisions {
+// first), moves the stacks off draining hosts and those a user asked to
+// move, keeps the volumes' copies, and names the pushed-out service that
+// may come back.
+func Plan(current *state.State, now time.Time) Decisions {
 	planner := newPlanner(current)
+	planner.now = now
 	var decisions Decisions
 	for _, id := range slices.Sorted(maps.Keys(current.Hosts)) {
 		lists, over := planner.room.fitOverCapacity(id)
@@ -83,27 +108,28 @@ func Plan(current *state.State) Decisions {
 	var unplaced []*state.Stack
 	for _, id := range slices.Sorted(maps.Keys(current.Stacks)) {
 		stack := current.Stacks[id]
-		if stack.Host == nil {
+		switch {
+		case current.Locks[state.StackLock(id)] != 0:
+			continue // an operation holds it, and decides for it
+		case stack.Host == nil:
 			unplaced = append(unplaced, stack)
 			continue
 		}
-		decisions.add(planner.place(stack))
+		decisions.add(planner.keep(stack)...)
 	}
 	// by the highest effective priority of their services, from the
 	// current categories like every other priority here
-	highest := map[string]int{}
+	slices.SortStableFunc(unplaced, func(a, b *state.Stack) int {
+		return cmp.Compare(planner.stackPriority(b.ID()), planner.stackPriority(a.ID()))
+	})
 	for _, stack := range unplaced {
-		for service := range stack.Services {
-			highest[stack.ID()] = max(highest[stack.ID()], planner.room.priority(serviceRef{stack.ID(), service}))
-		}
+		decisions.add(planner.place(stack, planner.activeHosts(nil), "")...)
 	}
-	slices.SortStableFunc(unplaced, func(a, b *state.Stack) int { return cmp.Compare(highest[b.ID()], highest[a.ID()]) })
-	for _, stack := range unplaced {
-		decisions.add(planner.place(stack))
-	}
+	decisions.Copies = planner.keepCopies()
 	// a pushed-out service comes back only in a pass that changes nothing
 	// else: a waiting stack gets the room first
-	if len(decisions.PushOuts) > 0 || slices.ContainsFunc(decisions.Placements, func(p Placement) bool { return p.SetsHost }) {
+	if len(decisions.PushOuts) > 0 || len(decisions.Moves) > 0 ||
+		slices.ContainsFunc(decisions.Placements, func(p Placement) bool { return p.SetsHost }) {
 		return decisions
 	}
 	if ref, ok := planner.room.comingBack(); ok {
@@ -114,13 +140,29 @@ func Plan(current *state.State) Decisions {
 	return decisions
 }
 
-// add takes one stack's placement, or its reason to wait.
-func (d *Decisions) add(placement Placement, reason string) {
+// decision is what the planner decides for one stack: a placement, a
+// move, or why it waits; any of them may be empty.
+type decision struct {
+	placement Placement
+	move      *Move
+	reason    string
+}
+
+// add takes the decisions for one stack.
+func (d *Decisions) add(decided ...decision) {
+	for _, one := range decided {
+		d.addOne(one)
+	}
+}
+
+func (d *Decisions) addOne(one decision) {
 	switch {
-	case reason != "":
-		d.Waiting = append(d.Waiting, Waiting{Stack: placement.Stack, Reason: reason})
-	case placement.SetsHost || len(placement.Volumes) > 0:
-		d.Placements = append(d.Placements, placement)
+	case one.reason != "":
+		d.Waiting = append(d.Waiting, Waiting{Stack: one.placement.Stack, Reason: one.reason})
+	case one.move != nil:
+		d.Moves = append(d.Moves, *one.move)
+	case one.placement.SetsHost || len(one.placement.Volumes) > 0:
+		d.Placements = append(d.Placements, one.placement)
 	}
 }
 
@@ -133,20 +175,42 @@ type planner struct {
 	allocated map[state.HostID]map[string][]int64
 	minors    map[int]bool
 	room      *room
+	// syncing is true while a copy with a disk is not synced yet, in the
+	// state or by this plan: the resync limit (copies.go)
+	syncing bool
+	// tiebreakers counts the tiebreakers on each host, as planned
+	tiebreakers map[state.HostID]int
+	// now is the leader's clock, for the cooldown of moves (makeRoom)
+	now time.Time
+	// operation is the one the plan is for (MoveVolumes): what it locks is
+	// the plan's to change
+	operation uint64
 }
 
 func newPlanner(current *state.State) *planner {
 	p := &planner{
 		current: current, classes: current.Config.Spec.StorageClasses,
 		allocated: map[state.HostID]map[string][]int64{}, minors: map[int]bool{}, room: newRoom(current),
+		tiebreakers: map[state.HostID]int{},
+	}
+	// a move that has not got its copies synced syncs them, all at once:
+	// it counts as the one resync of the limit
+	for _, operation := range current.Operations {
+		if operation.Move != nil && operation.State == state.OpRunning && operation.Step < state.MoveSynced {
+			p.syncing = true
+		}
 	}
 	for _, volume := range current.Volumes {
 		if volume.Minor != nil {
 			p.minors[*volume.Minor] = true
 		}
 		for _, volumeCopy := range volume.Copies {
-			if !volumeCopy.Tiebreaker {
+			switch {
+			case volumeCopy.Tiebreaker:
+				p.tiebreakers[volumeCopy.Host]++
+			default:
 				p.take(volumeCopy.Host, p.classes[volumeCopy.Class].Pool, int64(volume.Spec.Size))
+				p.syncing = p.syncing || p.resyncs(volume, volumeCopy)
 			}
 		}
 	}
@@ -160,19 +224,67 @@ func (p *planner) take(host state.HostID, pool string, size int64) {
 	p.allocated[host][pool] = append(p.allocated[host][pool], size)
 }
 
-// place decides for one stack; a reason means it waits, and the placement
-// then names only the stack. A new stack goes to the active host where all
-// of it fits with the least room left (best fit), else to the first where
-// its services push out others.
-func (p *planner) place(stack *state.Stack) (Placement, string) {
-	if stack.Host != nil {
-		volumes, reason := p.newVolumes(stack, *stack.Host)
-		return Placement{Stack: stack.ID(), Host: *stack.Host, Volumes: volumes}, reason
+// takesStacks tells whether a host takes new stacks and copies: it is
+// active, and no user removes it.
+func (p *planner) takesStacks(id state.HostID) bool {
+	host, ok := p.current.Hosts[id]
+	return ok && host.Phase == state.Active && !host.Leaving
+}
+
+// activeHosts are the hosts that take stacks, sorted, but the one left out.
+func (p *planner) activeHosts(leftOut *state.HostID) []state.HostID {
+	var hosts []state.HostID
+	for _, id := range slices.Sorted(maps.Keys(p.current.Hosts)) {
+		if p.takesStacks(id) && (leftOut == nil || *leftOut != id) {
+			hosts = append(hosts, id)
+		}
 	}
+	return hosts
+}
+
+// keep decides for a stack that has a host: it moves it if its host drains
+// or a user asked to (the volumes it newly names go with it), else it
+// places those volumes where it runs.
+func (p *planner) keep(stack *state.Stack) []decision {
+	host := *stack.Host
+	switch {
+	case p.current.Hosts[host].Phase == state.Draining:
+		return p.place(stack, p.activeHosts(&host), "its host drains")
+	case stack.MoveTo != nil:
+		return p.place(stack, []state.HostID{*stack.MoveTo}, "a user asked to move it")
+	}
+	volumes, copies, reason := p.volumesOn(stack, host)
+	switch {
+	case reason == "" && len(copies) > 0:
+		// the state lets a placed stack name only volumes with data where
+		// it runs; a guard
+		reason = "a volume has its data on another host"
+	case reason == "" && len(volumes) > 0:
+		p.reserve(host, volumes)
+		return []decision{{placement: Placement{Stack: stack.ID(), Host: host, Volumes: volumes}}}
+	case reason == "":
+		return nil
+	}
+	return []decision{{placement: Placement{Stack: stack.ID()}, reason: reason}}
+}
+
+// place finds a host among hosts for a stack that has none, or for one
+// that moves (why says why it moves), in this order:
+//  1. a host that has the stack's data and where all of it fits, the one
+//     with the least room left (best fit);
+//  2. a host where all of it fits once its volumes get copies there, only
+//     while no other copy syncs (the resync limit);
+//  3. for a stack without a host, room made by moving stacks of lower
+//     priority (makeRoom);
+//  4. a host where its services push out others, with its data first.
+//
+// A reason means the stack waits.
+func (p *planner) place(stack *state.Stack, hosts []state.HostID, why string) []decision {
 	var whole, pushing []stackFit
 	reasons := map[state.HostID]string{}
-	for _, id := range slices.Sorted(maps.Keys(p.current.Hosts)) {
-		if p.current.Hosts[id].Phase != state.Active {
+	for _, id := range hosts {
+		if !p.takesStacks(id) {
+			reasons[id] = "it takes no stacks"
 			continue
 		}
 		fit, reason := p.room.fitStack(stack.ID(), id)
@@ -185,93 +297,211 @@ func (p *planner) place(stack *state.Stack) (Placement, string) {
 			pushing = append(pushing, fit)
 		}
 	}
+	// a host without the stack's data comes after those with it: the copies
+	// it needs must sync first, and a volume of replicas 0 starts there anew,
+	// empty, as its data is thrown away when its stack moves (dataElsewhere)
 	freeMemory := map[state.HostID]int64{}
 	for _, fit := range whole {
 		freeMemory[fit.host] = p.room.free(fit.host).memory
 	}
 	slices.SortStableFunc(whole, func(a, b stackFit) int { return cmp.Compare(freeMemory[a.host], freeMemory[b.host]) })
-	for _, fit := range append(whole, pushing...) {
-		volumes, reason := p.newVolumes(stack, fit.host)
-		if reason != "" {
-			reasons[fit.host] = reason
-			continue
+	if chosen := p.withDataFirst(stack, whole, reasons); len(chosen) > 0 {
+		return []decision{p.choose(stack, chosen[0], why)}
+	}
+	if stack.Host == nil {
+		if moves, reason, ok := p.makeRoom(stack); ok {
+			return append(moves, decision{placement: Placement{Stack: stack.ID()}, reason: reason})
 		}
-		return Placement{
-			Stack: stack.ID(), Host: fit.host, SetsHost: true, Volumes: volumes,
-			PushedOut: p.room.accept(stack.ID(), fit),
-		}, ""
+	}
+	if chosen := p.withDataFirst(stack, pushing, reasons); len(chosen) > 0 {
+		return []decision{p.choose(stack, chosen[0], why)}
 	}
 	if len(reasons) == 0 {
-		return Placement{Stack: stack.ID()}, "no active host"
+		return []decision{{placement: Placement{Stack: stack.ID()}, reason: "no active host"}}
 	}
 	var each []string
 	for _, id := range slices.Sorted(maps.Keys(reasons)) {
 		each = append(each, p.current.Hosts[id].Name+": "+reasons[id])
 	}
-	return Placement{Stack: stack.ID()}, strings.Join(each, "; ")
+	reason := strings.Join(each, "; ")
+	if why != "" {
+		reason = "cannot move (" + why + "): " + reason
+	}
+	return []decision{{placement: Placement{Stack: stack.ID()}, reason: reason}}
+}
+
+// withDataFirst are the hosts of fits that can take the stack's volumes,
+// those with its data first; reasons gets why the others cannot.
+func (p *planner) withDataFirst(stack *state.Stack, fits []stackFit, reasons map[state.HostID]string) []candidate {
+	var withData, withoutData []candidate
+	for _, fit := range fits {
+		volumes, copies, reason := p.volumesOn(stack, fit.host)
+		switch {
+		case reason != "":
+			reasons[fit.host] = reason
+		case len(copies) == 0 && !p.dataElsewhere(stack, fit.host):
+			withData = append(withData, candidate{fit, volumes, nil})
+		case p.syncing && len(copies) > 0:
+			reasons[fit.host] = "a copy of a volume would have to sync there, and another copy syncs already"
+		default:
+			withoutData = append(withoutData, candidate{fit, volumes, copies})
+		}
+	}
+	return slices.Concat(withData, withoutData)
+}
+
+// candidate is a host a stack fits, with what its volumes need there
+// (volumesOn).
+type candidate struct {
+	fit             stackFit
+	volumes, copies []state.Volume
+}
+
+// choose makes a candidate the stack's: a placement for a stack without a
+// host whose data is there, else a move. A move the placement starts on
+// its own waits while one of the stack failed recently (failedRecently);
+// one a user asked for goes.
+func (p *planner) choose(stack *state.Stack, chosen candidate, why string) decision {
+	host := chosen.fit.host
+	moves := stack.Host != nil || len(chosen.copies) > 0 || p.dataElsewhere(stack, host)
+	if moves && stack.MoveTo == nil && p.failedRecently(stack) {
+		return decision{placement: Placement{Stack: stack.ID()}, reason: fmt.Sprintf(
+			"a move failed at %s; the next try comes after %s", stack.MoveFailed.Format(time.RFC3339), MoveCooldown)}
+	}
+	pushedOut := p.room.accept(stack.ID(), chosen.fit)
+	p.reserve(host, slices.Concat(chosen.volumes, chosen.copies))
+	if len(chosen.copies) > 0 {
+		p.syncing = true
+	}
+	if !moves {
+		return decision{placement: Placement{
+			Stack: stack.ID(), Host: host, SetsHost: true, Volumes: chosen.volumes, PushedOut: pushedOut,
+		}}
+	}
+	if why == "" {
+		why = "its volumes are on another host"
+	}
+	return decision{
+		placement: Placement{Stack: stack.ID()},
+		move: &Move{
+			Stack: stack.ID(), From: stack.Host, To: host,
+			PushedOut: pushedOut, Why: why,
+		},
+	}
+}
+
+// hasData tells whether a host has a stack's data: none of its volumes
+// needs a copy there, and none of replicas 0 has its LV elsewhere. A volume
+// that waits for its first stack may go anywhere.
+func (p *planner) hasData(stack *state.Stack, host state.HostID) bool {
+	_, copies, reason := p.volumesOn(stack, host)
+	return reason == "" && len(copies) == 0 && !p.dataElsewhere(stack, host)
+}
+
+// reserve takes the space and minors of volume records a decision places
+// copies with: what is new in them beside the state's records.
+func (p *planner) reserve(host state.HostID, volumes []state.Volume) {
+	for _, volume := range volumes {
+		index := slices.IndexFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == host })
+		if index >= 0 && !volume.Copies[index].Tiebreaker {
+			p.take(host, p.classes[volume.Copies[index].Class].Pool, int64(volume.Spec.Size))
+		}
+		if volume.Minor != nil {
+			p.minors[*volume.Minor] = true
+		}
+	}
+}
+
+// dataElsewhere tells whether a stack names a placed volume of replicas 0
+// whose plain LV is on another host: such a stack moves (its move gives
+// the volume a new, empty LV on the new host), but no copy syncs.
+func (p *planner) dataElsewhere(stack *state.Stack, host state.HostID) bool {
+	for _, name := range stack.Spec.VolumeNames() {
+		volume := p.current.Volumes[names.ID(stack.Namespace, name)]
+		if volume != nil && volume.Status != state.VolumePending && volume.Spec.Replicas == 0 &&
+			!slices.ContainsFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == host }) {
+			return true
+		}
+	}
+	return false
+}
+
+// volumesOn works out what a stack's volumes need on host: volumes are
+// those that wait for their first stack (pending), each placed there with
+// its first copy; copies are placed volumes of replicas 1 and more that
+// get a copy there (a tiebreaker there gets a disk). A placed volume of
+// replicas 0 needs neither (dataElsewhere). Nothing is taken from the
+// planner yet (reserve). A reason says why host cannot take them.
+func (p *planner) volumesOn(stack *state.Stack, host state.HostID) (volumes, copies []state.Volume, reason string) {
+	var reserved []allocation
+	var minors []int
+	for _, name := range stack.Spec.VolumeNames() {
+		id := names.ID(stack.Namespace, name)
+		current, ok := p.current.Volumes[id]
+		switch {
+		case !ok:
+			return nil, nil, fmt.Sprintf("volume %s is gone", name) // the state refuses this; a guard
+		case current.Status != state.VolumePending && current.Spec.Replicas == 0:
+			continue
+		case current.Status != state.VolumePending:
+			index := slices.IndexFunc(current.Copies, func(c state.VolumeCopy) bool { return c.Host == host })
+			if index >= 0 && !current.Copies[index].Tiebreaker {
+				continue
+			}
+			if holder := p.current.Locks[state.VolumeLock(id)]; holder != 0 && holder != p.operation {
+				return nil, nil, fmt.Sprintf("volume %s is locked by another operation", name)
+			}
+			if p.retiresHere(id, current.DataGeneration, host) {
+				return nil, nil, fmt.Sprintf("volume %s: the host still removes an old copy", name)
+			}
+			class, pool, ok := p.fit(host, current.Spec.Class, int64(current.Spec.Size), reserved)
+			if !ok {
+				return nil, nil, noPool(name, current.Spec)
+			}
+			reserved = append(reserved, allocation{pool, int64(current.Spec.Size)})
+			volume := *current
+			volume.Copies = slices.DeleteFunc(slices.Clone(current.Copies), func(c state.VolumeCopy) bool { return c.Host == host })
+			volume.Copies = append(volume.Copies, state.VolumeCopy{Host: host, Class: class})
+			copies = append(copies, volume)
+			continue
+		}
+		wanted := current.Spec
+		class, pool, ok := p.fit(host, wanted.Class, int64(wanted.Size), reserved)
+		if !ok {
+			return nil, nil, noPool(name, wanted)
+		}
+		volume := *current
+		volume.Copies = []state.VolumeCopy{{Host: host, Class: class}}
+		volume.Status = state.VolumeOK
+		if wanted.Replicas > 0 {
+			minor, ok := p.freeMinor(minors)
+			if !ok {
+				return nil, nil, "no free DRBD minor"
+			}
+			minors = append(minors, minor)
+			volume.Minor = &minor
+		}
+		reserved = append(reserved, allocation{pool, int64(wanted.Size)})
+		volumes = append(volumes, volume)
+	}
+	return volumes, copies, ""
+}
+
+// noPool is the reason for a volume that fits no pool of a host.
+func noPool(name string, spec resource.VolumeSpec) string {
+	return fmt.Sprintf("volume %s (%s, class %s) fits no pool", name, units.FormatSize(int64(spec.Size)), spec.Class)
+}
+
+// retiresHere tells whether a host still removes a copy of the volume in
+// its data generation: a new copy there would have the same LV.
+func (p *planner) retiresHere(volumeID string, generation int64, host state.HostID) bool {
+	return slices.Contains(p.current.Retired, state.RetiredCopy{Volume: volumeID, DataGeneration: generation, Host: host})
 }
 
 // allocation is space a volume takes in a pool.
 type allocation struct {
 	pool string
 	size int64
-}
-
-// reservation is what one stack's new volumes would take on a host. It is
-// kept apart from the planner until all of them fit: a stack that does not
-// fit takes nothing, neither space nor minors.
-type reservation struct {
-	space  []allocation
-	minors []int
-}
-
-// newVolumes places on host the volumes the stack names that wait for
-// their first stack (pending), taking their space; a reason says why one
-// does not fit, or why host is the wrong one: a placed volume stays where
-// its copy is, so the stack must go there.
-func (p *planner) newVolumes(stack *state.Stack, host state.HostID) ([]state.Volume, string) {
-	var volumes []state.Volume
-	var reserved reservation
-	for _, name := range stack.Spec.VolumeNames() {
-		current, ok := p.current.Volumes[names.ID(stack.Namespace, name)]
-		switch {
-		case !ok:
-			return nil, fmt.Sprintf("volume %s is gone", name) // the state refuses this; a guard
-		case current.Status != state.VolumePending:
-			if !slices.ContainsFunc(current.Copies, func(volumeCopy state.VolumeCopy) bool {
-				return volumeCopy.Host == host && !volumeCopy.Tiebreaker
-			}) {
-				return nil, fmt.Sprintf("volume %s has its data on another host", name)
-			}
-			continue
-		}
-		wanted := current.Spec
-		class, pool, ok := p.fit(host, wanted.Class, int64(wanted.Size), reserved.space)
-		if !ok {
-			return nil, fmt.Sprintf("volume %s (%s, class %s) fits no pool", name,
-				units.FormatSize(int64(wanted.Size)), wanted.Class)
-		}
-		volume := *current
-		volume.Copies = []state.VolumeCopy{{Host: host, Class: class}}
-		volume.Status = state.VolumeOK
-		if wanted.Replicas > 0 {
-			minor, ok := p.freeMinor(reserved.minors)
-			if !ok {
-				return nil, "no free DRBD minor"
-			}
-			reserved.minors = append(reserved.minors, minor)
-			volume.Minor = &minor
-		}
-		reserved.space = append(reserved.space, allocation{pool, int64(wanted.Size)})
-		volumes = append(volumes, volume)
-	}
-	for _, each := range reserved.space {
-		p.take(host, each.pool, each.size)
-	}
-	for _, minor := range reserved.minors {
-		p.minors[minor] = true
-	}
-	return volumes, ""
 }
 
 // fit finds a class whose pool on host holds size without overcommit,

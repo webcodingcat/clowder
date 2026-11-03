@@ -41,3 +41,6 @@ clowder_raft_applied_index{host="node0"} 9
 # HELP clowder_root_used_percent How full the root file system is.
 # TYPE clowder_root_used_percent gauge
 clowder_root_used_percent{host="node0"} 31
+# HELP clowder_volume_out_of_sync_bytes How much this host's copy of a volume differs from a peer: while it resyncs, what is left.
+# TYPE clowder_volume_out_of_sync_bytes gauge
+clowder_volume_out_of_sync_bytes{host="node0",volume="default/db"} 4096

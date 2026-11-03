@@ -52,8 +52,8 @@ const (
 // is, and what the host has of it.
 type copyFacts struct {
 	target target
-	// plain is a copy without DRBD (replicas 0)
-	plain bool
+	// plain is a copy without DRBD (replicas 0), diskless a tiebreaker
+	plain, diskless bool
 	// initialized is the state's word (Volume.Initialized)
 	initialized bool
 	seen        storage.Observed
@@ -63,6 +63,9 @@ type copyFacts struct {
 var (
 	errDataGone    = errors.New("the volume holds data, but its only LV is gone; restore it from a backup")
 	errOtherDevice = errors.New("another device is mounted at the copy's mount point; a human must look")
+	// errTiebreakerMounted: a stack here names a volume of which this host
+	// holds the tiebreaker; the placement never does that
+	errTiebreakerMounted = errors.New("this host holds only a tiebreaker of the volume, which has no data to mount")
 )
 
 // plan returns the steps that bring a copy from what the host has to its
@@ -85,12 +88,14 @@ func plan(facts copyFacts) ([]step, error) {
 		return nil, errDataGone
 	case facts.target == targetKept:
 		return nil, nil
+	case facts.diskless && facts.target == targetMounted:
+		return nil, errTiebreakerMounted
 	}
 	var steps []step
 	// a resource that is down or whose file changed needs ensure, which
 	// runs drbdadm adjust
 	resourceBehind := !facts.plain && (seen.Role == storage.RoleDown || !seen.ResourceFileCurrent)
-	if !seen.LV || resourceBehind {
+	if !seen.LV && !facts.diskless || resourceBehind {
 		steps = append(steps, stepEnsure)
 	}
 	primary := seen.Role == storage.RolePrimary

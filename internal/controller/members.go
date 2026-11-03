@@ -36,6 +36,7 @@ const (
 	makePassive     memberAction = "make passive"
 	makeActive      memberAction = "make active"
 	recordVoterRole memberAction = "record the Raft role of"
+	removeLeaving   memberAction = "remove from the cluster once empty"
 )
 
 // memberStep is the next change: an action on a host.
@@ -114,6 +115,8 @@ func tendMembers(ctx context.Context, cluster Cluster, members Members, propose 
 		err = movePhase(ctx, propose, copied.Hosts[step.host], state.Passive)
 	case makeActive:
 		err = movePhase(ctx, propose, copied.Hosts[step.host], state.Active)
+	case removeLeaving:
+		err = movePhase(ctx, propose, copied.Hosts[step.host], state.Removed)
 	case recordVoterRole:
 		_, err = commit(ctx, propose, state.KindSetHostVoter, state.SetHostVoter{Host: step.host, Voter: step.voter})
 	}
@@ -151,7 +154,9 @@ func voterCount(n int) int {
 //     it, but Raft's open connections go on, and so would its lead;
 //  2. hosts that are not members join Raft, and a joining or passive host
 //     that is a voter loses its vote;
-//  3. joining and passive hosts move on;
+//  3. a host that leaves (Host.Leaving) and has nothing left on it is
+//     removed, by another leader if it leads;
+//     joining and passive hosts move on;
 //  4. votes go where they belong, before a removed voter leaves: so the
 //     cluster never has fewer voters on the way than at its end;
 //  5. removed hosts leave Raft;
@@ -174,6 +179,16 @@ func nextMemberStep(current *state.State, configuration map[state.HostID]bool, s
 		// finds its vote; it gets none until it runs stacks
 		case (phase == state.Joining || phase == state.Passive) && configuration[id] && id != self:
 			return memberStep{action: demoteVoter, host: id}
+		}
+	}
+	for _, id := range ids {
+		// a host that leaves goes once nothing is on it; a leader hands
+		// its lead over first, and the next leader removes it
+		if current.Hosts[id].Leaving && current.CheckRemoval(id) == nil {
+			if id == self {
+				return memberStep{action: handOverLead, host: id}
+			}
+			return memberStep{action: removeLeaving, host: id}
 		}
 	}
 	if step := nextPhase(current, ids); step.action != noMemberAction {

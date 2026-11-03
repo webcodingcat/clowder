@@ -40,7 +40,7 @@ loops that talk to the world outside.
   stacks' secrets, 0700; mounted read-only), before the routes that name them. Traefik
   watches only the routes, so the files are named after a hash of the chain: a renewed
   certificate changes the routes, and Traefik reads it; old files go after the routes.
-- **ACME challenges.** The router `acme-challenge` on `web` sends
+- **ACME challenges.** The router `acme-challenge` on `web` and `internal` sends
   `/.well-known/acme-challenge/` of every domain, before every stack's router, to the agent
   on 127.0.0.1:7445, which answers from the state (`State.Challenges`): whichever host
   holds the Floating IP can answer the CA.
@@ -98,11 +98,11 @@ loops that talk to the world outside.
   nothing else, or no order (retry in 10 minutes: it never reached the CA, so it does not
   count towards the backoff, and Let's Encrypt's limit on failed validations stays
   untouched). Then the answer to the HTTP-01 challenge goes into the state, and the leader
-  asks the Floating IP :80 for it with the domain as host until Traefik returns it (at most
-  2 minutes). The Floating IP is on every host's interface, so this reaches the leader's
-  own Traefik: on one host the ingress host. With several hosts it proves nothing about
-  the ingress host; phase 2 must ask that host, for example through its internal
-  entrypoint. Only then may the CA validate. When the order ends, the leader removes the
+  asks the ingress host's Traefik for it, on its internal entrypoint (node address :7480,
+  `checkAddress`), with the domain as host until it returns it (at most 2 minutes): that
+  is where the CA's request through the Floating IP lands, and that host may apply the
+  challenge later than the leader. Without an ingress host it asks the Floating IP :80.
+  Only then may the CA validate. When the order ends, the leader removes the
   answer from the state; a new leader removes answers an old one left behind. A failed
   account makes the pass end: Let's Encrypt allows few new accounts per address.
 - A failed order backs off per domain: 10 minutes, doubling up to 24 hours, kept in the

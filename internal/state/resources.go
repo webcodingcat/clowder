@@ -59,13 +59,14 @@ func (s *State) deleted(kind string, meta Meta) {
 	})
 }
 
-// The verbs Authorize knows: put, delete and restart change resources in
+// The verbs Authorize knows: put, delete, restart and move change resources in
 // the state, read is for what never passes Raft (the API's lists, a stack's
 // ps and logs).
 const (
 	VerbPut     = "put"
 	VerbDelete  = "delete"
 	VerbRestart = "restart"
+	VerbMove    = "move"
 	VerbRead    = "read"
 )
 

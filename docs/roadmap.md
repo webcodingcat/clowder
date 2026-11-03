@@ -10,7 +10,7 @@ clowder is built in phases; each ends with live tests on HLab
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done, passes the live tests |
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
-| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions, the leader's plans and the locks, the network for several hosts, the join |
+| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions, the leader's plans and the locks, the network for several hosts, the join, the placement over hosts and moves |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -72,6 +72,34 @@ The bootstrap command changed with it, so a cluster of an earlier build must be 
 anew. `clowderd init` takes no `--name` any more: a host's name in the cluster is its
 hostname, which DRBD knows it by.
 
+Then the placement over hosts:
+
+- Each copy's host tells the state whether the copy is synced (`set-copy-synced`);
+  `get volumes` shows `degraded`, `resyncing` or `ok`, and `/metrics` what is left of a
+  resync.
+- The placement keeps the copies: a missing one goes to the host with the most free
+  space, a surplus one goes once the others are synced, and a volume with two copies
+  gets a diskless tiebreaker on a third host. A new copy starts only while no other
+  syncs, in the whole cluster: the resync limit. A host forgets a peer that left one
+  of its resources, so the slots in DRBD's metadata do not run out.
+- A stack moves with an operation, `move-stack`: copies on the new host, synced, the
+  images pulled; then the old host stops the stack, and the new one starts it. Each
+  step has a deadline; a resync that is late but gets on gets more time, anything else
+  before the stack stopped rolls back. A user moves a stack (`clowder stack move`),
+  `host drain` moves all of a host's, a stack whose volumes are elsewhere moves to
+  them, and stacks of lower priority move to make room for a new one (not twice within
+  ten minutes).
+- Every host pulls the images of the stacks it may take over before it needs them.
+- `host remove` of a host that still has stacks or copies lets it leave: they move off
+  it first, then the leader removes it.
+- A host takes a copy it gives up down only once no primary peer is connected to it,
+  so the primary of two copies keeps its quorum.
+- The ACME self-check asks the ingress host's Traefik, not the leader's own.
+- The live tests use all three hosts: they move a stack with its data from host to host,
+  add a copy and a tiebreaker, and drain a host (`TestPlacement`).
+
+The state changed with it, so a cluster of an earlier build must be set up anew.
+
 Before it, the first release became installable and the commands honest: the APT
 repository keeps every version, `examples/hetzner` pins `0.1.0`, `bin/dev live release
 <tag>` tests a published release (the [release checklist](developing/shipping.md#release-checklist)),
@@ -93,10 +121,21 @@ to upgrade a running cluster.
 
 They matter once there are several hosts; on one, they cost at most time.
 
-- Stacks are placed on any active host, but nothing moves them, and a volume has one
-  copy: the placement over hosts (`move-stack`, copies online) comes next. Until then the
-  live tests drain the joined hosts, so their stacks start on the first host, and a host
-  is replaced only while it holds no stack or copy.
+- A copy that never syncs (its host is down and stays active, as nothing fails over yet)
+  holds the resync limit, so no other new copy starts; and a host that comes back resyncs
+  all its copies at once, each at the limit. Failover brings both: a failed host's copies
+  stop counting, and are made anew elsewhere after ten minutes.
+- A move whose host goes away ends only with its deadline (a rollback, or the move
+  failed past the point of no return); failover will end it at once. After a move, the
+  published ports' DNAT and its conntrack entries follow with the ingress failover.
+- While a volume of replicas 1 moves, its resource has two copies and no tiebreaker: if
+  the new host goes away during the resync, the old one may lose DRBD's quorum and suspend
+  the stack's writes. The DRBD quorum step checks this and gives such a move a
+  tiebreaker if needed.
+- `replicas` cannot change yet: raising it (1 to 2 or 3) only needs the placement to
+  allow it, as copies come online now.
+- Images are never pruned (no `image prune`), and every host now pulls those of the
+  stacks it may take over: the root file system fills up over time.
 - A read sees a write of the same `clowder` call (the index header), not one of the
   call before: `clowder get` right after `clowder apply` may show, for a moment, the
   state of a follower that has not applied the apply yet. The CLI could keep the last
@@ -125,16 +164,6 @@ They matter once there are several hosts; on one, they cost at most time.
 - A placement is several commands in a row (push-outs, volumes, the stack's host). A new
   leader repairs what one left half done in its next pass; with failover, one command per
   placement would leave fewer states between.
-- A stack that moves to another host takes its volume once the old host's copy is
-  secondary. Until `move-stack` orders that, the new host's `promote` fails while the
-  old copy is still primary, and the stack is `failing` until a later pass promotes.
-- A tiebreaker copy on a host (diskless) is refused with an error: the placement over
-  hosts brings it.
-- A stack whose placed volumes sit on different hosts (left by deleted stacks) waits; on
-  one host it cannot happen.
-- The ACME self-check asks the Floating IP, which reaches the leader's own Traefik; with
-  several hosts it must ask the ingress host instead
-  ([Certificates of the routes](developing/loops.md#certificates-of-the-routes-controlleracmego)).
 - A Prometheus in a stack or outside the cluster cannot reach `/metrics` yet: only the
   hosts reach the node address. The way in (through Traefik, or a permission for certain
   stacks) comes when one is needed.

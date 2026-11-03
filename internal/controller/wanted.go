@@ -146,7 +146,13 @@ func wantedAlerts(current *state.State, conditions *Conditions, now time.Time) m
 	addCertificateAlerts(current, now, add)
 	for _, name := range slices.Sorted(maps.Keys(current.Stacks)) {
 		stack := current.Stacks[name]
-		if stack.WaitReason != "" && now.Sub(stack.WaitingSince) >= stackWaitFor {
+		switch {
+		case stack.WaitReason == "" || now.Sub(stack.WaitingSince) < stackWaitFor:
+		case stack.Host != nil:
+			// it runs; only its move waits (a drain, a user's request)
+			add("stack-waiting/"+name, "stack-waiting", clusterspec.SeverityWarning, fmt.Sprintf("stack %s cannot move", name),
+				"The stack runs where it is, but finds no host to move to: "+stack.WaitReason)
+		default:
 			add("stack-waiting/"+name, "stack-waiting", clusterspec.SeverityWarning, fmt.Sprintf("stack %s waits for a place", name),
 				"The stack finds no place: "+stack.WaitReason)
 		}

@@ -35,7 +35,7 @@ func (d *daemon) serve() ([]*http.Server, <-chan error, error) {
 	}
 	source := &metricsSource{
 		host: d.host, cluster: d.node, docker: d.parts.Docker, restarts: d.supervisor.Restarts,
-		failures: d.alerts.Failures, memory: readRSS, logger: d.logger,
+		failures: d.alerts.Failures, progress: d.volumes.Progress, memory: readRSS, logger: d.logger,
 	}
 	for _, start := range []func() (*http.Server, error){
 		func() (*http.Server, error) { return serveChallenges(d.node, d.logger) },

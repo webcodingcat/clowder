@@ -95,6 +95,9 @@ func (c Config) WithDefaults() Config {
 	c.Priorities = c.Priorities.withDefaults()
 	c.Defaults.Reservations = c.Defaults.Reservations.withDefaults(DefaultReservations)
 	c.SystemReserve = c.SystemReserve.withDefaults(DefaultSystemReserve)
+	if c.Replication.ResyncRate == "" {
+		c.Replication.ResyncRate = DefaultResyncRate
+	}
 	return c
 }
 
@@ -105,6 +108,10 @@ var (
 	DefaultReservations  = Resources{Memory: "128M", CPUs: "0.1"}
 	DefaultSystemReserve = Resources{Memory: "512M", CPUs: "0.25"}
 )
+
+// DefaultResyncRate is how fast a copy resyncs without replication.resync_rate
+// (bytes per second, per resync).
+const DefaultResyncRate = "50M"
 
 // withDefaults fills in each field left out.
 func (r Resources) withDefaults(defaults Resources) Resources {

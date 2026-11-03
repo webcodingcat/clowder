@@ -119,6 +119,19 @@ type Written struct {
 	Index uint64 `json:"index"`
 }
 
+// HostActionAnswer is the answer to a host action. Leaving says that a
+// removed host still has stacks or volume copies: it drains, they move off
+// it, and then it goes.
+type HostActionAnswer struct {
+	Written
+	Leaving bool `json:"leaving,omitempty"`
+}
+
+// MoveRequest asks to move a stack to a host, by its name.
+type MoveRequest struct {
+	To string `json:"to"`
+}
+
 // HostAction is something a user does to a host: POST
 // /v1/hosts/{id}/{name} moves the host from one of From (any phase if
 // empty) to To. The CLI makes its host subcommands from this list.
@@ -134,9 +147,8 @@ type HostAction struct {
 // HostActions are the actions on hosts.
 var HostActions = []HostAction{
 	{
-		// nothing moves a running stack yet: a placed stack keeps its host
 		Name:        "drain",
-		Description: "Keep new stacks off a host; its running stacks stay",
+		Description: "Move a host's stacks to other hosts and keep new ones off; its volume copies stay",
 		From:        []state.HostPhase{state.Active},
 		To:          state.Draining,
 	},
@@ -148,7 +160,7 @@ var HostActions = []HostAction{
 	},
 	{
 		Name:        "remove",
-		Description: "Remove a host from the cluster for good; its certificate is revoked",
+		Description: "Remove a host from the cluster for good, once its stacks and copies moved off; its certificate is revoked",
 		To:          state.Removed,
 		Final:       true,
 	},

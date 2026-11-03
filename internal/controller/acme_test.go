@@ -433,3 +433,17 @@ func TestRenewalComesWhenAThirdOfTheLifetimeIsLeftOrAsConfigured(t *testing.T) {
 		t.Error("the domains of the routes")
 	}
 }
+
+func TestTheSelfCheckAsksTheIngressHostsTraefik(t *testing.T) {
+	runner := &acmeRunner{httpPort: 80}
+	floatingIP := netip.MustParseAddr("203.0.113.10")
+	current := &state.State{}
+	if got := runner.checkAddress(current, floatingIP); got.String() != "203.0.113.10:80" {
+		t.Errorf("without an ingress host: %s", got)
+	}
+	ingressHost := state.HostID(2)
+	current.Ingress = &ingressHost
+	if got := runner.checkAddress(current, floatingIP); got.String() != "10.77.0.3:7480" {
+		t.Errorf("with host 2 as the ingress host: %s", got)
+	}
+}

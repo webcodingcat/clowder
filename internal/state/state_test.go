@@ -751,7 +751,7 @@ func TestAVolumeRecordKeepsItsInvariantsAndOwnMinor(t *testing.T) {
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: other}, "not from 0 to 999")
 	twice := volume
 	twice.Copies = []VolumeCopy{{Host: 0, Class: "fast"}, {Host: 0, Class: "fast"}}
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: twice}, "2 copies for 1 replicas")
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: twice}, "two copies on host 0")
 	respec := volume
 	respec.Spec.Replicas = 2
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: respec}, "its spec changes only with an apply")

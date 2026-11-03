@@ -25,6 +25,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/ingress"
+	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/units"
 )
@@ -75,8 +76,8 @@ type acmeRunner struct {
 	keys    Keys
 	// lookup resolves a domain (net.Resolver.LookupNetIP).
 	lookup func(ctx context.Context, network, host string) ([]netip.Addr, error)
-	// httpPort is where the self-check reaches Traefik on the Floating IP:
-	// its web entrypoint.
+	// httpPort is where the self-check reaches Traefik on the Floating IP
+	// while the cluster has no ingress host (checkAddress)
 	httpPort uint16
 	logger   *slog.Logger
 	// retries are the domains that wait after a failure, kept in memory: a
@@ -123,6 +124,7 @@ func (r *acmeRunner) pass(ctx context.Context) {
 		r.logger.Error("keep the certificates", "error", err)
 		return
 	}
+	checkAt := r.checkAddress(copied, floatingIP)
 	// a pass orders one domain after the other, so no order of this leader
 	// is in progress now: what is left is from a leader that stopped
 	for _, token := range slices.Sorted(maps.Keys(copied.Challenges)) {
@@ -179,7 +181,7 @@ func (r *acmeRunner) pass(ctx context.Context) {
 			}
 			client = connected
 		}
-		if err := r.order(ctx, client, domain, floatingIP); err != nil {
+		if err := r.order(ctx, client, domain, checkAt); err != nil {
 			r.failed(domain, now, err)
 			continue
 		}
@@ -345,7 +347,7 @@ func acmeHTTPClient(caPEM []byte) (*http.Client, error) {
 }
 
 // order gets a new certificate for a domain and records it.
-func (r *acmeRunner) order(ctx context.Context, client *acme.Client, domain string, floatingIP netip.Addr) error {
+func (r *acmeRunner) order(ctx context.Context, client *acme.Client, domain string, checkAt netip.AddrPort) error {
 	ctx, cancel := context.WithTimeout(ctx, orderTimeout)
 	defer cancel()
 	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(domain))
@@ -353,7 +355,7 @@ func (r *acmeRunner) order(ctx context.Context, client *acme.Client, domain stri
 		return fmt.Errorf("order: %w", err)
 	}
 	for _, url := range order.AuthzURLs {
-		if err := r.authorize(ctx, client, url, domain, floatingIP); err != nil {
+		if err := r.authorize(ctx, client, url, domain, checkAt); err != nil {
 			return err
 		}
 	}
@@ -400,9 +402,9 @@ func (r *acmeRunner) order(ctx context.Context, client *acme.Client, domain stri
 
 // authorize proves to the CA that the cluster serves the domain: it
 // publishes the answer to the HTTP-01 challenge in the state, where every
-// agent serves it, checks that it comes back through the Floating IP, and
-// only then lets the CA validate.
-func (r *acmeRunner) authorize(ctx context.Context, client *acme.Client, url, domain string, floatingIP netip.Addr) error {
+// agent serves it, checks that it comes back through the ingress host's
+// Traefik (checkAddress), and only then lets the CA validate.
+func (r *acmeRunner) authorize(ctx context.Context, client *acme.Client, url, domain string, checkAt netip.AddrPort) error {
 	authorization, err := client.GetAuthorization(ctx, url)
 	if err != nil {
 		return fmt.Errorf("read the authorization: %w", err)
@@ -435,7 +437,7 @@ func (r *acmeRunner) authorize(ctx context.Context, client *acme.Client, url, do
 		defer cancel()
 		r.commitOrLog(cleanUp, state.KindDeleteACMEChallenge, state.DeleteACMEChallenge{Token: challenge.Token})
 	}()
-	if err := r.selfCheck(ctx, floatingIP, domain, challenge.Token, keyAuthorization); err != nil {
+	if err := r.selfCheck(ctx, checkAt, domain, challenge.Token, keyAuthorization); err != nil {
 		return err
 	}
 	if _, err := client.Accept(ctx, challenge); err != nil {
@@ -451,10 +453,10 @@ func (r *acmeRunner) authorize(ctx context.Context, client *acme.Client, url, do
 // will, until the answer comes back; at most selfCheckTimeout. The Floating
 // IP is on every host's interface, so this reaches the leader's own
 // Traefik: on one host the ingress host's.
-func (r *acmeRunner) selfCheck(ctx context.Context, floatingIP netip.Addr, domain, token, keyAuthorization string) error {
+func (r *acmeRunner) selfCheck(ctx context.Context, checkAt netip.AddrPort, domain, token, keyAuthorization string) error {
 	ctx, cancel := context.WithTimeout(ctx, selfCheckTimeout)
 	defer cancel()
-	url := "http://" + netip.AddrPortFrom(floatingIP, r.httpPort).String() + ingress.ChallengePath + token
+	url := "http://" + checkAt.String() + ingress.ChallengePath + token
 	client := &http.Client{
 		// no proxy from the environment: the request must reach the
 		// Floating IP itself
@@ -471,7 +473,7 @@ func (r *acmeRunner) selfCheck(ctx context.Context, floatingIP netip.Addr, domai
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("the challenge did not come back through the Floating IP within %v: %w", selfCheckTimeout, err)
+			return fmt.Errorf("the challenge did not come back through the ingress host's Traefik within %v: %w", selfCheckTimeout, err)
 		case <-time.After(selfCheckPause):
 		}
 	}
@@ -497,4 +499,17 @@ func fetchChallenge(ctx context.Context, client *http.Client, url, domain, want 
 		return fmt.Errorf("%s answered %s with %q", url, response.Status, body)
 	}
 	return nil
+}
+
+// checkAddress is where the self-check asks for a challenge: the internal
+// entrypoint of the ingress host's Traefik, where the CA's request through
+// the Floating IP lands too. The leader's own Traefik would not do: the
+// leader may not be the ingress host, and the ingress host may not have
+// applied the challenge yet when the leader already has. Without an
+// ingress host it asks the Floating IP.
+func (r *acmeRunner) checkAddress(copied *state.State, floatingIP netip.Addr) netip.AddrPort {
+	if copied.Ingress == nil {
+		return netip.AddrPortFrom(floatingIP, r.httpPort)
+	}
+	return netip.AddrPortFrom(network.NodeAddress(*copied.Ingress), ingress.InternalPort)
 }

@@ -16,6 +16,7 @@ package volumes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -95,6 +96,11 @@ type Reconciler struct {
 	copies map[string]copyStatus
 	// mounted are the copies the last pass saw mounted, for the trim
 	mounted []storage.Volume
+	// reporting are the copies, by LV, whose set-copy-synced is on its way
+	reporting map[string]bool
+	// outOfSync is what each copy here (by volume ID) differed by from a
+	// peer at the last pass: while it resyncs, what is left (Progress)
+	outOfSync map[string]int64
 
 	// unexplained are the LVs of copies kept without a reason, warned
 	// about once; only the pass uses it
@@ -105,7 +111,9 @@ type Reconciler struct {
 type copyStatus struct {
 	dir   string // the mount point
 	ready bool   // primary and mounted, as a stack here needs it
-	err   error  // why the copy cannot get there
+	// released: unmounted and secondary, so a stack elsewhere can take it
+	released bool
+	err      error // why the copy cannot get there
 }
 
 // New makes the reconciler; it starts nothing.
@@ -113,7 +121,8 @@ func New(parts Parts) *Reconciler {
 	return &Reconciler{
 		files: parts.Files, host: parts.Host, cluster: parts.Cluster, storage: parts.Storage, held: parts.Held,
 		signal: parts.Signal, stacksReady: parts.StacksReady, propose: parts.Propose, logger: parts.Logger,
-		busy: map[string]bool{}, copies: map[string]copyStatus{}, unexplained: map[string]bool{},
+		busy: map[string]bool{}, copies: map[string]copyStatus{}, outOfSync: map[string]int64{}, reporting: map[string]bool{},
+		unexplained: map[string]bool{},
 	}
 }
 
@@ -164,16 +173,19 @@ func (r *Reconciler) pass(ctx context.Context) {
 	}
 	var mounted []storage.Volume
 	placed := map[string]bool{}
+	outOfSync := map[string]int64{}
 	for _, want := range wanted {
 		seen := observed[want.volume.LV]
 		if seen.Mounted && !seen.OtherDevice {
 			mounted = append(mounted, want.volume)
 		}
 		placed[want.volume.LV] = true
+		outOfSync[want.volume.ID] = seen.OutOfSyncBytes
+		r.reportSynced(ctx, want, seen)
 		r.reconcile(ctx, want, seen)
 	}
 	r.mu.Lock()
-	r.mounted = mounted
+	r.mounted, r.outOfSync = mounted, outOfSync
 	// a copy the state no longer places here is no stack's to use
 	maps.DeleteFunc(r.copies, func(lv string, _ copyStatus) bool { return !placed[lv] })
 	r.mu.Unlock()
@@ -192,13 +204,16 @@ func (r *Reconciler) reconcile(ctx context.Context, want wantedCopy, seen storag
 		return
 	}
 	steps, err := plan(copyFacts{
-		target: want.target, plain: volume.Resource == nil, initialized: want.initialized, seen: seen,
+		target: want.target, plain: volume.Resource == nil, diskless: volume.Diskless, initialized: want.initialized, seen: seen,
 	})
 	switch {
 	case err != nil:
 		r.setStatus(volume, copyStatus{err: fmt.Errorf("volume %s: %w", volume.ID, err)})
 	case len(steps) == 0:
-		r.setStatus(volume, copyStatus{dir: r.storage.MountPoint(volume), ready: want.target == targetMounted})
+		r.setStatus(volume, copyStatus{
+			dir: r.storage.MountPoint(volume), ready: want.target == targetMounted,
+			released: want.target == targetSecondary,
+		})
 	default:
 		r.start(ctx, volume.ID, func() { r.runSteps(ctx, want, steps) })
 	}
@@ -345,7 +360,11 @@ func (r *Reconciler) removeCopy(ctx context.Context, volume storage.Volume, reti
 	if err == nil {
 		err = r.forgetCopy(volume)
 	}
-	if err != nil {
+	switch {
+	case errors.Is(err, storage.ErrNotYet):
+		// a primary peer still has it; the next pass tries again
+		r.logger.Debug("a retired volume copy waits", "volume", volume.ID, "lv", volume.LV, "reason", err)
+	case err != nil:
 		r.logger.Error("remove a retired volume copy", "volume", volume.ID, "lv", volume.LV, "error", err)
 	}
 }
@@ -359,4 +378,60 @@ func (r *Reconciler) warnUnexplained(volume storage.Volume) {
 	r.unexplained[volume.LV] = true
 	r.logger.Warn("keeping a volume copy the cluster neither places nor retires here; remove it by hand if it is not needed",
 		"volume", volume.ID, "lv", volume.LV)
+}
+
+// reportSynced tells the state when a copy with a disk became synced or
+// stopped being so (set-copy-synced): a move waits for it, and users see
+// it. A resource that is down says nothing either way, so a restart of
+// the agent writes nothing. A failed commit is tried again at the next
+// pass, which compares with the state again.
+func (r *Reconciler) reportSynced(ctx context.Context, want wantedCopy, seen storage.Observed) {
+	volume := want.volume
+	if want.err != nil || volume.Diskless || (volume.Resource != nil && seen.Disk == "") {
+		return
+	}
+	synced := seen.Synced(volume)
+	if synced == want.synced {
+		return
+	}
+	r.mu.Lock()
+	reporting := r.reporting[volume.LV]
+	r.reporting[volume.LV] = true
+	r.mu.Unlock()
+	if reporting {
+		return // the last report is on its way
+	}
+	// in a goroutine of its own: without Raft's quorum a commit waits for
+	// its timeout, and the pass must not
+	r.jobs.Go(func() {
+		defer func() {
+			r.mu.Lock()
+			delete(r.reporting, volume.LV)
+			r.mu.Unlock()
+		}()
+		err := loop.CommitAsHost(ctx, r.propose, r.host, state.KindSetCopySynced, state.SetCopySynced{
+			Volume: volume.ID, DataGeneration: want.dataGeneration, Synced: synced,
+		})
+		if err != nil && ctx.Err() == nil {
+			r.logger.Error("tell whether a volume copy is synced", "volume", volume.ID, "synced", synced, "error", err)
+		}
+	})
+}
+
+// Released tells whether this host's copy of a volume, by its LV, is
+// unmounted and secondary as the state wants it, so a stack on another
+// host can take the volume.
+func (r *Reconciler) Released(lv string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.copies[lv].released
+}
+
+// Progress is what each copy on this host, by volume ID, differed by from
+// a peer at the last pass: while it resyncs, what is left of the resync,
+// in bytes.
+func (r *Reconciler) Progress() map[string]int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return maps.Clone(r.outOfSync)
 }

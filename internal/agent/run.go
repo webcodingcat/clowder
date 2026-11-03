@@ -52,6 +52,7 @@ type HostParts struct {
 type Docker interface {
 	supervisor.Docker
 	stacks.Docker
+	stacks.Puller
 	Inspect(ctx context.Context, id string) (docker.Details, error)
 	Ping(ctx context.Context) error
 }
@@ -189,6 +190,7 @@ type daemon struct {
 	propose    controller.Propose
 	volumes    *volumes.Reconciler
 	runner     *stacks.Runner
+	prefetcher *stacks.Prefetcher
 	traefik    *traefikRunner
 	reporter   *hostReporter
 	supervisor *supervisor.Supervisor
@@ -204,7 +206,8 @@ type daemon struct {
 //	stack runner ──asks (Mounted)──▶ volume reconciler
 //	stack runner, Traefik ──call Pause on──▶ supervisor
 //	stack runner, volume reconciler, report, alerts, leader's loops ──commit through (serverProposer)──▶ API server
-//	API server ──answers for──▶ stack runner (containers), alerts
+//	API server ──answers for──▶ stack runner (containers), volume reconciler (progress), alerts
+//	move steps ──ask──▶ prefetcher, stack runner's files, volume reconciler
 //
 // The signals are made first, so the supervisor needs no runner; the
 // proposer gets the server last, as the server needs the stack runner and
@@ -227,13 +230,14 @@ func newDaemon(base shared) (*daemon, error) {
 	conditions := controller.NewConditions()
 	alerts := controller.NewAlerts(base.node, proposer.propose, base.credentials.dataKey.Open, conditions, base.logger)
 	joins := &joiner{cluster: base.node, propose: proposer.propose, dataKey: base.credentials.dataKey, connect: base.parts.Hoster}
-	proposer.server = newAPIServer(base, runner, alerts, joins)
+	proposer.server = newAPIServer(base, runner, reconciler, alerts, joins)
 
 	return &daemon{
 		shared:     base,
 		propose:    proposer.propose,
 		volumes:    reconciler,
 		runner:     runner,
+		prefetcher: stacks.NewPrefetcher(base.host.ID, base.node, base.parts.Docker, base.logger),
 		traefik:    newTraefikRunner(base, watcher, traefikSignal),
 		reporter:   newHostReporter(base, proposer.propose),
 		supervisor: watcher,
@@ -326,7 +330,8 @@ func newHostReporter(base shared, propose controller.Propose) *hostReporter {
 
 // newAPIServer makes the API server, which answers for the stack runner
 // (a stack's containers), the alerts and the joins.
-func newAPIServer(base shared, runner *stacks.Runner, alerts *controller.Alerts, joins api.Joins) *api.Server {
+func newAPIServer(base shared, runner *stacks.Runner, volumes api.Volumes, alerts *controller.Alerts, joins api.Joins,
+) *api.Server {
 	return api.NewServer(api.ServerConfig{
 		Cluster: base.node, CA: base.credentials.ca, Certificate: base.credentials.certificate,
 		APIAddress: func(id state.HostID) string {
@@ -334,7 +339,7 @@ func newAPIServer(base shared, runner *stacks.Runner, alerts *controller.Alerts,
 			return net.JoinHostPort(network.NodeAddress(id).String(), strconv.Itoa(base.host.APIPort))
 		},
 		Keys: base.credentials.dataKey, Version: buildinfo.Version, Logger: base.logger,
-		HostID: base.host.ID, Containers: runner, Alerts: alertsAPI{alerts}, Joins: joins,
+		HostID: base.host.ID, Containers: runner, Volumes: volumes, Alerts: alertsAPI{alerts}, Joins: joins,
 	})
 }
 
@@ -356,6 +361,7 @@ func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup, caughtUp
 		controller.RunMembers(ctx, node, node, propose, raftAddress, d.host.ID, logger)
 	})
 	loops.Go(func() { controller.RunPlacement(ctx, node, propose, d.conditions, logger) })
+	loops.Go(func() { controller.RunMoves(ctx, node, propose, d.server.Progress, logger) })
 	loops.Go(func() {
 		controller.RunFloatingIP(ctx, node, propose, d.credentials.dataKey.Open, d.parts.Hoster, d.conditions, logger)
 	})
@@ -383,6 +389,13 @@ func (d *daemon) runOnceCaughtUp(ctx context.Context, loops *sync.WaitGroup, cau
 	loops.Go(func() { d.volumes.Run(ctx) })
 	loops.Go(func() { d.volumes.Trim(ctx) })
 	loops.Go(func() { forgetPeers(ctx, d.node, d.host.ID, d.parts.Storage, d.propose, d.logger) })
+	loops.Go(func() { d.prefetcher.Run(ctx) })
+	loops.Go(func() {
+		moveSteps{
+			cluster: d.node, self: d.host.ID, propose: d.propose, imagesReady: d.prefetcher.Ready,
+			stopped: d.files.stackFiles().Stopped, released: d.volumes.Released, logger: d.logger,
+		}.run(ctx)
+	})
 	d.runner.Run(ctx)
 }
 

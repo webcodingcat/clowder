@@ -58,6 +58,17 @@ type lockCase struct {
 
 var lockCases = []lockCase{
 	{
+		name: "a user asks to move a stack", kind: KindRequestMove, actor: UserActor("alice"), lock: "stack/default/shop",
+		payload: func(*cluster, uint64) any { return RequestMove{Namespace: "default", Name: "shop", To: 1} },
+	},
+	{
+		name: "the host tells its copy is synced", kind: KindSetCopySynced, actor: HostActor(0), lock: "volume/default/data",
+		payload: func(*cluster, uint64) any {
+			return SetCopySynced{Volume: "default/data", DataGeneration: 1, Synced: true}
+		},
+		free: true,
+	},
+	{
 		name: "a user changes a stack", kind: KindPutResource, actor: UserActor("alice"), lock: "stack/default/shop",
 		payload: func(*cluster, uint64) any {
 			spec := shopSpec()
@@ -157,6 +168,8 @@ var unlockedKinds = map[string]string{
 	KindStartOperation:       "operations take the locks",
 	KindAdvanceOperation:     "operations take the locks",
 	KindFinishOperation:      "operations take the locks",
+	KindExtendOperation:      "operations take the locks",
+	KindRollBackOperation:    "operations take the locks",
 	KindAddJoinToken:         "a join token",
 	KindAddHost:              "a new host, which no operation can hold yet",
 	KindConfirmServerRef:     "a fact about the host's server, no phase",

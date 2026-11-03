@@ -26,20 +26,18 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | Who | Commands |
   |---|---|
   | `clowderd init` | `bootstrap` |
-  | the user | `apply-config`, `add-user` (the bootstrap's user), `recover-user` and `set-recovery-recipient` (with a code from a host), `set-host-phase` (host actions), `add-join-token`, `put-resource` and `delete-resource` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack` |
+  | the user | `apply-config`, `add-user` (the bootstrap's user), `recover-user` and `set-recovery-recipient` (with a code from a host), `set-host-phase` (host actions), `add-join-token`, `put-resource` and `delete-resource` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack`, `request-move` |
   | the leader, for a joining host | `add-host` |
-  | the members loop | `set-host-phase` (joining, passive, active), `set-host-voter` |
-  | the placement, the stack's host | `put-volume`, `set-stack-status`, `set-stack-wait-reason`, `set-pushed-out` |
+  | the members loop | `set-host-phase` (joining, passive, active; removed for a host that left), `set-host-voter` |
+  | the placement, the stack's host | `put-volume`, `set-stack-status`, `set-stack-wait-reason`, `set-pushed-out`, `start-operation` (a move) |
+  | the moves loop | `put-volume`, `set-stack-status`, `advance-operation`, `extend-operation`, `roll-back-operation`, `finish-operation` |
   | the Floating IP's loop | `confirm-server-ref`, `set-ingress` |
   | the ACME loop | `put-acme-account`, `put-acme-challenge`, `delete-acme-challenge`, `put-certificate`, `delete-certificate` |
   | the alerts | `put-alert`, `resolve-alert` |
-  | each agent | `report-host`, `forget-copy`, `set-volume-initialized`, `report-peer-forgotten` |
-  | nothing yet | `start-operation`, `advance-operation`, `finish-operation` |
+  | each agent | `report-host`, `forget-copy`, `set-volume-initialized`, `set-copy-synced`, `report-peer-forgotten`, `advance-operation` (a move's step on the host) |
 
   Every kind has a sender: a kind comes with the phase that sends it (failover and
-  backups later), not before. The operations are the one exception: the
-  state holds and checks them, and their locks guard stacks, volumes and hosts, before
-  moving a stack and fencing a host (phase 2) start the first ones.
+  backups later), not before.
 - **Resources** (phase 1c): namespaces (`Namespaces`), and by `<namespace>/<name>` stacks
   (`Stacks`), volumes (`Volumes`) and secrets (`Secrets`), each with a `Meta`. The kinds
   and their specs are in `internal/resource` (a stack's in `internal/stackspec`), which the
@@ -142,6 +140,31 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   tells what runs where, which the operation waits for, and `set-volume-initialized` what
   a copy holds. A table test holds every kind of command to this
   (`TestEveryKindOfCommandIsCheckedForLocks`): a new kind needs a case or a reason.
+  Each step has a deadline (`Operation.Deadline`, `StepTime` unless the sender gives one);
+  the leader gives a step that gets on more time (`extend-operation`) and turns one back
+  before the kind's point of no return (`roll-back-operation`): the operation is then
+  `rolling-back` until the leader has undone what it did and finishes it as failed.
+- **Moving a stack** (`move-stack`, `StackMove`; the placement starts it, `controller.RunMoves`
+  drives it). It locks the stack and its volumes. Its steps, each the last one done:
+  `MoveCopies` (the leader placed a copy of each volume on the new host), `MoveSynced` (the
+  new host has them synced, `VolumeCopy.Synced`, and the images pulled), `MoveStopped` (the
+  old host stopped the stack and its copies are secondary), `MoveHost` (the leader set the
+  stack's host; a volume of replicas 0 gets a new data generation there, empty). The
+  leader finishes it once the stack runs on the new host. The hosts do the work through
+  their loops: from `MoveSynced` on, `StopsForMove` takes the stack off its old host's
+  runner and reconciler, and the new host's reconciler promotes once the stack is placed
+  there. `MoveStopped` is the point of no return. The deadline of `MoveCopies` allows the
+  resync at `replication.resync_rate` twice over; once it passed, the leader asks the new
+  host how much is left (`/v1/internal/volumes/progress`) and extends while that shrinks.
+  A move that ends answers a user's `request-move` (`Stack.MoveTo`), worked or not; one
+  that moved records `Stack.LastMove`; one that failed `Stack.MoveFailed`, and within
+  `MoveCooldown` the placement starts no move of its own for that stack again (a user's
+  request still goes), so a move that cannot work does not resync copies over and over.
+  A running stack that cannot move gets the alert `stack-waiting` with "cannot move". To follow one through the code: `scheduler.place`
+  decides it, `controller.startMove` starts it, `controller.mover.placeCopies` (with
+  `scheduler.MoveVolumes`) runs the first step, `agent.moveSteps.synced` and `stoppedHere`
+  record the hosts' steps, `controller.mover.setHost` the leader's last one, and
+  `controller.mover.late` minds the deadlines.
 - **Retired copies.** A volume copy's data goes only when the state says so:
   `delete-resource` of a volume, and a `put-volume` that changes the data generation or
   takes a copy off a host each add the copies they give up to `Retired` (volume, data
@@ -172,14 +195,17 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   the leader powers it off (`fenced`) before its stacks start elsewhere. A fenced host
   that is back recovers (`recovering`, then `active`); one that fails again and again is
   `disabled` until a user enables it. Until failover comes, a host never reaches
-  `failed` and the phases after it, and a drain only keeps new stacks off the host:
-  nothing moves a running stack yet. While an operation holds `host/<id>` (fencing,
+  `failed` and the phases after it. A drain moves the host's stacks off it and keeps new
+  ones off; its volume copies stay, as the host comes back after the maintenance. While an operation holds `host/<id>` (fencing,
   drain, remove), only it moves the host, and the host's own reports of a phase are
   refused too.
 
   **Removing** (`checkRemoval`; the CLI asks first) refuses the last host that runs stacks
   (`active` or `draining`), and a host that runs stacks while a stack or a volume copy is
-  on it. Once `MinHAHosts` hosts ran stacks, the state is `HA` for good, and no removal may
+  on it. A user who removes such a host makes it leave instead
+  (`SetHostPhase.Leaving`, `ErrNotEmpty`): it drains, the placement moves its copies off
+  too (they no longer count), and the members loop removes it once nothing is left on it;
+  an undrain takes it back. Once `MinHAHosts` hosts ran stacks, the state is `HA` for good, and no removal may
   leave fewer than three that run stacks: a replacement joins first. A removed host's
   certificate is revoked, and every other host forgets it as a DRBD peer and reports it
   (`report-peer-forgotten`); `Forgetting` holds who has not yet. Only then is its ID free
@@ -597,12 +623,26 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 ## Placement (`internal/scheduler`, `internal/controller`)
 
 - `scheduler.Plan` reads the state and returns its decisions: what hosts over capacity push
-  out, where pending stacks go (highest priority first), why the others wait, and which
-  pushed-out service may come back. A volume is placed with the first stack that names it,
-  on that stack's host, and must fit its pool there (`Fits`: without overcommit, the pool's
-  volumes and the new one stay within the pool less its reserve, a class's fallbacks
-  included); a placed volume stays where its copy is, so a stack that names one goes only
-  to that host. Volumes, DRBD minors and room are taken only for a stack that fits.
+  out, where pending stacks go (highest priority first), which stacks move (`Move`), how
+  the volumes' copies change (`Copies`), why stacks wait, and which pushed-out service may
+  come back. A stack or volume that an operation holds is left to it. A volume is placed
+  with the first stack that names it, on that stack's host, with one copy, and must fit its
+  pool there (`Fits`: without overcommit, the pool's volumes and the new one stay within
+  the pool less its reserve, a class's fallbacks included). Volumes, DRBD minors and room
+  are taken only for a stack that fits.
+- **Copies** (`copies.go`, `keepCopies`), one change per volume and pass: a missing copy
+  goes to the host that takes stacks with the most free space in the pool (a tiebreaker
+  there gets a disk); a copy beyond `replicas` goes once the others are synced, the one on
+  a leaving host first, never the one where its stack runs; a volume with two copies gets
+  a tiebreaker (diskless) on a host without a copy, the one with the fewest, once three
+  hosts take stacks. A copy on a host that leaves does not count, one on a draining host
+  does. **The resync limit:** a new copy with a disk starts only while no other copy
+  syncs, in the whole cluster, so each resyncs at `replication.resync_rate` and no link
+  carries more. A move that has not got its copies synced counts as that one resync, though
+  it syncs the copies of all its stack's volumes at once. A volume may have one copy more
+  than `replicas` (`checkVolume`): the one a move or a leaving host leaves behind, until
+  `keepCopies` gives it up. A volume of replicas 0 that no stack runs with on a leaving
+  host starts anew, empty, on another (`leaveThrownAway`).
 - **Room, one measure for everything.** A host offers what it reported (memory, CPUs) less
   `system_reserve` (default 512M, 0.25). Each service of a stack on it that is `starting` or
   `running` takes its reservations (`resources.reserve`, default `defaults.reservations`,
@@ -620,9 +660,17 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **Waiting.** `Stack.WaitingSince` is set with the first wait reason and kept while only
   its text changes; it is in the state so the alert for a stack that waits too long
   survives a change of leader.
-- **Placing.** A new stack goes to the active host where all of it fits with the least
-  memory left. If none has room, it goes to the first host where it fits by pushing out
-  (`fitStack`):
+- **Placing** (`place`), in this order: a host that has the stack's data
+  and where all of it fits, the one with the least memory left; then one where all of it
+  fits once its volumes get copies there (a move, within the resync limit); then, for a
+  stack without a host, room made by moving stacks of lower priority to hosts that have
+  their data (`makeRoom`, not a stack moved within `MoveCooldown`); last, a host where it
+  fits by pushing out (`fitStack`). The same order picks the new host of a stack that
+  moves: one a user asked to move (`Stack.MoveTo`), one on a draining host. A stack moves
+  with a move-stack operation ([Cluster state](#cluster-state-internalstate)); while it
+  moves, its room counts on the new host, and on the old one until it stopped there
+  (`stillOn`). A move to the host the stack runs on takes a user's request back, and a
+  request to a host that no longer takes stacks goes with that host's phase change. Pushing out works like this:
   - Its services go one by one: highest effective priority first, and at equal priority
     what others depend on first.
   - Each takes free room, or pushes out services of any stack below its own priority,
@@ -663,6 +711,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   so the next command may change what it changed; when something else came in between,
   the state refuses a command about what that changed (`ErrStale`, logged as info), and
   the next pass plans again.
+  After the placements it starts the moves (`set-pushed-out` on the new host first, then
+  `start-operation`) and writes the copies' changes (`put-volume`). `controller.RunMoves`
+  runs the leader's steps of each move and minds their deadlines; `agent/moves.go` records
+  a host's steps once its loops have done them.
 - **On the host** a pushed-out service is left out of `compose up` (`--scale <service>=0`,
   which also removes its running container), and the supervisor's rule for it is "no
   restart". Only the leader changes `Stack.PushedOut`; a host's status report no longer

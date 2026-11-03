@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
@@ -37,6 +38,9 @@ func TestVolumesFitOnlyWithoutOvercommit(t *testing.T) {
 		})
 	}
 }
+
+// planTime is the leader's clock in the tests' plans.
+var planTime = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 
 // cluster is one active host with a 100 GiB fast and a 10 GiB bulk pool.
 func cluster() *state.State {
@@ -85,7 +89,7 @@ func stack(current *state.State, name string, volumes map[string]resource.Volume
 func TestAStackGoesWhereItsVolumesFit(t *testing.T) {
 	current := cluster()
 	stack(current, "shop", map[string]resource.VolumeSpec{"db": volume("fast", 20, 1), "cache": volume("any", 12, 0)})
-	decisions := Plan(current)
+	decisions := Plan(current, planTime)
 	placements, waiting := decisions.Placements, decisions.Waiting
 	if len(waiting) > 0 || len(placements) != 1 || !placements[0].SetsHost || placements[0].Host != 0 {
 		t.Fatalf("placements %+v, waiting %+v", placements, waiting)
@@ -109,7 +113,7 @@ func TestStacksThatDoNotFitWaitAndTakeNothing(t *testing.T) {
 	current := cluster()
 	stack(current, "big", map[string]resource.VolumeSpec{"small": volume("fast", 10, 1), "huge": volume("fast", 75, 1)})
 	stack(current, "next", map[string]resource.VolumeSpec{"data": volume("fast", 80, 1)})
-	decisions := Plan(current)
+	decisions := Plan(current, planTime)
 	placements, waiting := decisions.Placements, decisions.Waiting
 	// huge (first by name) fits, small after it does not
 	// the reason is shown to users: sizes in units, the hosts' reasons joined
@@ -132,7 +136,7 @@ func TestAPlacedStackGetsOnlyItsNewVolumes(t *testing.T) {
 	shop.Host = &host
 	db := current.Volumes["default/db"]
 	db.Minor, db.Status, db.Copies = &minor, state.VolumeOK, []state.VolumeCopy{{Host: 0, Class: "fast"}}
-	decisions := Plan(current)
+	decisions := Plan(current, planTime)
 	placements, waiting := decisions.Placements, decisions.Waiting
 	if len(waiting) > 0 || len(placements) != 1 || placements[0].SetsHost {
 		t.Fatalf("placements %+v, waiting %+v", placements, waiting)
@@ -144,7 +148,7 @@ func TestAPlacedStackGetsOnlyItsNewVolumes(t *testing.T) {
 	app := shop.Spec.Services["app"]
 	app.Volumes = app.Volumes[:1] // db only
 	shop.Spec.Services["app"] = app
-	if placements := Plan(current).Placements; len(placements) != 0 {
+	if placements := Plan(current, planTime).Placements; len(placements) != 0 {
 		t.Errorf("a placed stack without new volumes: %+v", placements)
 	}
 }
@@ -155,13 +159,16 @@ func TestAStackGoesWhereItsVolumeKeepsItsData(t *testing.T) {
 	stack(current, "shop", map[string]resource.VolumeSpec{"data": volume("fast", 1, 0)})
 	data := current.Volumes["default/data"]
 	data.Status, data.Copies = state.VolumeOK, []state.VolumeCopy{{Host: 1, Class: "fast"}}
-	placements := Plan(current).Placements
+	placements := Plan(current, planTime).Placements
 	if len(placements) != 1 || placements[0].Host != 1 || len(placements[0].Volumes) != 0 {
 		t.Errorf("placements %+v", placements)
 	}
+	// a draining host keeps its copy, so the stack moves to where a new,
+	// empty LV takes the place of its throw-away data
 	current.Hosts[1].Phase = state.Draining
-	if waiting := Plan(current).Waiting; len(waiting) != 1 || !strings.Contains(waiting[0].Reason, "has its data on another host") {
-		t.Errorf("waiting %+v", waiting)
+	moves := Plan(current, planTime).Moves
+	if len(moves) != 1 || moves[0].To != 0 || moves[0].From != nil || len(firstStep(t, current, moves[0])) != 0 {
+		t.Errorf("moves %+v", moves)
 	}
 }
 
@@ -169,7 +176,7 @@ func TestWithoutAnActiveHostEveryStackWaits(t *testing.T) {
 	current := cluster()
 	current.Hosts[0].Phase = state.Draining
 	stack(current, "shop", map[string]resource.VolumeSpec{"db": volume("fast", 1, 0)})
-	if waiting := Plan(current).Waiting; len(waiting) != 1 || waiting[0].Reason != "no active host" {
+	if waiting := Plan(current, planTime).Waiting; len(waiting) != 1 || waiting[0].Reason != "no active host" {
 		t.Errorf("waiting %+v", waiting)
 	}
 }

@@ -63,6 +63,10 @@ const (
 	KindConfirmServerRef     = "confirm-server-ref"
 	KindSetHostVoter         = "set-host-voter"
 	KindReportPeerForgotten  = "report-peer-forgotten"
+	KindSetCopySynced        = "set-copy-synced"
+	KindExtendOperation      = "extend-operation"
+	KindRollBackOperation    = "roll-back-operation"
+	KindRequestMove          = "request-move"
 )
 
 // LeaderActor is the leader acting on its own (its control loops).
@@ -151,6 +155,10 @@ var commandKinds = map[string]commandKind{
 	KindConfirmServerRef:     {"0.2.0", decoded(applyConfirmServerRef)},
 	KindSetHostVoter:         {"0.2.0", decoded(applySetHostVoter)},
 	KindReportPeerForgotten:  {"0.2.0", decoded(applyReportPeerForgotten)},
+	KindSetCopySynced:        {"0.2.0", decoded(applySetCopySynced)},
+	KindExtendOperation:      {"0.2.0", decoded(applyExtendOperation)},
+	KindRollBackOperation:    {"0.2.0", decoded(applyRollBackOperation)},
+	KindRequestMove:          {"0.2.0", decoded(applyRequestMove)},
 }
 
 // decoded turns a function of a typed payload into a handler. Unknown fields

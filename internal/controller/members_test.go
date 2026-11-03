@@ -137,3 +137,14 @@ func TestTooManyVotersGiveUpTheirVotesButTheLeaders(t *testing.T) {
 		t.Error("voterCount")
 	}
 }
+
+func TestAHostThatLeavesGoesOnceEmptyAndHandsItsLeadOverFirst(t *testing.T) {
+	current := hostsIn(state.Active, state.Active, state.Active, state.Draining)
+	current.Hosts[3].Leaving = true
+	if got := nextMemberStep(current, voters(4, 0, 1, 2), 0); got != (memberStep{action: removeLeaving, host: 3}) {
+		t.Errorf("an empty host that leaves: %+v", got)
+	}
+	if got := nextMemberStep(current, voters(4, 0, 1, 2), 3); got != (memberStep{action: handOverLead, host: 3}) {
+		t.Errorf("a leader that leaves: %+v", got)
+	}
+}

@@ -403,7 +403,14 @@ func printTable(out io.Writer, kind string, objects []resource.Object, withHeade
 			}
 			var copies []string
 			for _, copied := range status.Copies {
-				copies = append(copies, copied.Host)
+				switch {
+				case copied.Tiebreaker:
+					copies = append(copies, copied.Host+" (tiebreaker)")
+				case !copied.Synced:
+					copies = append(copies, copied.Host+" (syncing)")
+				default:
+					copies = append(copies, copied.Host)
+				}
 			}
 			_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n", object.Metadata.Namespace, object.Metadata.Name,
 				spec.Class, units.FormatSize(int64(spec.Size)), spec.Replicas, status.Status, strings.Join(copies, ","))

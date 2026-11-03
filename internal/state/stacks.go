@@ -42,7 +42,7 @@ func putStack(s *State, id string, payload PutResource) (func() *Meta, error) {
 	if exists && sameJSON(stored.Spec, spec) {
 		return nil, errUnchanged
 	}
-	if err := s.checkUnlocked(stackLock(id), 0); err != nil {
+	if err := s.checkUnlocked(StackLock(id), 0); err != nil {
 		return nil, err
 	}
 	if problems := stackspec.Check(spec); len(problems) > 0 {
@@ -110,7 +110,7 @@ func applyRestartStack(s *State, cmd Command, payload RestartStack) (func(), err
 	if !ok {
 		return nil, fmt.Errorf("no stack %s", id)
 	}
-	if err := s.checkUnlocked(stackLock(id), 0); err != nil {
+	if err := s.checkUnlocked(StackLock(id), 0); err != nil {
 		return nil, err
 	}
 	for _, service := range payload.Services {
@@ -225,7 +225,7 @@ func (s *State) checkStack(id, namespace string, host *HostID, spec stackspec.Sp
 // removeStack removes a stack; its volumes stay, with their data, for the
 // next stack that names them.
 func removeStack(s *State, id string) (func(), error) {
-	if err := s.checkUnlocked(stackLock(id), 0); err != nil {
+	if err := s.checkUnlocked(StackLock(id), 0); err != nil {
 		return nil, err
 	}
 	return func() { delete(s.Stacks, id) }, nil
@@ -298,9 +298,63 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) (func(),
 		maps.Equal(stack.AppliedSecrets, applied) && stack.UpError == payload.UpError {
 		return nil, errUnchanged
 	}
+	// an operation that gives the stack a host moves it (checkLeaderStatus)
+	moved := payload.Operation != 0 && payload.Host != nil && !samePlace(stack.Host, payload.Host)
 	return func() {
 		stack.Status, stack.Host, stack.AppliedSecrets = payload.Status, payload.Host, applied
 		stack.UpError = payload.UpError
+		if moved {
+			stack.LastMove = cmd.At
+		}
+		s.changed(resource.KindStack, &stack.Meta)
+	}, nil
+}
+
+// RequestMove is a user asking to move a stack to another host. The
+// placement starts the move (a move-stack operation) once it fits there.
+type RequestMove struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	To        HostID `json:"to"`
+}
+
+// applyRequestMove records the request in Stack.MoveTo. It refuses a stack
+// that has no host yet (the placement chooses one), or a host that takes
+// no stacks; and while an operation holds the stack, as that may move it.
+// A move to the host the stack runs on takes a request back.
+// Like a restart, it changes no spec, and any channel may ask for it.
+func applyRequestMove(s *State, cmd Command, payload RequestMove) (func(), error) {
+	if err := Authorize(cmd.Actor, VerbMove, resource.KindStack, payload.Namespace); err != nil {
+		return nil, err
+	}
+	id := names.ID(payload.Namespace, payload.Name)
+	stack, ok := s.Stacks[id]
+	if !ok {
+		return nil, fmt.Errorf("no stack %s", id)
+	}
+	if err := s.checkUnlocked(StackLock(id), 0); err != nil {
+		return nil, err
+	}
+	host, ok := s.Hosts[payload.To]
+	switch {
+	case stack.Host == nil:
+		return nil, fmt.Errorf("stack %s has no host yet; the placement chooses one", id)
+	case *stack.Host == payload.To && stack.MoveTo != nil:
+		// a move to where it runs takes the request back
+		return func() {
+			stack.MoveTo = nil
+			s.changed(resource.KindStack, &stack.Meta)
+		}, nil
+	case *stack.Host == payload.To:
+		return nil, fmt.Errorf("stack %s runs on host %d already", id, payload.To)
+	case !ok || host.Phase != Active || host.Leaving:
+		return nil, fmt.Errorf("host %d is no active host; a stack moves only to one", payload.To)
+	case samePlace(stack.MoveTo, &payload.To):
+		return nil, errUnchanged
+	}
+	to := payload.To
+	return func() {
+		stack.MoveTo = &to
 		s.changed(resource.KindStack, &stack.Meta)
 	}, nil
 }
@@ -313,7 +367,7 @@ func (s *State) checkLeaderStatus(stack *Stack, payload SetStackStatus) error {
 	if err := checkPlanned(resource.KindStack, payload.ID, &stack.Meta, payload.PlannedAt); err != nil {
 		return err
 	}
-	lock := stackLock(payload.ID)
+	lock := StackLock(payload.ID)
 	if err := s.checkUnlocked(lock, payload.Operation); err != nil {
 		return err
 	}
@@ -366,7 +420,7 @@ func applySetPushedOut(s *State, _ Command, payload SetPushedOut) (func(), error
 		if err := checkPlanned(resource.KindStack, id, &stack.Meta, payload.PlannedAt); err != nil {
 			return nil, err
 		}
-		if err := s.checkUnlocked(stackLock(id), 0); err != nil {
+		if err := s.checkUnlocked(StackLock(id), 0); err != nil {
 			return nil, err
 		}
 		for _, service := range payload.Stacks[id] {
@@ -408,7 +462,7 @@ func applySetStackWaitReason(s *State, cmd Command, payload SetStackWaitReason) 
 	case stack.WaitReason == payload.Reason:
 		return nil, errUnchanged
 	}
-	if err := s.checkUnlocked(stackLock(payload.ID), 0); err != nil {
+	if err := s.checkUnlocked(StackLock(payload.ID), 0); err != nil {
 		return nil, err
 	}
 	return func() {

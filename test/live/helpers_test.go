@@ -376,15 +376,7 @@ func secretDigests(t *testing.T) map[string]string {
 // host, with the data generation the cluster gave it.
 func volumeLV(t *testing.T, name string) string {
 	t.Helper()
-	var object resource.Object
-	if err := json.Unmarshal([]byte(mustClowder(t, "get", "volume", name, "-o", "json")), &object); err != nil {
-		t.Fatalf("read volume %s: %v", name, err)
-	}
-	var status api.VolumeStatus
-	if err := json.Unmarshal(object.Status, &status); err != nil {
-		t.Fatalf("read the status of volume %s: %v", name, err)
-	}
-	return names.VolumeName(names.ID(names.Default, name), status.DataGeneration)
+	return names.VolumeName(names.ID(names.Default, name), volumeStatus(t, name).DataGeneration)
 }
 
 // waitRunning waits until the stack runs in the given generation.

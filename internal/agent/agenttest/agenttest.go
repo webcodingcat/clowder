@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -156,26 +157,38 @@ func (f *Storage) Observe(_ context.Context, volumes []storage.Volume) (map[stri
 	return observed, nil
 }
 
-// Ensure makes the LV and brings the resource up secondary.
+// Ensure makes the LV and brings the resource up secondary: a new copy is
+// Inconsistent until a test says otherwise, a tiebreaker Diskless.
 func (f *Storage) Ensure(ctx context.Context, volume storage.Volume) error {
 	return f.step(ctx, "ensure", volume, func(copyNow *storage.Observed) {
-		copyNow.LV = true
+		copyNow.LV = !volume.Diskless
 		if volume.Resource != nil {
 			copyNow.ResourceFileCurrent = true
 			if copyNow.Role == storage.RoleDown {
 				copyNow.Role = storage.RoleSecondary
 			}
+			switch {
+			case volume.Diskless:
+				copyNow.Disk = storage.DiskDiskless
+			case copyNow.Disk == "":
+				copyNow.Disk = "Inconsistent"
+			}
 		}
 	})
 }
 
-// Promote makes the copy primary.
+// Promote makes the copy primary; with force, its data counts as current.
 func (f *Storage) Promote(ctx context.Context, volume storage.Volume, force bool) error {
 	name := "promote"
 	if force {
 		name = "promote --force"
 	}
-	return f.step(ctx, name, volume, func(copyNow *storage.Observed) { copyNow.Role = storage.RolePrimary })
+	return f.step(ctx, name, volume, func(copyNow *storage.Observed) {
+		copyNow.Role = storage.RolePrimary
+		if force {
+			copyNow.Disk = storage.DiskUpToDate
+		}
+	})
 }
 
 // Mount mounts the copy.
@@ -327,6 +340,12 @@ func (f *Docker) ComposePull(_ context.Context, stack string, _, services []stri
 	return nil
 }
 
+// PullMissing records the call.
+func (f *Docker) PullMissing(_ context.Context, image string) error {
+	f.Add("pull missing %s", image)
+	return nil
+}
+
 // ComposeDown records the call; it fails while FailedDowns is above zero.
 func (f *Docker) ComposeDown(_ context.Context, stack, _ string) error {
 	f.Add("down %s", stack)
@@ -416,6 +435,21 @@ func NewCluster(t *testing.T) *Cluster {
 	cluster.PlaceVolume("db", 1)
 	cluster.Place("shop")
 	return cluster
+}
+
+// AddHost joins an active host with a token of its own.
+func (c *Cluster) AddHost(id state.HostID) {
+	c.t.Helper()
+	token := "token-" + strconv.Itoa(int(id))
+	c.Apply(state.KindAddJoinToken, state.UserActor("alice"), state.AddJoinToken{
+		ID: token, Hash: strings.Repeat("ab", 32), TTL: time.Hour,
+	})
+	c.Apply(state.KindAddHost, state.LeaderActor, state.AddHost{Token: token, Host: state.Host{
+		ID: id, Name: "node" + strconv.Itoa(int(id)), Underlay: netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
+		WGPublicKey: "wg", CertificateSerial: "s" + strconv.Itoa(int(id)), CertificateNotAfter: time.Now().AddDate(1, 0, 0),
+		ServerRef: "srv-" + strconv.Itoa(int(id)), ServerRefChecked: true,
+	}})
+	c.Apply(state.KindSetHostPhase, state.LeaderActor, state.SetHostPhase{Host: id, Phase: state.Active})
 }
 
 // Read runs use under the lock.

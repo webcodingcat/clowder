@@ -167,6 +167,10 @@ type Host struct {
 	DockerDown bool `json:"docker_down,omitempty"`
 	// RootUsedPercent is how full the root file system is, in whole percent.
 	RootUsedPercent int `json:"root_used_percent,omitempty"`
+	// Leaving is a host a user removes while it still has stacks or volume
+	// copies (SetHostPhase.Leaving): it drains, the placement moves its copies
+	// off too, and the leader removes it once nothing is left on it.
+	Leaving bool `json:"leaving,omitempty"`
 }
 
 // Resources are a host's memory and CPUs, as it reports them; the
@@ -272,6 +276,17 @@ type Stack struct {
 	// so how long a stack has waited survives a change of leader; the
 	// alert for a stack that waits too long reads it.
 	WaitingSince time.Time `json:"waiting_since,omitzero"`
+	// MoveTo is the host a user asked the stack to move to (request-move).
+	// The placement starts the move; the move's end clears it, whether it
+	// worked or not.
+	MoveTo *HostID `json:"move_to,omitempty"`
+	// LastMove is when an operation last moved the stack to another host:
+	// within a cooldown the placement does not move it again to make room.
+	LastMove time.Time `json:"last_move,omitzero"`
+	// MoveFailed is when a move of the stack last ended as failed: within
+	// the cooldown the placement starts no move of its own again (a user's
+	// request still goes).
+	MoveFailed time.Time `json:"move_failed,omitzero"`
 }
 
 // ID is the stack's key in State.Stacks.
@@ -343,6 +358,11 @@ type VolumeCopy struct {
 	// Class is the pool's class the copy is in (any falls back to another).
 	Class      string `json:"class"`
 	Tiebreaker bool   `json:"tiebreaker,omitempty"` // diskless
+	// Synced is the host's word that the copy holds the volume's current
+	// data (DRBD's UpToDate; a plain LV once it exists), set with
+	// set-copy-synced. A new copy is not synced until its first resync is
+	// done; a tiebreaker holds no data and is never synced.
+	Synced bool `json:"synced,omitempty"`
 }
 
 // RetiredCopy is a copy of a volume that its host may remove: of a deleted

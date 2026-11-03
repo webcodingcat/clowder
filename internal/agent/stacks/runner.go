@@ -82,6 +82,19 @@ func (f Files) secretFile(project, name string) string {
 	return filepath.Join(f.secretFilesDir(project), name)
 }
 
+// Stopped tells whether a stack (by its project) has no containers here:
+// it never ran here, or its compose down worked (stopLeavers).
+func (f Files) Stopped(project string) (bool, error) {
+	_, err := os.Stat(f.stackFile(project))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return true, nil
+	case err != nil:
+		return false, fmt.Errorf("look for the stack %s: %w", project, err)
+	}
+	return false, nil
+}
+
 // HeldLVs are the LVs that the containers of the stacks on this host may
 // hold: those in the volumes.json of each stack that has a compose.yaml,
 // placed here or a leaver that has not stopped yet. The volume reconciler
@@ -198,7 +211,8 @@ func readDesired(cluster loop.Cluster, self state.HostID) (desiredState, error) 
 		secrets: copied.Secrets, registries: copied.RegistryLogins(),
 	}
 	for _, stack := range copied.Stacks {
-		if stack.Host != nil && *stack.Host == self {
+		// a stack that stops for a move is a leaver here (stopLeavers)
+		if stack.Host != nil && *stack.Host == self && !copied.StopsForMove(stack.ID()) {
 			desired.stacks[stack.Project()] = stack
 		}
 	}

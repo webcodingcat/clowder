@@ -134,16 +134,30 @@ func newRoom(current *state.State) *room {
 
 // hostOf is where a stack runs or is planned to: false for a stack that
 // has no host or does not run there yet or any more. A failing stack keeps
-// its place: its host tries again at every pass.
+// its place: its host tries again at every pass. A stack that moves counts
+// on the host it moves to: room there is taken from the start.
 func (r *room) hostOf(id string) (state.HostID, bool) {
 	if host, ok := r.placed[id]; ok {
 		return host, true
+	}
+	if move := r.current.MoveOf(id); move != nil && move.State == state.OpRunning {
+		return move.Move.To, true
 	}
 	stack := r.current.Stacks[id]
 	if stack.Host == nil || stack.Status == state.StackPending {
 		return 0, false
 	}
 	return *stack.Host, true
+}
+
+// stillOn is the old host of a stack that moves and has not stopped there
+// yet.
+func (r *room) stillOn(id string) (state.HostID, bool) {
+	move := r.current.MoveOf(id)
+	if move == nil || move.State != state.OpRunning || move.Move.From == nil || move.Step >= state.MoveStopped {
+		return 0, false
+	}
+	return *move.Move.From, true
 }
 
 // capacity is what a host offers its services: what it reported less
@@ -169,11 +183,15 @@ func (r *room) reservation(ref serviceRef) resources {
 }
 
 // running are the services that take room on a host: those of the stacks
-// there that are not pushed out, sorted.
+// there that are not pushed out, sorted. A stack that moves takes room on
+// both hosts until it stopped on the old one (stillOn): a stack placed in
+// the room it leaves would run beside it meanwhile.
 func (r *room) running(host state.HostID) []serviceRef {
 	var refs []serviceRef
 	for _, id := range slices.Sorted(maps.Keys(r.current.Stacks)) {
-		if on, ok := r.hostOf(id); !ok || on != host {
+		on, ok := r.hostOf(id)
+		old, moving := r.stillOn(id)
+		if (!ok || on != host) && (!moving || old != host) {
 			continue
 		}
 		for _, service := range slices.Sorted(maps.Keys(r.current.Stacks[id].Services)) {
@@ -450,4 +468,23 @@ func (r *room) comingBack() (serviceRef, bool) {
 		}
 	}
 	return serviceRef{}, false
+}
+
+// roomSave is what a plan has decided of the room, to go back to when a
+// try does not work out (makeRoom).
+type roomSave struct {
+	pushedOut map[string]map[string]bool
+	placed    map[string]state.HostID
+}
+
+func (r *room) save() roomSave {
+	saved := roomSave{pushedOut: map[string]map[string]bool{}, placed: maps.Clone(r.placed)}
+	for id, services := range r.pushedOut {
+		saved.pushedOut[id] = maps.Clone(services)
+	}
+	return saved
+}
+
+func (r *room) restore(saved roomSave) {
+	r.pushedOut, r.placed = saved.pushedOut, saved.placed
 }

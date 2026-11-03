@@ -58,6 +58,7 @@ func newTestMetrics(t *testing.T, leads bool) *metricsSource {
 			return map[supervisor.Service]int{{Stack: agenttest.ShopProject, Name: "app"}: 3}
 		},
 		failures: func() []controller.Failure { return []controller.Failure{{Key: "root-use/node0"}} },
+		progress: func() map[string]int64 { return map[string]int64{"default/db": 4096} },
 		memory:   func() (int64, error) { return 41 << 20, nil },
 		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

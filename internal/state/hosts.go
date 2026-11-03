@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/resource"
 )
 
 // Bootstrap starts the cluster: the keys init made, its bootstrap key
@@ -79,6 +80,10 @@ type SetHostPhase struct {
 	// while one holds the host's lock (fencing, drain, remove), only it
 	// moves the host, and the host itself reports no phase either.
 	Operation uint64 `json:"operation,omitempty"`
+	// Leaving goes with draining only: a user removes a host that still
+	// has stacks or volume copies (Host.Leaving). Any other phase change
+	// takes it back.
+	Leaving bool `json:"leaving,omitempty"`
 }
 
 // mover says who may make a phase change: the leader (on its own or for a
@@ -143,38 +148,76 @@ func (s *State) CheckRemoval(id HostID) error {
 	return s.checkRemoval(host)
 }
 
-// checkRemoval refuses to remove a host the cluster cannot do without:
+// CheckLeaving tells whether a host may leave (checkMayGo): the API asks it
+// when CheckRemoval refuses a host for its stacks and copies, which then
+// move off it first (SetHostPhase.Leaving).
+func (s *State) CheckLeaving(id HostID) error {
+	host, ok := s.Hosts[id]
+	switch {
+	case !ok:
+		return fmt.Errorf("no host %d", id)
+	case host.Phase != Active && host.Phase != Draining:
+		return fmt.Errorf("host %s is %s; only an active or draining host leaves", host.Name, host.Phase)
+	}
+	return s.checkMayGo(host)
+}
+
+// checkRemoval refuses to remove a host the cluster cannot do without
+// (checkMayGo), or a host that runs stacks while a stack or a volume copy
+// is still on it: they would be lost with it. Such a host leaves instead
+// (SetHostPhase.Leaving): they move off it, and then it goes.
+func (s *State) checkRemoval(host *Host) error {
+	if err := s.checkMayGo(host); err != nil || !runsStacks(host.Phase) {
+		return err
+	}
+	return s.checkEmpty(host)
+}
+
+// checkMayGo refuses to let a host go that the cluster cannot do without:
 //   - the last host that runs stacks: the cluster would go on without
 //     placement, ingress or alerts, and nothing brings a removed host back;
 //   - once the cluster is highly available, any host that would leave fewer
 //     than MinHAHosts that run stacks, a dead one too: a replacement joins
 //     first. A cluster never goes back below three; the one way out is
 //     clowderd recover --power-off, which phase 2 brings for a quorum that
-//     is lost for good;
-//   - a host that runs stacks while a stack or a volume copy is still on
-//     it: they would be lost with it.
+//     is lost for good.
 //
 // Before the cluster is highly available, a host that runs no stacks
 // (failed, fenced) may always go, so a dead host can be given up.
-func (s *State) checkRemoval(host *Host) error {
-	remaining := s.hostsRunningStacks(host.ID)
+func (s *State) checkMayGo(host *Host) error {
+	// a host that leaves goes too, so it does not count as one that stays
+	going := []HostID{host.ID}
+	for _, other := range s.Hosts {
+		if other.Leaving {
+			going = append(going, other.ID)
+		}
+	}
+	remaining := s.hostsRunningStacks(going...)
 	switch {
 	case s.HA && remaining < MinHAHosts:
 		return fmt.Errorf("host %s cannot go: %d hosts would be left to run stacks, and a highly available "+
 			"cluster keeps %d; join a replacement first", host.Name, remaining, MinHAHosts)
-	case !runsStacks(host.Phase):
-		return nil
-	case remaining == 0:
+	case runsStacks(host.Phase) && remaining == 0:
 		return fmt.Errorf("host %s is the last that runs stacks; the cluster cannot do without it", host.Name)
 	}
+	return nil
+}
+
+// ErrNotEmpty is checkRemoval's answer for a host that still has a stack
+// or a volume copy.
+var ErrNotEmpty = errors.New("it must move off first")
+
+// checkEmpty refuses a host that still has a stack or a volume copy
+// (ErrNotEmpty).
+func (s *State) checkEmpty(host *Host) error {
 	for _, id := range slices.Sorted(maps.Keys(s.Stacks)) {
 		if placed := s.Stacks[id].Host; placed != nil && *placed == host.ID {
-			return fmt.Errorf("host %s still has stack %s; delete it or move it first", host.Name, id)
+			return fmt.Errorf("host %s still has stack %s: %w", host.Name, id, ErrNotEmpty)
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(s.Volumes)) {
 		if slices.ContainsFunc(s.Volumes[id].Copies, func(c VolumeCopy) bool { return c.Host == host.ID }) {
-			return fmt.Errorf("host %s still has a copy of volume %s; delete it or move it first", host.Name, id)
+			return fmt.Errorf("host %s still has a copy of volume %s: %w", host.Name, id, ErrNotEmpty)
 		}
 	}
 	return nil
@@ -232,7 +275,17 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), err
 		return nil, err
 	}
 	who, allowed := phaseChanges[host.Phase][payload.Phase]
-	if payload.Phase == Removed {
+	switch {
+	case payload.Leaving && payload.Phase != Draining:
+		return nil, fmt.Errorf("host %s: only a draining host leaves", host.Name)
+	case payload.Leaving:
+		// a remove of a host that still has stacks or copies: it may go
+		// as soon as they moved
+		if err := s.checkMayGo(host); err != nil {
+			return nil, err
+		}
+		allowed = allowed || host.Phase == Draining
+	case payload.Phase == Removed:
 		if err := s.checkRemoval(host); err != nil {
 			return nil, err
 		}
@@ -254,6 +307,11 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), err
 			return
 		}
 		host.Phase = payload.Phase
+		// an undrain takes the remove back
+		host.Leaving = payload.Leaving
+		if payload.Phase != Active || payload.Leaving {
+			s.forgetMovesTo(host.ID)
+		}
 		if s.hostsRunningStacks() >= MinHAHosts {
 			s.HA = true
 		}
@@ -365,4 +423,15 @@ func applyReportHost(s *State, cmd Command, payload ReportHost) (func(), error) 
 // percent tells whether a value is a whole percent, 0 to 100.
 func percent(value int) bool {
 	return value >= 0 && value <= 100
+}
+
+// forgetMovesTo drops the users' requests to move stacks to a host that no
+// longer takes stacks: they would wait for it for good.
+func (s *State) forgetMovesTo(id HostID) {
+	for _, stack := range s.Stacks {
+		if stack.MoveTo != nil && *stack.MoveTo == id {
+			stack.MoveTo = nil
+			s.changed(resource.KindStack, &stack.Meta)
+		}
+	}
 }

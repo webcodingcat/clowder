@@ -7,6 +7,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/webcodingcat/clowder/internal/resource"
 )
 
 // Operation is a long task, such as moving a stack or fencing a host, in
@@ -14,9 +17,11 @@ import (
 // done (advance-operation), and the leader finishes it. While it runs it
 // holds locks on what it changes, and no one else changes that.
 //
-// The state holds and checks operations; nothing starts one yet. Moving a
-// stack and fencing a host bring the first ones, with the steps, deadlines
-// and rollbacks they need.
+// Each step has a deadline. Before its point of no return, an operation
+// whose step fails or runs late rolls back (roll-back-operation): the
+// leader finishes it as failed once it is undone (for a move: at once; the
+// placement gives up the copies it left once the locks are free). Moving a
+// stack is the first kind (OperationMoveStack); fencing a host comes with failover.
 type Operation struct {
 	// ID is the Raft index of the command that started it: unique, and
 	// sorted by start.
@@ -28,19 +33,89 @@ type Operation struct {
 	Step int `json:"step"`
 	// Owner runs the next step: a host, or nil for the leader.
 	Owner *HostID `json:"owner,omitempty"`
-	State OpState `json:"state"`
-	Error string  `json:"error,omitempty"`
+	// Deadline is when the next step must be done (the leader's clock).
+	Deadline time.Time `json:"deadline,omitzero"`
+	State    OpState   `json:"state"`
+	Error    string    `json:"error,omitempty"`
+	// Move is what a move-stack operation moves.
+	Move *StackMove `json:"move,omitempty"`
 }
 
 // OpState is where an operation is.
 type OpState string
 
-// The states of an operation.
+// The states of an operation. One that rolls back has only the leader's
+// undoing left, then it fails.
 const (
-	OpRunning OpState = "running"
-	OpDone    OpState = "done"
-	OpFailed  OpState = "failed"
+	OpRunning     OpState = "running"
+	OpRollingBack OpState = "rolling-back"
+	OpDone        OpState = "done"
+	OpFailed      OpState = "failed"
 )
+
+// OperationMoveStack moves a stack to another host (StackMove).
+const OperationMoveStack = "move-stack"
+
+// StackMove is what a move-stack operation moves: a stack, from its host to
+// another, with its volumes. Its steps, each the last one done:
+//
+//	MoveCopies   the leader placed a copy of each volume on To
+//	MoveSynced   To has them synced and the images pulled
+//	MoveStopped  From stopped the stack, its copies are secondary
+//	MoveHost     the leader set the stack's host to To
+//
+// The leader finishes it once the stack runs on To. MoveStopped is the
+// point of no return: before it, the stack still runs on From, and a
+// rollback leaves it there; after it, only To can run it.
+type StackMove struct {
+	Stack string `json:"stack"` // the stack's ID
+	// From is the stack's host when the move started; nil for a stack that
+	// had none and waits for its volumes to come to To. Such a move has no
+	// stack to stop: the new host goes from MoveCopies to MoveStopped.
+	From *HostID `json:"from,omitempty"`
+	To   HostID  `json:"to"`
+}
+
+// The steps of a move-stack operation (StackMove); MoveStart is the one
+// before the first.
+const (
+	MoveStart   = 0
+	MoveCopies  = 1
+	MoveSynced  = 2
+	MoveStopped = 3
+	MoveHost    = 4
+)
+
+// MoveStepName names the last step done of a move, for messages.
+func MoveStepName(step int) string {
+	switch step {
+	case MoveStart:
+		return "its start"
+	case MoveCopies:
+		return "placing the copies on the new host"
+	case MoveSynced:
+		return "the copies synced on the new host"
+	case MoveStopped:
+		return "the stack stopped on its old host"
+	case MoveHost:
+		return "giving the stack its new host"
+	default:
+		return fmt.Sprintf("step %d", step)
+	}
+}
+
+// StepTime is how long a step of an operation has, unless its sender
+// gives a deadline of its own: a step that waits for a resync gets more.
+const StepTime = 10 * time.Minute
+
+// deadline is a step's deadline: the one given, else StepTime from the
+// command's time (the leader's clock).
+func deadline(cmd Command, given time.Time) time.Time {
+	if given.IsZero() {
+		return cmd.At.Add(StepTime)
+	}
+	return given
+}
 
 // keptFinished is how many finished operations the state keeps for users
 // to look at.
@@ -54,11 +129,33 @@ const (
 	hostLockPrefix   = "host/"
 )
 
-func stackLock(id string) string { return stackLockPrefix + id }
+// StackLock is the lock on a stack, by its ID.
+func StackLock(id string) string { return stackLockPrefix + id }
 
-func volumeLock(id string) string { return volumeLockPrefix + id }
+// VolumeLock is the lock on a volume, by its ID.
+func VolumeLock(id string) string { return volumeLockPrefix + id }
 
 func hostLock(id HostID) string { return hostLockPrefix + strconv.Itoa(int(id)) }
+
+// MoveOf returns the move-stack operation that holds the stack's lock, if
+// one does and has not finished.
+func (s *State) MoveOf(stackID string) *Operation {
+	operation, ok := s.Operations[s.Locks[StackLock(stackID)]]
+	if !ok || operation.Move == nil || operation.Move.Stack != stackID {
+		return nil
+	}
+	return operation
+}
+
+// StopsForMove tells whether the stack's old host stops it for a move: its
+// move's copies are synced on the new host, and the stack does not have the
+// new host yet. From MoveHost on, the new host is the stack's, which runs it
+// as any other; a move that rolls back has the stack run where it was.
+func (s *State) StopsForMove(stackID string) bool {
+	operation := s.MoveOf(stackID)
+	return operation != nil && operation.State == OpRunning &&
+		operation.Step >= MoveSynced && operation.Step < MoveHost
+}
 
 // checkLockable accepts a lock on a stack or a volume the state has, or on
 // a host that is a member: a lock on nothing would protect nothing.
@@ -103,7 +200,9 @@ type StartOperation struct {
 	Kind  string   `json:"kind"`
 	Locks []string `json:"locks"`
 	// Owner runs the first step: a host, or nil for the leader.
-	Owner *HostID `json:"owner,omitempty"`
+	Owner    *HostID    `json:"owner,omitempty"`
+	Deadline time.Time  `json:"deadline,omitzero"`
+	Move     *StackMove `json:"move,omitempty"`
 }
 
 func applyStartOperation(s *State, cmd Command, payload StartOperation) (func(), error) {
@@ -118,6 +217,9 @@ func applyStartOperation(s *State, cmd Command, payload StartOperation) (func(),
 	if err := s.checkLiveHost(payload.Owner); err != nil {
 		return nil, err
 	}
+	if err := s.checkMove(payload); err != nil {
+		return nil, err
+	}
 	for _, lock := range payload.Locks {
 		if err := s.checkLockable(lock); err != nil {
 			return nil, err
@@ -128,7 +230,7 @@ func applyStartOperation(s *State, cmd Command, payload StartOperation) (func(),
 	}
 	operation := &Operation{
 		ID: s.Index, Kind: payload.Kind, Locks: slices.Compact(slices.Sorted(slices.Values(payload.Locks))),
-		Owner: payload.Owner, State: OpRunning,
+		Owner: payload.Owner, Deadline: deadline(cmd, payload.Deadline), State: OpRunning, Move: payload.Move,
 	}
 	return func() {
 		s.Operations[operation.ID] = operation
@@ -136,6 +238,35 @@ func applyStartOperation(s *State, cmd Command, payload StartOperation) (func(),
 			s.Locks[lock] = operation.ID
 		}
 	}, nil
+}
+
+// checkMove holds a move-stack operation to its stack: it locks the stack,
+// starts from where the stack is, and goes to another host that runs
+// stacks. Only a move-stack operation names a move.
+func (s *State) checkMove(payload StartOperation) error {
+	move := payload.Move
+	switch {
+	case (payload.Kind == OperationMoveStack) != (move != nil):
+		return fmt.Errorf("operation %s: a move goes with %s, and only with it", payload.Kind, OperationMoveStack)
+	case move == nil:
+		return nil
+	case !slices.Contains(payload.Locks, StackLock(move.Stack)):
+		return fmt.Errorf("a move of stack %s must lock it", move.Stack)
+	}
+	stack, ok := s.Stacks[move.Stack]
+	switch {
+	case !ok:
+		return fmt.Errorf("no stack %s", move.Stack)
+	case !samePlace(stack.Host, move.From):
+		return fmt.Errorf("stack %s is not where the move starts", move.Stack)
+	case move.From != nil && *move.From == move.To:
+		return fmt.Errorf("stack %s is on host %d already", move.Stack, move.To)
+	}
+	host, ok := s.Hosts[move.To]
+	if !ok || host.Phase != Active || host.Leaving {
+		return fmt.Errorf("stack %s cannot move to host %d: it is no active host", move.Stack, move.To)
+	}
+	return nil
 }
 
 // AdvanceOperation records a step done and who runs the next one.
@@ -148,6 +279,9 @@ type AdvanceOperation struct {
 	Step     int `json:"step"`
 	// Owner runs the next step: a host, or nil for the leader.
 	Owner *HostID `json:"owner,omitempty"`
+	// Deadline is when the next step must be done; zero is StepTime from
+	// now.
+	Deadline time.Time `json:"deadline,omitzero"`
 }
 
 // applyAdvanceOperation takes the step only from the one who runs it: the
@@ -162,6 +296,8 @@ func applyAdvanceOperation(s *State, cmd Command, payload AdvanceOperation) (fun
 		runner = HostActor(*operation.Owner)
 	}
 	switch {
+	case operation.State != OpRunning:
+		return nil, fmt.Errorf("operation %d rolls back", operation.ID)
 	case cmd.Actor != runner:
 		return nil, fmt.Errorf("operation %d: %s runs its step %d, not %s",
 			operation.ID, runner, operation.Step+1, cmd.Actor)
@@ -174,7 +310,68 @@ func applyAdvanceOperation(s *State, cmd Command, payload AdvanceOperation) (fun
 		return nil, err
 	}
 	return func() {
-		operation.Step, operation.Owner = payload.Step, payload.Owner
+		operation.Step, operation.Owner, operation.Deadline = payload.Step, payload.Owner, deadline(cmd, payload.Deadline)
+	}, nil
+}
+
+// ExtendOperation gives an operation's next step more time; the leader
+// sends it for a step that is late but still gets on, such as a resync
+// that makes progress.
+type ExtendOperation struct {
+	ID uint64 `json:"id"`
+	// Step is the last step done, as the leader saw it: once another is
+	// done, the extension is for a step that is over.
+	Step     int       `json:"step"`
+	Deadline time.Time `json:"deadline"`
+}
+
+func applyExtendOperation(s *State, cmd Command, payload ExtendOperation) (func(), error) {
+	if cmd.Actor != LeaderActor {
+		return nil, fmt.Errorf("%s cannot extend an operation; only the leader does", cmd.Actor)
+	}
+	operation, err := s.running(payload.ID)
+	switch {
+	case err != nil:
+		return nil, err
+	case payload.Step != operation.Step:
+		return nil, fmt.Errorf("operation %d is at step %d, no longer %d", operation.ID, operation.Step, payload.Step)
+	case !payload.Deadline.After(operation.Deadline):
+		return nil, fmt.Errorf("operation %d: the deadline %s is not later than %s", operation.ID,
+			payload.Deadline.Format(time.RFC3339), operation.Deadline.Format(time.RFC3339))
+	}
+	return func() { operation.Deadline = payload.Deadline }, nil
+}
+
+// RollBackOperation turns an operation back before its point of no return:
+// the leader finishes it as failed once it is undone. It holds its locks
+// until then. A move needs no undoing of its own: its stack runs on its old
+// host again (StopsForMove), and the placement gives up the copies it left.
+type RollBackOperation struct {
+	ID       uint64 `json:"id"`
+	FromStep int    `json:"from_step"` // as in AdvanceOperation
+	Error    string `json:"error"`     // why
+}
+
+func applyRollBackOperation(s *State, cmd Command, payload RollBackOperation) (func(), error) {
+	if cmd.Actor != LeaderActor {
+		return nil, fmt.Errorf("%s cannot roll an operation back; only the leader does", cmd.Actor)
+	}
+	operation, err := s.running(payload.ID)
+	switch {
+	case err != nil:
+		return nil, err
+	case operation.State != OpRunning:
+		return nil, fmt.Errorf("operation %d rolls back already", operation.ID)
+	case payload.FromStep != operation.Step:
+		return nil, fmt.Errorf("operation %d is at step %d, no longer %d", operation.ID, operation.Step, payload.FromStep)
+	case operation.Move != nil && operation.Step >= MoveStopped:
+		return nil, fmt.Errorf("operation %d is past its point of no return: the stack stopped on its old host",
+			operation.ID)
+	case payload.Error == "":
+		return nil, fmt.Errorf("operation %d: a rollback says why", operation.ID)
+	}
+	return func() {
+		operation.State, operation.Owner, operation.Error = OpRollingBack, nil, payload.Error
 	}, nil
 }
 
@@ -186,6 +383,9 @@ type FinishOperation struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// applyFinishOperation ends an operation. A move that ends, whether it
+// worked or not, answers a user's request to move the stack (MoveTo): the
+// placement does not try it again by itself.
 func applyFinishOperation(s *State, cmd Command, payload FinishOperation) (func(), error) {
 	if cmd.Actor != LeaderActor {
 		return nil, fmt.Errorf("%s cannot finish an operation; only the leader does", cmd.Actor)
@@ -194,25 +394,46 @@ func applyFinishOperation(s *State, cmd Command, payload FinishOperation) (func(
 	if err != nil {
 		return nil, err
 	}
+	failed := payload.Failed || operation.State == OpRollingBack
 	return func() {
-		operation.State, operation.Error = OpDone, payload.Error
-		if payload.Failed {
+		operation.State = OpDone
+		if failed {
 			operation.State = OpFailed
 		}
+		if payload.Error != "" {
+			operation.Error = payload.Error
+		}
+		operation.Owner = nil
 		for _, lock := range operation.Locks {
 			delete(s.Locks, lock)
+		}
+		if stack, ok := s.Stacks[moveStack(operation)]; ok {
+			stack.MoveTo = nil
+			if failed {
+				stack.MoveFailed = cmd.At
+			}
+			s.changed(resource.KindStack, &stack.Meta)
 		}
 		s.forgetFinished()
 	}, nil
 }
 
-// running returns an operation that has not finished.
+// moveStack is the stack a move moves; empty for another operation.
+func moveStack(operation *Operation) string {
+	if operation.Move == nil {
+		return ""
+	}
+	return operation.Move.Stack
+}
+
+// running returns an operation that has not finished: it runs or rolls
+// back.
 func (s *State) running(id uint64) (*Operation, error) {
 	operation, ok := s.Operations[id]
 	switch {
 	case !ok:
 		return nil, fmt.Errorf("no operation %d", id)
-	case operation.State != OpRunning:
+	case operation.State != OpRunning && operation.State != OpRollingBack:
 		return nil, fmt.Errorf("operation %d is finished (%s)", id, operation.State)
 	}
 	return operation, nil
@@ -223,7 +444,7 @@ func (s *State) running(id uint64) (*Operation, error) {
 func (s *State) forgetFinished() {
 	var finished []uint64
 	for _, id := range slices.Sorted(maps.Keys(s.Operations)) {
-		if s.Operations[id].State != OpRunning {
+		if state := s.Operations[id].State; state == OpDone || state == OpFailed {
 			finished = append(finished, id)
 		}
 	}

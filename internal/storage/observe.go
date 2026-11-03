@@ -3,7 +3,6 @@ package storage
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,20 +13,35 @@ import (
 
 // Observed is what the host has of a copy right now.
 type Observed struct {
-	// LV says the copy's LV exists.
+	// LV says the copy's LV exists; a tiebreaker has none.
 	LV bool
 	// ResourceFileCurrent says the DRBD resource file is the one the copy
 	// should have (only with replicas); a new peer changes it.
 	ResourceFileCurrent bool
 	// Role is the DRBD resource's role here (only with replicas).
 	Role Role
+	// Disk is DRBD's disk state of the copy here (DiskUpToDate, ...), and
+	// OutOfSyncBytes how much it differs by from a peer at most: while it
+	// resyncs, what is left. Both only with replicas, and only while the
+	// resource is up.
+	Disk           string
+	OutOfSyncBytes int64
 	// Mounted says a file system is mounted at the copy's mount point;
 	// OtherDevice that it is not the copy's device.
 	Mounted, OtherDevice bool
 }
 
+// Synced tells whether the copy holds the volume's current data: DRBD
+// says UpToDate, or a plain LV exists.
+func (o Observed) Synced(volume Volume) bool {
+	if volume.Resource == nil {
+		return o.LV
+	}
+	return o.Disk == DiskUpToDate
+}
+
 // Observe reads what the host has of the copies, by LV. It only reads, and
-// at once for all copies: lvs per volume group, the roles of all DRBD
+// at once for all copies: lvs per volume group, the state of all DRBD
 // resources and the mount table. So a pass that finds everything as it
 // should be runs no tool per copy, and none that touches a volume.
 func (d Driver) Observe(ctx context.Context, volumes []Volume) (map[string]Observed, error) {
@@ -35,7 +49,9 @@ func (d Driver) Observe(ctx context.Context, volumes []Volume) (map[string]Obser
 	var groups []string
 	replicated := false
 	for _, volume := range volumes {
-		groups = append(groups, volumeGroup(volume.Pool))
+		if !volume.Diskless {
+			groups = append(groups, volumeGroup(volume.Pool))
+		}
 		replicated = replicated || volume.Resource != nil
 	}
 	for _, group := range slices.Compact(slices.Sorted(slices.Values(groups))) {
@@ -47,10 +63,10 @@ func (d Driver) Observe(ctx context.Context, volumes []Volume) (map[string]Obser
 			lvs[group+"/"+name] = true
 		}
 	}
-	var roles map[string]Role
+	var resources map[string]drbdResource
 	if replicated {
 		var err error
-		if roles, err = d.roles(ctx); err != nil {
+		if resources, err = d.resources(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -60,9 +76,10 @@ func (d Driver) Observe(ctx context.Context, volumes []Volume) (map[string]Obser
 	}
 	observed := map[string]Observed{}
 	for _, volume := range volumes {
-		copyNow := Observed{LV: lvs[volumeGroup(volume.Pool)+"/"+volume.LV]}
+		copyNow := Observed{LV: !volume.Diskless && lvs[volumeGroup(volume.Pool)+"/"+volume.LV]}
 		if volume.Resource != nil {
-			copyNow.Role = roles[volume.Resource.Name]
+			resource := resources[volume.Resource.Name]
+			copyNow.Role, copyNow.Disk, copyNow.OutOfSyncBytes = resource.Role, resource.disk(), resource.outOfSyncBytes()
 			if copyNow.ResourceFileCurrent, err = d.resourceFileCurrent(volume.Resource); err != nil {
 				return nil, err
 			}
@@ -73,29 +90,6 @@ func (d Driver) Observe(ctx context.Context, volumes []Volume) (map[string]Obser
 		observed[volume.LV] = copyNow
 	}
 	return observed, nil
-}
-
-// roles reads the role of every DRBD resource that is up here; one that is
-// down is not in the list (RoleDown).
-func (d Driver) roles(ctx context.Context) (map[string]Role, error) {
-	output, err := d.Run(ctx, statusTimeout, "drbdsetup", "status", "--json")
-	if err != nil {
-		return nil, fmt.Errorf("read the DRBD resources: %w", err)
-	}
-	var resources []struct {
-		Name string `json:"name"`
-		Role Role   `json:"role"`
-	}
-	if strings.TrimSpace(output) != "" {
-		if err := json.Unmarshal([]byte(output), &resources); err != nil {
-			return nil, fmt.Errorf("read the DRBD resources: %w", err)
-		}
-	}
-	roles := map[string]Role{}
-	for _, resource := range resources {
-		roles[resource.Name] = resource.Role
-	}
-	return roles, nil
 }
 
 // mounts reads the mount table: the source of each mount point. --raw

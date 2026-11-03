@@ -52,6 +52,8 @@ type metricsSource struct {
 	docker   Docker
 	restarts func() map[supervisor.Service]int
 	failures func() []controller.Failure
+	// progress is how far this host's copies are (volumes.Reconciler.Progress)
+	progress func() map[string]int64
 	// memory reads the agent's resident memory (readRSS); tests replace it
 	memory func() (int64, error)
 	logger *slog.Logger
@@ -104,6 +106,11 @@ func (m *metricsSource) addHost(set *metrics.Set, copied *state.State, leads boo
 			float64(host.Pools[pool].DataPercent), "host", name, "pool", pool)
 		set.Add("clowder_pool_metadata_percent", "How full a thin pool's metadata is.", metrics.Gauge,
 			float64(host.Pools[pool].MetadataPercent), "host", name, "pool", pool)
+	}
+	progress := m.progress()
+	for _, volume := range slices.Sorted(maps.Keys(progress)) {
+		set.Add("clowder_volume_out_of_sync_bytes", "How much this host's copy of a volume differs from a peer: while it resyncs, what is left.",
+			metrics.Gauge, float64(progress[volume]), "host", name, "volume", volume)
 	}
 }
 

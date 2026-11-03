@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/scheduler"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -69,7 +70,7 @@ func (p *placer) pass(ctx context.Context) time.Duration {
 		return 0
 	}
 	p.plannedAt = copied.Index
-	decisions := scheduler.Plan(copied)
+	decisions := scheduler.Plan(copied, time.Now())
 	p.noteOverCapacity(copied, decisions.OverCapacity)
 	// A push-out holds, for each stack it touches, the stack's new list of
 	// pushed-out services. If one fails, nothing is placed in this pass:
@@ -84,6 +85,13 @@ func (p *placer) pass(ctx context.Context) time.Duration {
 	p.commitWaitReasons(ctx, copied, decisions.Waiting)
 	for _, placement := range decisions.Placements {
 		p.commitPlacement(ctx, placement)
+	}
+	for _, move := range decisions.Moves {
+		p.startMove(ctx, copied, move)
+	}
+	for _, record := range decisions.Copies {
+		p.logger.Info("the copies of a volume change", "volume", record.ID(), "copies", record.Copies)
+		p.commitOrLog(ctx, state.KindPutVolume, state.PutVolume{Volume: record, PlannedAt: p.plannedAt})
 	}
 	return p.comeBack(ctx, decisions.ComeBack)
 }
@@ -194,4 +202,25 @@ func (p *placer) comeBack(ctx context.Context, back *scheduler.ComeBack) time.Du
 	})
 	p.fitting = ""
 	return 0
+}
+
+// startMove starts a move-stack operation (RunMoves drives it): what the
+// stack pushes out on the new host first, as for a placement. If the
+// start then fails, those services come back by the usual rule (comeBack). The move
+// locks the stack and its volumes.
+func (p *placer) startMove(ctx context.Context, copied *state.State, move scheduler.Move) {
+	if move.PushedOut != nil &&
+		!p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: move.PushedOut, PlannedAt: p.plannedAt}) {
+		return
+	}
+	stack := copied.Stacks[move.Stack]
+	locks := []string{state.StackLock(move.Stack)}
+	for _, name := range stack.Spec.VolumeNames() {
+		locks = append(locks, state.VolumeLock(names.ID(stack.Namespace, name)))
+	}
+	p.logger.Info("moving a stack", "stack", move.Stack, "to", copied.Hosts[move.To].Name, "why", move.Why)
+	p.commitOrLog(ctx, state.KindStartOperation, state.StartOperation{
+		Kind: state.OperationMoveStack, Locks: locks,
+		Move: &state.StackMove{Stack: move.Stack, From: move.From, To: move.To},
+	})
 }

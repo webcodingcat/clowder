@@ -67,6 +67,9 @@ type ServerConfig struct {
 	// HostID is this agent's host; Containers answers for its stacks.
 	HostID     state.HostID
 	Containers Containers
+	// Volumes tells how far this host's copies are; the volume
+	// reconciler is the real one, nil on an agent without it.
+	Volumes Volumes
 	// Alerts answers for the alert channels; the agent's alerts loop is the
 	// real one.
 	Alerts Alerts
@@ -141,6 +144,7 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/stacks/{namespace}/{name}/ps", pki.RoleUser, server.stackPs)
 	server.handle("GET /v1/stacks/{namespace}/{name}/logs", pki.RoleUser, server.stackLogs)
 	server.handle("POST /v1/stacks/{namespace}/{name}/restart", pki.RoleUser, server.restartStack)
+	server.handle("POST /v1/stacks/{namespace}/{name}/move", pki.RoleUser, server.moveStack)
 	server.handle("POST /v1/alerts/test", pki.RoleUser, server.alertTest)
 	server.handle("GET /v1/alerts/failures", pki.RoleUser, server.alertFailures)
 	server.handle("GET /v1/internal/alerts/failures", pki.RoleHost, server.localAlertFailures)
@@ -150,6 +154,7 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("POST /v1/internal/hand-over", pki.RoleHost, server.internalHandOver)
 	server.handle("GET /v1/internal/stacks/{project}/ps", pki.RoleHost, server.localPs)
 	server.handle("GET /v1/internal/stacks/{project}/logs", pki.RoleHost, server.localLogs)
+	server.handle("GET /v1/internal/volumes/progress", pki.RoleHost, server.localProgress)
 	server.handleOpen("GET /v1/bootstrap", limited(&server.bootstraps, server.bootstrapOffer))
 	server.handleOpen("POST /v1/bootstrap", limited(&server.bootstraps, server.bootstrap))
 	server.handleOpen("GET /v1/recover/offer", limited(&server.recoveries, server.recoverOffer))
@@ -412,6 +417,17 @@ func (s *Server) hostAction(w http.ResponseWriter, r *http.Request) {
 	// the phase checked here must still be the host's when it commits
 	move := state.SetHostPhase{Host: id, Phase: action.To, From: phase}
 	if action.To == state.Removed {
+		if leaves := s.leaves(id); leaves != nil {
+			cmd, err := state.NewCommand(state.KindSetHostPhase, time.Time{}, actorOf(identityOf(r)), *leaves)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			if index, ok := s.commit(w, r, cmd, s.Propose); ok {
+				writeJSON(w, http.StatusOK, HostActionAnswer{Written: Written{Index: index}, Leaving: true})
+			}
+			return
+		}
 		if err := s.handOverLeadOf(r.Context(), id); err != nil {
 			writeError(w, http.StatusServiceUnavailable, err)
 			return
@@ -540,7 +556,7 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 // those the user routes of the API and the bootstrap make; a kind joins when
 // its route does.
 var userKinds = map[string]bool{
-	state.KindApplyConfig: true, state.KindSetHostPhase: true, state.KindRestartStack: true,
+	state.KindApplyConfig: true, state.KindSetHostPhase: true, state.KindRestartStack: true, state.KindRequestMove: true,
 	state.KindAddUser:              true, // the bootstrap's user
 	state.KindRecoverUser:          true, // a user back with a code from a host
 	state.KindSetRecoveryRecipient: true,
@@ -551,7 +567,8 @@ var userKinds = map[string]bool{
 var hostKinds = map[string]bool{
 	state.KindReportHost:     true,
 	state.KindSetStackStatus: true, state.KindForgetCopy: true, state.KindSetVolumeInitialized: true,
-	state.KindReportPeerForgotten: true,
+	state.KindReportPeerForgotten: true, state.KindSetCopySynced: true,
+	state.KindAdvanceOperation: true, // the step of an operation a host owns
 }
 
 // internalPropose is where a follower forwards a user's write and where an

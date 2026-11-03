@@ -25,7 +25,10 @@ type ResourceList struct {
 	Items []resource.Object `json:"items"`
 }
 
-// VolumeStatus is a volume's status as the API shows it.
+// VolumeStatus is a volume's status as the API shows it. Status is the
+// state's (pending, ok) for a volume that has all its copies synced,
+// else resyncing while a copy catches up, or degraded while copies are
+// missing.
 type VolumeStatus struct {
 	Status         string       `json:"status"`
 	DataGeneration int64        `json:"dataGeneration"`
@@ -37,6 +40,7 @@ type VolumeCopy struct {
 	Host       string `json:"host"`
 	Class      string `json:"class"`
 	Tiebreaker bool   `json:"tiebreaker,omitempty"`
+	Synced     bool   `json:"synced,omitempty"`
 }
 
 // SecretStatus is a secret's status: its digest, never its value.
@@ -233,8 +237,40 @@ func volumeStatus(current *state.State, volume *state.Volume) VolumeStatus {
 			host = known.Name
 		}
 		status.Copies = append(status.Copies, VolumeCopy{
-			Host: host, Class: volumeCopy.Class, Tiebreaker: volumeCopy.Tiebreaker,
+			Host: host, Class: volumeCopy.Class, Tiebreaker: volumeCopy.Tiebreaker, Synced: volumeCopy.Synced,
 		})
 	}
+	if volume.Status != state.VolumePending {
+		status.Status = volumeHealth(volume)
+	}
 	return status
+}
+
+// The health of a placed volume beside ok.
+const (
+	volumeDegraded  = "degraded"
+	volumeResyncing = "resyncing"
+)
+
+// volumeHealth tells how a placed volume's copies are: degraded with fewer
+// copies than replicas, resyncing while one is not synced yet, else ok.
+// Replicas 0 has one plain LV.
+func volumeHealth(volume *state.Volume) string {
+	copies, synced := 0, 0
+	for _, volumeCopy := range volume.Copies {
+		if volumeCopy.Tiebreaker {
+			continue
+		}
+		copies++
+		if volumeCopy.Synced {
+			synced++
+		}
+	}
+	switch {
+	case copies < max(volume.Spec.Replicas, 1):
+		return volumeDegraded
+	case synced < copies:
+		return volumeResyncing
+	}
+	return string(state.VolumeOK)
 }

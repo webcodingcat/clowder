@@ -263,21 +263,63 @@ func TestAMissingPlainCopyOfDataIsNeverMadeAnew(t *testing.T) {
 	}
 }
 
-func TestATiebreakerHereIsNotKeptYet(t *testing.T) {
+func TestATiebreakerHereIsUpWithoutADiskAndNeverMounted(t *testing.T) {
 	r := newTestReconciler(t)
 	r.cluster.Put(resource.KindVolume, "data", resource.VolumeSpec{Class: "fast", Size: 1 << 30, Replicas: 2})
+	r.cluster.AddHost(1)
 	var volume state.Volume
 	r.cluster.Read(func(current *state.State) { volume = *current.Volumes[names.ID(names.Default, "data")] })
 	minor := 5
 	volume.Minor, volume.Status = &minor, state.VolumeOK
-	volume.Copies = []state.VolumeCopy{{Host: 0, Tiebreaker: true}}
+	volume.Copies = []state.VolumeCopy{{Host: 1, Class: "fast"}, {Host: 0, Tiebreaker: true}}
 	r.cluster.Apply(state.KindPutVolume, state.LeaderActor, state.PutVolume{Volume: volume, PlannedAt: r.cluster.Index()})
 	r.settle()
-	if _, _, err := r.Mounted(dataLV); !errors.Is(err, errTiebreakerHere) {
-		t.Errorf("want errTiebreakerHere, got %v", err)
-	}
-	if r.storage.Count("ensure "+dataLV) != 0 {
+	if r.storage.Count("ensure "+dataLV) != 1 || r.storage.Count("promote --force "+dataLV) != 0 {
 		t.Errorf("storage %q", r.storage.Lines())
+	}
+	if copyNow := r.storage.Copy(dataLV); copyNow.LV || copyNow.Disk != storage.DiskDiskless {
+		t.Errorf("the tiebreaker has an LV or a disk: %+v", copyNow)
+	}
+	if !r.Released(dataLV) {
+		t.Error("a tiebreaker leaves the volume to the copies with a disk")
+	}
+}
+
+func TestAHostTellsWhenItsCopyIsSyncedAndWhenNoLonger(t *testing.T) {
+	r := newTestReconciler(t)
+	placeData(r.cluster)
+	placeBlog(r.cluster)
+	r.settle()
+	synced := func() bool {
+		var copies []state.VolumeCopy
+		r.cluster.Read(func(current *state.State) { copies = current.Volumes[names.ID(names.Default, "data")].Copies })
+		return copies[0].Synced
+	}
+	if !synced() {
+		t.Fatal("the first copy, made primary with --force, is not synced")
+	}
+	r.storage.Lock()
+	copyNow := r.storage.Copies[dataLV]
+	copyNow.Disk, copyNow.OutOfSyncBytes = "Inconsistent", 1<<20
+	r.storage.Copies[dataLV] = copyNow
+	r.storage.Unlock()
+	r.settle()
+	if synced() {
+		t.Error("a copy that resyncs is still synced")
+	}
+	if got := r.Progress()[names.ID(names.Default, "data")]; got != 1<<20 {
+		t.Errorf("progress %d", got)
+	}
+	// a resource that is down says nothing
+	r.storage.Lock()
+	r.storage.Fails = map[string]error{dataLV: errors.New("adjust fails")}
+	copyNow.Disk, copyNow.Role = "", storage.RoleDown
+	r.storage.Copies[dataLV] = copyNow
+	r.storage.Unlock()
+	before := r.cluster.Index()
+	r.settle()
+	if r.cluster.Index() != before {
+		t.Error("a copy that is down was reported")
 	}
 }
 

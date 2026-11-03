@@ -63,8 +63,8 @@ Every scenario but `TestSetup` starts from the same baseline and checks it first
 leader, `cluster.yaml` applied and with the settings `TestSetup` gave it, the first host
 active and the joined ones drained, three voters, no stack or volume in any namespace, no
 fault in the lab and no dead server (HLab's `/status`). The joined hosts are drained so
-the scenarios' stacks start on the first host, where the test looks for them: stacks do
-not move between hosts yet. A
+the scenarios' stacks start on the first host, where the test looks for them;
+`TestPlacement` takes them in and gives them back. A
 scenario puts back what it changed at its end, so the next finds the baseline again; one
 that failed stops the next `bin/dev live run` with what it left. So the scenarios run in
 any order; `go test` runs them in the order of their files, and the sections below follow
@@ -112,6 +112,23 @@ reads within a step.
 2. `clowder2` is removed; removing `clowder3` then is refused, as it would leave two.
 3. `clowder4` joins in `clowder2`'s place (OpenTofu removes its server) and takes its ID,
    once every host forgot it as a DRBD peer.
+
+### `TestPlacement`
+
+1. A stack with a volume of two replicas runs on the first host; the volume is
+   `degraded`, with one copy.
+2. The joined hosts take stacks again (`undrain`): the volume gets its second copy, which
+   syncs (the test logs how long), and a tiebreaker on the third host. The copy is
+   secondary and unmounted, the tiebreaker diskless (`drbdsetup status`).
+3. The copy's host pulled the stack's image before it needs it.
+4. `stack move` to the copy's host: the stack runs there once, with the data written on
+   the first host (the test logs how long the move took).
+5. `stack move` to the tiebreaker's host: it gets a disk, the old copy goes, and a new
+   tiebreaker comes.
+6. A drain of the stack's host moves it to the other copy; the copies stay.
+7. A stack with a volume of one replica moves: a copy of its own comes along, and the old
+   one goes.
+8. The stacks and volumes go, and the joined hosts are drained again.
 
 ### `TestStacks`
 

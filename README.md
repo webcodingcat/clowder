@@ -5,8 +5,8 @@ RAM). It replicates volumes with DRBD 9, keeps the client's real IP behind a Flo
 places services by priority and fences failed hosts through the hoster's API. The first
 hoster is Hetzner Cloud.
 
-**Status:** under construction; hosts join, but stacks do not move between them and no
-host fails over yet. [docs/roadmap.md](docs/roadmap.md) says how far it is. Until
+**Status:** under construction; hosts join and stacks move between them, but no host
+fails over yet. [docs/roadmap.md](docs/roadmap.md) says how far it is. Until
 `v1.0.0`, a new release may need a cluster set up anew.
 
 ## What it does
@@ -14,8 +14,14 @@ host fails over yet. [docs/roadmap.md](docs/roadmap.md) says how far it is. Unti
 - **Resources as with kubectl:** namespaces, stacks, volumes and secrets, with
   `clowder apply -f`, `get` (also `--watch`) and `delete`.
 - **Secrets in your files, encrypted:** only the cluster can open them.
-- **Placement by priority:** every service reserves memory and CPUs. On a full host, a
-  new stack pushes out services of lower priority, which come back when there is room.
+- **Placement by priority:** every service reserves memory and CPUs. A new stack goes
+  where its data is; on full hosts, stacks of lower priority move to make room, or a new
+  stack pushes out services of lower priority, which come back when there is room.
+- **Replicated volumes:** with `replicas: 2` or `3`, DRBD keeps the copies on other
+  hosts in sync, a volume with two copies gets a tiebreaker on a third host, and new
+  copies resync one at a time at `replication.resync_rate`. A stack moves to another host
+  with its data (`clowder stack move`, `clowder host drain`), its images pulled there
+  first.
 - **HTTP routes with certificates:** Traefik on the Floating IP, the client's address in
   `X-Forwarded-For`. A certificate comes from Let's Encrypt once the domain's DNS points at
   the Floating IP (not through a proxying CDN). The cluster accepts Let's Encrypt's terms
@@ -109,7 +115,10 @@ cluster stays at three hosts or more: `clowder host remove` refuses to go below,
 replacement joins first, even for a host that is dead. `clowder host list` shows the
 hosts. The leader checks with the
 hoster that each host's server is its own, so give each cluster a Hetzner project of its
-own. Stacks do not move between hosts yet, and no host fails over yet.
+own. `clowder host drain` moves a host's stacks to the others for maintenance (its volume
+copies stay), and `clowder host remove` of a host that still has stacks or copies moves
+them off before it goes. A volume with `replicas: 0` holds throw-away data: it starts empty on
+the new host whenever its stack moves. No host fails over yet.
 
 ## Running a stack
 
@@ -121,7 +130,7 @@ metadata: {name: shop}
 apiVersion: clowder/v1
 kind: Volume
 metadata: {namespace: shop, name: data}
-spec: {class: fast, size: 10G, replicas: 1}   # replicas 0: one plain LV without DRBD
+spec: {class: fast, size: 10G, replicas: 1}   # replicas 0: one plain LV without DRBD, empty again after a move
 ---
 apiVersion: clowder/v1
 kind: Stack
@@ -163,6 +172,7 @@ Put both in a directory and run `clowder apply -f shop/`. Then:
 | `clowder get stacks -n shop` | the stacks and where they run (`-A`: all namespaces) |
 | `clowder stack ps\|logs shop/web` | the containers and their logs |
 | `clowder stack restart shop/web [app]` | recreates services with their images pulled again |
+| `clowder stack move shop/web node2` | moves the stack with its volumes' data to another host; a volume of replicas 0 starts there empty |
 | `clowder delete -f shop/ --with-data` | deletes the resources; a volume only with `--with-data` |
 | `clowder cluster status` | the hosts, the leader and the open alerts |
 | `clowder secret rekey -f shop/` | encrypts the values in files again, for the cluster's current keys |

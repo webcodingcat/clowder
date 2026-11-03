@@ -101,7 +101,7 @@ func removeVolumeResource(s *State, id string) (func(), error) {
 	}); stack != "" {
 		return nil, fmt.Errorf("volume %s is stack %s's; change or delete the stack first", id, stack)
 	}
-	if err := s.checkUnlocked(volumeLock(id), 0); err != nil {
+	if err := s.checkUnlocked(VolumeLock(id), 0); err != nil {
 		return nil, err
 	}
 	return func() {
@@ -137,7 +137,7 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 	if err := checkPlanned(resource.KindVolume, id, &old.Meta, payload.PlannedAt); err != nil {
 		return nil, err
 	}
-	if err := s.checkUnlocked(volumeLock(id), payload.Operation); err != nil {
+	if err := s.checkUnlocked(VolumeLock(id), payload.Operation); err != nil {
 		return nil, err
 	}
 	switch {
@@ -150,6 +150,14 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 	// only the hosts tell (set-volume-initialized); a new data generation
 	// is a new LV, never initialized yet
 	volume.Initialized = old.Initialized && volume.DataGeneration == old.DataGeneration
+	volume.Copies = slices.Clone(volume.Copies)
+	for i, volumeCopy := range volume.Copies {
+		synced, err := keptSynced(old, volume.DataGeneration, volumeCopy)
+		if err != nil {
+			return nil, fmt.Errorf("volume %s: %w", id, err)
+		}
+		volume.Copies[i].Synced = synced
+	}
 	if sameJSON(*old, volume) {
 		return nil, errUnchanged
 	}
@@ -159,6 +167,11 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 	if volume.DataGeneration < old.DataGeneration {
 		return nil, fmt.Errorf("volume %s: data generation %d is older than %d",
 			id, volume.DataGeneration, old.DataGeneration)
+	}
+	if volume.DataGeneration != old.DataGeneration {
+		if err := s.checkFreeLV(id, volume.DataGeneration); err != nil {
+			return nil, err
+		}
 	}
 	if volume.Minor != nil {
 		if *volume.Minor < 0 || *volume.Minor > MaxMinor {
@@ -181,12 +194,38 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 			return nil, fmt.Errorf("volume %s: two copies on host %d", id, volumeCopy.Host)
 		}
 		placed[volumeCopy.Host] = true
+		// the retired copy's LV has the same name, and its host would take
+		// the old data for the new copy's
+		if slices.Contains(s.Retired, RetiredCopy{Volume: id, DataGeneration: volume.DataGeneration, Host: volumeCopy.Host}) {
+			return nil, fmt.Errorf("volume %s: host %d still removes a copy it gave up", id, volumeCopy.Host)
+		}
 	}
 	return func() {
 		s.retire(old, &volume)
 		s.Volumes[id] = &volume
 		s.changed(resource.KindVolume, &volume.Meta)
 	}, nil
+}
+
+// keptSynced is the Synced of a copy in a volume's new record: only its
+// host tells (set-copy-synced), so a copy that stays what it was keeps the
+// word, and any other starts unsynced. A copy with a disk cannot become a
+// tiebreaker on its host: its LV would stay behind, as no retired copy
+// names it.
+func keptSynced(old *Volume, generation int64, volumeCopy VolumeCopy) (bool, error) {
+	if generation != old.DataGeneration {
+		return false, nil
+	}
+	index := slices.IndexFunc(old.Copies, func(c VolumeCopy) bool { return c.Host == volumeCopy.Host })
+	switch {
+	case index < 0:
+		return false, nil
+	case !old.Copies[index].Tiebreaker && volumeCopy.Tiebreaker:
+		return false, fmt.Errorf("the copy on host %d has a disk; it cannot become a tiebreaker", volumeCopy.Host)
+	case old.Copies[index].Tiebreaker != volumeCopy.Tiebreaker || old.Copies[index].Class != volumeCopy.Class:
+		return false, nil
+	}
+	return old.Copies[index].Synced, nil
 }
 
 // retire marks the copies of old as retired. It skips each copy that kept
@@ -230,22 +269,12 @@ type SetVolumeInitialized struct {
 }
 
 // applySetVolumeInitialized takes the word of a host that has a copy with
-// a disk in the volume's data generation: a host that took long to tell
-// must not mark a newer generation, whose LV is another one. It minds no
-// lock: the host tells what its copy holds, which no operation can undo.
+// a disk in the volume's data generation (diskCopyOf). It minds no lock:
+// the host tells what its copy holds, which no operation can undo.
 func applySetVolumeInitialized(s *State, cmd Command, payload SetVolumeInitialized) (func(), error) {
-	volume, ok := s.Volumes[payload.Volume]
-	if !ok {
-		return nil, fmt.Errorf("no volume %s", payload.Volume)
-	}
-	if volume.DataGeneration != payload.DataGeneration {
-		return nil, fmt.Errorf("volume %s is in data generation %d, not %d",
-			payload.Volume, volume.DataGeneration, payload.DataGeneration)
-	}
-	if !slices.ContainsFunc(volume.Copies, func(c VolumeCopy) bool {
-		return HostActor(c.Host) == cmd.Actor && !c.Tiebreaker
-	}) {
-		return nil, fmt.Errorf("%s has no copy of volume %s with a disk", cmd.Actor, payload.Volume)
+	volume, _, err := s.diskCopyOf(cmd.Actor, payload.Volume, payload.DataGeneration)
+	if err != nil {
+		return nil, err
 	}
 	if volume.Initialized {
 		return nil, errUnchanged
@@ -256,13 +285,61 @@ func applySetVolumeInitialized(s *State, cmd Command, payload SetVolumeInitializ
 	}, nil
 }
 
+// SetCopySynced is a host telling whether its copy of a volume holds the
+// volume's current data (VolumeCopy.Synced).
+type SetCopySynced struct {
+	Volume         string `json:"volume"` // the volume's ID
+	DataGeneration int64  `json:"data_generation"`
+	Synced         bool   `json:"synced"`
+}
+
+// applySetCopySynced takes the word of a host about its copy with a disk in
+// the volume's data generation, like set-volume-initialized. It minds no
+// lock: a move waits to hear it.
+func applySetCopySynced(s *State, cmd Command, payload SetCopySynced) (func(), error) {
+	volume, index, err := s.diskCopyOf(cmd.Actor, payload.Volume, payload.DataGeneration)
+	if err != nil {
+		return nil, err
+	}
+	if volume.Copies[index].Synced == payload.Synced {
+		return nil, errUnchanged
+	}
+	return func() {
+		volume.Copies[index].Synced = payload.Synced
+		s.changed(resource.KindVolume, &volume.Meta)
+	}, nil
+}
+
+// diskCopyOf finds the copy with a disk that the actor, a host, has of a
+// volume in its data generation: a host that took long to tell must not
+// speak for a newer generation, whose LV is another one.
+func (s *State) diskCopyOf(actor, volumeID string, generation int64) (*Volume, int, error) {
+	volume, ok := s.Volumes[volumeID]
+	if !ok {
+		return nil, 0, fmt.Errorf("no volume %s", volumeID)
+	}
+	if volume.DataGeneration != generation {
+		return nil, 0, fmt.Errorf("volume %s is in data generation %d, not %d",
+			volumeID, volume.DataGeneration, generation)
+	}
+	index := slices.IndexFunc(volume.Copies, func(c VolumeCopy) bool {
+		return HostActor(c.Host) == actor && !c.Tiebreaker
+	})
+	if index < 0 {
+		return nil, 0, fmt.Errorf("%s has no copy of volume %s with a disk", actor, volumeID)
+	}
+	return volume, index, nil
+}
+
 // checkVolume holds what a volume's record must be on its own: the state is
 // the last place to catch a wrong one.
 func checkVolume(volume Volume) error {
 	id := volume.ID()
-	copies := 0
+	copies, tiebreakers := 0, 0
 	for _, volumeCopy := range volume.Copies {
-		if !volumeCopy.Tiebreaker {
+		if volumeCopy.Tiebreaker {
+			tiebreakers++
+		} else {
 			copies++
 		}
 	}
@@ -275,9 +352,16 @@ func checkVolume(volume Volume) error {
 		// the generation is part of the LV's name, whose length has a limit
 		return fmt.Errorf("volume %s: data generation %d is not from 0 to %d", id, volume.DataGeneration,
 			names.MaxDataGeneration)
-	case copies > max(replicas, 1):
+	case replicas == 0 && copies > 1:
 		// replicas 0 is one plain LV on one host
+		return fmt.Errorf("volume %s: %d copies for replicas 0", id, copies)
+	case copies > replicas+1:
+		// one more than replicas while a new copy takes an old one's
+		// place (a move); DRBD's metadata has room for it (max-peers)
 		return fmt.Errorf("volume %s: %d copies for %d replicas", id, copies, replicas)
+	case tiebreakers > 0 && (replicas != 2 || tiebreakers > 1):
+		// a tiebreaker gives two copies their third vote, and only them
+		return fmt.Errorf("volume %s: %d tiebreakers for %d replicas", id, tiebreakers, replicas)
 	case volume.Status == VolumePending && (len(volume.Copies) > 0 || volume.Minor != nil):
 		// the minor comes with the first copy, from the placement
 		return fmt.Errorf("volume %s: a pending volume has no copies and no DRBD minor", id)

@@ -197,8 +197,8 @@ func waitForJoined(t *testing.T, names ...string) {
 
 // growToThreeHosts joins two hosts with a token each: the second waits
 // passive, and with the third all of them are active and vote. The joined
-// hosts are drained, so the stacks of the scenarios start on the first host
-// while the placement over hosts is still to come.
+// hosts are drained, so the stacks of the scenarios start on the first host,
+// where they look for them; TestPlacement undrains them for a while.
 func growToThreeHosts(t *testing.T) {
 	tokens := map[string]string{firstJoining: joinToken(t, time.Hour), secondJoining: joinToken(t, time.Hour)}
 	applyHosts(t, []string{firstJoining}, map[string]string{firstJoining: tokens[firstJoining]})

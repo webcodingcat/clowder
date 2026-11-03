@@ -14,9 +14,9 @@ import (
 func newStack(g *globals) *cobra.Command {
 	stack := &cobra.Command{
 		Use:   "stack",
-		Short: "The containers, logs and restarts of a stack (apply, get and delete manage stacks)",
+		Short: "The containers, logs, restarts and moves of a stack (apply, get and delete manage stacks)",
 	}
-	stack.AddCommand(newStackPs(g), newStackLogs(g), newStackRestart(g))
+	stack.AddCommand(newStackPs(g), newStackLogs(g), newStackRestart(g), newStackMove(g))
 	return stack
 }
 
@@ -111,6 +111,40 @@ func newStackRestart(g *globals) *cobra.Command {
 				return err
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Stack %s/%s: restarting\n", stack.namespace, stack.name)
+			return err
+		},
+	}
+	selected.register(command, false)
+	return command
+}
+
+func newStackMove(g *globals) *cobra.Command {
+	var selected selectFlags
+	command := &cobra.Command{
+		Use:   "move [<namespace>/]<stack> <host>",
+		Short: "Move a stack to another host",
+		Long: "Moves a stack to another host: its volumes get a copy there first, and once the copies\n" +
+			"are synced and the images pulled, the stack stops on its host and starts on the new one.\n" +
+			"A volume of replicas 0 holds throw-away data: it starts empty on the new host. The move\n" +
+			"starts once the stack fits there; get stacks says why it waits. A move to the host the\n" +
+			"stack runs on takes a request back.",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			stack, err := selected.resolve("stack", args[0])
+			if err != nil {
+				return err
+			}
+			client, _, err := g.connect()
+			if err != nil {
+				return err
+			}
+			request := api.MoveRequest{To: args[1]}
+			if err := client.Act(cmd.Context(), stackPath(stack, "move"), request, &api.Written{}); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(),
+				"Stack %s/%s: asked to move to %s; get stacks shows where it runs, or why it waits\n",
+				stack.namespace, stack.name, args[1])
 			return err
 		},
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -43,7 +44,7 @@ type Node struct {
 func RenderResource(resource Resource) string {
 	resyncRate := resource.ResyncRate
 	if resyncRate == "" {
-		resyncRate = "50M"
+		resyncRate = clusterspec.DefaultResyncRate
 	}
 	lines := []string{
 		"# Written by clowderd; changes are overwritten.",

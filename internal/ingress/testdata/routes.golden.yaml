@@ -3,6 +3,7 @@ http:
     acme-challenge:
       entryPoints:
         - web
+        - internal
       rule: PathPrefix(`/.well-known/acme-challenge/`)
       priority: 1000000
       service: acme-challenge

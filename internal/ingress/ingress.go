@@ -268,12 +268,14 @@ const challengePriority = 1_000_000
 // names never clash. A route whose domain has one of the certificates gets a router on
 // websecure and one on web that redirects to it; without one, only a plain
 // router on web, so nobody sees Traefik's self-signed default certificate.
-// The ACME challenges go to the agent on every host, whatever the domain.
+// The ACME challenges go to the agent on every host, whatever the domain,
+// also on the internal entrypoint: the leader checks a challenge there on
+// the ingress host before the CA asks for it (controller.checkAddress).
 func RenderDynamic(routes []Route, certificates []CertificateFiles) ([]byte, error) {
 	config := dynamicConfig{HTTP: httpConfig{
 		Routers: map[string]router{
 			challengeName: {
-				EntryPoints: []string{"web"}, Rule: "PathPrefix(`" + ChallengePath + "`)",
+				EntryPoints: []string{"web", "internal"}, Rule: "PathPrefix(`" + ChallengePath + "`)",
 				Priority: challengePriority, Service: challengeName,
 			},
 		},

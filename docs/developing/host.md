@@ -60,7 +60,8 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
      supervisor), the leader's, which do nothing while it does not lead, and, once the
      state caught up (`runOnceCaughtUp`), the report, Traefik, the volume reconciler with
      its trim, the forgetting of removed hosts (`forgetPeers`: `storage.ForgetPeer`, then
-     `report-peer-forgotten`), and the stack runner.
+     `report-peer-forgotten`), the prefetcher, the steps of moves (`moveSteps`), and the
+     stack runner.
   6. It tells systemd `READY=1` and feeds the watchdog as long as the state's lock answers.
 
   When it stops, it ends its loops and waits for them, at most `loopsTimeout`: a host tool
@@ -92,6 +93,13 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   initialized ([Cluster state](cluster.md#cluster-state-internalstate), Initialized
   volumes); a plain copy whose LV is gone while the volume holds data, and another device
   at the mount point, are errors for a human.
+  A tiebreaker (`VolumeCopy.Tiebreaker`, `storage.Volume.Diskless`) is the resource alone,
+  never promoted or mounted. The pass tells the state when a copy with a disk becomes
+  synced or stops being so (`set-copy-synced`, from the disk state `Observe` reads; a
+  resource that is down says nothing), keeps what each copy has left to resync
+  (`Progress`, for the leader and `/metrics`), and tells whether a copy is unmounted and
+  secondary as wanted (`Released`, for a move). A stack that stops for a move
+  (`State.StopsForMove`) names no copy here any more, so its copies go secondary.
   The steps of a volume run in a job, a goroutine of their own: mkfs, `mkdir data/`, a
   mount or an unmount write to the volume and hang while DRBD suspends I/O, and they must
   hold up neither the other volumes nor the agent. A volume has one job at a time
@@ -121,6 +129,16 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   agent hands the runner its parts (`stacks.Parts`): where its files are
   (`stacks.Files`), this host, the Raft member, Docker, the volume reconciler, the data key
   and the supervisor.
+  A stack that stops for a move is a leaver here, as if it had left.
+- **The prefetcher** (`stacks.Prefetcher`) pulls the images of the stacks this host may
+  take in a failover or a move, before it needs them (`docker.Client.PullMissing`): those
+  whose volumes with data all have a copy with a disk here, those without such volumes on
+  any host that runs stacks, and the stack that moves here. One pull at a time, in a loop
+  of its own, so a long pull holds up nothing else.
+- **The steps of moves** (`agent/moves.go`, `moveSteps`) record a move's step that this
+  host owns once its loops have done it: on the new host, each copy synced (or the volume
+  never held data) and the images there; on the old host, the stack stopped
+  (`stacks.Files.Stopped`) and each copy released.
 - **A leaver that fails to stop** may still use its volumes, and no other stack may take
   them until it stopped: two databases on one file system would ruin it. Its volumes are
   the LVs in its `volumes.json` beside `compose.yaml`. Before `compose up` the runner adds
@@ -297,6 +315,12 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   --json`; a resource that is down is not listed), the mount table, and whether the
   resource file is current. Markers in the driver's `StateDir` let `Ensure` pick up after a
   crash at any point (`created`: clowder made the LV; `metadata`: DRBD metadata written).
+A tiebreaker (`Volume.Diskless`) has no LV and no metadata: `Ensure` writes
+  its resource file and runs `adjust`, `Remove` takes it down. When a resource's file loses
+  a peer (a copy went), `Ensure` notes the peer first (the marker `<resource>.forget`) and
+  forgets it after the `adjust` (`ForgetPeerOf`), so the next copy finds a free slot in the
+  metadata (`maxPeers`). `Observe` also reads each copy's disk state and how much it
+  differs from its peers (`Observed.Disk`, `OutOfSyncBytes`, the latter only toward the peers it resyncs from).
   `ForgetPeer` forgets a removed host on every resource (`drbdsetup forget-peer`), so
   its node-id can serve a new host. It fails, and the agent tries again, while a resource
   is down or still has the peer configured (its `adjust` takes it out), and for any
@@ -316,7 +340,10 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   so a container whose volume is not mounted fails to start instead of writing to the root
   file system.
 - `Remove` picks up after a crash at any point: a resource without its file is down
-  already, an LV that `lvs` does not find is gone already.
+  already, an LV that `lvs` does not find is gone already. It takes a resource down only once
+  no connected peer is primary (`checkNoPrimaryPeer`): a primary with two copies would
+  lose its quorum and suspend its stack's writes. The primary goes first, or drops the
+  copy from its resource.
 - `PoolUsage` reads a pool's size and use; `Trim` (fstrim) gives the deleted blocks of
   mounted copies back.
 
