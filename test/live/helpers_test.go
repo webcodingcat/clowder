@@ -34,11 +34,19 @@ const commandTimeout = 5 * time.Minute
 
 // outputs are the outputs of examples/hetzner (tofu output -json).
 type outputs struct {
-	PublicAddress  struct{ Value string }         `json:"public_address"`
-	PrivateAddress struct{ Value string }         `json:"private_address"`
-	FloatingIP     struct{ Value string }         `json:"floating_ip"`
-	BootstrapKey   struct{ Value string }         `json:"bootstrap_key"`
-	ClusterYAML    struct{ Value map[string]any } `json:"cluster_yaml"`
+	PublicAddress  struct{ Value string }                `json:"public_address"`
+	PrivateAddress struct{ Value string }                `json:"private_address"`
+	FloatingIP     struct{ Value string }                `json:"floating_ip"`
+	BootstrapKey   struct{ Value string }                `json:"bootstrap_key"`
+	ClusterYAML    struct{ Value map[string]any }        `json:"cluster_yaml"`
+	Hosts          struct{ Value map[string]moduleHost } `json:"hosts"`
+}
+
+// moduleHost is a host as the module's output hosts has it.
+type moduleHost struct {
+	PublicAddress  string `json:"public_address"`
+	PrivateAddress string `json:"private_address"`
+	ServerID       string `json:"server_id"`
 }
 
 func readOutputs(t *testing.T) outputs {
@@ -81,6 +89,20 @@ func (h host) runWithInput(command string, input io.Reader) (string, error) {
 		return trimmed, fmt.Errorf("on the host: %s: %w\n%s", command, err, trimmed)
 	}
 	return trimmed, nil
+}
+
+// setupDone tells whether clowder-setup has finished on the host. While it
+// has not, the error says what the setup does now, its journal's last
+// line, for the log of a long wait (eventually).
+func (h host) setupDone() error {
+	if _, err := h.run("test -e " + setupMarker); err == nil {
+		return nil
+	}
+	last, err := h.run("journalctl -u clowder-setup -n 1 --no-pager -o cat")
+	if err != nil {
+		return fmt.Errorf("the host does not answer yet: %w", err)
+	}
+	return fmt.Errorf("the setup is at: %s", last)
 }
 
 // must runs a shell command on the host and fails the test if it fails.
@@ -256,21 +278,34 @@ func removeStack(t *testing.T, name string) {
 }
 
 // eventually calls check until it succeeds, and fails the test with the last
-// error once the deadline has passed.
+// error once the deadline has passed. While it waits, it says so every
+// progressInterval with the last error, so a long wait (a host's setup)
+// shows in the log as a wait, not as a run that hangs.
 func eventually(t *testing.T, deadline time.Duration, what string, check func() error) {
 	t.Helper()
-	end := time.Now().Add(deadline)
+	start := time.Now()
+	end, nextReport := start.Add(deadline), start.Add(progressInterval)
 	for {
 		err := check()
 		if err == nil {
+			if waited := time.Since(start); waited >= progressInterval {
+				t.Logf("%s after %s", what, waited.Round(time.Second))
+			}
 			return
 		}
 		if time.Now().After(end) {
 			t.Fatalf("%s: not within %s: %v", what, deadline, err)
 		}
+		if time.Now().After(nextReport) {
+			t.Logf("waiting for %s for %s of %s: %v", what, time.Since(start).Round(time.Second), deadline, err)
+			nextReport = time.Now().Add(progressInterval)
+		}
 		time.Sleep(2 * time.Second)
 	}
 }
+
+// progressInterval is how often eventually reports a wait.
+const progressInterval = time.Minute
 
 // listedStack is a stack as clowder get stacks lists it.
 type listedStack struct {

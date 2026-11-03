@@ -3,6 +3,7 @@
 package live
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,9 +32,11 @@ func recoverAccess(t *testing.T, server host) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// whoever saw the code cannot take the user's place with it
+	// whoever saw the code cannot take the user's place with it: the seed
+	// refuses it if its state has the use already, else the leader's state
+	// does (a seed that follows may be a moment behind)
 	if output, err := clowder("user", "recover", "tester", "--code", code); err == nil ||
-		!strings.Contains(output, "the code does not fit") {
+		!strings.Contains(output, "the code does not fit") && !strings.Contains(output, "the code was used already") {
 		t.Errorf("the same code once more: %v\n%s", err, output)
 	}
 	writeCredentials(t, stolen)
@@ -51,10 +54,20 @@ func recoverAccess(t *testing.T, server host) {
 // longer with the old one, and the cluster keeps what it had.
 func rotateRecoveryKey(t *testing.T, server host) {
 	oldKey, newKey := filepath.Join(workDir, "recovery-key"), filepath.Join(workDir, "recovery-key-rotated")
+	// --recovery-out writes no file over another, and the refused rotation
+	// below leaves its key behind: gone before, gone after, so a step run
+	// again starts as the first time
+	refusedKey := filepath.Join(workDir, "recovery-key-refused")
+	for _, leftOver := range []string{refusedKey, newKey} {
+		if err := os.Remove(leftOver); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _ = os.Remove(refusedKey) })
 	// a real code, for another user: the credentials are valid, the code not theirs
 	output, err := clowder("recovery", "rotate", "--code",
 		recoveryCode(t, server, "someone-else", "clowder recovery rotate"),
-		"--recovery-out", filepath.Join(workDir, "recovery-key-refused"))
+		"--recovery-out", refusedKey)
 	if err == nil || !strings.Contains(output, "the code does not fit") {
 		t.Fatalf("recovery rotate with another user's code: %v", err)
 	}

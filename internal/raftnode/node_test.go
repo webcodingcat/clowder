@@ -12,8 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hashicorp/raft"
-
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -108,8 +106,8 @@ func command(t *testing.T, kind string, payload any) state.Command {
 
 func bootstrapCommand(t *testing.T) state.Command {
 	return command(t, state.KindBootstrap, state.Bootstrap{
-		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
-		JoinKey: state.SealedSecret{Value: state.Sealed("join"), Digest: "d"},
+		Keys:         state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
+		BootstrapKey: state.Sealed("join"),
 		Host: state.Host{
 			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
 			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
@@ -277,9 +275,7 @@ func TestThreeHostsReplicateOverMutualTLS(t *testing.T) {
 	}
 	waitForLeader(t, nodes[0])
 	for id := 1; id < 3; id++ {
-		// join comes with phase 2; until then the test adds the voters itself
-		add := nodes[0].raft.AddVoter(serverID(state.HostID(id)), raft.ServerAddress(addresses[id]), 0, proposeTimeout)
-		if err := add.Error(); err != nil {
+		if err := nodes[0].AddVoter(state.HostID(id), addresses[id]); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -54,7 +54,8 @@ func (c *Client) Post(ctx context.Context, path string, in any) (Written, error)
 }
 
 // Act posts in (nil for none) to path and reads the answer into out: an
-// action that writes nothing to the state, such as a test alert.
+// action whose answer is more than the index of a write, such as a test
+// alert or a join token.
 func (c *Client) Act(ctx context.Context, path string, in, out any) error {
 	var body []byte
 	if in != nil {

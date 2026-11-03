@@ -125,12 +125,11 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 				{Type: "discord"},
 				{Type: "pager"},
 				{Type: "webhook", MinSeverity: "loud"},
-				{Type: "email", SMTP: &SMTP{}, From: "clowder@example.com", To: []string{"ops@example.com"}},
+				{Type: "email", SMTP: &SMTP{Password: "the-key"}, From: "clowder@example.com", To: []string{"ops@example.com"}},
 			},
 			Heartbeat: &Heartbeat{Interval: "often"},
 		},
 		ACME:       ACME{Directory: "acme.example.com", Email: "ops", CA: "../ca.pem", RenewBefore: "soon"},
-		JoinKeys:   []SecretRef{"join_keys[0]", "the-key"},
 		Registries: map[string]Registry{"ghcr.io": {}},
 	}
 	want := []string{
@@ -143,7 +142,7 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 		"webhook: a value tagged !secret", "type is not discord", `min_severity "loud"`, "url: a value tagged !secret",
 		"heartbeat.url", `interval "often"`,
 		"smtp needs host and port", `registries["ghcr.io"].username`, `registries["ghcr.io"].password`,
-		`join_keys[1] names the secret "the-key"`,
+		`alerts.channels[3].smtp.password names the secret "the-key"`,
 	}
 	problems := Check(config)
 	text := problems.Error()

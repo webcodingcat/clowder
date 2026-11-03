@@ -190,7 +190,7 @@ func (s *Server) applyCluster(w http.ResponseWriter, r *http.Request) {
 // SealClusterSecret seals a value of cluster.yaml for the state, with its
 // digest: an HMAC over its name and value with a key derived from the data
 // key, so a diff tells a changed value from one encrypted anew without
-// showing it. init seals its bootstrap key this way too.
+// showing it.
 func SealClusterSecret(keys Keys, name string, value []byte) (state.SealedSecret, error) {
 	sealed, err := keys.Seal(value)
 	if err != nil {

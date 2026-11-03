@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,10 +14,25 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// fakeHoster routes the Floating IP where it is told.
+// fakeHoster routes the Floating IP where it is told; its servers 41 and
+// 42 have the underlays of withServers' hosts, unless servers says else.
 type fakeHoster struct {
 	target  string
 	assigns []string
+	servers map[string][]netip.Addr
+}
+
+func (f *fakeHoster) ServerAddresses(_ context.Context, serverRef string) ([]netip.Addr, error) {
+	if f.servers != nil {
+		return f.servers[serverRef], nil
+	}
+	switch serverRef {
+	case "41":
+		return []netip.Addr{netip.MustParseAddr("10.0.0.3")}, nil
+	case "42":
+		return []netip.Addr{netip.MustParseAddr("10.0.0.4")}, nil
+	}
+	return nil, nil
 }
 
 func (f *fakeHoster) FloatingIPTarget(context.Context, netip.Addr) (string, error) {
@@ -70,6 +86,9 @@ func TestTheFloatingIPGoesToTheIngressHostAndStays(t *testing.T) {
 		if current.Ingress == nil || *current.Ingress != 1 {
 			t.Errorf("ingress %v, want host 1 (the lowest ID with a server ref)", current.Ingress)
 		}
+		if !current.Hosts[1].ServerRefChecked {
+			t.Error("host 1's server ref was not checked first")
+		}
 	})
 	if len(fake.assigns) != 1 || fake.assigns[0] != "41" {
 		t.Errorf("assigns %v", fake.assigns)
@@ -85,6 +104,27 @@ func TestTheFloatingIPGoesToTheIngressHostAndStays(t *testing.T) {
 	if len(fake.assigns) != 2 || fake.assigns[1] != "41" {
 		t.Errorf("not moved back: %v", fake.assigns)
 	}
+}
+
+func TestTheFloatingIPGoesToNoServerOfAnotherHost(t *testing.T) {
+	l := newLeader(t, 100<<30)
+	withServers(l)
+	// server 41 has another private address: host 1 named a stranger
+	fake := &fakeHoster{servers: map[string][]netip.Addr{"41": {netip.MustParseAddr("10.0.0.99")}}}
+	open := func(sealed state.Sealed) ([]byte, error) { return sealed, nil }
+	connect := func(clusterspec.Hoster, string) (hoster.Hoster, error) { return fake, nil }
+	asked, err := holdFloatingIP(context.Background(), l, l.propose, open, connect, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if !asked || err == nil || !strings.Contains(err.Error(), "not the host's 10.0.0.3: it is another server") {
+		t.Errorf("asked %v, %v", asked, err)
+	}
+	if len(fake.assigns) != 0 {
+		t.Errorf("assigned to %v", fake.assigns)
+	}
+	l.Read(func(current *state.State) {
+		if current.Ingress != nil || current.Hosts[1].ServerRefChecked {
+			t.Errorf("ingress %v, host 1 %+v", current.Ingress, current.Hosts[1])
+		}
+	})
 }
 
 func TestTheIngressHostIsKeptThenPreferredThenTheLowestID(t *testing.T) {
@@ -117,5 +157,12 @@ func TestTheIngressHostIsKeptThenPreferredThenTheLowestID(t *testing.T) {
 	}
 	if _, ok := ingressHost(&state.State{Hosts: map[state.HostID]*state.Host{0: hosts[0], 3: hosts[3]}}); ok {
 		t.Error("a host without a server ref or not active was chosen")
+	}
+	// a checked host goes before a recorded one the hoster never confirmed
+	checked := host(2, "node2", "42", state.Active)
+	checked.ServerRefChecked = true
+	current := &state.State{Hosts: map[state.HostID]*state.Host{1: hosts[1], 2: checked}, Ingress: recorded(1)}
+	if got, ok := ingressHost(current); !ok || got.ID != 2 {
+		t.Errorf("with a checked host: got %v", got)
 	}
 }

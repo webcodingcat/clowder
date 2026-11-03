@@ -41,8 +41,8 @@ const prometheusImage = "prom/prometheus:v3.5.0"
 const heartbeatInterval = 10 * time.Second
 
 // alertsReachTheChannels sets up the three channels and the heartbeat: a
-// test alert reaches each, the heartbeat stops while the agent is stopped,
-// and a pool that fills raises its alert and the all-clear.
+// test alert reaches each, the heartbeat goes on while the first host's
+// agent is stopped, and a pool that fills raises its alert and the all-clear.
 func alertsReachTheChannels(t *testing.T, server host) {
 	received := startReceiver(t)
 	caCert, err := os.ReadFile(filepath.Join(workDir, registryCAFile))
@@ -103,8 +103,10 @@ func mailSubjects(t *testing.T) string {
 	return strings.Join(subjects, "\n")
 }
 
-// heartbeat: the leader calls the heartbeat every 10 s; with the agent
-// stopped the calls stop, started again they come back.
+// heartbeat: the leader calls the heartbeat every 10 s. With the first
+// host's agent stopped, the cluster goes on: another host leads, if the
+// first did, and calls on; started again, the first host's agent changes
+// nothing about that.
 func heartbeat(t *testing.T, server host, received *receiver) {
 	eventually(t, time.Minute, "the heartbeat comes", func() error {
 		if calls := len(received.got("/heartbeat")); calls < 2 {
@@ -117,14 +119,16 @@ func heartbeat(t *testing.T, server host, received *receiver) {
 	// the diagnosis
 	t.Cleanup(func() { _, _ = server.run("systemctl start clowderd") })
 	stopped := len(received.got("/heartbeat"))
-	time.Sleep(4 * heartbeatInterval) // four calls missed if it went on
-	// one call may have been on its way
-	if calls := len(received.got("/heartbeat")); calls > stopped+1 {
-		t.Errorf("%d heartbeats while the agent was stopped", calls-stopped)
-	}
+	// one call may have been on its way: two more come from the others
+	eventually(t, 2*time.Minute, "the heartbeat from the other hosts", func() error {
+		if calls := len(received.got("/heartbeat")); calls < stopped+3 {
+			return fmt.Errorf("%d calls since the stop", calls-stopped)
+		}
+		return nil
+	})
 	server.must(t, "systemctl start clowderd")
 	again := len(received.got("/heartbeat"))
-	eventually(t, 2*time.Minute, "the heartbeat comes back", func() error {
+	eventually(t, 2*time.Minute, "the heartbeat after the start", func() error {
 		if calls := len(received.got("/heartbeat")); calls <= again {
 			return fmt.Errorf("no call since the start")
 		}

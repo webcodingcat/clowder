@@ -26,16 +26,18 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | Who | Commands |
   |---|---|
   | `clowderd init` | `bootstrap` |
-  | the user | `apply-config`, `add-user` (the bootstrap's user), `recover-user` and `set-recovery-recipient` (with a code from a host), `set-host-phase` (host actions), `put-resource` and `delete-resource` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack` |
+  | the user | `apply-config`, `add-user` (the bootstrap's user), `recover-user` and `set-recovery-recipient` (with a code from a host), `set-host-phase` (host actions), `add-join-token`, `put-resource` and `delete-resource` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack` |
+  | the leader, for a joining host | `add-host` |
+  | the members loop | `set-host-phase` (joining, passive, active), `set-host-voter` |
   | the placement, the stack's host | `put-volume`, `set-stack-status`, `set-stack-wait-reason`, `set-pushed-out` |
-  | the Floating IP's loop | `set-ingress` |
+  | the Floating IP's loop | `confirm-server-ref`, `set-ingress` |
   | the ACME loop | `put-acme-account`, `put-acme-challenge`, `delete-acme-challenge`, `put-certificate`, `delete-certificate` |
   | the alerts | `put-alert`, `resolve-alert` |
-  | each agent | `report-host`, `forget-copy`, `set-volume-initialized` |
+  | each agent | `report-host`, `forget-copy`, `set-volume-initialized`, `report-peer-forgotten` |
   | nothing yet | `start-operation`, `advance-operation`, `finish-operation` |
 
-  Every kind has a sender: a kind comes with the phase that sends it (hosts that join,
-  failover and backups later), not before. The operations are the one exception: the
+  Every kind has a sender: a kind comes with the phase that sends it (failover and
+  backups later), not before. The operations are the one exception: the
   state holds and checks them, and their locks guard stacks, volumes and hosts, before
   moving a stack and fencing a host (phase 2) start the first ones.
 - **Resources** (phase 1c): namespaces (`Namespaces`), and by `<namespace>/<name>` stacks
@@ -164,17 +166,28 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   any phase ─L→ removed
   ```
 
-  In words: a new host joins as `joining`; the leader makes it `passive` (waiting) or
-  `active` (running stacks), and drains it for maintenance and back. A host that stops
-  answering is `failed`; it comes back `active` by itself, or the leader powers it off
-  (`fenced`) before its stacks start elsewhere. A fenced host that is back recovers
-  (`recovering`, then `active`); one that fails again and again is `disabled` until a user
-  enables it. Any host can be `removed`, except the last that runs stacks (`active` or
-  `draining`); the CLI asks first. Until phase 2, with no hosts that join and no
-  failover, a host is only ever `active`, `draining` or `removed`, and a drain only keeps
-  new stacks off the host: nothing moves a running stack yet. While an operation holds
-  `host/<id>` (fencing, drain, remove), only it moves the host, and the host's own
-  reports of a phase are refused too.
+  In words: a new host joins as `joining` (`add-host`); the members loop makes it
+  `passive` (waiting) or `active` (running stacks), and a user drains it for maintenance
+  and back. A host that stops answering is `failed`; it comes back `active` by itself, or
+  the leader powers it off (`fenced`) before its stacks start elsewhere. A fenced host
+  that is back recovers (`recovering`, then `active`); one that fails again and again is
+  `disabled` until a user enables it. Until failover comes, a host never reaches
+  `failed` and the phases after it, and a drain only keeps new stacks off the host:
+  nothing moves a running stack yet. While an operation holds `host/<id>` (fencing,
+  drain, remove), only it moves the host, and the host's own reports of a phase are
+  refused too.
+
+  **Removing** (`checkRemoval`; the CLI asks first) refuses the last host that runs stacks
+  (`active` or `draining`), and a host that runs stacks while a stack or a volume copy is
+  on it. Once `MinHAHosts` hosts ran stacks, the state is `HA` for good, and no removal may
+  leave fewer than three that run stacks: a replacement joins first. A removed host's
+  certificate is revoked, and every other host forgets it as a DRBD peer and reports it
+  (`report-peer-forgotten`); `Forgetting` holds who has not yet. Only then is its ID free
+  for a host that joins (`HostIDFree`), as DRBD's node-id is the host ID and a peer's slot
+  in the metadata outlives the host. A host that is down reports nothing, so the ID waits
+  for it; once it is removed too, nobody waits for it any more. The removal does not take
+  the data key away: a removed host that kept its disk keeps the CA's key and the
+  secrets (roadmap, Known gaps).
 
 - **Versions.** Every agent must apply every entry of the log, or the states drift apart
   for good (a `revoke` left out, and a certificate goes on working there). So:
@@ -210,7 +223,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   user, valid names (`internal/names`), volumes with 0 to 3 replicas and a DRBD minor
   exactly when replicated (a pending volume has neither copy nor minor), one copy per host,
   one stack per volume, nothing deleted that a stack names, a removed host's certificate
-  revoked.
+  revoked, no name, underlay, server ref or certificate of a host twice among the hosts
+  that are not removed (`CheckJoiningHost`), and every joined host's server ref checked
+  with the hoster.
 - **Revocations.** `Revoked` holds each revoked certificate with when it expires, which the
   state knows from the command that recorded the certificate (`AddUser`, `RecoverUser`,
   the host's `CertificateNotAfter`); `revoke` puts it there. The list grows only there, so
@@ -221,11 +236,17 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   clear. Those of `cluster.yaml` are `ClusterSecrets`, by name (`clusterspec.SecretPlaces`),
   each with a digest; the namespaces' are `Secrets`. Readers find a value through the
   spec, never by taking a name apart: `ClusterSecret(config.Hoster.Token)`,
-  `ValidJoinKeys`, `RegistryLogins` (the user from the spec, the password sealed). Until the
-  first `apply-config` the config is revision 0 and names only init's bootstrap key
-  (`FirstJoinKey`); the loops that need a hoster or a Floating IP find none and wait. A
-  stack names at most `MaxStackSecrets`. Who can read a secret: API,
-  below.
+  `RegistryLogins` (the user from the spec, the password sealed). Until the first
+  `apply-config` the config is revision 0 with an empty spec; the loops that need a hoster
+  or a Floating IP find none and wait. init's bootstrap key is `BootstrapKey`, sealed,
+  until `add-user` drops it. A stack names at most `MaxStackSecrets`. Who can read a
+  secret: API, below.
+- **Join tokens** (`internal/jointoken`): an ID and a 256-bit secret. `add-join-token`
+  keeps only the secret's hash under the ID, with when it expires: the command's `At` plus
+  its TTL (`MinJoinTokenTTL` to `MaxJoinTokenTTL`, at most `MaxJoinTokens` open).
+  `add-host` checks the token against its own `At` (`CheckJoinToken`) and deletes it in
+  the same command, so a token opens once; `dropExpiredTokens` drops the expired ones a
+  while after (`joinTokenKept`), so a late join hears that its token expired.
 - `Copy` gives a deep copy without the audit, for work too slow for the state's lock (the
   placement weighs every stack) or that keeps parts of the state (the agent's stacks). The
   loops do not copy themselves: `raftnode.Node.SharedCopy` makes one copy per change, which
@@ -242,8 +263,11 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - Keys are Ed25519 and never leave the machine that made them: the CA signs public keys.
 - Certificates end by revocation, not expiry: hosts may stay off for months. `Verify` takes
   the revoked serials from the state, which keeps each until a while after it expired.
-- `TrustProof` (HMAC-SHA256 with the bootstrap key over the CA certificate) is how a CLI or a
-  joining host trusts the CA on first contact.
+- `TrustProof` (HMAC-SHA256 over the CA certificate) is how a CLI or a joining host trusts
+  the CA on first contact: with the bootstrap key, a recovery code, or a join token's hash
+  (`jointoken.ProofKey`). A bootstrap key a user chose has at least
+  `MinBootstrapKeyLength` characters, as the offer lets anyone try keys offline until the
+  bootstrap.
 - `tls_test.go` puts both TLS configs before every peer they must refuse: none, a user, a
   host of another CA, a stranger showing a host's certificate behind its own, a revoked, an
   expired and a not yet valid host; and runs handshakes on 127.0.0.1.
@@ -263,7 +287,30 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   changes it in place. `WaitIndex` lets a read follow a write made through another member.
   `Changes` answers the watch from the member's ring of changes (API, The watch).
 - `Bootstrap` makes the first host a cluster of its own; on a member with a log it does
-  nothing. Adding members comes with the join (phase 2).
+  nothing. The leader changes the members one at a time (`members.go`: `AddNonvoter`,
+  `AddVoter`, `DemoteVoter`, `RemoveMember`, `TransferLeadership`), from the members loop
+  (`controller/members.go`). Each pass makes one change, in this order
+  (`nextMemberStep`):
+  1. A leader that is removed hands its lead over. The API does that before it commits
+     the removal (`handOverLeadOf`), as the removal revokes the leader's certificate. A
+     removal the state then refuses has moved the lead for nothing, which does no harm.
+     The loop is the fallback for a removal the API did not see coming: the others take
+     no new connection of a revoked leader, but Raft's open ones go on, and so would its
+     lead.
+  2. Every host that is not removed is a member; a joining host joins as a non-voter. A
+     joining or passive host that votes loses its vote: one that took the ID of a
+     removed host before that left Raft finds the old host's vote.
+  3. A joining host whose agent reported (`report-host`) becomes `passive` while it is
+     the second host of a cluster that is not `HA` yet, else `active`. A passive host
+     becomes active once there are three.
+  4. Of the active and draining hosts, 1, 3 or 5 vote (`voterCount`): those that voted
+     already, then the lowest IDs. The leader keeps its own vote.
+  5. A removed host leaves Raft, after step 4 gave its vote to another.
+  6. `set-host-voter` mirrors each host's vote in the state, which shows it.
+
+  Raft changes its members one by one, so the third host's join passes through seconds
+  with two voters, in which the loss of either stops the cluster until it is back. The
+  leader takes one join at a time (`joiner.mu`), so two hosts never get the same ID.
 - The data key is an age identity in a file only root reads. `Seal` and `Open` turn secrets
   into `state.Sealed` and back; joining hosts get the key with their join answer.
 - The tests run real members on 127.0.0.1: a restart from disk, three hosts over mTLS,
@@ -459,9 +506,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   or is meant for another place shows as `error:` with the reason, and the command fails
   after printing every line.
 - **The user** has no certificate yet (`cluster bootstrap`). `GET /v1/bootstrap` gives
-  the CA certificate with a `pki.TrustProof` for each valid bootstrap key, and the CLI trusts
-  the CA only if one matches its key (`api.FindCluster`). The offer also says whether the
-  cluster has a user already (`bootstrapped`): then the CLI stops before it makes a
+  the CA certificate with a `pki.TrustProof` made with the bootstrap key, and the CLI
+  trusts the CA only if it matches its key (`api.FindCluster`). The offer also says
+  whether the cluster has a user already (`bootstrapped`): then it has no proof, as the
+  key opens nothing any more, and the CLI stops (`api.ErrBootstrapped`) before it makes a
   recovery key, so nobody holds two and does not know which counts. Else it makes the
   recovery key and hands it over: shown once with its last 8 characters typed back, or
   into a new file (`--recovery-out`, for scripts); nothing has reached the cluster yet.
@@ -471,8 +519,35 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   works once: a cluster has one user, and further certificates come only through
   `user recover`. The CLI then writes the
   credentials (`clusterdir.WriteCredentials`), checks that the cluster's recovery
-  recipient is the key it made, and writes `cluster.yaml` with the bootstrap key encrypted
-  (`clusterdir.Create`).
+  recipient is the key it made, and writes `cluster.yaml` to fill in (`clusterdir.Create`).
+- **A host joins** with a token a user made (`clowder host join-token`, `api/join.go`,
+  `agent/join.go`). `GET /v1/join?token=<id>` gives the CA certificate with a
+  `pki.TrustProof` made with the token's hash while the token is open, and the host trusts
+  the CA only if it matches its token (`api.FindClusterByToken`). `POST /v1/join`, over TLS
+  checked against that CA, carries the token itself, the host's name, addresses, server
+  ref and public keys (its own key and WireGuard's; the private halves stay on the host),
+  a nonce and the time. Any agent takes it and hands it to the leader
+  (`/v1/internal/join`); the joining host waits longer for the answer than the leader
+  may take (`joinClientTimeout`). The leader (`agent.joiner`) takes a request only for
+  `joinMaxAge`, and each once while it leads (a nonce in its memory): little more than
+  insurance, as only the cluster's agents see a request, over TLS, and whoever saw one
+  saw its token. It compares the token's hash, needs the applied `cluster.yaml`, chooses the
+  lowest free ID, issues the host's certificate, checks the host against the state
+  (`CheckJoiningHost`), that the request comes from the host's underlay or public address
+  (`JoinRequest.Source`, which the agent that took it sets from the connection), and
+  its server with the hoster (`hoster.CheckServerRef`: the server has the host's
+  addresses), and commits `add-host`. The hoster vouches for addresses, the source for
+  the host that has them: without it, whoever holds a token could name another server
+  of the project, which fencing would later power off. A refusal
+  says why: only the holder of an open token's secret gets that far, and the token stays
+  open for another try. The answer carries the certificate, the data key and the other
+  hosts, for the host's first WireGuard interfaces (A host, Join).
+- **The server ref** decides which server fencing powers off and where the Floating IP
+  goes, and the hoster's token may act on every server of its project. A joined host's
+  is checked as it joins; the first host's, which init takes from the metadata service,
+  the Floating IP's loop checks once `cluster.yaml` brings the hoster's token
+  (`confirm-server-ref`). Only a host with a checked one holds the Floating IP
+  (`set-ingress`).
 - **A code from a host** gives access back (`internal/recoverycode`, `api/recover.go`): root
   on a host runs `clowderd user recovery-code <user>`, which reads only the data key, so it
   works while the agent is down. A code is the first 80 bits of an HMAC over its use

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -19,6 +20,8 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/agent/agenttest"
+	"github.com/webcodingcat/clowder/internal/api"
+	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/cli"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
@@ -42,11 +45,23 @@ func freePort(t *testing.T) int {
 }
 
 // fakeHoster is the hoster's API: it remembers where the Floating IP goes
-// and with which token it was asked.
+// and with which token it was asked, and knows the private addresses of
+// its servers.
 type fakeHoster struct {
-	mu     sync.Mutex
-	token  string
-	target string
+	mu      sync.Mutex
+	token   string
+	target  string
+	servers map[string][]netip.Addr
+}
+
+func (f *fakeHoster) ServerAddresses(_ context.Context, serverRef string) ([]netip.Addr, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	addresses, ok := f.servers[serverRef]
+	if !ok {
+		return nil, fmt.Errorf("no server %s", serverRef)
+	}
+	return addresses, nil
 }
 
 func (f *fakeHoster) connect(_ clusterspec.Hoster, token string) (hoster.Hoster, error) {
@@ -85,12 +100,12 @@ func (f *fakeHoster) waitForTarget(t *testing.T, serverRef, token string) {
 	t.Errorf("the Floating IP is not on server %s with token %q", serverRef, token)
 }
 
-// fakeNetwork stands in for the host's network and remembers the rules. The
-// agent's tests run one host, whose mesh has no peers, so ApplyMesh does
-// nothing; network's tests cover the mesh.
+// fakeNetwork stands in for the host's network and remembers the rules and
+// the meshes; network's tests cover what applying them does.
 type fakeNetwork struct {
 	mu       sync.Mutex
 	rulesets []network.Ruleset
+	meshes   []network.Mesh
 	// interfaceFails and resolverFails make the interface and the resolver
 	// fail to start
 	interfaceFails, resolverFails bool
@@ -112,7 +127,12 @@ func (f *fakeNetwork) ApplyRules(_ context.Context, ruleset network.Ruleset) err
 	return nil
 }
 
-func (f *fakeNetwork) ApplyMesh(context.Context, network.Mesh) error { return nil }
+func (f *fakeNetwork) ApplyMesh(_ context.Context, mesh network.Mesh) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.meshes = append(f.meshes, mesh)
+	return nil
+}
 
 func (f *fakeNetwork) StartResolver() (io.Closer, error) {
 	if f.resolverFails {
@@ -233,7 +253,7 @@ func initTestHost(t *testing.T) (files Files, raftPort, apiPort int) {
 	files = Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}
 	raftPort, apiPort = freePort(t), freePort(t)
 	err := Init(context.Background(), files, InitOptions{
-		BootstrapKey: "the-bootstrap-key", Name: "node0", Underlay: loopback, PublicAddress: netip.MustParseAddr("127.0.0.2"),
+		BootstrapKey: testBootstrapKey, Name: "node0", Underlay: loopback, PublicAddress: netip.MustParseAddr("127.0.0.2"),
 		ServerRef: "1000001", NodeAddress: loopback, RaftPort: raftPort, APIPort: apiPort,
 	}, &fakeNetwork{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
@@ -329,14 +349,14 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	// the public address is another loopback address, as a host's public
 	// address is another than its underlay; users reach the API there
 	err := Init(context.Background(), files, InitOptions{
-		BootstrapKey: "the-bootstrap-key", Name: "node0", Underlay: loopback,
+		BootstrapKey: testBootstrapKey, Name: "node0", Underlay: loopback,
 		PublicAddress: netip.MustParseAddr("127.0.0.2"), ServerRef: "1000001",
 		NodeAddress: loopback, RaftPort: freePort(t), APIPort: apiPort,
 	}, hostNetwork, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Init(context.Background(), files, InitOptions{BootstrapKey: "k", Name: "node0", Underlay: loopback},
+	if err := Init(context.Background(), files, InitOptions{BootstrapKey: testBootstrapKey, Name: "node0", Underlay: loopback},
 		hostNetwork, logger); err == nil || !strings.Contains(err.Error(), "was part of a cluster") {
 		t.Errorf("a second init: %v", err)
 	}
@@ -354,7 +374,7 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	stopped := make(chan error, 1)
 	hostStorage := &agenttest.Storage{Dir: t.TempDir()}
 	hostDocker := &agenttest.Docker{}
-	hostHoster := &fakeHoster{}
+	hostHoster := &fakeHoster{servers: map[string][]netip.Addr{"1000001": {loopback, netip.MustParseAddr("127.0.0.2")}}}
 	parts := HostParts{Network: hostNetwork, Storage: hostStorage, Docker: hostDocker, Hoster: hostHoster.connect}
 	go func() { stopped <- Run(ctx, files, parts, logger) }()
 	defer func() {
@@ -386,11 +406,11 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 		return err
 	}
 
-	if err := bootstrap("alice", "test", dir, keyFile(t, "a-guess"), "--recovery-out", recoveryFile); err == nil ||
+	if err := bootstrap("alice", "test", dir, keyFile(t, "a-guess-that-is-long-enough-to-be-tried"), "--recovery-out", recoveryFile); err == nil ||
 		!strings.Contains(err.Error(), "cannot prove it knows the bootstrap key") {
 		t.Errorf("a wrong bootstrap key: %v", err)
 	}
-	theKey := keyFile(t, "the-bootstrap-key\n")
+	theKey := keyFile(t, testBootstrapKey+"\n")
 	if err := bootstrap("alice", "test", dir, theKey); err == nil || !strings.Contains(err.Error(), "--recovery-out") {
 		t.Errorf("no terminal and no --recovery-out: %v", err)
 	}
@@ -413,12 +433,17 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 		t.Error("a second bootstrap made a recovery key")
 	}
 
-	// cluster.yaml as the bootstrap wrote it, the bootstrap key encrypted
+	// cluster.yaml as the bootstrap wrote it, without the bootstrap key,
+	// which opens nothing any more: not even a proof of the CA
 	config := filepath.Join(dir, clusterdir.ConfigFile)
 	written, err := os.ReadFile(config)
-	if err != nil || !strings.Contains(string(written), "join_keys:\n  - !secret |\n") ||
-		strings.Contains(string(written), "the-bootstrap-key") {
+	if err != nil || !strings.Contains(string(written), "name: test\n") ||
+		strings.Contains(string(written), testBootstrapKey) || strings.Contains(string(written), "BEGIN AGE") {
 		t.Fatalf("cluster.yaml: %q, %v", written, err)
+	}
+	offer, err := api.FindCluster(context.Background(), seed, []byte(testBootstrapKey), buildinfo.Version)
+	if !errors.Is(err, api.ErrBootstrapped) || offer != nil {
+		t.Errorf("the bootstrap key after the bootstrap: %v, %v", offer, err)
 	}
 	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err == nil || !strings.Contains(err.Error(), "hoster") {
 		t.Errorf("diff of the unfinished cluster.yaml: %q, %v", out, err)

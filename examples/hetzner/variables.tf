@@ -1,12 +1,30 @@
 variable "name" {
   type        = string
-  description = "Name of the host; also the prefix of the other resources."
+  description = "Name of the first host; also the prefix of the other resources."
   default     = "clowder0"
   validation {
     # it also goes into setup.sh's settings, quoted for the shell
-    condition     = can(regex("^[a-z][a-z0-9-]*$", var.name))
-    error_message = "The name is lowercase letters, digits and -."
+    condition     = can(regex("^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.name))
+    error_message = "The name is lowercase letters, digits and -, at most 63, starting with a letter and not ending with -."
   }
+}
+
+variable "hosts" {
+  type        = list(string)
+  description = "Names of the hosts that join the first one, each with a token in join_tokens."
+  default     = []
+  validation {
+    # clowder takes a host's name as a DNS label, as it does the first's
+    condition     = alltrue([for host in var.hosts : can(regex("^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", host))]) && length(distinct(var.hosts)) == length(var.hosts)
+    error_message = "Each host's name is lowercase letters, digits and -, at most 63, starting with a letter and not ending with -, and once."
+  }
+}
+
+variable "join_tokens" {
+  type        = map(string)
+  description = "A join token (clowder host join-token) per host of hosts that has not joined yet. It opens once and expires: a host made later needs a new one; for one that joined, the token may go."
+  default     = {}
+  sensitive   = true
 }
 
 variable "ssh_public_key" {

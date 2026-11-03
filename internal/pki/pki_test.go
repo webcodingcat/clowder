@@ -4,6 +4,8 @@ import (
 	"crypto/ed25519"
 	"crypto/x509"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -139,6 +141,24 @@ func TestTheCASurvivesPEM(t *testing.T) {
 	}
 	if _, err := LoadCA(ca.CertificatePEM(), otherKeyPEM); err == nil {
 		t.Error("a CA with a foreign key loaded")
+	}
+}
+
+func TestABootstrapKeyHasAMinimumLength(t *testing.T) {
+	dir := t.TempDir()
+	short := filepath.Join(dir, "short")
+	long := filepath.Join(dir, "long")
+	if err := os.WriteFile(short, []byte(strings.Repeat("k", MinBootstrapKeyLength-1)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(long, []byte(strings.Repeat("k", MinBootstrapKeyLength)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadBootstrapKey(short); err == nil || !strings.Contains(err.Error(), "fewer than") {
+		t.Errorf("a short key: %v", err)
+	}
+	if key, err := ReadBootstrapKey(long); err != nil || len(key) != MinBootstrapKeyLength {
+		t.Errorf("a long enough key: %q, %v", key, err)
 	}
 }
 

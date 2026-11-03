@@ -83,8 +83,9 @@ func pushOut(t *testing.T, server host) {
 		t.Fatal(err)
 	}
 	const mib = 1 << 20
-	free := int64(metricValue(t, server, "clowder_host_offered_memory_bytes") -
-		metricValue(t, server, "clowder_host_reserved_memory_bytes"))
+	// the stacks run on the first host (the others are drained)
+	free := int64(clusterMetric(t, server, "clowder_host_offered_memory_bytes", "clowder0") -
+		clusterMetric(t, server, "clowder_host_reserved_memory_bytes", "clowder0"))
 	reserve := (defaultReserve + free - 100*mib) / mib
 	t.Logf("free %d MiB; system_reserve %dM", free/mib, reserve)
 	changeConfig(t, func(config *clusterspec.Config) { config.SystemReserve.Memory = fmt.Sprintf("%dM", reserve) })

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"errors"
 	"io"
 	"log"
 	"log/slog"
@@ -72,6 +73,7 @@ func (h *oneHost) Read(use func(current *state.State)) {
 func (h *oneHost) WaitIndex(context.Context, uint64) error { return nil }
 func (h *oneHost) IsLeader() bool                          { return true }
 func (h *oneHost) Leader() (state.HostID, bool)            { return 0, true }
+func (h *oneHost) TransferLeadership() error               { return errors.New("one host has no other voter") }
 
 // recoveryKeyFile is where startCluster puts the cluster's recovery key, in
 // the test's home.
@@ -105,8 +107,8 @@ func startCluster(t *testing.T) string {
 
 	current := &state.State{}
 	cmd, err := state.NewCommand(state.KindBootstrap, time.Now(), state.LeaderActor, state.Bootstrap{
-		Keys:    state.ClusterKeys{CACertificate: ca.CertificatePEM(), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
-		JoinKey: state.SealedSecret{Value: state.Sealed("join"), Digest: "d"},
+		Keys:         state.ClusterKeys{CACertificate: ca.CertificatePEM(), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
+		BootstrapKey: state.Sealed("join"),
 		Host: state.Host{
 			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
 			CertificateNotAfter: time.Now().AddDate(1, 0, 0),

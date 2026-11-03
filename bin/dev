@@ -14,11 +14,12 @@
 #   package   build, then the Debian packages of clowder and clowderd into dist/
 #   all       lint, test, test-tools, package (what CI runs)
 #   live      the live tests in an HLab lab of their own: live up, live run,
-#             and live down once they pass (about 20 minutes; needs
+#             and live down once they pass (about an hour; needs
 #             HLAB=<path to HLab's bin/hlab> and /dev/kvm). What a failed run
 #             leaves stays for a look.
-#   live up [<tag>]  package, start the lab unless it runs, make a host with
-#             examples/hetzner and bootstrap its cluster (test/live: TestSetup).
+#   live up [<tag>]  package, start the lab unless it runs, make the first host
+#             with examples/hetzner, bootstrap its cluster and have two more
+#             hosts join (test/live: TestSetup).
 #             With a tag, on a checkout of it, the release without the test
 #             hook: the host installs clowderd from the APT repository, the CLI
 #             comes from the GitHub release
@@ -372,8 +373,9 @@ fetch_release_cli() {
   echo "clowderd_version = \"$(package_version "${tag}")\""
 }
 
-# cmd_live_up [<tag>]: Make a host in the lab, started unless it runs, and
-# bootstrap its cluster (TestSetup); the registry and the mail server run on
+# cmd_live_up [<tag>]: Make the first host in the lab, started unless it runs;
+# TestSetup bootstraps its cluster and has two more hosts join, with
+# OpenTofu copied to /work/bin. The registry and the mail server run on
 # until bin/dev live down. With a tag, on that release instead of dist/; the
 # tests come from the checkout, so it must be at the tag.
 cmd_live_up() {
@@ -415,8 +417,10 @@ ${package_variables}
 EOF
   start_registry
   start_mail
+  # the tests run OpenTofu themselves for the hosts that join (test/live: tofu)
   if ! live_tofu 'tofu apply -input=false -auto-approve -state=/work/terraform.tfstate \
-    -var-file=/work/live.tfvars && tofu output -json -state=/work/terraform.tfstate >/work/outputs.json' \
+    -var-file=/work/live.tfvars && tofu output -json -state=/work/terraform.tfstate >/work/outputs.json \
+    && mkdir -p /work/bin && cp /usr/local/bin/tofu /work/bin/tofu' \
     || ! live_go_test -run '^TestSetup$'; then
     live_failed "bin/dev live down, then up, makes it anew"
   fi
@@ -479,8 +483,9 @@ cmd_live_down() {
   live_lab
   docker rm -f "${LIVE_PACKAGES}" "${LIVE_REGISTRY}" "${LIVE_MAIL}" >/dev/null 2>&1 || true
   if live_host_left; then
-    live_tofu 'tofu destroy -input=false -auto-approve -state=/work/terraform.tfstate \
-      -var-file=/work/live.tfvars'
+    # hosts.tfvars names the hosts that joined (test/live writes it)
+    live_tofu 'touch /work/hosts.tfvars && tofu destroy -input=false -auto-approve \
+      -state=/work/terraform.tfstate -var-file=/work/live.tfvars -var-file=/work/hosts.tfvars'
   fi
   # only after a destroy that worked (set -e): the state goes with the rest
   in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/*'

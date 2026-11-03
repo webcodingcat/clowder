@@ -3,34 +3,30 @@ package state
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
+	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 )
 
-// Bootstrap starts the cluster: the keys init made, its bootstrap key and
-// the first host.
+// Bootstrap starts the cluster: the keys init made, its bootstrap key
+// (sealed) and the first host.
 type Bootstrap struct {
-	Keys    ClusterKeys  `json:"keys"`
-	JoinKey SealedSecret `json:"join_key"`
-	Host    Host         `json:"host"`
+	Keys         ClusterKeys `json:"keys"`
+	BootstrapKey Sealed      `json:"bootstrap_key"`
+	Host         Host        `json:"host"`
 }
 
-// FirstJoinKey is the name of init's bootstrap key: the first entry of
-// cluster.yaml's join_keys, which the bootstrap's cluster.yaml writes.
-const FirstJoinKey = "join_keys[0]"
-
-// applyBootstrap makes the first host the cluster. Until the first
-// cluster.yaml is applied, the config is revision 0 and names only the
-// bootstrap key, so the user and the next hosts get in with it.
+// applyBootstrap makes the first host the cluster. The bootstrap key lets
+// the user in, once (applyAddUser drops it); hosts join with tokens.
 func applyBootstrap(s *State, _ Command, payload Bootstrap) (func(), error) {
 	switch {
 	case s.Keys != nil:
 		return nil, errors.New("the cluster is bootstrapped already")
 	case len(payload.Keys.CACertificate) == 0 || len(payload.Keys.CAKey) == 0 || len(payload.Keys.AgeIdentity) == 0:
 		return nil, errors.New("the keys are incomplete")
-	case len(payload.JoinKey.Value) == 0 || payload.JoinKey.Digest == "":
+	case len(payload.BootstrapKey) == 0:
 		return nil, errors.New("the bootstrap key is missing")
 	case payload.Host.ID != 0:
 		return nil, fmt.Errorf("the first host has ID 0, not %d", payload.Host.ID)
@@ -43,8 +39,7 @@ func applyBootstrap(s *State, _ Command, payload Bootstrap) (func(), error) {
 	keys := payload.Keys
 	return func() {
 		s.Keys = &keys
-		s.Config = ClusterConfig{Spec: clusterspec.Config{JoinKeys: []clusterspec.SecretRef{FirstJoinKey}}}
-		s.ClusterSecrets = map[string]SealedSecret{FirstJoinKey: payload.JoinKey}
+		s.BootstrapKey = payload.BootstrapKey
 		s.Hosts[host.ID] = &host
 		s.Namespaces[names.Default] = &Namespace{Meta: Meta{Name: names.Default, Generation: 1}}
 	}, nil
@@ -55,6 +50,9 @@ func checkNewHost(host Host) error {
 	switch {
 	case host.Name == "":
 		return errors.New("the host has no name")
+	// it names the host in DRBD's resource files, and is its hostname
+	case !names.Valid(host.Name):
+		return fmt.Errorf("host name %q: %s", host.Name, names.Rule)
 	// the nft rules and WireGuard's endpoints are IPv4
 	case !host.Underlay.Is4():
 		return fmt.Errorf("host %s has no IPv4 underlay address", host.Name)
@@ -74,7 +72,6 @@ func checkNewHost(host Host) error {
 type SetHostPhase struct {
 	Host  HostID    `json:"host"`
 	Phase HostPhase `json:"phase"`
-	Voter *bool     `json:"voter,omitempty"` // changes the Raft role along with the phase
 	// From, when set, is the phase the sender checked the move against; the
 	// move is refused if the host has left it since.
 	From HostPhase `json:"from,omitempty"`
@@ -97,9 +94,9 @@ const (
 )
 
 // phaseChanges are the allowed moves; any phase may also go to Removed, by
-// the leader or a user, unless the host is the last that runs stacks.
-// The table is the lifecycle of phase 2: nothing reaches joining or passive
-// before the join, nor failed, fenced, recovering or disabled before failover.
+// the leader or a user, unless checkRemoval refuses. A host joins as
+// joining (add-host); nothing reaches failed, fenced, recovering or
+// disabled before failover.
 var phaseChanges = map[HostPhase]map[HostPhase]mover{
 	Joining:    {Passive: byLeaderOrUser, Active: byLeaderOrUser},
 	Passive:    {Active: byLeaderOrUser},
@@ -117,20 +114,104 @@ func runsStacks(phase HostPhase) bool {
 	return phase == Active || phase == Draining
 }
 
-// checkRemoval refuses to remove the last host that runs stacks: the
-// cluster would go on without placement, ingress or alerts, and nothing
-// brings a removed host back. A host that runs none (failed, fenced) may
-// go, so a dead host can always be given up.
-func (s *State) checkRemoval(host *Host) error {
-	if !runsStacks(host.Phase) {
-		return nil
-	}
+// MinHAHosts is how many hosts run stacks in a cluster that is highly
+// available: three voters, a majority of which survives one host.
+const MinHAHosts = 3
+
+// hostsRunningStacks counts the hosts that run stacks. The hosts in
+// leftOut are not counted.
+func (s *State) hostsRunningStacks(leftOut ...HostID) int {
+	count := 0
 	for _, other := range s.Hosts {
-		if other.ID != host.ID && runsStacks(other.Phase) {
-			return nil
+		if !slices.Contains(leftOut, other.ID) && runsStacks(other.Phase) {
+			count++
 		}
 	}
-	return fmt.Errorf("host %s is the last that runs stacks; the cluster cannot do without it", host.Name)
+	return count
+}
+
+// CheckRemoval tells whether the state would remove the host (checkRemoval);
+// the API asks it before the host hands its lead over.
+func (s *State) CheckRemoval(id HostID) error {
+	host, ok := s.Hosts[id]
+	switch {
+	case !ok:
+		return fmt.Errorf("no host %d", id)
+	case host.Phase == Removed:
+		return fmt.Errorf("host %s is removed", host.Name)
+	}
+	return s.checkRemoval(host)
+}
+
+// checkRemoval refuses to remove a host the cluster cannot do without:
+//   - the last host that runs stacks: the cluster would go on without
+//     placement, ingress or alerts, and nothing brings a removed host back;
+//   - once the cluster is highly available, any host that would leave fewer
+//     than MinHAHosts that run stacks, a dead one too: a replacement joins
+//     first. A cluster never goes back below three; the one way out is
+//     clowderd recover --power-off, which phase 2 brings for a quorum that
+//     is lost for good;
+//   - a host that runs stacks while a stack or a volume copy is still on
+//     it: they would be lost with it.
+//
+// Before the cluster is highly available, a host that runs no stacks
+// (failed, fenced) may always go, so a dead host can be given up.
+func (s *State) checkRemoval(host *Host) error {
+	remaining := s.hostsRunningStacks(host.ID)
+	switch {
+	case s.HA && remaining < MinHAHosts:
+		return fmt.Errorf("host %s cannot go: %d hosts would be left to run stacks, and a highly available "+
+			"cluster keeps %d; join a replacement first", host.Name, remaining, MinHAHosts)
+	case !runsStacks(host.Phase):
+		return nil
+	case remaining == 0:
+		return fmt.Errorf("host %s is the last that runs stacks; the cluster cannot do without it", host.Name)
+	}
+	for _, id := range slices.Sorted(maps.Keys(s.Stacks)) {
+		if placed := s.Stacks[id].Host; placed != nil && *placed == host.ID {
+			return fmt.Errorf("host %s still has stack %s; delete it or move it first", host.Name, id)
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(s.Volumes)) {
+		if slices.ContainsFunc(s.Volumes[id].Copies, func(c VolumeCopy) bool { return c.Host == host.ID }) {
+			return fmt.Errorf("host %s still has a copy of volume %s; delete it or move it first", host.Name, id)
+		}
+	}
+	return nil
+}
+
+// remove makes the host removed: its certificate revoked, its retired
+// copies forgotten, and every host that is left to forget it as a DRBD
+// peer (forgetPeer). Its ID is free once all of them have.
+func (s *State) remove(host *Host, at time.Time) {
+	host.Phase, host.Voter = Removed, false
+	s.revoke(host.CertificateSerial, host.CertificateNotAfter, at)
+	// nobody is left to remove the host's retired copies
+	s.Retired = slices.DeleteFunc(s.Retired, func(c RetiredCopy) bool { return c.Host == host.ID })
+	// the removed host forgets nothing any more
+	for peer := range s.Forgetting {
+		s.forgot(host.ID, peer)
+	}
+	var waiting []HostID
+	for _, id := range slices.Sorted(maps.Keys(s.Hosts)) {
+		if id != host.ID && s.Hosts[id].Phase != Removed {
+			waiting = append(waiting, id)
+		}
+	}
+	if len(waiting) > 0 {
+		s.Forgetting[host.ID] = waiting
+	}
+}
+
+// forgot takes a host off the list of those that have still to forget the
+// peer, and the peer off Forgetting once none is left.
+func (s *State) forgot(host, peer HostID) {
+	waiting := slices.DeleteFunc(s.Forgetting[peer], func(id HostID) bool { return id == host })
+	if len(waiting) == 0 {
+		delete(s.Forgetting, peer)
+	} else {
+		s.Forgetting[peer] = waiting
+	}
 }
 
 func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), error) {
@@ -168,22 +249,62 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), err
 		return nil, fmt.Errorf("%s cannot move host %s to %s; only the leader or a user does", cmd.Actor, host.Name, payload.Phase)
 	}
 	return func() {
-		host.Phase = payload.Phase
-		if payload.Voter != nil {
-			host.Voter = *payload.Voter
+		if payload.Phase == Removed {
+			s.remove(host, cmd.At)
+			return
 		}
-		if host.Phase == Removed {
-			host.Voter = false
-			s.revoke(host.CertificateSerial, host.CertificateNotAfter, cmd.At)
-			// nobody is left to remove the host's retired copies
-			s.Retired = slices.DeleteFunc(s.Retired, func(c RetiredCopy) bool { return c.Host == host.ID })
+		host.Phase = payload.Phase
+		if s.hostsRunningStacks() >= MinHAHosts {
+			s.HA = true
 		}
 	}, nil
 }
 
+// SetHostVoter records whether a host votes in Raft, after the leader
+// changed Raft's configuration (controller's members loop): the state
+// mirrors Raft, which decides.
+type SetHostVoter struct {
+	Host  HostID `json:"host"`
+	Voter bool   `json:"voter"`
+}
+
+func applySetHostVoter(s *State, cmd Command, payload SetHostVoter) (func(), error) {
+	host, ok := s.Hosts[payload.Host]
+	switch {
+	case cmd.Actor != LeaderActor:
+		return nil, fmt.Errorf("%s cannot record a voter; only the leader does", cmd.Actor)
+	case !ok:
+		return nil, fmt.Errorf("no host %d", payload.Host)
+	case host.Phase == Removed:
+		return nil, fmt.Errorf("host %s is removed", host.Name)
+	case host.Voter == payload.Voter:
+		return nil, errUnchanged
+	}
+	return func() { host.Voter = payload.Voter }, nil
+}
+
+// ReportPeerForgotten is a host telling that it forgot a removed host as a
+// DRBD peer (drbdsetup forget-peer on each of its resources), so a new
+// host may take the ID.
+type ReportPeerForgotten struct {
+	Host HostID `json:"host"`
+	Peer HostID `json:"peer"`
+}
+
+func applyReportPeerForgotten(s *State, cmd Command, payload ReportPeerForgotten) (func(), error) {
+	waiting, ok := s.Forgetting[payload.Peer]
+	switch {
+	case cmd.Actor != HostActor(payload.Host):
+		return nil, fmt.Errorf("only host %d itself reports what it forgot", payload.Host)
+	case !ok || !slices.Contains(waiting, payload.Host):
+		return nil, errUnchanged
+	}
+	return func() { s.forgot(payload.Host, payload.Peer) }, nil
+}
+
 // SetIngress records the host that should hold the Floating IP. Only an
-// active host with a ServerRef can: the hoster routes the address to a
-// server by that ID.
+// active host with a checked ServerRef can: the hoster routes the address
+// to a server by that ID.
 type SetIngress struct {
 	Host HostID `json:"host"`
 }
@@ -195,8 +316,8 @@ func applySetIngress(s *State, _ Command, payload SetIngress) (func(), error) {
 		return nil, fmt.Errorf("no host %d", payload.Host)
 	case host.Phase != Active:
 		return nil, fmt.Errorf("host %s is %s, not active", host.Name, host.Phase)
-	case host.ServerRef == "":
-		return nil, fmt.Errorf("host %s has no server ref", host.Name)
+	case !host.ServerRefChecked:
+		return nil, fmt.Errorf("host %s has no checked server ref", host.Name)
 	}
 	id := payload.Host
 	return func() { s.Ingress = &id }, nil

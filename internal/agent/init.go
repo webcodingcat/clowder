@@ -16,9 +16,9 @@ import (
 
 	"filippo.io/age"
 
-	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/datakey"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/raftnode"
@@ -27,8 +27,7 @@ import (
 
 // InitOptions are what cloud-init gives clowderd init.
 type InitOptions struct {
-	// BootstrapKey is the key OpenTofu made; it lets the user in and
-	// later hosts join.
+	// BootstrapKey is the key OpenTofu made; it lets the user in, once.
 	BootstrapKey string
 	Name         string
 	Underlay     netip.Addr
@@ -42,6 +41,15 @@ type InitOptions struct {
 	NodeAddress netip.Addr
 	RaftPort    int
 	APIPort     int
+}
+
+// checkHostName refuses a name the state would refuse: the host's name in
+// the cluster is its hostname, and a hostname may be a FQDN or have capitals.
+func checkHostName(name string) error {
+	if !names.Valid(name) {
+		return fmt.Errorf("the hostname %q cannot name a host of the cluster: %s", name, names.Rule)
+	}
+	return nil
 }
 
 // leaderTimeout is how long init waits for its own Raft member to lead.
@@ -58,6 +66,14 @@ func Init(ctx context.Context, files Files, options InitOptions, hostNetwork Hos
 	}
 	if options.BootstrapKey == "" || options.Name == "" || !options.Underlay.IsValid() {
 		return errors.New("init needs the bootstrap key, the host's name and its underlay address")
+	}
+	if len(options.BootstrapKey) < pki.MinBootstrapKeyLength {
+		return fmt.Errorf("the bootstrap key has fewer than %d characters", pki.MinBootstrapKeyLength)
+	}
+	// the state takes only a DNS label (checkNewHost); refused there, init
+	// would stop halfway
+	if err := checkHostName(options.Name); err != nil {
+		return err
 	}
 	// the state takes only IPv4 (checkNewHost); refused there, init would
 	// stop halfway
@@ -132,22 +148,7 @@ func createKeys(files Files, host Host) (state.ClusterKeys, state.Host, error) {
 	if err != nil {
 		return keys, state.Host{}, err
 	}
-	writes := []struct {
-		path    string
-		content []byte
-	}{
-		{files.caCertificate(), ca.CertificatePEM()},
-		{files.hostCertificate(), certificatePEM},
-		{files.hostKey(), hostKeyPEM},
-		{files.wireGuardKey(), []byte(base64.StdEncoding.EncodeToString(wireGuardKey.Bytes()) + "\n")},
-	}
-	for _, write := range writes {
-		// keys and certificates: root only, whole or not at all
-		if err := atomicfile.Write(write.path, write.content, 0o600); err != nil {
-			return keys, state.Host{}, err
-		}
-	}
-	if err := dataKey.Save(files.dataKey()); err != nil {
+	if err := files.writeKeys(ca.CertificatePEM(), certificatePEM, hostKeyPEM, wireGuardKey, dataKey); err != nil {
 		return keys, state.Host{}, err
 	}
 
@@ -166,6 +167,30 @@ func createKeys(files Files, host Host) (state.ClusterKeys, state.Host, error) {
 		CertificateNotAfter: certificate.NotAfter,
 	}
 	return keys, entry, nil
+}
+
+// writeKeys writes what the host proves itself with: the CA's certificate,
+// its own certificate and key, its WireGuard key and the data key. init and
+// join write them alike.
+func (f Files) writeKeys(caPEM, certificatePEM, hostKeyPEM []byte, wireGuardKey *ecdh.PrivateKey,
+	dataKey *datakey.Key,
+) error {
+	writes := []struct {
+		path    string
+		content []byte
+	}{
+		{f.caCertificate(), caPEM},
+		{f.hostCertificate(), certificatePEM},
+		{f.hostKey(), hostKeyPEM},
+		{f.wireGuardKey(), []byte(base64.StdEncoding.EncodeToString(wireGuardKey.Bytes()) + "\n")},
+	}
+	for _, write := range writes {
+		// keys and certificates: root only, whole or not at all
+		if err := atomicfile.Write(write.path, write.content, 0o600); err != nil {
+			return err
+		}
+	}
+	return dataKey.Save(f.dataKey())
 }
 
 // bootstrapRaft starts the Raft group and writes the bootstrap command.
@@ -190,12 +215,12 @@ func bootstrapRaft(ctx context.Context, files Files, host Host, keys state.Clust
 	if err := waitForLead(ctx, node); err != nil {
 		return err
 	}
-	joinKey, err := api.SealClusterSecret(credentials.dataKey, state.FirstJoinKey, []byte(bootstrapKey))
+	sealedKey, err := credentials.dataKey.Seal([]byte(bootstrapKey))
 	if err != nil {
 		return err
 	}
 	cmd, err := state.NewCommand(state.KindBootstrap, time.Now(), state.HostActor(host.ID),
-		state.Bootstrap{Keys: keys, JoinKey: joinKey, Host: entry})
+		state.Bootstrap{Keys: keys, BootstrapKey: sealedKey, Host: entry})
 	if err != nil {
 		return err
 	}

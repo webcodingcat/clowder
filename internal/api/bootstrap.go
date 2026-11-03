@@ -24,25 +24,27 @@ import (
 
 // The user's way in: the cluster has no user yet, so nobody has a
 // certificate. Whoever holds the bootstrap key (OpenTofu made it, cloud-init
-// gave it to init) proves it with HMACs instead.
+// gave it to init) proves it with HMACs instead. The key opens only this
+// once: the bootstrap's add-user drops it from the state.
 //
-//  1. GET /v1/bootstrap: the agent sends its CA certificate and, for every
-//     valid bootstrap key, pki.TrustProof over it. The CLI trusts the CA only
-//     if one proof matches its key. The offer also tells whether the cluster
-//     has its user already, so the CLI stops before it makes a
-//     recovery key that would never count.
+//  1. GET /v1/bootstrap: the agent sends its CA certificate and, while the
+//     cluster has no user, pki.TrustProof over it made with the bootstrap
+//     key. The CLI trusts the CA only if the proof matches its key. The
+//     offer also tells whether the cluster has its user already, so the
+//     CLI stops before it makes a recovery key that would never count.
 //  2. POST /v1/bootstrap over TLS checked against that CA: the user's name
 //     and public key and the recovery key's recipient, signed with the
 //     bootstrap key. The agent issues the user's first certificate; after
 //     that, the endpoint refuses.
 
 // BootstrapOffer is the agent's answer to the first contact. It comes
-// unchecked: the proofs make the CA trustworthy, and Bootstrapped tells
-// anyone whether the cluster has a user, but not which.
+// unchecked: the proof makes the CA trustworthy, and Bootstrapped tells
+// anyone whether the cluster has a user, but not which. Once it has one,
+// there is no proof.
 type BootstrapOffer struct {
-	CACertificate string   `json:"ca_certificate"`
-	Proofs        [][]byte `json:"proofs"`
-	Bootstrapped  bool     `json:"bootstrapped"`
+	CACertificate string `json:"ca_certificate"`
+	Proof         []byte `json:"proof,omitempty"`
+	Bootstrapped  bool   `json:"bootstrapped"`
 }
 
 // BootstrapRequest asks for the user's first certificate.
@@ -87,9 +89,12 @@ type TrustedCluster struct {
 	bootstrapKey  []byte
 	CA            *x509.Certificate
 	CAPEM         string
-	// Bootstrapped tells that the cluster has its user already.
-	Bootstrapped bool
 }
+
+// ErrBootstrapped is FindCluster's answer when the cluster has its user
+// already: the bootstrap key opens nothing then, so the agent proves
+// nothing with it either.
+var ErrBootstrapped = errors.New("the cluster has a user already, and a cluster has only one")
 
 // FindCluster asks the agent at seed for its CA and trusts it only if it
 // proves it knows the bootstrap key.
@@ -103,19 +108,18 @@ func FindCluster(ctx context.Context, seed string, bootstrapKey []byte, version 
 	if err := send(uncheckedClient(), request, &offer); err != nil {
 		return nil, fmt.Errorf("ask %s for its CA: %w", seed, err)
 	}
-	if !slices.ContainsFunc(offer.Proofs, func(proof []byte) bool {
-		return pki.CheckTrustProof(bootstrapKey, []byte(offer.CACertificate), proof)
-	}) {
+	// unchecked, but harmless: it stops a bootstrap, the user's own
+	if offer.Bootstrapped {
+		return nil, ErrBootstrapped
+	}
+	if !pki.CheckTrustProof(bootstrapKey, []byte(offer.CACertificate), offer.Proof) {
 		return nil, fmt.Errorf("%s cannot prove it knows the bootstrap key: wrong key, or not your cluster", seed)
 	}
 	ca, err := pki.ParseCertificate([]byte(offer.CACertificate))
 	if err != nil {
 		return nil, fmt.Errorf("read the CA of %s: %w", seed, err)
 	}
-	return &TrustedCluster{
-		seed: seed, version: version, bootstrapKey: bootstrapKey,
-		CA: ca, CAPEM: offer.CACertificate, Bootstrapped: offer.Bootstrapped,
-	}, nil
+	return &TrustedCluster{seed: seed, version: version, bootstrapKey: bootstrapKey, CA: ca, CAPEM: offer.CACertificate}, nil
 }
 
 // Bootstrap gets the user's first certificate (PEM), over TLS checked
@@ -174,14 +178,16 @@ func (s *Server) bootstrapOffer(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, errors.New("the cluster is not bootstrapped yet"))
 		return
 	}
-	keys, err := s.joinKeys()
+	offer := BootstrapOffer{CACertificate: string(caPEM), Bootstrapped: bootstrapped}
+	// after the bootstrap no proof at all: it would let anyone try keys
+	// offline
+	key, err := s.bootstrapKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	offer := BootstrapOffer{CACertificate: string(caPEM), Bootstrapped: bootstrapped}
-	for _, key := range keys {
-		offer.Proofs = append(offer.Proofs, pki.TrustProof(key, caPEM))
+	if key != nil {
+		offer.Proof = pki.TrustProof(key, caPEM)
 	}
 	writeJSON(w, http.StatusOK, offer)
 }
@@ -208,13 +214,13 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, errors.New("the request is too old (or a clock is off by minutes)"))
 		return
 	}
-	keys, err := s.joinKeys()
+	key, err := s.bootstrapKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if !slices.ContainsFunc(keys, request.SignedWith) {
-		writeError(w, http.StatusUnauthorized, errors.New("the request is not signed with a valid bootstrap key"))
+	if key == nil || !request.SignedWith(key) {
+		writeError(w, http.StatusUnauthorized, errors.New("the request is not signed with the bootstrap key"))
 		return
 	}
 	if err := pki.CheckUserName(request.User); err != nil {
@@ -259,19 +265,22 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// joinKeys opens the valid bootstrap keys.
-func (s *Server) joinKeys() ([][]byte, error) {
-	var sealed []state.Sealed
-	s.config.Cluster.Read(func(current *state.State) { sealed = slices.Clone(current.ValidJoinKeys()) })
-	var keys [][]byte
-	for _, key := range sealed {
-		opened, err := s.config.Keys.Open(key)
-		if err != nil {
-			return nil, fmt.Errorf("open a bootstrap key: %w", err)
+// bootstrapKey opens the bootstrap key; nil once the cluster has its user.
+func (s *Server) bootstrapKey() ([]byte, error) {
+	var sealed state.Sealed
+	s.config.Cluster.Read(func(current *state.State) {
+		if len(current.Users) == 0 {
+			sealed = slices.Clone(current.BootstrapKey)
 		}
-		keys = append(keys, opened)
+	})
+	if sealed == nil {
+		return nil, nil
 	}
-	return keys, nil
+	key, err := s.config.Keys.Open(sealed)
+	if err != nil {
+		return nil, fmt.Errorf("open the bootstrap key: %w", err)
+	}
+	return key, nil
 }
 
 // authority opens the cluster CA from the state with the data key.

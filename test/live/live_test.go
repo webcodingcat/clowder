@@ -139,11 +139,12 @@ func watchHost(t *testing.T, server host) {
 const baselineConfigFile = "baseline-config.json"
 
 // baseline checks where every scenario starts, so each runs alone and in any
-// order (bin/dev live run -run <test>): the host that bin/dev live up made,
+// order (bin/dev live run -run <test>): the hosts that bin/dev live up made,
 // its cluster bootstrapped with a leader and cluster.yaml applied as
-// TestSetup left it, no stack or volume in any namespace, and no fault in
-// the lab. A scenario that fails leaves what it made for a look; the next one
-// stops here and names it.
+// TestSetup left it, the first host active and the others drained (so
+// stacks start on the first), three voters, no stack or volume in any
+// namespace, and no fault in the lab. A scenario that fails leaves what it
+// made for a look; the next one stops here and names it.
 func baseline(t *testing.T) (host, outputs) {
 	t.Helper()
 	tofu := readOutputs(t)
@@ -162,6 +163,19 @@ func baseline(t *testing.T) (host, outputs) {
 	}
 	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "nothing to apply") {
 		t.Fatalf("cluster.yaml is not applied:\n%s", diff)
+	}
+	hosts := clusterHosts(t)
+	for _, found := range hosts {
+		want := "draining"
+		if found.ID == 0 {
+			want = "active"
+		}
+		if found.Phase != want && found.Phase != "removed" {
+			t.Fatalf("host %s is %s, want %s: %+v", found.Name, found.Phase, want, hosts)
+		}
+	}
+	if err := checkVoters(hosts, 3); err != nil {
+		t.Fatal(err)
 	}
 	// a deleted volume is listed until its host removed its copy
 	eventually(t, time.Minute, "no stack or volume left", func() error {
@@ -191,8 +205,9 @@ func resourcesInAllNamespaces(t *testing.T, kind string) []string {
 	return names
 }
 
-// TestSetup makes the first host and bootstraps its cluster: the baseline
-// of the other scenarios. bin/dev live up runs it, once per host.
+// TestSetup makes the first host, bootstraps its cluster and has two more
+// hosts join: the baseline of the other scenarios. bin/dev live up runs it,
+// once per cluster.
 func TestSetup(t *testing.T) {
 	tofu := readOutputs(t)
 	server := host{address: tofu.PublicAddress.Value}
@@ -200,6 +215,7 @@ func TestSetup(t *testing.T) {
 	runSteps(t, []step{
 		{"the setup makes the first host", func(t *testing.T) { waitForSetup(t, server) }},
 		{"the user bootstraps and applies the cluster", func(t *testing.T) { bootstrap(t, server, tofu) }},
+		{"two hosts join with a token each", growToThreeHosts},
 	})
 }
 
@@ -233,10 +249,7 @@ func TestStacks(t *testing.T) {
 // waitForSetup waits until clowder-setup has made the host the first of a
 // cluster and the agent runs.
 func waitForSetup(t *testing.T, server host) {
-	eventually(t, setupDeadline, "clowder-setup done", func() error {
-		_, err := server.run("test -e " + setupMarker)
-		return err
-	})
+	eventually(t, setupDeadline, "clowder-setup done", server.setupDone)
 	server.must(t, "systemctl is-active clowderd")
 	if _, err := server.run("test -e /etc/clowder/bootstrap-key"); err == nil {
 		t.Error("the bootstrap key file is still on the host")
@@ -246,8 +259,7 @@ func waitForSetup(t *testing.T, server host) {
 
 // bootstrap makes the test the user, its recovery key in a file, and
 // fills in cluster.yaml from the module's outputs, with the hoster token
-// and the registry's login encrypted next to the bootstrap's join key, then
-// applies it.
+// and the registry's login encrypted, then applies it.
 func bootstrap(t *testing.T, server host, tofu outputs) {
 	keyFile := filepath.Join(workDir, "bootstrap-key")
 	if err := os.WriteFile(keyFile, []byte(tofu.BootstrapKey.Value), 0o600); err != nil {
@@ -273,9 +285,8 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	if err := decoder.Decode(&config); err != nil {
 		t.Fatalf("the module's cluster_yaml: %v", err)
 	}
-	// as bootstrapped: the CLI finds the credentials by the name, and the
-	// join key stays
-	config.Name, config.JoinKeys = "live", bootstrapped.Config.JoinKeys
+	// as bootstrapped: the CLI finds the credentials by the name
+	config.Name = bootstrapped.Config.Name
 	config.Hoster = clusterspec.Hoster{Type: "hetzner", Token: "hoster.token", API: os.Getenv("HCLOUD_ENDPOINT")}
 	password := pushPrivateImage(t, server)
 	registryPassword := yamlpath.Key(yamlpath.Key("registries", registry), "password")
@@ -399,10 +410,21 @@ func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 	mustClowder(t, "apply", "-f", stackDir("shop"))
 	// a changed spec is the stack's next generation; a change of secrets
 	// alone keeps it
-	generation, want := stackInfo(t, "shop").generation, before
+	want := before
 	if specChanged {
 		want++
 	}
+	// each clowder call is a client of its own, and reads come from the
+	// seed's copy of the state, which may be a follower's a moment behind
+	// the write; the secrets come before the stack in the log, so they are
+	// there with it
+	var generation int64
+	eventually(t, time.Minute, "the apply in the seed's state", func() error {
+		if generation = stackInfo(t, "shop").generation; generation < want {
+			return fmt.Errorf("generation %d", generation)
+		}
+		return nil
+	})
 	if generation != want {
 		t.Errorf("generation %d after the apply, want %d", generation, want)
 	}
@@ -756,6 +778,21 @@ func missingSecretFile(t *testing.T, server host) {
 			"--format '{{.Label \"com.docker.compose.service\"}}:{{.State}}' | sort"))
 		if !slices.Equal(containers, []string{"app:running", "web:running"}) {
 			return fmt.Errorf("containers %v", containers)
+		}
+		return nil
+	})
+	// the agent's pass may still replace a container right after: the
+	// next step compares the containers, so they must stay as they are
+	// for a whole pass
+	eventually(t, stackDeadline, "the stack's containers stay as they are", func() error {
+		listed := func() string {
+			return server.must(t, "docker ps -a --no-trunc --filter label=com.docker.compose.project="+project("shop")+
+				" --format '{{.ID}} {{.State}}' | sort")
+		}
+		before := listed()
+		time.Sleep(agentPass)
+		if after := listed(); after != before {
+			return fmt.Errorf("they changed from %q to %q", before, after)
 		}
 		return nil
 	})

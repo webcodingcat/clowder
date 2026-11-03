@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -76,6 +77,49 @@ func (c *Client) AssignFloatingIP(ctx context.Context, ip netip.Addr, serverRef 
 	}
 	return c.act(ctx, fmt.Sprintf("/floating_ips/%d/actions/assign", found.ID), map[string]int64{"server": server},
 		fmt.Sprintf("assign the Floating IP %s to server %s", ip, serverRef))
+}
+
+// ServerAddresses are the server's IPv4 addresses: in the project's
+// private networks, and its public one.
+func (c *Client) ServerAddresses(ctx context.Context, serverRef string) ([]netip.Addr, error) {
+	server, err := serverID(serverRef)
+	if err != nil {
+		return nil, err
+	}
+	var answer struct {
+		Server struct {
+			PublicNet struct {
+				IPv4 *struct {
+					IP string `json:"ip"`
+				} `json:"ipv4"`
+			} `json:"public_net"`
+			PrivateNet []struct {
+				IP string `json:"ip"`
+			} `json:"private_net"`
+		} `json:"server"`
+	}
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/servers/%d", server), nil, &answer); err != nil {
+		if errors.Is(err, errNotFound) {
+			return nil, fmt.Errorf("read server %s: %w", serverRef, ErrNoSuchServer)
+		}
+		return nil, fmt.Errorf("read server %s: %w", serverRef, err)
+	}
+	var texts []string
+	for _, network := range answer.Server.PrivateNet {
+		texts = append(texts, network.IP)
+	}
+	if public := answer.Server.PublicNet.IPv4; public != nil {
+		texts = append(texts, public.IP)
+	}
+	var addresses []netip.Addr
+	for _, text := range texts {
+		address, err := netip.ParseAddr(text)
+		if err != nil {
+			return nil, fmt.Errorf("server %s: address %q: %w", serverRef, text, err)
+		}
+		addresses = append(addresses, address)
+	}
+	return addresses, nil
 }
 
 // findFloatingIP looks the address up among the project's Floating IPs:
@@ -180,10 +224,14 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 			} `json:"error"`
 		}
 		_ = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&failure) // the status says enough without it
-		if failure.Error.Message != "" {
-			return fmt.Errorf("%s (%s, HTTP %d)", failure.Error.Message, failure.Error.Code, response.StatusCode)
+		var status error = statusCode(response.StatusCode)
+		if response.StatusCode == http.StatusNotFound {
+			status = errNotFound
 		}
-		return fmt.Errorf("HTTP %d", response.StatusCode)
+		if failure.Error.Message != "" {
+			return fmt.Errorf("%s (%s, %w)", failure.Error.Message, failure.Error.Code, status)
+		}
+		return status
 	}
 	if err := json.NewDecoder(response.Body).Decode(out); err != nil {
 		return fmt.Errorf("read the answer: %w", err)
@@ -191,11 +239,23 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	return nil
 }
 
+// statusCode is an answer of the API that is not 2xx.
+type statusCode int
+
+func (s statusCode) Error() string { return fmt.Sprintf("HTTP %d", int(s)) }
+
+// errNotFound is the API's 404.
+var errNotFound error = statusCode(http.StatusNotFound)
+
+// ErrNoSuchServer is ServerAddresses' answer for a server the project does
+// not have, or a server ref that is no server ID.
+var ErrNoSuchServer = errors.New("the project has no such server")
+
 // serverID reads a ServerRef as Hetzner's server ID.
 func serverID(serverRef string) (int64, error) {
 	id, err := strconv.ParseInt(serverRef, 10, 64)
 	if err != nil || id <= 0 {
-		return 0, fmt.Errorf("server ref %q is not a Hetzner server ID", serverRef)
+		return 0, fmt.Errorf("server ref %q is not a Hetzner server ID: %w", serverRef, ErrNoSuchServer)
 	}
 	return id, nil
 }

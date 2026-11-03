@@ -5,8 +5,9 @@ RAM). It replicates volumes with DRBD 9, keeps the client's real IP behind a Flo
 places services by priority and fences failed hosts through the hoster's API. The first
 hoster is Hetzner Cloud.
 
-**Status:** under construction and on one host so far; [docs/roadmap.md](docs/roadmap.md)
-says how far it is. Until `v1.0.0`, a new release may need a cluster set up anew.
+**Status:** under construction; hosts join, but stacks do not move between them and no
+host fails over yet. [docs/roadmap.md](docs/roadmap.md) says how far it is. Until
+`v1.0.0`, a new release may need a cluster set up anew.
 
 ## What it does
 
@@ -55,8 +56,8 @@ clowder cluster bootstrap me --name prod \
 ```
 
 `<(...)` hands the bootstrap key over without a file. Without Bash, write it to a file
-outside the cluster directory and delete it after the bootstrap: the key lets anyone in
-who reaches the API, and later lets hosts join.
+outside the cluster directory and delete it after the bootstrap. Until the bootstrap, the
+key lets anyone in who reaches the API; after it, it opens nothing.
 
 The bootstrap shows the cluster's **recovery key** once and asks you to type its last 8
 characters (`--recovery-out <file>` writes it to a file instead). Keep it in your password
@@ -93,6 +94,22 @@ directory in a repository: your own key and certificate are in your config direc
 (`~/.config/clowder/clusters/prod/` on Linux, `~/Library/Application Support/clowder/` on
 macOS, `%AppData%\clowder\` on Windows). The module's settings, such as the firewall, are
 in [its README](examples/hetzner/README.md).
+
+**More hosts** join with a token each, once `cluster.yaml` is applied:
+`clowder host join-token` prints one, which opens once and for an hour (`--ttl` up to a
+day). Hand it to the module with the host's name:
+
+```bash
+tofu apply ... -var 'hosts=["clowder1", "clowder2"]' \
+  -var 'join_tokens={clowder1 = "<token>", clowder2 = "<token>"}'
+```
+
+The second host waits as `passive`; with the third, all three run stacks and vote, and the
+cluster stays at three hosts or more: `clowder host remove` refuses to go below, so a
+replacement joins first, even for a host that is dead. `clowder host list` shows the
+hosts. The leader checks with the
+hoster that each host's server is its own, so give each cluster a Hetzner project of its
+own. Stacks do not move between hosts yet, and no host fails over yet.
 
 ## Running a stack
 

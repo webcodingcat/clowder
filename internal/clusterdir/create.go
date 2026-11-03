@@ -6,8 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/webcodingcat/clowder/internal/secretvalue"
 )
 
 // NewDirectory is what clowder cluster bootstrap writes into an empty
@@ -17,9 +15,6 @@ type NewDirectory struct {
 	// Name is the cluster's name in cluster.yaml.
 	Name string
 	Seed string
-	// JoinKey is the bootstrap key, encrypted for cluster.yaml
-	// (secretvalue's armor).
-	JoinKey string
 }
 
 // CheckBootstrap tells whether a bootstrap may write a cluster of that name
@@ -56,8 +51,8 @@ func checkNoConfig(path string) error {
 	return nil
 }
 
-// Create writes cluster.yaml into a new cluster directory: the name, the
-// seed and the bootstrap key, and as comments what the first cluster apply
+// Create writes cluster.yaml into a new cluster directory: the name and the
+// seed, and as comments what the first cluster apply
 // still needs. It refuses a directory that has a cluster.yaml already.
 func Create(directory NewDirectory) error {
 	if err := checkNoConfig(directory.Path); err != nil {
@@ -78,10 +73,7 @@ func configTemplate(directory NewDirectory) string {
 		"# writes one, and only the cluster opens it.",
 		"name: " + directory.Name,
 		"seeds: [" + directory.Seed + "]",
-		"# the bootstrap keys: hosts join with them",
-		"join_keys:",
-		"  - " + secretvalue.Block(directory.JoinKey, "    ") +
-			"# Before the first clowder cluster apply, fill in the rest (clowder cluster",
+		"# Before the first clowder cluster apply, fill in the rest (clowder cluster",
 		"# schema has every field), for example:",
 		"# hoster:",
 		"#   type: hetzner",

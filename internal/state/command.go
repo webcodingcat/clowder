@@ -58,6 +58,11 @@ const (
 	KindStartOperation       = "start-operation"
 	KindAdvanceOperation     = "advance-operation"
 	KindFinishOperation      = "finish-operation"
+	KindAddJoinToken         = "add-join-token"
+	KindAddHost              = "add-host"
+	KindConfirmServerRef     = "confirm-server-ref"
+	KindSetHostVoter         = "set-host-voter"
+	KindReportPeerForgotten  = "report-peer-forgotten"
 )
 
 // LeaderActor is the leader acting on its own (its control loops).
@@ -141,6 +146,11 @@ var commandKinds = map[string]commandKind{
 	KindStartOperation:       {"0.2.0", decoded(applyStartOperation)},
 	KindAdvanceOperation:     {"0.2.0", decoded(applyAdvanceOperation)},
 	KindFinishOperation:      {"0.2.0", decoded(applyFinishOperation)},
+	KindAddJoinToken:         {"0.2.0", decoded(applyAddJoinToken)},
+	KindAddHost:              {"0.2.0", decoded(applyAddHost)},
+	KindConfirmServerRef:     {"0.2.0", decoded(applyConfirmServerRef)},
+	KindSetHostVoter:         {"0.2.0", decoded(applySetHostVoter)},
+	KindReportPeerForgotten:  {"0.2.0", decoded(applyReportPeerForgotten)},
 }
 
 // decoded turns a function of a typed payload into a handler. Unknown fields
@@ -307,6 +317,12 @@ func (s *State) makeMaps() {
 	}
 	if s.Revoked == nil {
 		s.Revoked = map[string]Revocation{}
+	}
+	if s.Forgetting == nil {
+		s.Forgetting = map[HostID][]HostID{}
+	}
+	if s.JoinTokens == nil {
+		s.JoinTokens = map[string]JoinToken{}
 	}
 	if s.UsedCodes == nil {
 		s.UsedCodes = map[string]time.Time{}

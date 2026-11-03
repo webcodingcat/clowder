@@ -53,6 +53,8 @@ func (f Files) caCertificate() string   { return filepath.Join(f.Dir, "pki", "ca
 func (f Files) hostCertificate() string { return filepath.Join(f.Dir, "pki", "host.pem") }
 func (f Files) hostKey() string         { return filepath.Join(f.Dir, "pki", "host-key.pem") }
 func (f Files) raftDir() string         { return filepath.Join(f.Dir, "raft") }
+func (f Files) meshFile() string        { return filepath.Join(f.Dir, "net.json") }
+func (f Files) joinFile() string        { return filepath.Join(f.Dir, "keys", "join.json") }
 
 // The storage driver's directories: the mount points of the volumes, and
 // its state, beside which the agent keeps the time of the last trim.

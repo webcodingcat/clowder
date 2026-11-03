@@ -54,19 +54,27 @@ func newCluster(t *testing.T) *cluster {
 	t.Helper()
 	c := &cluster{t: t, state: &State{}}
 	c.mustApply(KindBootstrap, LeaderActor, Bootstrap{
-		Keys:    ClusterKeys{CACertificate: []byte("ca"), CAKey: Sealed("key"), AgeIdentity: Sealed("age")},
-		JoinKey: SealedSecret{Value: Sealed("join"), Digest: "d-join"},
-		Host:    testHost(0),
+		Keys:         ClusterKeys{CACertificate: []byte("ca"), CAKey: Sealed("key"), AgeIdentity: Sealed("age")},
+		BootstrapKey: Sealed("bootstrap"),
+		Host:         testHost(0),
 	})
 	return c
 }
 
-// addHost puts a joining host into the state. No command adds one until
-// phase 2 brings the join, so the test writes it in.
+// addHost joins a host with a token of its own; it is joining.
 func (c *cluster) addHost(host Host) {
-	host.Phase = Joining
-	c.state.Hosts[host.ID] = &host
+	c.t.Helper()
+	token := "token-" + strconv.Itoa(int(host.ID))
+	c.mustApply(KindAddJoinToken, UserActor("alice"), AddJoinToken{ID: token, Hash: testHash, TTL: time.Hour})
+	if host.ServerRef == "" {
+		host.ServerRef = "srv-" + strconv.Itoa(int(host.ID))
+	}
+	host.ServerRefChecked = true
+	c.mustApply(KindAddHost, LeaderActor, AddHost{Token: token, Host: host})
 }
+
+// testHash is the hash of the tests' join tokens.
+var testHash = strings.Repeat("ab", 32)
 
 func testHost(id HostID) Host {
 	return Host{
@@ -160,8 +168,8 @@ func TestBootstrapMakesHostZeroTheActiveVoter(t *testing.T) {
 	if host.Phase != Active || !host.Voter {
 		t.Errorf("host 0: %+v", host)
 	}
-	if len(c.state.ValidJoinKeys()) != 1 || c.state.Keys == nil {
-		t.Errorf("keys: %+v %v", c.state.Keys, c.state.ValidJoinKeys())
+	if string(c.state.BootstrapKey) != "bootstrap" || c.state.Keys == nil || host.ServerRefChecked {
+		t.Errorf("keys: %+v %q, host %+v", c.state.Keys, c.state.BootstrapKey, host)
 	}
 	c.refuse(KindBootstrap, LeaderActor, Bootstrap{}, "bootstrapped already")
 }
@@ -211,9 +219,9 @@ func TestAHostHasIPv4Addresses(t *testing.T) {
 		host := testHost(0)
 		change(&host)
 		c.refuse(KindBootstrap, LeaderActor, Bootstrap{
-			Keys:    ClusterKeys{CACertificate: []byte("ca"), CAKey: Sealed("key"), AgeIdentity: Sealed("age")},
-			JoinKey: SealedSecret{Value: Sealed("join"), Digest: "d-join"},
-			Host:    host,
+			Keys:         ClusterKeys{CACertificate: []byte("ca"), CAKey: Sealed("key"), AgeIdentity: Sealed("age")},
+			BootstrapKey: Sealed("bootstrap"),
+			Host:         host,
 		}, name)
 	}
 }
@@ -368,9 +376,9 @@ func TestOnlyAHostReportsAboutItself(t *testing.T) {
 	}
 }
 
-func TestTheIngressIsAnActiveHostWithAServerRef(t *testing.T) {
+func TestTheIngressIsAnActiveHostWithACheckedServerRef(t *testing.T) {
 	c := newCluster(t)
-	c.refuse(KindSetIngress, LeaderActor, SetIngress{Host: 0}, "host node0 has no server ref")
+	c.refuse(KindSetIngress, LeaderActor, SetIngress{Host: 0}, "host node0 has no checked server ref")
 	c.refuse(KindSetIngress, LeaderActor, SetIngress{Host: 5}, "no host 5")
 	host := testHost(1)
 	host.ServerRef = "4711"
@@ -534,31 +542,29 @@ func testSecrets() map[string]SealedSecret {
 
 func TestApplyConfigCountsRevisionsAndReplacesTheSecrets(t *testing.T) {
 	c := newCluster(t)
-	if c.state.Config.Revision != 0 || len(c.state.ValidJoinKeys()) != 1 {
-		t.Errorf("after init: config %+v, join keys %v", c.state.Config, c.state.ValidJoinKeys())
+	if c.state.Config.Revision != 0 || len(c.state.ClusterSecrets) != 0 {
+		t.Errorf("after init: config %+v, values %v", c.state.Config, c.state.ClusterSecrets)
 	}
 	config := testConfig()
-	config.JoinKeys = []clusterspec.SecretRef{"join_keys[0]", "join_keys[1]"}
-	config.Registries = map[string]clusterspec.Registry{"ghcr.io": {Username: "robot", Password: `registries["ghcr.io"].password`}}
-	secrets := testSecrets()
-	secrets["join_keys[0]"] = SealedSecret{Value: Sealed("k1"), Digest: "d1"}
-	secrets["join_keys[1]"] = SealedSecret{Value: Sealed("k2"), Digest: "d2"}
-	secrets[`registries["ghcr.io"].password`] = SealedSecret{Value: Sealed("pw"), Digest: "d3"}
-	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: secrets})
-	if keys := c.state.ValidJoinKeys(); len(keys) != 2 || string(keys[1]) != "k2" {
-		t.Errorf("join keys %q", keys)
+	config.Registries = map[string]clusterspec.Registry{
+		"ghcr.io":   {Username: "robot", Password: `registries["ghcr.io"].password`},
+		"localhost": {Username: "ci", Password: "registries.localhost.password"},
 	}
+	secrets := testSecrets()
+	secrets[`registries["ghcr.io"].password`] = SealedSecret{Value: Sealed("pw"), Digest: "d3"}
+	secrets["registries.localhost.password"] = SealedSecret{Value: Sealed("pw2"), Digest: "d4"}
+	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: secrets})
 	if login := c.state.RegistryLogins()["ghcr.io"]; login.Username != "robot" || string(login.Password) != "pw" {
 		t.Errorf("login %+v", login)
 	}
 
-	config.JoinKeys = config.JoinKeys[:1]
+	delete(config.Registries, "localhost")
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: secrets},
-		"a value for join_keys[1], which cluster.yaml does not name")
-	delete(secrets, "join_keys[1]")
+		"a value for registries.localhost.password, which cluster.yaml does not name")
+	delete(secrets, "registries.localhost.password")
 	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: secrets})
-	if c.state.Config.Revision != 2 || len(c.state.ValidJoinKeys()) != 1 {
-		t.Errorf("config %+v, join keys %v", c.state.Config, c.state.ValidJoinKeys())
+	if c.state.Config.Revision != 2 || len(c.state.RegistryLogins()) != 1 {
+		t.Errorf("config %+v, logins %v", c.state.Config, c.state.RegistryLogins())
 	}
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig()}, "hoster.token: the value is missing")
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{

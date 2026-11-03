@@ -131,7 +131,7 @@ What follows from there:
 | Binary | Package | Runs on | Does |
 |---|---|---|---|
 | `clowder` | `cmd/clowder`, `internal/cli` | Linux, macOS, Windows | the user's CLI: reads the cluster directory, talks to an agent over mTLS |
-| `clowderd` | `cmd/clowderd`, `internal/agent` | Linux | the agent (`run`, systemd service `clowderd`) and the host commands `check`, `init`, `user recovery-code`; `join` and `recover` to come |
+| `clowderd` | `cmd/clowderd`, `internal/agent` | Linux | the agent (`run`, systemd service `clowderd`) and the host commands `check`, `init`, `join`, `user recovery-code`; `recover` to come |
 
 `cmd/clowderd` has the build constraint `linux`. Both get their version from
 `internal/buildinfo.Version`, which `bin/dev build` stamps from the Git tag, or
@@ -144,7 +144,8 @@ The package layout is planned for the whole of v1; packages appear as the phases
 - **Portable**: `cli`, `api`, `clusterspec` (`cluster.yaml`'s types and checks),
   `clusterdir` (the cluster directory's files), `secretvalue` (values tagged
   `!secret`), `yamlpath` (the names of places in YAML), `pki`, `recoverycode` (the codes
-  from a host that give access back), `compose`, `units`,
+  from a host that give access back), `jointoken` (the tokens hosts join with),
+  `compose`, `units`,
   `names` (the rules for the names users give, and the names on the host made of them),
   `buildinfo`, `logging`, `atomicfile` (files written whole or not at all), `metrics`
   (Prometheus' text format), `stackspec` (a stack's schema), `resource` (the kinds of

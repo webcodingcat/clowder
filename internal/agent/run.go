@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -60,6 +61,7 @@ type Docker interface {
 type Storage interface {
 	volumes.Storage
 	PoolUsage(ctx context.Context, pool string) (sizeBytes int64, dataPercent, metadataPercent float64, err error)
+	ForgetPeer(ctx context.Context, peer int) error
 }
 
 // Run runs the agent until ctx ends, in the order docs/developing/host.md
@@ -73,12 +75,21 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	if err != nil {
 		return err
 	}
+	// a join that wrote host.json and could not remove join.json leaves the
+	// data key a second time there
+	if err := os.Remove(files.joinFile()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		logger.Warn("remove what the join left", "file", files.joinFile(), "error", err)
+	}
 	credentials, err := files.readCredentials()
 	if err != nil {
 		return err
 	}
 	if err := parts.Network.SetUpInterface(ctx, host.NodeAddress); err != nil {
 		return err
+	}
+	if err := restoreMesh(ctx, files, host.ID, parts.Network); err != nil {
+		// the state brings the mesh too, if a leader is in reach without it
+		logger.Error("start without the mesh of the last run", "error", err)
 	}
 	node, caughtUp, err := openNode(ctx, files, host, credentials, logger)
 	if err != nil {
@@ -215,7 +226,8 @@ func newDaemon(base shared) (*daemon, error) {
 	}
 	conditions := controller.NewConditions()
 	alerts := controller.NewAlerts(base.node, proposer.propose, base.credentials.dataKey.Open, conditions, base.logger)
-	proposer.server = newAPIServer(base, runner, alerts)
+	joins := &joiner{cluster: base.node, propose: proposer.propose, dataKey: base.credentials.dataKey, connect: base.parts.Hoster}
+	proposer.server = newAPIServer(base, runner, alerts, joins)
 
 	return &daemon{
 		shared:     base,
@@ -313,8 +325,8 @@ func newHostReporter(base shared, propose controller.Propose) *hostReporter {
 }
 
 // newAPIServer makes the API server, which answers for the stack runner
-// (a stack's containers) and the alerts.
-func newAPIServer(base shared, runner *stacks.Runner, alerts *controller.Alerts) *api.Server {
+// (a stack's containers), the alerts and the joins.
+func newAPIServer(base shared, runner *stacks.Runner, alerts *controller.Alerts, joins api.Joins) *api.Server {
 	return api.NewServer(api.ServerConfig{
 		Cluster: base.node, CA: base.credentials.ca, Certificate: base.credentials.certificate,
 		APIAddress: func(id state.HostID) string {
@@ -322,7 +334,7 @@ func newAPIServer(base shared, runner *stacks.Runner, alerts *controller.Alerts)
 			return net.JoinHostPort(network.NodeAddress(id).String(), strconv.Itoa(base.host.APIPort))
 		},
 		Keys: base.credentials.dataKey, Version: buildinfo.Version, Logger: base.logger,
-		HostID: base.host.ID, Containers: runner, Alerts: alertsAPI{alerts},
+		HostID: base.host.ID, Containers: runner, Alerts: alertsAPI{alerts}, Joins: joins,
 	})
 }
 
@@ -332,10 +344,17 @@ func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup, caughtUp
 	node, propose, logger := d.node, d.propose, d.logger
 
 	// this host's loops that start no container
-	loops.Go(func() { reconcileNetwork(ctx, node, d.host.ID, d.parts.Network, logger) })
+	loops.Go(func() { reconcileNetwork(ctx, node, d.files, d.host.ID, d.parts.Network, logger) })
 	loops.Go(func() { d.supervisor.Run(ctx, compose.LabelStack) })
 
 	// the leader's loops: each does nothing while this host does not lead
+	loops.Go(func() {
+		// every host has the same Raft port
+		raftAddress := func(id state.HostID) string {
+			return net.JoinHostPort(network.NodeAddress(id).String(), strconv.Itoa(d.host.RaftPort))
+		}
+		controller.RunMembers(ctx, node, node, propose, raftAddress, d.host.ID, logger)
+	})
 	loops.Go(func() { controller.RunPlacement(ctx, node, propose, d.conditions, logger) })
 	loops.Go(func() {
 		controller.RunFloatingIP(ctx, node, propose, d.credentials.dataKey.Open, d.parts.Hoster, d.conditions, logger)
@@ -363,6 +382,7 @@ func (d *daemon) runOnceCaughtUp(ctx context.Context, loops *sync.WaitGroup, cau
 	loops.Go(func() { d.traefik.run(ctx) })
 	loops.Go(func() { d.volumes.Run(ctx) })
 	loops.Go(func() { d.volumes.Trim(ctx) })
+	loops.Go(func() { forgetPeers(ctx, d.node, d.host.ID, d.parts.Storage, d.propose, d.logger) })
 	d.runner.Run(ctx)
 }
 

@@ -35,15 +35,27 @@ type State struct {
 	Keys   *ClusterKeys  `json:"keys,omitempty"`
 	Config ClusterConfig `json:"config"`
 	// ClusterSecrets are the values of cluster.yaml, by their names
-	// (clusterspec.SecretPlaces): the hoster's token, the join keys, the
-	// registries' passwords, the alert channels'. A digest each, so a diff
-	// tells a changed value from one encrypted anew.
+	// (clusterspec.SecretPlaces): the hoster's token, the registries'
+	// passwords, the alert channels'. A digest each, so a diff tells a
+	// changed value from one encrypted anew.
 	ClusterSecrets map[string]SealedSecret `json:"cluster_secrets,omitempty"`
+	// BootstrapKey is init's key, sealed, until the bootstrap made the
+	// user; then it is gone.
+	BootstrapKey Sealed `json:"bootstrap_key,omitempty"`
+	// JoinTokens are the tokens a host may join with, by ID, until one
+	// joins with it or it expires.
+	JoinTokens map[string]JoinToken `json:"join_tokens,omitempty"`
 	// RecoveryRecipient is the public half of the recovery key: every
 	// encrypted value is for it too, so its holder can read the values when
 	// the cluster is lost.
 	RecoveryRecipient string           `json:"recovery_recipient,omitempty"`
 	Hosts             map[HostID]*Host `json:"hosts,omitempty"`
+	// HA is set once MinHAHosts hosts ran stacks at the same time: from
+	// then on, the cluster stays highly available (checkRemoval).
+	HA bool `json:"ha,omitempty"`
+	// Forgetting are the removed hosts whose IDs are not free yet, each
+	// with the hosts that have still to forget it as a DRBD peer.
+	Forgetting map[HostID][]HostID `json:"forgetting,omitempty"`
 	// Ingress is the host that should hold the Floating IP; the leader keeps
 	// the hoster's routing in line with it.
 	Ingress *HostID `json:"ingress,omitempty"`
@@ -95,8 +107,8 @@ type ClusterKeys struct {
 
 // ClusterConfig is the applied cluster.yaml.
 type ClusterConfig struct {
-	// Revision counts the applies. It is 0 until the first, with a spec
-	// that names only init's join key.
+	// Revision counts the applies. It is 0 until the first, with an empty
+	// spec.
 	Revision int64              `json:"revision"`
 	Spec     clusterspec.Config `json:"spec"`
 	// Files are the files next to cluster.yaml that it names (acme.ca).
@@ -126,10 +138,15 @@ var Phases = []HostPhase{Joining, Passive, Active, Draining, Failed, Fenced, Rec
 
 // Host is one member of the cluster.
 type Host struct {
-	ID        HostID     `json:"id"`
-	Name      string     `json:"name"`
-	ServerRef string     `json:"server_ref,omitempty"` // the hoster's ID of the server
-	Underlay  netip.Addr `json:"underlay"`
+	ID        HostID `json:"id"`
+	Name      string `json:"name"`
+	ServerRef string `json:"server_ref,omitempty"` // the hoster's ID of the server
+	// ServerRefChecked says that the leader asked the hoster: the server
+	// has the host's addresses (hoster.CheckServerRef). Only then does the
+	// Floating IP go to the host, and only then may it be fenced; a host
+	// names its server itself.
+	ServerRefChecked bool       `json:"server_ref_checked,omitempty"`
+	Underlay         netip.Addr `json:"underlay"`
 	// PublicAddress is where users reach the host's API when the underlay is
 	// a private network; the CLI learns it from the cluster.
 	PublicAddress netip.Addr `json:"public_address,omitzero"`

@@ -36,6 +36,8 @@ type fakeCluster struct {
 	leaderID state.HostID
 	changes  state.ChangeRing
 	changed  chan struct{}
+	// handOvers counts TransferLeadership
+	handOvers int
 }
 
 // newFakeCluster is a member with a bootstrapped state, its ring complete
@@ -101,7 +103,21 @@ func (f *fakeCluster) WaitIndex(ctx context.Context, index uint64) error {
 
 func (f *fakeCluster) IsLeader() bool { return f.leader }
 
-func (f *fakeCluster) Leader() (state.HostID, bool) { return f.leaderID, true }
+func (f *fakeCluster) Leader() (state.HostID, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.leaderID, true
+}
+
+// TransferLeadership counts the hand-overs and names host 1 the leader;
+// this member still commits, as no other member would take the commands.
+func (f *fakeCluster) TransferLeadership() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.handOvers++
+	f.leaderID = 1
+	return nil
+}
 
 // setIndex moves the applied index, as replication would.
 func (f *fakeCluster) setIndex(index uint64) {
@@ -123,6 +139,8 @@ type testCluster struct {
 	recipients []age.Recipient
 	// recovery is the recovery key, which opens every value
 	recovery *age.X25519Identity
+	// joins answers the joins on every server; only the leader's is asked
+	joins *fakeJoins
 }
 
 func newTestCluster(t *testing.T) *testCluster {
@@ -131,7 +149,7 @@ func newTestCluster(t *testing.T) *testCluster {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &testCluster{t: t, ca: ca}
+	c := &testCluster{t: t, ca: ca, joins: &fakeJoins{}}
 	// a real data key: the state reads the sealed length of secrets
 	keys, err := datakey.New()
 	if err != nil {
@@ -163,6 +181,7 @@ func newTestCluster(t *testing.T) *testCluster {
 			APIAddress: func(id state.HostID) string { return addresses[id] },
 			Version:    testVersion,
 			Keys:       keys,
+			Joins:      c.joins,
 			Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		})
 		server.Config.Handler = api
@@ -190,14 +209,14 @@ func bootstrappedState(t *testing.T) *state.State {
 		}
 	}
 	apply(1, state.KindBootstrap, state.Bootstrap{
-		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
-		JoinKey: state.SealedSecret{Value: state.Sealed("join"), Digest: "d"},
+		Keys:         state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
+		BootstrapKey: state.Sealed("join"),
 		Host: state.Host{
 			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
 			CertificateNotAfter: notAfter,
 		},
 	})
-	// no command adds a host until phase 2 brings the join
+	// written in: the tests need host 1, not its join
 	current.Hosts[1] = &state.Host{
 		ID: 1, Name: "node1", Underlay: netip.MustParseAddr("10.0.0.3"), WGPublicKey: "wg", CertificateSerial: "s1",
 		CertificateNotAfter: notAfter, Phase: state.Joining,

@@ -44,14 +44,13 @@ func TestTheExampleDirectoryLoadsWithItsValuesApart(t *testing.T) {
 		t.Errorf("classes or priorities: %+v %+v", config.StorageClasses, config.Priorities)
 	}
 	want := []string{
-		"alerts.channels[0].webhook", "hoster.token", "join_keys[0]",
-		`registries["ghcr.io"].password`,
+		"alerts.channels[0].webhook", "hoster.token", `registries["ghcr.io"].password`,
 	}
 	if got := slices.Sorted(maps.Keys(directory.Encrypted)); !slices.Equal(got, want) {
 		t.Errorf("values %q", got)
 	}
-	if !strings.Contains(directory.Encrypted["join_keys[0]"], "am9pbg==") {
-		t.Errorf("the join key's armor: %q", directory.Encrypted["join_keys[0]"])
+	if !strings.Contains(directory.Encrypted["hoster.token"], "dG9rZW4=") {
+		t.Errorf("the hoster token's armor: %q", directory.Encrypted["hoster.token"])
 	}
 	if problems := clusterspec.Check(config); len(problems) > 0 {
 		t.Errorf("the example does not pass Check: %v", problems)
@@ -115,7 +114,7 @@ func TestTheSchemaDescribesClusterYAML(t *testing.T) {
 	if err := json.Unmarshal(encoded, &schema); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"name", "seeds", "storage_classes", "priorities", "alerts", "join_keys", "registries"} {
+	for _, key := range []string{"name", "seeds", "storage_classes", "priorities", "alerts", "private_network", "registries"} {
 		if _, ok := schema.Properties[key]; !ok {
 			t.Errorf("schema lacks %s", key)
 		}

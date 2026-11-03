@@ -39,9 +39,9 @@ var neighborStack = document(resource.KindStack, "neighbor", `services:
     resources: {reserve: {cpus: 0.01, memory: 32M}}
 `)
 
-// TestBoundaries checks what a container may reach on one host: the rules
-// of internal/network (guard_in, guard_fwd) and Docker's own rules between
-// stacks, which a Docker update could change.
+// TestBoundaries checks what a container may reach on its host and of the
+// other hosts: the rules of internal/network (guard_in, guard_fwd) and
+// Docker's own rules between stacks, which a Docker update could change.
 func TestBoundaries(t *testing.T) {
 	server, tofu := baseline(t)
 	runSteps(t, []step{
@@ -72,14 +72,8 @@ func checkBoundaries(t *testing.T, server host, tofu outputs) {
 	if len(neighborIPs) != 1 {
 		t.Fatalf("neighbor's container has the addresses %v, want one", neighborIPs)
 	}
-	// clowder0 holds the resolver's address too; the node address is the one
-	// in the overlay (network.Overlay)
-	node := server.must(t, "ip -4 -o addr show dev clowder0 to 10.77.0.0/24 | awk '{print $4}' | cut -d / -f 1")
-	if net.ParseIP(node) == nil {
-		t.Fatalf("the node address on clowder0: %q", node)
-	}
-
-	for _, target := range []struct{ what, address string }{
+	node := nodeAddressOf(t, server)
+	targets := []struct{ what, address string }{
 		{"the API on the node address", net.JoinHostPort(node, apiPort)},
 		{"Raft", net.JoinHostPort(node, raftPort)},
 		{"/metrics", net.JoinHostPort(node, metricsPort)},
@@ -89,7 +83,26 @@ func checkBoundaries(t *testing.T, server host, tofu outputs) {
 		{"SSH on the public address", net.JoinHostPort(tofu.PublicAddress.Value, "22")},
 		{"SSH on the Floating IP", net.JoinHostPort(tofu.FloatingIP.Value, "22")},
 		{"another stack's container", net.JoinHostPort(neighborIPs[0], "8080")},
-	} {
+	}
+	// the other hosts: the first host reaches them over the private network
+	// and WireGuard, its containers must not. Their public addresses are
+	// not probed: the Cloud firewall closes SSH and the API there to the
+	// first host itself, so no answer could vouch for the probe; the drop
+	// of @cluster_hosts names them all the same.
+	for name, other := range tofu.Hosts.Value {
+		if other.PublicAddress == tofu.PublicAddress.Value {
+			continue
+		}
+		otherNode := nodeAddressOf(t, host{address: other.PublicAddress})
+		targets = append(targets, []struct{ what, address string }{
+			{name + "'s API on its node address", net.JoinHostPort(otherNode, apiPort)},
+			{name + "'s Raft", net.JoinHostPort(otherNode, raftPort)},
+			{name + "'s API on its underlay", net.JoinHostPort(other.PrivateAddress, apiPort)},
+			{name + "'s SSH on its underlay", net.JoinHostPort(other.PrivateAddress, "22")},
+		}...)
+	}
+
+	for _, target := range targets {
 		if !reaches(t, server, "", target.address) {
 			t.Errorf("%s (%s) does not answer the host itself; the probe would tell nothing", target.what, target.address)
 			continue
@@ -112,6 +125,17 @@ func checkBoundaries(t *testing.T, server host, tofu outputs) {
 	if output, err := server.run("docker exec " + prober + " nslookup " + directory.Hostname()); err != nil {
 		t.Errorf("the resolver does not answer a container: %v\n%s", err, output)
 	}
+}
+
+// nodeAddressOf reads a host's node address: clowder0 holds the resolver's
+// address too, the node address is the one in the overlay (network.Overlay).
+func nodeAddressOf(t *testing.T, server host) string {
+	t.Helper()
+	node := server.must(t, "ip -4 -o addr show dev clowder0 to 10.77.0.0/24 | awk '{print $4}' | cut -d / -f 1")
+	if net.ParseIP(node) == nil {
+		t.Fatalf("the node address on clowder0 of %s: %q", server.address, node)
+	}
+	return node
 }
 
 // checkDroppedBeyondTheHost probes what no answer of the host itself can

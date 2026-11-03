@@ -43,18 +43,27 @@ func applyAddUser(s *State, _ Command, payload AddUser) (func(), error) {
 		return nil, errors.New("the recovery key's recipient is no age key (age1...)")
 	}
 	return func() {
+		// the key is in the user data, the OpenTofu state and the metadata
+		// service; from now on it opens nothing
+		s.BootstrapKey = nil
 		s.RecoveryRecipient = payload.RecoveryRecipient
 		s.Users[payload.Name] = &User{Name: payload.Name, Serials: map[string]time.Time{payload.Serial: payload.NotAfter}}
 	}, nil
 }
 
-// serialInUse tells whether a serial belongs to a user or was revoked.
+// serialInUse tells whether a serial belongs to a user or a host, or was
+// revoked.
 func (s *State) serialInUse(serial string) bool {
 	if _, revoked := s.Revoked[serial]; revoked {
 		return true
 	}
 	for _, user := range s.Users {
 		if _, ok := user.Serials[serial]; ok {
+			return true
+		}
+	}
+	for _, host := range s.Hosts {
+		if host.CertificateSerial == serial {
 			return true
 		}
 	}

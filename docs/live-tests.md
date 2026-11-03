@@ -8,11 +8,11 @@ those tools and from where the tools reach the hosts. Point `HLAB` at its wrappe
 
 ```bash
 export HLAB=/path/to/hlab/bin/hlab
-bin/dev live                        # up, run, and down once it passes; about 20 minutes
-bin/dev live up                     # package, make the host, bootstrap its cluster
-bin/dev live run                    # every scenario on that host
+bin/dev live                        # up, run, and down once it passes; about an hour
+bin/dev live up                     # package, make the first host, bootstrap, two more join
+bin/dev live run                    # every scenario on that cluster
 bin/dev live run -run TestIngress   # one scenario; the flags go to go test
-bin/dev live down                   # destroy the host, stop the lab
+bin/dev live down                   # destroy the hosts, stop the lab
 bin/dev live release v1.2.3-rc1     # on a checkout of the tag: the release, without the test hook
 ```
 
@@ -39,15 +39,16 @@ second `bin/dev live` while one runs, since both would share the lab and the vol
 - It applies `examples/hetzner` with `admin_cidrs` = `192.0.2.2/32`, a third storage
   class `small` of 10 GB, the published port `udp/9987`, and the test hook: the package's
   URL and SHA-256. With a tag there is no hook: `clowderd_version` names the release.
-- It runs `TestSetup`, which bootstraps the cluster.
+- It copies OpenTofu's binary to `/work/bin`, for the tests that add and remove hosts.
+- It runs `TestSetup`, which bootstraps the cluster and has two more hosts join.
 
 The registry and the mail server run until `bin/dev live down`; `run` refuses to start
 without them, since a new registry would not hold the test's image. `up` refuses while a
-host is left: `down` removes it first.
+host is left: `down` removes them first, with the hosts of `/work/hosts.tfvars`.
 
-Everything a run keeps is in the Docker volume `clowder-live`: the OpenTofu state, a
-throw-away SSH key and `known_hosts`, the CLI, the registry's files, the cluster and stack
-directories. A failed scenario leaves the host and what it made for a look.
+Everything a run keeps is in the Docker volume `clowder-live`: the OpenTofu state and the
+joining hosts' variables (`hosts.tfvars`, with their tokens), a throw-away SSH key and
+`known_hosts`, the CLI, the registry's files, the cluster and stack directories. A failed scenario leaves the host and what it made for a look.
 
 ## The scenarios
 
@@ -58,9 +59,12 @@ a failure the test prints cloud-init's status and the journals of `clowder-setup
 `clowderd`.
 
 Every scenario but `TestSetup` starts from the same baseline and checks it first
-(`baseline`): the host set up and its agent active, the cluster bootstrapped with a
-leader, `cluster.yaml` applied and with the settings `TestSetup` gave it, no stack or
-volume in any namespace, no fault in the lab and no dead server (HLab's `/status`). A
+(`baseline`): the first host set up and its agent active, the cluster bootstrapped with a
+leader, `cluster.yaml` applied and with the settings `TestSetup` gave it, the first host
+active and the joined ones drained, three voters, no stack or volume in any namespace, no
+fault in the lab and no dead server (HLab's `/status`). The joined hosts are drained so
+the scenarios' stacks start on the first host, where the test looks for them: stacks do
+not move between hosts yet. A
 scenario puts back what it changed at its end, so the next finds the baseline again; one
 that failed stops the next `bin/dev live run` with what it left. So the scenarios run in
 any order; `go test` runs them in the order of their files, and the sections below follow
@@ -76,12 +80,38 @@ reads within a step.
 1. The setup makes the first host and deletes its key file.
 2. The user bootstraps (its credentials go to `/work/config`, mode 600, not to the
    developer's config directory), fills in `cluster.yaml` from the module's outputs and
-   applies it; the bootstrap's join key stays, the hoster token and the registry's password
-   join it encrypted (`secret encrypt --cluster-yaml`). The cluster directory holds
-   `cluster.yaml` alone, with no value in clear. `cluster diff` names a changed token, by
-   name only, and nothing for the same token encrypted anew. The recovery key goes to
-   `/work/recovery-key`. The host trusts the registry's CA (`/etc/docker/certs.d`), and the
-   test pushes its image there, then logs out, so only the agent's login pulls it.
+   applies it, with the hoster token and the registry's password encrypted (`secret
+   encrypt --cluster-yaml`). The cluster directory holds `cluster.yaml` alone, with no
+   value in clear. `cluster diff` names a changed token, by name only, and nothing for the
+   same token encrypted anew. The recovery key goes to `/work/recovery-key`. The host
+   trusts the registry's CA (`/etc/docker/certs.d`), and the test pushes its image there,
+   then logs out, so only the agent's login pulls it.
+3. Two hosts join, `clowder1` and `clowder2`, each with a token of `host join-token`: the
+   test writes them into `/work/hosts.tfvars` and runs OpenTofu itself (the binary that
+   `up` copies to `/work/bin`). The first waits `passive` without a vote; with the second,
+   all three are active and vote. Each joined host has its `net.json` and reaches the
+   first host's API over the private network. The test drains both and keeps their
+   tokens for `TestJoin`.
+
+### `TestJoin`
+
+1. The bootstrap key proves nothing any more: the offer has no proof, and the CLI stops
+   with "has a user already".
+2. An unknown token, the token a host joined with and a token of a minute after its
+   minute get no proof of the CA (403, each with why).
+3. With an open token and the CA it proved, a join is refused that names a server of the
+   project outside the private network (a server the test makes through HLab's Cloud
+   API), as it does not come from that server's address, and one that names a joined
+   host's server. No host comes of it. That the hoster's addresses must match the
+   host's is a unit test (`agent/join_test.go`): a request comes from the test's own
+   address here.
+
+### `TestReplace`
+
+1. A fourth host, `clowder3`, joins: active, without a vote (three vote).
+2. `clowder2` is removed; removing `clowder3` then is refused, as it would leave two.
+3. `clowder4` joins in `clowder2`'s place (OpenTofu removes its server) and takes its ID,
+   once every host forgot it as a DRBD peer.
 
 ### `TestStacks`
 
@@ -150,8 +180,8 @@ The stack `echo` lives from step 2 to the last.
 ### `TestAlerts`
 
 1. `clowder alert test` reaches Discord and a webhook (both received by the test) and the
-   mail server. The heartbeat stops while the agent is stopped and comes back after its
-   start. Filling the pool of `small` beyond 80 % raises `pool-use`; deleting the volume
+   mail server. The heartbeat goes on while the first host's agent is stopped: another
+   host leads and calls it. Filling the pool of `small` beyond 80 % raises `pool-use`; deleting the volume
    brings its all-clear. The step removes its channels and the pool's reserve at the end.
 2. `promtool check metrics` accepts `/metrics`, and a Prometheus on the host scrapes it.
 
@@ -169,8 +199,11 @@ The stack `echo` lives from step 2 to the last.
 
 1. A container of the stack `prober` reaches none of these, each of which answers the
    host itself: the API on the node address, the underlay and the public address, Raft,
-   `/metrics`, SSH on the underlay, the public address and the Floating IP, and a
-   container of the stack `neighbor` on its port. It reaches the registry beyond the
+   `/metrics`, SSH on the underlay, the public address and the Floating IP, a container
+   of the stack `neighbor` on its port, and of every other host the API and Raft on its
+   node address (through WireGuard) and the API and SSH on its underlay. The other hosts'
+   public addresses are not probed: the Cloud firewall closes them to the first host
+   itself. It reaches the registry beyond the
    host, and the resolver answers it. The probe runs on the host in the container's
    network namespace (`nsenter --net`), so its packets leave through the container's
    bridge.
@@ -181,6 +214,3 @@ The stack `echo` lives from step 2 to the last.
    interface, to the registry). The agent reloads the table every loop interval, which
    zeroes the counters, so each probe gets three tries.
 3. Both stacks go.
-
-With several hosts (the join), the test also covers the other hosts' underlay and node
-addresses.

@@ -157,6 +157,11 @@ var unlockedKinds = map[string]string{
 	KindStartOperation:       "operations take the locks",
 	KindAdvanceOperation:     "operations take the locks",
 	KindFinishOperation:      "operations take the locks",
+	KindAddJoinToken:         "a join token",
+	KindAddHost:              "a new host, which no operation can hold yet",
+	KindConfirmServerRef:     "a fact about the host's server, no phase",
+	KindSetHostVoter:         "mirrors Raft's configuration, no phase",
+	KindReportPeerForgotten:  "a host's report about a removed host",
 }
 
 func TestEveryKindOfCommandIsCheckedForLocks(t *testing.T) {

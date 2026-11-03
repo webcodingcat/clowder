@@ -213,6 +213,12 @@ func (f *Storage) Trim(_ context.Context, volume storage.Volume) error {
 	return nil
 }
 
+// ForgetPeer records the call.
+func (f *Storage) ForgetPeer(_ context.Context, peer int) error {
+	f.Add("forget-peer %d", peer)
+	return nil
+}
+
 // PoolUsage is 100 GiB, DataPercent full.
 func (f *Storage) PoolUsage(context.Context, string) (int64, float64, float64, error) {
 	f.Lock()
@@ -389,8 +395,8 @@ func NewCluster(t *testing.T) *Cluster {
 	}
 	cluster := &Cluster{t: t, State: &state.State{}, Keys: keys}
 	cluster.Apply(state.KindBootstrap, state.LeaderActor, state.Bootstrap{
-		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
-		JoinKey: state.SealedSecret{Value: state.Sealed("j"), Digest: "d"},
+		Keys:         state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
+		BootstrapKey: state.Sealed("j"),
 		Host: state.Host{
 			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
 			CertificateNotAfter: time.Now().AddDate(1, 0, 0),

@@ -97,10 +97,9 @@ func TestADiffNamesWhatAnApplyWouldChange(t *testing.T) {
 	cluster := newTestCluster(t)
 	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
 	ctx := context.Background()
-	// init's join key goes, as this cluster.yaml does not name it
 	first, err := client.DiffCluster(ctx, cluster.testApply("the token"))
 	if err != nil || first.Revision != 0 || !slices.Contains(first.Fields, "hoster") ||
-		!slices.Equal(first.Secrets, []string{"hoster.token", "join_keys[0]", registryPassword}) {
+		!slices.Equal(first.Secrets, []string{"hoster.token", registryPassword}) {
 		t.Errorf("before the first apply: %+v, %v", first, err)
 	}
 	if _, err := client.Put(ctx, "/v1/cluster", cluster.testApply("the token")); err != nil {

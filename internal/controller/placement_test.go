@@ -78,8 +78,8 @@ func (l *leader) apply(kind, actor string, payload any) {
 func newLeader(t *testing.T, poolSize int64) *leader {
 	l := &leader{t: t, state: &state.State{}, changed: make(chan struct{})}
 	l.apply(state.KindBootstrap, state.LeaderActor, state.Bootstrap{
-		Keys:    state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
-		JoinKey: state.SealedSecret{Value: state.Sealed("j"), Digest: "d"},
+		Keys:         state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
+		BootstrapKey: state.Sealed("j"),
 		Host: state.Host{
 			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg",
 			CertificateSerial: "s0", CertificateNotAfter: time.Now().AddDate(1, 0, 0),

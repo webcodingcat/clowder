@@ -6,11 +6,6 @@ hoster:
     -----BEGIN AGE ENCRYPTED FILE-----
     dG9rZW4=
     -----END AGE ENCRYPTED FILE-----
-join_keys:
-  - !secret |
-    -----BEGIN AGE ENCRYPTED FILE-----
-    am9pbg==
-    -----END AGE ENCRYPTED FILE-----
 registries:
   ghcr.io:
     username: robot

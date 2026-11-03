@@ -2,10 +2,12 @@ package hetzner
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +25,8 @@ type fakeAPI struct {
 	bodies   []string
 	// actionFails makes every action end in an error.
 	actionFails bool
+	// missingServers makes GET /v1/servers/404 the API's not found
+	missingServers bool
 }
 
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -47,6 +51,13 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"floating_ips": [
 			{"id": 4713, "ip": "203.0.113.10", "server": 42}
 		], "meta": {"pagination": {"page": 2, "per_page": 50, "next_page": null}}}`)
+	case f.missingServers && r.Method == http.MethodGet && r.URL.Path == "/v1/servers/404":
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error": {"code": "not_found", "message": "server not found"}}`)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/42":
+		_, _ = io.WriteString(w, `{"server": {"id": 42, "name": "node0",
+			"public_net": {"ipv4": {"id": 7, "ip": "198.51.100.42", "blocked": false}, "ipv6": null},
+			"private_net": [{"network": 4711, "ip": "10.0.0.2", "alias_ips": [], "mac_address": "86:00:00:2a:7d:e0"}]}}`)
 	case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/actions/"):
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{"action": {"id": 13, "command": "assign_floating_ip", "status": "running", "error": null}}`)
@@ -106,6 +117,26 @@ func TestAssigningWaitsForTheAction(t *testing.T) {
 	}
 	if api.bodies[1] != `{"server":43}` {
 		t.Errorf("assign body %s", api.bodies[1])
+	}
+}
+
+func TestAServersAddressesArePrivateAndPublic(t *testing.T) {
+	api := &fakeAPI{t: t}
+	client := newClient(t, api)
+	addresses, err := client.ServerAddresses(context.Background(), "42")
+	want := []netip.Addr{netip.MustParseAddr("10.0.0.2"), netip.MustParseAddr("198.51.100.42")}
+	if err != nil || !slices.Equal(addresses, want) {
+		t.Errorf("addresses %v, %v; want %v", addresses, err, want)
+	}
+}
+
+func TestAServerTheProjectDoesNotHaveIsNoSuchServer(t *testing.T) {
+	api := &fakeAPI{t: t, missingServers: true}
+	client := newClient(t, api)
+	for _, ref := range []string{"404", "no-id"} {
+		if _, err := client.ServerAddresses(context.Background(), ref); !errors.Is(err, ErrNoSuchServer) {
+			t.Errorf("server %s: %v", ref, err)
+		}
 	}
 }
 

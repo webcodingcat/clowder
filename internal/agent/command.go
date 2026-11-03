@@ -1,9 +1,10 @@
 // Package agent is the clowderd process: the daemon (run) and the commands
-// that run on a host (check, init, user recovery-code; later join,
+// that run on a host (check, init, join, user recovery-code; later
 // recover). Only clowderd imports it.
 package agent
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -18,6 +19,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/command"
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/hoster"
+	"github.com/webcodingcat/clowder/internal/jointoken"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/storage"
@@ -31,27 +33,66 @@ func NewRoot() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newVersion(), newCheck(), newInit(), newRun(), newUser())
+	root.AddCommand(newVersion(), newCheck(), newInit(), newJoin(), newRun(), newUser())
 	return root
 }
 
+// hostFlags are the flags init and join share: who the host is. Its name
+// in the cluster is its hostname, by which DRBD names it in a resource.
+type hostFlags struct {
+	underlay, publicAddress, serverRef string
+	start                              bool
+}
+
+func (f *hostFlags) add(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&f.underlay, "underlay", "", "the host's address in the network between the hosts")
+	cmd.Flags().StringVar(&f.publicAddress, "public-address", "",
+		"where users reach the API, if the underlay is a private network")
+	cmd.Flags().StringVar(&f.serverRef, "server-ref", "", "the hoster's ID of this server")
+	cmd.Flags().BoolVar(&f.start, "start", true, "enable and start clowderd.service afterwards")
+	_ = cmd.MarkFlagRequired("underlay") // the flag exists; this cannot fail
+}
+
+// parse reads the hostname and the addresses.
+func (f *hostFlags) parse() (name string, underlay, publicAddress netip.Addr, err error) {
+	if name, err = os.Hostname(); err != nil {
+		return "", underlay, publicAddress, fmt.Errorf("read the hostname, the host's name in the cluster: %w", err)
+	}
+	if underlay, err = netip.ParseAddr(f.underlay); err != nil {
+		return "", underlay, publicAddress, fmt.Errorf("--underlay: %w", err)
+	}
+	if f.publicAddress != "" {
+		if publicAddress, err = netip.ParseAddr(f.publicAddress); err != nil {
+			return "", underlay, publicAddress, fmt.Errorf("--public-address: %w", err)
+		}
+	}
+	return name, underlay, publicAddress, nil
+}
+
+// startService enables and starts clowderd.service: the agent runs as a
+// service from then on, across reboots.
+func (f *hostFlags) startService(ctx context.Context) error {
+	if !f.start {
+		return nil
+	}
+	if _, err := command.Run(ctx, time.Minute, "systemctl", "enable", "--now", "clowderd.service"); err != nil {
+		return fmt.Errorf("start clowderd.service: %w", err)
+	}
+	return nil
+}
+
 func newInit() *cobra.Command {
-	var options InitOptions
-	var underlay, publicAddress, keyFile string
-	var start bool
+	var flags hostFlags
+	var keyFile string
 	initCommand := &cobra.Command{
 		Use:   "init",
 		Short: "Make this host the first of a new cluster (from cloud-init)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			options := InitOptions{ServerRef: flags.serverRef}
 			var err error
-			if options.Underlay, err = netip.ParseAddr(underlay); err != nil {
-				return fmt.Errorf("--underlay: %w", err)
-			}
-			if publicAddress != "" {
-				if options.PublicAddress, err = netip.ParseAddr(publicAddress); err != nil {
-					return fmt.Errorf("--public-address: %w", err)
-				}
+			if options.Name, options.Underlay, options.PublicAddress, err = flags.parse(); err != nil {
+				return err
 			}
 			if options.BootstrapKey, err = pki.ReadBootstrapKey(keyFile); err != nil {
 				return err
@@ -60,29 +101,50 @@ func newInit() *cobra.Command {
 			if err := Init(cmd.Context(), files, options, hostNetwork(files), slog.Default()); err != nil {
 				return err
 			}
-			if !start {
-				return nil
-			}
-			// the agent runs as a service from now on, across reboots
-			if _, err := command.Run(cmd.Context(), time.Minute, "systemctl", "enable", "--now",
-				"clowderd.service"); err != nil {
-				return fmt.Errorf("start clowderd.service: %w", err)
-			}
-			return nil
+			return flags.startService(cmd.Context())
 		},
 	}
-	hostname, _ := os.Hostname() // without one, --name is needed
+	flags.add(initCommand)
 	initCommand.Flags().StringVar(&keyFile, "bootstrap-key-file", "",
 		"a file with the cluster's bootstrap key (from OpenTofu); not a flag of its own, which /proc would show")
-	initCommand.Flags().StringVar(&options.Name, "name", hostname, "the host's name in the cluster")
-	initCommand.Flags().StringVar(&underlay, "underlay", "", "the host's address in the network between the hosts")
-	initCommand.Flags().StringVar(&publicAddress, "public-address", "",
-		"where users reach the API, if the underlay is a private network")
-	initCommand.Flags().StringVar(&options.ServerRef, "server-ref", "", "the hoster's ID of this server")
-	initCommand.Flags().BoolVar(&start, "start", true, "enable and start clowderd.service afterwards")
-	_ = initCommand.MarkFlagRequired("bootstrap-key-file") // the flags exist; this cannot fail
-	_ = initCommand.MarkFlagRequired("underlay")
+	_ = initCommand.MarkFlagRequired("bootstrap-key-file") // the flag exists; this cannot fail
 	return initCommand
+}
+
+func newJoin() *cobra.Command {
+	var flags hostFlags
+	var seed, tokenFile string
+	joinCommand := &cobra.Command{
+		Use:   "join",
+		Short: "Make this host a member of a cluster, with a join token (from cloud-init)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			options := JoinOptions{Seed: seed, ServerRef: flags.serverRef}
+			var err error
+			if options.Name, options.Underlay, options.PublicAddress, err = flags.parse(); err != nil {
+				return err
+			}
+			content, err := os.ReadFile(tokenFile)
+			if err != nil {
+				return fmt.Errorf("read the join token: %w", err)
+			}
+			if options.Token, err = jointoken.Parse(string(content)); err != nil {
+				return err
+			}
+			files := Files{Dir: DefaultDir}
+			if err := Join(cmd.Context(), files, options, hostNetwork(files), slog.Default()); err != nil {
+				return err
+			}
+			return flags.startService(cmd.Context())
+		},
+	}
+	flags.add(joinCommand)
+	joinCommand.Flags().StringVar(&seed, "seed", "", "an agent of the cluster: its underlay address")
+	joinCommand.Flags().StringVar(&tokenFile, "token-file", "",
+		"a file with the join token (clowder host join-token); not a flag of its own, which /proc would show")
+	_ = joinCommand.MarkFlagRequired("seed") // the flags exist; this cannot fail
+	_ = joinCommand.MarkFlagRequired("token-file")
+	return joinCommand
 }
 
 func newRun() *cobra.Command {

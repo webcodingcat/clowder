@@ -1,16 +1,22 @@
 package agent
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
+	"os"
 	"reflect"
 	"slices"
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/agent/loop"
+	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -32,16 +38,23 @@ type wantedNetwork struct {
 
 // reconcileNetwork keeps the WireGuard mesh and the nft rules as the state
 // says until ctx ends: after a change of the state when they differ, and
-// every loop.Interval anyway, to repair what someone changed by hand.
-func reconcileNetwork(ctx context.Context, cluster loop.Cluster, self state.HostID, hostNetwork HostNetwork,
-	logger *slog.Logger,
+// every loop.Interval anyway, to repair what someone changed by hand. It
+// keeps the mesh it applied in net.json for the next start (restoreMesh).
+func reconcileNetwork(ctx context.Context, cluster loop.Cluster, files Files, self state.HostID,
+	hostNetwork HostNetwork, logger *slog.Logger,
 ) {
 	// applied is what was applied at appliedAt; nil at the start and after
 	// a failure
 	var applied *wantedNetwork
 	var appliedAt time.Time
 	loop.Run(ctx, cluster, nil, func() {
-		wanted := readWantedNetwork(cluster, self)
+		wanted, known := readWantedNetwork(cluster, self)
+		if !known {
+			// a joined host's state is empty until the leader's log reaches
+			// it, over the mesh of net.json; a mesh made from that state
+			// would have no peers and cut the host off for good
+			return
+		}
 		repairDue := time.Since(appliedAt) >= loop.Interval
 		// DeepEqual covers every field, a new one too; readWantedNetwork
 		// sorts the lists
@@ -59,18 +72,64 @@ func reconcileNetwork(ctx context.Context, cluster loop.Cluster, self state.Host
 			logger.Error("apply the WireGuard mesh", "error", err)
 			return
 		}
+		if err := files.writeMesh(wanted.mesh); err != nil {
+			logger.Error("keep the WireGuard mesh for the next start", "error", err)
+			return
+		}
 		applied, appliedAt = &wanted, time.Now()
 	})
+}
+
+// writeMesh keeps the mesh in net.json, unless it holds it already.
+func (f Files) writeMesh(mesh network.Mesh) error {
+	content, err := json.MarshalIndent(mesh, "", "  ")
+	if err != nil {
+		return fmt.Errorf("write %s: %w", f.meshFile(), err)
+	}
+	content = append(content, '\n')
+	if old, err := os.ReadFile(f.meshFile()); err == nil && bytes.Equal(old, content) {
+		return nil
+	}
+	return atomicfile.Write(f.meshFile(), content, 0o600)
+}
+
+// restoreMesh applies the mesh of net.json, if there is one. Raft runs
+// over the mesh, so after a reboot a host would learn its peers from a
+// leader it cannot reach without them; the file breaks that circle. The
+// state's mesh replaces it once the state answers.
+func restoreMesh(ctx context.Context, files Files, self state.HostID, hostNetwork HostNetwork) error {
+	content, err := os.ReadFile(files.meshFile())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", files.meshFile(), err)
+	}
+	var mesh network.Mesh
+	if err := json.Unmarshal(content, &mesh); err != nil {
+		return fmt.Errorf("read %s: %w", files.meshFile(), err)
+	}
+	if mesh.Self != self {
+		return fmt.Errorf("%s is the mesh of host %d, not of this host %d", files.meshFile(), mesh.Self, self)
+	}
+	if err := hostNetwork.ApplyMesh(ctx, mesh); err != nil {
+		return fmt.Errorf("restore the WireGuard mesh of %s: %w", files.meshFile(), err)
+	}
+	return nil
 }
 
 // readWantedNetwork reads the mesh and the nft ruleset from the current
 // state. Every other host is a peer until it is removed. The addresses of
 // all hosts stay closed to containers, a removed host's too: it may still
-// run, until the hoster's server is gone.
-func readWantedNetwork(cluster loop.Cluster, self state.HostID) wantedNetwork {
-	wanted := wantedNetwork{mesh: network.Mesh{Self: self}}
+// run, until the hoster's server is gone. known is false while the state
+// does not know this host yet: then it says nothing about the network.
+func readWantedNetwork(cluster loop.Cluster, self state.HostID) (wanted wantedNetwork, known bool) {
+	wanted = wantedNetwork{mesh: network.Mesh{Self: self}}
 	ruleset := &wanted.ruleset
 	cluster.Read(func(current *state.State) {
+		if _, known = current.Hosts[self]; !known {
+			return
+		}
 		spec := current.Config.Spec
 		// empty before the first cluster apply; clusterspec.Check lets no
 		// other invalid value into the state
@@ -98,5 +157,5 @@ func readWantedNetwork(cluster loop.Cluster, self state.HostID) wantedNetwork {
 	slices.SortFunc(ruleset.ClusterHosts, netip.Addr.Compare)
 	slices.SortFunc(wanted.mesh.Peers, func(a, b network.Peer) int { return cmp.Compare(a.ID, b.ID) })
 	slices.Sort(ruleset.Peers)
-	return wanted
+	return wanted, known
 }

@@ -57,8 +57,11 @@ loops that talk to the world outside.
   for a lab's API instead of the hoster's (a full `http://` or `https://` URL: the token
   goes there).
 - `hoster.Hoster` is what clowder asks of a hoster: where the Floating IP is routed, route
-  it, power a server off and on (fencing, phase 2). A server is its `ServerRef`, the
-  hoster's ID that `clowderd init --server-ref` records. `hoster.New` picks the plugin.
+  it, a server's private addresses, power a server off and on (fencing, phase 2). A
+  server is its `ServerRef`, the hoster's ID that `clowderd init` and `join --server-ref`
+  record. A host names it itself, so `hoster.CheckServerRef` makes sure one of the
+  server's private addresses is the host's underlay (`ErrOtherServer` if not): the join
+  checks it, the Floating IP's loop the first host's. `hoster.New` picks the plugin.
 - `hoster/hetzner` is a small client of the Hetzner Cloud API on `net/http`: the official
   SDK would bring Prometheus' client and more into clowderd. It finds the Floating IP among
   the project's (the API cannot look one up by its address) and waits for each action to
@@ -66,7 +69,9 @@ loops that talk to the world outside.
 - `controller.RunFloatingIP` (`floatingip.go`) acts only on the leader. The ingress host (`State.Ingress`,
   `set-ingress`) is the recorded one while it is active and has a server ref, so the
   Floating IP never switches back by itself; otherwise the first of
-  `ingress.preferred_hosts` that can, else the one with the lowest ID that can. At a change
+  `ingress.preferred_hosts` that can, else the one with the lowest ID that can. A host
+  whose server ref the hoster has not confirmed yet is checked first
+  (`confirm-server-ref`); one that fails the check gets no Floating IP. At a change
   of the state and every 30 s it asks the hoster where the Floating IP is and routes it to
   the ingress host when it is elsewhere (moved by hand, or a new ingress host); it reads
   the API at most once per 30 s, about 120 of Hetzner's 3600 requests an hour.

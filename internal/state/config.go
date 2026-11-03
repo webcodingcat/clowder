@@ -10,8 +10,7 @@ import (
 
 // ApplyConfig replaces cluster.yaml and its values with what the user
 // applied. Secrets holds a value for each name of the spec
-// (clusterspec.SecretPlaces), and no other: a join key left out is invalid
-// from now on.
+// (clusterspec.SecretPlaces), and no other.
 type ApplyConfig struct {
 	Spec    clusterspec.Config      `json:"spec"`
 	Secrets map[string]SealedSecret `json:"secrets"`
@@ -32,18 +31,6 @@ type RegistryLogin struct {
 func (s *State) ClusterSecret(name clusterspec.SecretRef) (Sealed, bool) {
 	secret, ok := s.ClusterSecrets[string(name)]
 	return secret.Value, ok
-}
-
-// ValidJoinKeys are the bootstrap keys hosts may join with, and the first
-// user bootstrap with.
-func (s *State) ValidJoinKeys() []Sealed {
-	var keys []Sealed
-	for _, name := range s.Config.Spec.JoinKeys {
-		if key, ok := s.ClusterSecret(name); ok {
-			keys = append(keys, key)
-		}
-	}
-	return keys
 }
 
 // RegistryLogins are the logins for private image registries, by registry.

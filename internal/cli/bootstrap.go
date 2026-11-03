@@ -19,7 +19,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/pki"
-	"github.com/webcodingcat/clowder/internal/secretvalue"
 )
 
 // bootstrapFlags are the flags of clowder cluster bootstrap.
@@ -57,16 +56,15 @@ func newBootstrap(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cluster, err := api.FindCluster(cmd.Context(), flags.seed, []byte(bootstrapKey), buildinfo.Version)
-			if err != nil {
-				return err
-			}
 			// before a recovery key is made: nobody may hold two and not know
 			// which one counts
-			if cluster.Bootstrapped {
-				return fmt.Errorf("the cluster has a user already, and a cluster has only one. If that was an earlier try of "+
-					"yours, the recovery key it gave out is the one that counts; %s",
-					accessByCode(user, flags.name, flags.seed))
+			cluster, err := api.FindCluster(cmd.Context(), flags.seed, []byte(bootstrapKey), buildinfo.Version)
+			if errors.Is(err, api.ErrBootstrapped) {
+				return fmt.Errorf("%w. If that was an earlier try of yours, the recovery key it gave out is the one "+
+					"that counts; %s", err, accessByCode(user, flags.name, flags.seed))
+			}
+			if err != nil {
+				return err
 			}
 			recovery, err := age.GenerateX25519Identity()
 			if err != nil {
@@ -87,7 +85,7 @@ func newBootstrap(g *globals) *cobra.Command {
 					accessByCode(user, flags.name, flags.seed))
 			}
 			newDirectory := clusterdir.NewDirectory{Path: path, Name: flags.name, Seed: flags.seed}
-			if err := createDirectory(cmd.Context(), newDirectory, credentials, cluster, recovery, bootstrapKey); err != nil {
+			if err := createDirectory(cmd.Context(), newDirectory, credentials, cluster, recovery); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s is the user of cluster %s. Next:\n"+
@@ -131,17 +129,17 @@ func becomeFirstUser(ctx context.Context, cluster *api.TrustedCluster, user stri
 }
 
 // createDirectory writes the cluster directory with cluster.yaml to fill
-// in. Its join key is the bootstrap key, encrypted for the cluster, so the
-// user asks the cluster, with the new credentials, for its recipients.
+// in, once the cluster, asked with the new credentials, has the recovery
+// key just made.
 func createDirectory(ctx context.Context, directory clusterdir.NewDirectory, credentials clusterdir.Credentials,
-	cluster *api.TrustedCluster, recovery *age.X25519Identity, bootstrapKey string,
+	cluster *api.TrustedCluster, recovery *age.X25519Identity,
 ) error {
 	certificate, err := tls.X509KeyPair([]byte(credentials.Certificate), []byte(credentials.Key))
 	if err != nil {
 		return err
 	}
 	client := api.NewClient([]string{directory.Seed}, certificate, cluster.CA, buildinfo.Version)
-	recipients, encryption, err := clusterRecipients(ctx, client)
+	_, encryption, err := clusterRecipients(ctx, client)
 	if err != nil {
 		return err
 	}
@@ -150,11 +148,6 @@ func createDirectory(ctx context.Context, directory clusterdir.NewDirectory, cre
 	if encryption.Recovery != recovery.Recipient().String() {
 		return fmt.Errorf("the cluster's recovery key is %s, not the one just made; "+
 			"make a new one with clowder recovery rotate and a code from a host", encryption.Recovery)
-	}
-	directory.JoinKey, err = secretvalue.Encrypt(secretvalue.Value{For: secretvalue.Cluster, Bytes: []byte(bootstrapKey)},
-		recipients...)
-	if err != nil {
-		return err
 	}
 	return clusterdir.Create(directory)
 }

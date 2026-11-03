@@ -108,11 +108,6 @@ func Check(config Config) Problems {
 			report("registries[%q].password: a value tagged !secret is required", host)
 		}
 	}
-	for index, key := range config.JoinKeys {
-		if key == "" {
-			report("join_keys[%d]: a value tagged !secret is required", index)
-		}
-	}
 	for _, place := range SecretPlaces(config) {
 		if string(place.Name) != place.Path {
 			report("%s names the secret %q; a secret is named by its place", place.Path, place.Name)

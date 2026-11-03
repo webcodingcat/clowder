@@ -30,9 +30,6 @@ type Config struct {
 	// the current members.
 	Seeds  []string `yaml:"seeds" json:"seeds" jsonschema:"required,minItems=1"`
 	Hoster Hoster   `yaml:"hoster" json:"hoster" jsonschema:"required"`
-	// JoinKeys are the bootstrap keys: hosts join with one, and the first
-	// user bootstraps with one. A key left out is invalid once applied.
-	JoinKeys []SecretRef `yaml:"join_keys,omitempty" json:"join_keys,omitempty"`
 	// Registries are the logins for private image registries, by host.
 	Registries map[string]Registry `yaml:"registries,omitempty" json:"registries,omitempty"`
 	// PrivateNetwork is the hoster's private network the hosts share, as a

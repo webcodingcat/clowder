@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
-# Prepare a Hetzner host for clowder and make it the first host of a cluster:
-# packages (DRBD 9 from LINBIT, clowderd from clowder's APT repository), the
-# operator base that clowderd check expects, a thin pool per storage class, the
-# Floating IP, then clowderd check and clowderd init.
+# Prepare a Hetzner host for clowder and make it a host of a cluster: packages
+# (DRBD 9 from LINBIT, clowderd from clowder's APT repository), the operator
+# base that clowderd check expects, a thin pool per storage class, the
+# Floating IP, then clowderd check and clowderd init (the first host) or
+# clowderd join (the others).
 #
 # clowder-setup.service runs it at every boot until it has finished (the
 # marker), so it may reboot in between; every step can run again. Its settings
-# come from /etc/clowder-setup.env, the bootstrap key from a root-only file;
-# cloud-init writes both (examples/hetzner).
+# come from /etc/clowder-setup.env, the bootstrap key (the first host) or the
+# join token (the others) from a root-only file; cloud-init writes them
+# (examples/hetzner).
 # Usage: setup.sh
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 readonly SETTINGS=/etc/clowder-setup.env
 readonly KEY_FILE=/etc/clowder/bootstrap-key
+readonly TOKEN_FILE=/etc/clowder/join-token
 readonly STATE_DIR=/var/lib/clowder-setup
 readonly MARKER="${STATE_DIR}/done"
 readonly REBOOTS="${STATE_DIR}/reboots"
@@ -244,11 +247,30 @@ time_synchronized() {
   [[ "$(timedatectl show --property=NTPSynchronized --value)" == yes ]]
 }
 
-# init_cluster: clowderd check, then clowderd init, once.
-init_cluster() {
-  local public private class_volume pools=()
-  public="$(metadata public-ipv4)"
-  private="$(private_address)"
+# join_cluster <host flags...>: clowderd join through the seed, tried again
+# for a while: the seed may still boot, or the leader be busy with another
+# host. clowderd says in the journal why a try failed.
+join_cluster() {
+  local deadline=$((SECONDS + 900))
+  # the module writes an empty file for a host without a token in join_tokens
+  if [[ -z "$(tr -d '[:space:]' <"${TOKEN_FILE}")" ]]; then
+    log "${TOKEN_FILE} holds no join token; put one there (clowder host join-token) and reboot"
+    return 1
+  fi
+  until clowderd join "$@" --seed "${SEED}" --token-file "${TOKEN_FILE}"; do
+    if ((SECONDS >= deadline)); then
+      log "gave up joining through ${SEED}; if the cluster lists this host as joining," \
+        "clowder host remove it, then put a new token into ${TOKEN_FILE} and reboot"
+      return 1
+    fi
+    sleep 10
+  done
+}
+
+# enter_cluster: clowderd check, then clowderd init with the bootstrap key or
+# clowderd join with the join token, once.
+enter_cluster() {
+  local class_volume pools=() host=()
   for class_volume in ${VOLUMES}; do
     pools+=(--pool "vg-${class_volume%%=*}/thin")
   done
@@ -258,11 +280,17 @@ init_cluster() {
     return 0
   fi
   if [[ -d /var/lib/clowder/raft ]]; then
-    log "an earlier clowderd init stopped halfway; to start anew, remove /var/lib/clowder and reboot"
+    log "an earlier clowderd init or join stopped halfway; to start anew, remove /var/lib/clowder and reboot"
     return 1
   fi
-  clowderd init --name "${NAME}" --underlay "${private}" --public-address "${public}" \
-    --server-ref "$(metadata instance-id)" --bootstrap-key-file "${KEY_FILE}"
+  # the host's name in the cluster is its hostname, the server's name
+  host=(--underlay "$(private_address)" --public-address "$(metadata public-ipv4)"
+  --server-ref "$(metadata instance-id)")
+  if [[ -f "${TOKEN_FILE}" ]]; then
+    join_cluster "${host[@]}"
+  else
+    clowderd init "${host[@]}" --bootstrap-key-file "${KEY_FILE}"
+  fi
 }
 
 # main: Do what the header of this script describes.
@@ -277,9 +305,10 @@ main() {
   configure_storage
   configure_floating_ip
   wait_for 600 "the time sync" time_synchronized
-  init_cluster
-  # the key is in the cluster's state now (sealed) and in the user's files
-  rm -f "${KEY_FILE}"
+  enter_cluster
+  # the key is in the cluster's state now (sealed), until the user is in;
+  # the token is used up
+  rm -f "${KEY_FILE}" "${TOKEN_FILE}"
   touch "${MARKER}"
   log "done"
 }

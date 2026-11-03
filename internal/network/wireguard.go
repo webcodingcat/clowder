@@ -38,16 +38,16 @@ const (
 
 // Mesh is this host's part of the WireGuard mesh: an interface to each peer.
 type Mesh struct {
-	Self state.HostID
+	Self state.HostID `json:"self"`
 	// Peers are the other hosts, sorted by ID.
-	Peers []Peer
+	Peers []Peer `json:"peers"`
 }
 
 // Peer is another host, as WireGuard reaches it.
 type Peer struct {
-	ID        state.HostID
-	PublicKey string
-	Underlay  netip.Addr
+	ID        state.HostID `json:"id"`
+	PublicKey string       `json:"public_key"`
+	Underlay  netip.Addr   `json:"underlay"`
 }
 
 // PeerInterface is the WireGuard interface to the peer with the ID.

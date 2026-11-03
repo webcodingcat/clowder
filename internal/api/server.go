@@ -50,6 +50,8 @@ type Cluster interface {
 	IsLeader() bool
 	// Leader returns the leading host; ok is false while there is none.
 	Leader() (id state.HostID, ok bool)
+	// TransferLeadership hands this member's lead to another voter.
+	TransferLeadership() error
 }
 
 // ServerConfig is what an agent's API server needs.
@@ -67,7 +69,9 @@ type ServerConfig struct {
 	Containers Containers
 	// Alerts answers for the alert channels; the agent's alerts loop is the
 	// real one.
-	Alerts  Alerts
+	Alerts Alerts
+	// Joins adds joining hosts while this agent leads.
+	Joins   Joins
 	Version string
 	Logger  *slog.Logger
 }
@@ -104,7 +108,7 @@ type Server struct {
 	endStreams context.CancelFunc
 	// the routes without a certificate count their tries, each pair for
 	// itself, so that strangers at the bootstrap do not block a recovery
-	bootstraps, recoveries limiter
+	bootstraps, recoveries, joins limiter
 	// warnedVersions are the callers' versions checkVersion has warned
 	// about, so the log says it once
 	warnedVersions sync.Map
@@ -120,6 +124,7 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/status", pki.RoleUser, server.status)
 	server.handle("GET /v1/hosts", pki.RoleUser, server.hosts)
 	server.handle("POST /v1/hosts/{id}/{action}", pki.RoleUser, server.hostAction)
+	server.handle("POST /v1/join-tokens", pki.RoleUser, server.newJoinToken)
 	server.handle("GET /v1/users", pki.RoleUser, server.users)
 	server.handle("GET /v1/audit", pki.RoleUser, server.audit)
 	server.handle("GET /v1/cluster", pki.RoleUser, server.cluster)
@@ -141,12 +146,16 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/internal/alerts/failures", pki.RoleHost, server.localAlertFailures)
 	server.handle("POST /v1/internal/propose", pki.RoleHost, server.internalPropose)
 	server.handle("POST /v1/internal/changes", pki.RoleHost, server.internalChanges)
+	server.handle("POST /v1/internal/join", pki.RoleHost, server.internalJoin)
+	server.handle("POST /v1/internal/hand-over", pki.RoleHost, server.internalHandOver)
 	server.handle("GET /v1/internal/stacks/{project}/ps", pki.RoleHost, server.localPs)
 	server.handle("GET /v1/internal/stacks/{project}/logs", pki.RoleHost, server.localLogs)
 	server.handleOpen("GET /v1/bootstrap", limited(&server.bootstraps, server.bootstrapOffer))
 	server.handleOpen("POST /v1/bootstrap", limited(&server.bootstraps, server.bootstrap))
 	server.handleOpen("GET /v1/recover/offer", limited(&server.recoveries, server.recoverOffer))
 	server.handleOpen("POST /v1/recover", limited(&server.recoveries, server.recoverUser))
+	server.handleOpen("GET /v1/join", limited(&server.joins, server.joinOffer))
+	server.handleOpen("POST /v1/join", limited(&server.joins, server.join))
 	return server
 }
 
@@ -167,8 +176,8 @@ func (s *Server) streamContext(r *http.Request) (context.Context, context.Cancel
 }
 
 // TLSConfig is the server's side of mutual TLS. A client certificate is
-// checked when given; the routes refuse calls without one. (Bootstrap and
-// join will come without one and prove themselves with the bootstrap key.)
+// checked when given; the routes refuse calls without one, apart from
+// those of handleOpen.
 func (s *Server) TLSConfig() *tls.Config {
 	roots := x509.NewCertPool()
 	roots.AddCert(s.config.CA)
@@ -219,8 +228,9 @@ func (s *Server) handle(pattern string, role pki.Role, handler http.HandlerFunc)
 }
 
 // handleOpen registers a route callers reach without a certificate: the
-// bootstrap, which proves itself with the bootstrap key instead, and the
-// recovery, which proves itself with a code from a host.
+// bootstrap, which proves itself with the bootstrap key instead, the
+// recovery, which proves itself with a code from a host, and the join,
+// which proves itself with a join token.
 func (s *Server) handleOpen(pattern string, handler http.HandlerFunc) {
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		if s.checkVersion(w, r) {
@@ -400,7 +410,90 @@ func (s *Server) hostAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// the phase checked here must still be the host's when it commits
-	s.commitRequest(w, r, state.KindSetHostPhase, state.SetHostPhase{Host: id, Phase: action.To, From: phase})
+	move := state.SetHostPhase{Host: id, Phase: action.To, From: phase}
+	if action.To == state.Removed {
+		if err := s.handOverLeadOf(r.Context(), id); err != nil {
+			writeError(w, http.StatusServiceUnavailable, err)
+			return
+		}
+	}
+	s.commitRequest(w, r, state.KindSetHostPhase, move)
+}
+
+// leaderPoll is how often handOverLeadOf looks whether the lead moved.
+const leaderPoll = 50 * time.Millisecond
+
+// handOverLeadOf has a host that is to be removed hand its lead over
+// first, if it leads: its certificate is revoked with the removal, and a
+// leader that the others no longer take would end its lead abruptly. A
+// removal the state would refuse moves no lead; its commit then says why.
+func (s *Server) handOverLeadOf(ctx context.Context, id state.HostID) error {
+	leader, ok := s.config.Cluster.Leader()
+	if !ok || leader != id {
+		return nil
+	}
+	var refused error
+	s.config.Cluster.Read(func(current *state.State) { refused = current.CheckRemoval(id) })
+	if refused != nil {
+		return nil
+	}
+	var err error
+	if s.config.Cluster.IsLeader() {
+		err = s.config.Cluster.TransferLeadership()
+	} else {
+		err = s.askLeaderToHandOver(ctx, id)
+	}
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(waitTimeout)
+	for {
+		if leader, ok := s.config.Cluster.Leader(); ok && leader != id {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("host %d still leads; try again", id)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(leaderPoll):
+		}
+	}
+}
+
+// askLeaderToHandOver asks the leading host to hand its lead over.
+func (s *Server) askLeaderToHandOver(ctx context.Context, id state.HostID) error {
+	url := "https://" + s.config.APIAddress(id) + "/v1/internal/hand-over"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("ask host %d to hand its lead over: %w", id, err)
+	}
+	request.Header.Set(VersionHeader, s.config.Version)
+	if err := send(s.forwarder, request, nil); err != nil {
+		return fmt.Errorf("ask host %d to hand its lead over: %w", id, err)
+	}
+	return nil
+}
+
+// internalHandOver is where a host asks the leader to hand its lead over,
+// before a user removes it: only a leader that the state would remove.
+func (s *Server) internalHandOver(w http.ResponseWriter, _ *http.Request) {
+	if !s.config.Cluster.IsLeader() {
+		writeJSON(w, http.StatusOK, Written{})
+		return
+	}
+	var refused error
+	s.config.Cluster.Read(func(current *state.State) { refused = current.CheckRemoval(s.config.HostID) })
+	if refused != nil {
+		writeError(w, http.StatusConflict, refused)
+		return
+	}
+	if err := s.config.Cluster.TransferLeadership(); err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, Written{})
 }
 
 // phaseList reads "active", "active or draining", ...
@@ -451,12 +544,14 @@ var userKinds = map[string]bool{
 	state.KindAddUser:              true, // the bootstrap's user
 	state.KindRecoverUser:          true, // a user back with a code from a host
 	state.KindSetRecoveryRecipient: true,
+	state.KindAddJoinToken:         true,
 }
 
 // hostKinds are what a host reports about itself.
 var hostKinds = map[string]bool{
 	state.KindReportHost:     true,
 	state.KindSetStackStatus: true, state.KindForgetCopy: true, state.KindSetVolumeInitialized: true,
+	state.KindReportPeerForgotten: true,
 }
 
 // internalPropose is where a follower forwards a user's write and where an

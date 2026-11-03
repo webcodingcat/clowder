@@ -283,6 +283,12 @@ func TrustProof(bootstrapKey, caCertificatePEM []byte) []byte {
 	return mac.Sum(nil)
 }
 
+// MinBootstrapKeyLength is the shortest bootstrap key taken. The key is the
+// only defense of the bootstrap until the cluster has its user, and the
+// offer's proof lets anyone try keys offline; OpenTofu's example makes 48
+// letters and digits, and a key chosen by hand must not be much weaker.
+const MinBootstrapKeyLength = 32
+
 // ReadBootstrapKey reads the bootstrap key from a file, without the line end
 // an editor or echo adds. clowderd init and clowder cluster bootstrap take
 // it from a file, never from the command line, where /proc and shell
@@ -293,8 +299,9 @@ func ReadBootstrapKey(path string) (string, error) {
 		return "", fmt.Errorf("read the bootstrap key: %w", err)
 	}
 	key := strings.TrimSpace(string(content))
-	if key == "" {
-		return "", fmt.Errorf("read the bootstrap key: %s is empty", path)
+	if len(key) < MinBootstrapKeyLength {
+		return "", fmt.Errorf("read the bootstrap key: %s holds %d characters, fewer than %d",
+			path, len(key), MinBootstrapKeyLength)
 	}
 	return key, nil
 }

@@ -5,8 +5,9 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
 ## The agent (`internal/agent`)
 
 - **Files.** A host's files are under `DefaultDir`: `host.json` (ID, name, addresses, ports),
-  `keys/`, `pki/`, `raft/`, `stacks/`, `storage/`, `volume-records/`, `volumes/`. init and
-  join write `host.json` last, so a host with it has everything else.
+  `net.json` (the WireGuard mesh it last applied), `keys/`, `pki/`, `raft/`, `stacks/`,
+  `storage/`, `volume-records/`, `volumes/`. init and join write `host.json` last, so a
+  host with it has everything else.
 - **`clowderd init`** (from cloud-init) makes the first host: the CA, the data key, the
   cluster's age key, the host's certificate and WireGuard key, a Raft group with this host as
   its only voter and the bootstrap command. Then it enables and starts `clowderd.service`.
@@ -14,7 +15,24 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   (`--bootstrap-key-file`; `clowder cluster bootstrap --key-file` alike), never from the
   command line, where `/proc` and shell histories keep it. `--public-address` is where users
   reach the API when the underlay is a private network; it goes into `host.json` and the
-  state, like `--server-ref`, the hoster's ID of the server (for fencing).
+  state, like `--server-ref`, the hoster's ID of the server (for fencing). The host's
+  name in the cluster is its hostname, by which DRBD names it in a resource. The
+  bootstrap key has at least `pki.MinBootstrapKeyLength` characters.
+- **`clowderd join`** (from cloud-init) makes a host a member of a cluster, with a join
+  token from a file (`--token-file`) and an agent of the cluster as `--seed`; the other
+  flags are init's. In this order:
+  1. It makes the host's own key and WireGuard key and keeps them in `keys/join.json`.
+  2. It trusts the cluster's CA by the token's proof and sends the join
+     (`api.JoiningCluster.Join`). The answer goes into `join.json` at once.
+  3. From `join.json` it writes the keys, the certificate and the data key (`writeKeys`,
+     as init does), `clowder0`, and `net.json` with the other hosts as peers, then
+     `host.json`, and deletes `join.json`.
+
+  A join that fails after step 2 goes on from `join.json` the next time and asks the
+  cluster nothing. A host whose answer never arrived is joining in the state, with its
+  token used: `clowder host remove` it, and it joins anew with a new token. The leader
+  adds the host to Raft as a non-voter at once, and moves it on once its agent runs and
+  reports (The cluster, Raft). It refuses a host that has a `raft/` directory or `host.json`.
 - **`clowderd user recovery-code <user>`** prints the codes that give the user access back,
   one for `user recover` and one for `recovery rotate`, each in its command (the code from
   a host, in [API and the CLI](cluster.md#api-internalapi-and-the-cli-internalcli)). It reads the data key only and changes
@@ -22,7 +40,9 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   name gives codes that fit nowhere.
 - **`clowderd run`** (the service) starts in this order:
   1. `clowder0` with the node address: a dummy interface, so the address exists on a host
-     without peers.
+     without peers. Then the WireGuard mesh of `net.json` (`restoreMesh`): Raft runs over
+     the mesh, so after a reboot a host would learn its peers from a leader it cannot
+     reach without them. The state's mesh replaces it once the state answers.
   2. The Raft member. It waits up to `catchUpTimeout` for its state to catch up with the
      Raft log. If the state met an entry or snapshot it cannot read by then, the agent
      ends here, before its loops start; a follower may meet it later (`CatchUp` does not
@@ -39,7 +59,8 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   5. The loops (`startLoops`): this host's that start no container (the network,
      supervisor), the leader's, which do nothing while it does not lead, and, once the
      state caught up (`runOnceCaughtUp`), the report, Traefik, the volume reconciler with
-     its trim, and the stack runner.
+     its trim, the forgetting of removed hosts (`forgetPeers`: `storage.ForgetPeer`, then
+     `report-peer-forgotten`), and the stack runner.
   6. It tells systemd `READY=1` and feeds the watchdog as long as the state's lock answers.
 
   When it stops, it ends its loops and waits for them, at most `loopsTimeout`: a host tool
@@ -191,7 +212,9 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
 - **The agent's network loop** (`agent/network.go`) reads the wanted network from the
   state (`readWantedNetwork`) and applies the nft rules first, then the WireGuard mesh, at
   every change and every loop interval. Every other host is a peer until it is removed;
-  the addresses of all hosts stay closed to containers.
+  the addresses of all hosts stay closed to containers. It keeps the mesh it applied in
+  `net.json`, which a joined host's first start and every start after a reboot apply
+  before Raft (`restoreMesh`).
 - **The WireGuard mesh** (`ApplyMesh`) has an interface per peer, `clw-<m>`, so each peer
   has a port, a route and a routing table of its own:
   - `clw-<m>` listens on `51800 + m` and reaches peer *m* at its underlay on
@@ -274,6 +297,10 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   --json`; a resource that is down is not listed), the mount table, and whether the
   resource file is current. Markers in the driver's `StateDir` let `Ensure` pick up after a
   crash at any point (`created`: clowder made the LV; `metadata`: DRBD metadata written).
+  `ForgetPeer` forgets a removed host on every resource (`drbdsetup forget-peer`), so
+  its node-id can serve a new host. It fails, and the agent tries again, while a resource
+  is down or still has the peer configured (its `adjust` takes it out), and for any
+  refusal but `unknownPeer`: a resource that never knew the peer has nothing to forget.
   Whether a volume holds data is no marker: the state knows, for every host
   (`Volume.Initialized`). The driver refuses an LV it did not create and never wrote
   metadata on or formatted (plain or replicated), a device with another file system, and a

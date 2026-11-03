@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -48,10 +49,41 @@ func newHost(g *globals) *cobra.Command {
 			return printHosts(cmd.OutOrStdout(), hosts)
 		},
 	})
+	host.AddCommand(newJoinToken(g))
 	for _, action := range api.HostActions {
 		host.AddCommand(newHostAction(g, action))
 	}
 	return host
+}
+
+// newJoinToken makes the subcommand that makes a join token.
+func newJoinToken(g *globals) *cobra.Command {
+	var ttl time.Duration
+	command := &cobra.Command{
+		Use:   "join-token",
+		Short: "Make a token one host joins the cluster with (clowderd join --token-file)",
+		Long: "Make a token one host joins the cluster with: clowderd join --token-file <file> on the new\n" +
+			"host. It opens once and only until it expires; it is shown only now.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, _, err := g.connect()
+			if err != nil {
+				return err
+			}
+			var answer api.JoinTokenAnswer
+			if err := client.Act(cmd.Context(), "/v1/join-tokens", api.JoinTokenRequest{TTL: ttl.String()}, &answer); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(cmd.OutOrStdout(), answer.Token); err != nil {
+				return err
+			}
+			// on stderr, so the token alone goes into a file
+			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "valid until %s, for one host\n", answer.Expires.Local().Format(time.RFC3339))
+			return err
+		},
+	}
+	command.Flags().DurationVar(&ttl, "ttl", api.DefaultJoinTokenTTL, "how long the token opens: a minute to a day")
+	return command
 }
 
 // newHostAction makes the subcommand of one action; a final one asks first.

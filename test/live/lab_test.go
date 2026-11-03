@@ -333,19 +333,32 @@ const (
 	metricsURL    = "http://" + metricsTarget + "/metrics"
 )
 
-// metricValue reads the first sample of a metric from the host's /metrics.
-func metricValue(t *testing.T, server host, name string) float64 {
+// clusterMetric reads a metric that only the leader has (the room of each
+// host), for one host, through server: the leader may be any host, and
+// server reaches each host's /metrics on its node address.
+func clusterMetric(t *testing.T, server host, name, hostName string) float64 {
 	t.Helper()
-	for _, line := range strings.Split(server.must(t, "curl -sf "+metricsURL), "\n") {
-		if strings.HasPrefix(line, name+"{") || strings.HasPrefix(line, name+" ") {
-			fields := strings.Fields(line)
-			value, err := strconv.ParseFloat(fields[len(fields)-1], 64)
-			if err != nil {
-				t.Fatalf("%s: %v", line, err)
+	sample := name + `{host="` + hostName + `"}`
+	for _, other := range clusterHosts(t) {
+		if other.Phase == "removed" {
+			continue
+		}
+		// the node address of host n (network.NodeAddress)
+		url := fmt.Sprintf("http://10.77.0.%d:7444/metrics", other.ID+1)
+		output, err := server.run("curl -sf " + url)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(output, "\n") {
+			if fields := strings.Fields(line); len(fields) == 2 && fields[0] == sample {
+				value, err := strconv.ParseFloat(fields[1], 64)
+				if err != nil {
+					t.Fatalf("%s: %v", line, err)
+				}
+				return value
 			}
-			return value
 		}
 	}
-	t.Fatalf("no %s in /metrics", name)
+	t.Fatalf("no host's /metrics has %s", sample)
 	return 0
 }

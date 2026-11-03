@@ -10,7 +10,7 @@ clowder is built in phases; each ends with live tests on HLab
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done, passes the live tests |
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
-| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions, the leader's plans and the locks, the network for several hosts |
+| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions, the leader's plans and the locks, the network for several hosts, the join |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -48,6 +48,30 @@ took the place of `network`) and the overlay stay closed. The host's own process
 longer reach the metadata service either. The DNAT to another host, and the conntrack
 cleanup when its target moves, come with the ingress failover.
 
+Then the join:
+
+- A host joins with a token that a user makes (`clowder host join-token`). The token
+  opens once and expires; the state keeps only its hash.
+- The bootstrap key lets the first user in. After that it opens nothing, not even a
+  proof of the CA. `join_keys` is gone from `cluster.yaml`.
+- The leader asks the hoster whether a joining host's server is its own: the server has
+  the host's underlay as an address, and no server serves two hosts. It checks the first
+  host's server too, once `cluster.yaml` brings the hoster's token. Only a host with a
+  checked server gets the Floating IP.
+- The leader keeps Raft's members. A second host waits passive. With the third, three
+  hosts vote; from six hosts on, five vote.
+- A cluster that had three hosts keeps three: `host remove` refuses to go below. A leader
+  that is removed hands its lead over first. A removed host's ID is free again once every
+  host forgot it as a DRBD peer.
+- A host keeps its WireGuard mesh in `net.json`. After a reboot it finds its peers before
+  Raft runs.
+- The live tests run on three hosts and replace one. They show that a join with a wrong
+  token or a wrong server is refused.
+
+The bootstrap command changed with it, so a cluster of an earlier build must be set up
+anew. `clowderd init` takes no `--name` any more: a host's name in the cluster is its
+hostname, which DRBD knows it by.
+
 Before it, the first release became installable and the commands honest: the APT
 repository keeps every version, `examples/hetzner` pins `0.1.0`, `bin/dev live release
 <tag>` tests a published release (the [release checklist](developing/shipping.md#release-checklist)),
@@ -57,9 +81,8 @@ out; its release candidate passed the live tests without the test hook.
 
 Code without a caller went then; each phase brings back what it needs:
 
-- phase 2: the join (a command that adds a host, Raft members added at run time),
-  fencing (powering servers off and on through the hoster), the hosts' own phase reports
-  and `host enable` after the flapping brake;
+- phase 2: fencing (powering servers off and on through the hoster), the hosts' own
+  phase reports and `host enable` after the flapping brake;
 - phase 3: `backup:` in `cluster.yaml`, and resources owned by a GitOps source;
 - user management: more users per cluster, removing a user, revoking one certificate.
 
@@ -70,8 +93,26 @@ to upgrade a running cluster.
 
 They matter once there are several hosts; on one, they cost at most time.
 
-- The WireGuard mesh is tested only by its golden file and `wg`: one host has no peer.
-  The join brings the live test of it.
+- Stacks are placed on any active host, but nothing moves them, and a volume has one
+  copy: the placement over hosts (`move-stack`, copies online) comes next. Until then the
+  live tests drain the joined hosts, so their stacks start on the first host, and a host
+  is replaced only while it holds no stack or copy.
+- A read sees a write of the same `clowder` call (the index header), not one of the
+  call before: `clowder get` right after `clowder apply` may show, for a moment, the
+  state of a follower that has not applied the apply yet. The CLI could keep the last
+  index it wrote in its config directory and ask for it.
+- A cluster that had three hosts never goes below three, a dead host too: a
+  replacement joins first. If none can (examples/hetzner joins through its first host),
+  the cluster stays at two until `clowderd recover --power-off` comes.
+- A removed host keeps the data key, and with it the CA's key and every `!secret`
+  value: a host that kept its disk can still issue certificates the revocations do not
+  name. Removing hosts is normal now; rotating the data key, the CA and the cluster's
+  age key (`cluster rotate-keys`) comes before users get permissions. Until then, wipe a
+  removed host's disk.
+- The CLI checks an agent's certificate against the CA, not against the revocations: a
+  removed host that kept its key could answer it as the cluster, with recipients of its
+  own for `secret encrypt`. Removing hosts is normal now, so the CLI needs the revocation
+  list or the cluster's recipients pinned in the credentials.
 - `CatchUp` makes sure the state holds the whole log only on the leader; a follower returns
   once it knows a leader. Before a host that was away starts its stacks, it must have
   applied the leader's commit index.
@@ -100,8 +141,6 @@ They matter once there are several hosts; on one, they cost at most time.
 - A host that falls silent raises no alert: `docker-down` and the pools come from the
   host's own report, which a dead host does not send. On one host the heartbeat covers it;
   with several, the leader needs an alert for a host whose reports stop.
-- `TestBoundaries` checks one host. With several, it must show that containers reach
-  neither the other hosts' underlay nor their node addresses.
 - `examples/hetzner` ignores later changes to the server's user data, so a storage class
   added later gets a volume but no thin pool on an existing host.
 
