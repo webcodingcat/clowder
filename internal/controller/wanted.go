@@ -34,6 +34,7 @@ func conditionKeys(current *state.State) map[string]bool {
 		if host.Phase != state.Removed {
 			keys[overCapacityKey(id)] = true
 			keys[dockerDownKey(id)] = true
+			keys[fencingBlockedKey(id)] = true
 		}
 	}
 	for id := range current.Stacks {
@@ -50,6 +51,12 @@ func overCapacityKey(host state.HostID) string {
 // dockerDownKey is the condition of a host whose Docker does not answer.
 func dockerDownKey(host state.HostID) string {
 	return fmt.Sprintf("docker-down/%d", host)
+}
+
+// fencingBlockedKey is the condition of a failed host the leader cannot
+// fence (fencer.whyNotFence).
+func fencingBlockedKey(host state.HostID) string {
+	return fmt.Sprintf("fencing-blocked/%d", host)
 }
 
 // stackFailingKey is the condition of a stack its host could not bring up;
@@ -132,6 +139,7 @@ func wantedAlerts(current *state.State, conditions *Conditions, now time.Time) m
 				fmt.Sprintf("Docker has not answered the agent's ping for %v or more; the host's stacks may be down.",
 					dockerDownFor))
 		}
+		addHostAlerts(host, held(fencingBlockedKey(id), "fencing-blocked/"+host.Name, 0), add)
 		if held(overCapacityKey(id), "over-capacity/"+host.Name, 0) {
 			add("over-capacity/"+host.Name, "over-capacity", clusterspec.SeverityWarning, fmt.Sprintf("%s is over capacity", host.Name),
 				"The services at the host's highest priority reserve more than it offers; nothing was pushed out, "+
@@ -148,6 +156,10 @@ func wantedAlerts(current *state.State, conditions *Conditions, now time.Time) m
 		stack := current.Stacks[name]
 		switch {
 		case stack.WaitReason == "" || now.Sub(stack.WaitingSince) < stackWaitFor:
+		case stack.Host != nil && state.FailsOver(current.Hosts[*stack.Host].Phase):
+			add("stack-waiting/"+name, "stack-waiting", clusterspec.SeverityWarning, fmt.Sprintf("stack %s is down", name),
+				"Its host is down, and the stack finds no other host to run on: "+stack.WaitReason+". A volume with "+
+					"replicas 1 has no copy elsewhere: the stack waits for its host, or a restore of the volume.")
 		case stack.Host != nil:
 			// it runs; only its move waits (a drain, a user's request)
 			add("stack-waiting/"+name, "stack-waiting", clusterspec.SeverityWarning, fmt.Sprintf("stack %s cannot move", name),
@@ -189,5 +201,32 @@ func addCertificateAlerts(current *state.State, now time.Time, add func(key, kin
 			"acme.renew_before is not shorter than a certificate's lifetime",
 			fmt.Sprintf("It would renew every new certificate at once, so the leader renews %v when a third of the "+
 				"lifetime is left. Set renew_before shorter.", ignoredFor))
+	}
+}
+
+// addHostAlerts adds the alerts of a host's failure: failed (and fencing),
+// fencing blocked, fenced (until it is active again) and disabled.
+func addHostAlerts(host *state.Host, blocked bool, add func(key, kind, severity, subject, message string)) {
+	switch host.Phase {
+	case state.Failed, state.Fencing:
+		add("host-failed/"+host.Name, "host-failed", clusterspec.SeverityWarning, fmt.Sprintf("%s does not answer", host.Name),
+			fmt.Sprintf("A majority of the voters has not heard the host for %v or more. If another host can take its stacks, "+
+				"the leader powers it off through the hoster, and then they start there; otherwise it stays as it "+
+				"is until it answers again.", FailAfter))
+	case state.Fenced, state.Recovering:
+		add("host-fenced/"+host.Name, "host-fenced", clusterspec.SeverityCritical, fmt.Sprintf("%s was fenced", host.Name),
+			"The leader powered the host off after it failed, and its stacks started elsewhere. It is powered on "+
+				"again, catches its volumes up (recovering) and takes stacks once it is active.")
+	case state.Disabled:
+		add("host-disabled/"+host.Name, "host-disabled", clusterspec.SeverityCritical, fmt.Sprintf("%s is disabled", host.Name),
+			fmt.Sprintf("The host was fenced %d times within %v and stays off. Find out why, then run clowder host "+
+				"enable %s.", state.FlapLimit, state.FlapWindow, host.Name))
+	}
+	if blocked {
+		add("fencing-blocked/"+host.Name, "fencing-blocked", clusterspec.SeverityCritical,
+			fmt.Sprintf("%s cannot be fenced", host.Name),
+			"The host failed, but the leader cannot power it off: no hoster, an unconfirmed server, the hoster's "+
+				"API, or more hosts failed at once. Its stacks do not start elsewhere. The leader's log says why. If "+
+				"you know the host is off, run clowder host fence-confirm "+host.Name+".")
 	}
 }

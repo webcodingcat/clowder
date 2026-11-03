@@ -52,6 +52,12 @@ type Cluster interface {
 	Leader() (id state.HostID, ok bool)
 	// TransferLeadership hands this member's lead to another voter.
 	TransferLeadership() error
+	// VerifyLeader makes sure a majority still takes this member as leader.
+	VerifyLeader(ctx context.Context) error
+	// CommitIndex is the last index this member knows committed.
+	CommitIndex() uint64
+	// WaitCommitted returns once the state holds every entry up to index.
+	WaitCommitted(ctx context.Context, index uint64) error
 }
 
 // ServerConfig is what an agent's API server needs.
@@ -73,6 +79,8 @@ type ServerConfig struct {
 	// Alerts answers for the alert channels; the agent's alerts loop is the
 	// real one.
 	Alerts Alerts
+	// Beats keeps the beats of the hosts (controller.Heard).
+	Beats Beats
 	// Joins adds joining hosts while this agent leads.
 	Joins   Joins
 	Version string
@@ -155,6 +163,9 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/internal/stacks/{project}/ps", pki.RoleHost, server.localPs)
 	server.handle("GET /v1/internal/stacks/{project}/logs", pki.RoleHost, server.localLogs)
 	server.handle("GET /v1/internal/volumes/progress", pki.RoleHost, server.localProgress)
+	server.handle("GET /v1/internal/commit-index", pki.RoleHost, server.localCommitIndex)
+	server.handle("POST /v1/internal/beats", pki.RoleHost, server.localBeat)
+	server.handle("GET /v1/internal/beats/{id}", pki.RoleHost, server.localSilence)
 	server.handleOpen("GET /v1/bootstrap", limited(&server.bootstraps, server.bootstrapOffer))
 	server.handleOpen("POST /v1/bootstrap", limited(&server.bootstraps, server.bootstrap))
 	server.handleOpen("GET /v1/recover/offer", limited(&server.recoveries, server.recoverOffer))
@@ -569,6 +580,7 @@ var hostKinds = map[string]bool{
 	state.KindSetStackStatus: true, state.KindForgetCopy: true, state.KindSetVolumeInitialized: true,
 	state.KindReportPeerForgotten: true, state.KindSetCopySynced: true,
 	state.KindAdvanceOperation: true, // the step of an operation a host owns
+	state.KindSetHostPhase:     true, // its own: recovering, then active (the state checks who)
 }
 
 // internalPropose is where a follower forwards a user's write and where an
@@ -650,12 +662,12 @@ func (s *Server) proposeHere(ctx context.Context, cmd state.Command) (uint64, er
 // to the leader's internal endpoint. It is the one way to commit, for the
 // API's routes as for the agent's own reports and the leader's controllers.
 func (s *Server) Propose(ctx context.Context, cmd state.Command) (uint64, error) {
-	if s.config.Cluster.IsLeader() {
+	id, here, err := s.waitForLeader(ctx)
+	switch {
+	case err != nil:
+		return 0, err
+	case here:
 		return s.proposeHere(ctx, cmd)
-	}
-	id, ok := s.config.Cluster.Leader()
-	if !ok {
-		return 0, errors.New("the cluster has no leader right now")
 	}
 	body, err := json.Marshal(cmd)
 	if err != nil {
@@ -698,4 +710,32 @@ func writeError(w http.ResponseWriter, status int, err error) {
 		err = fmt.Errorf("the request is larger than %d bytes", MaxRequestBytes)
 	}
 	writeJSON(w, status, Error{Message: err.Error()})
+}
+
+// leaderWait is how long a write waits for a leader: an election takes
+// seconds, and a peer that restarts may lose its leader for a moment.
+const leaderWait = 10 * time.Second
+
+// waitForLeader returns where a write goes once it can go somewhere, at
+// most leaderWait: here (this agent leads), or the leading host. During an
+// election, or while this agent, newly leading, applies its log
+// (raftnode.Node.IsLeader), a write waits a moment instead of failing.
+func (s *Server) waitForLeader(ctx context.Context) (leader state.HostID, here bool, err error) {
+	deadline := time.Now().Add(leaderWait)
+	for {
+		if s.config.Cluster.IsLeader() {
+			return s.config.HostID, true, nil
+		}
+		if id, ok := s.config.Cluster.Leader(); ok && id != s.config.HostID {
+			return id, false, nil
+		}
+		if time.Now().After(deadline) {
+			return 0, false, errors.New("the cluster has no leader right now")
+		}
+		select {
+		case <-ctx.Done():
+			return 0, false, fmt.Errorf("wait for a leader: %w", ctx.Err())
+		case <-time.After(leaderPoll):
+		}
+	}
 }

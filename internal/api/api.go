@@ -159,6 +159,20 @@ var HostActions = []HostAction{
 		To:          state.Active,
 	},
 	{
+		Name: "fence-confirm",
+		Description: "Confirm that a failed host is off, when the leader cannot power it off: its stacks start " +
+			"elsewhere, and the leader powers it on again",
+		From:  []state.HostPhase{state.Failed},
+		To:    state.Fenced,
+		Final: true,
+	},
+	{
+		Name:        "enable",
+		Description: "Let a host that was fenced too often come back: the leader powers it on again",
+		From:        []state.HostPhase{state.Disabled},
+		To:          state.Fenced,
+	},
+	{
 		Name:        "remove",
 		Description: "Remove a host from the cluster for good, once its stacks and copies moved off; its certificate is revoked",
 		To:          state.Removed,

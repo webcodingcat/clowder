@@ -33,11 +33,12 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | the moves loop | `put-volume`, `set-stack-status`, `advance-operation`, `extend-operation`, `roll-back-operation`, `finish-operation` |
   | the Floating IP's loop | `confirm-server-ref`, `set-ingress` |
   | the ACME loop | `put-acme-account`, `put-acme-challenge`, `delete-acme-challenge`, `put-certificate`, `delete-certificate` |
+  | the fencing loop | `set-host-phase` (failed, active again; fenced or back to failed for its operation; disabled), `start-operation`, `advance-operation`, `finish-operation` (a fence) |
   | the alerts | `put-alert`, `resolve-alert` |
-  | each agent | `report-host`, `forget-copy`, `set-volume-initialized`, `set-copy-synced`, `report-peer-forgotten`, `advance-operation` (a move's step on the host) |
+  | each agent | `report-host`, `forget-copy`, `set-volume-initialized`, `set-copy-synced`, `report-peer-forgotten`, `advance-operation` (a move's step on the host), `set-host-phase` (its own: recovering, active) |
 
-  Every kind has a sender: a kind comes with the phase that sends it (failover and
-  backups later), not before.
+  Every kind has a sender: a kind comes with the phase that sends it (backups later),
+  not before.
 - **Resources** (phase 1c): namespaces (`Namespaces`), and by `<namespace>/<name>` stacks
   (`Stacks`), volumes (`Volumes`) and secrets (`Secrets`), each with a `Meta`. The kinds
   and their specs are in `internal/resource` (a stack's in `internal/stackspec`), which the
@@ -144,6 +145,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   the leader gives a step that gets on more time (`extend-operation`) and turns one back
   before the kind's point of no return (`roll-back-operation`): the operation is then
   `rolling-back` until the leader has undone what it did and finishes it as failed.
+- **Fencing a host** (`fence-host`, `HostFence`; the fencing loop starts and drives it,
+  loops.md, Fencing). It locks the host, and its start makes the host `fencing` in the
+  same command. Its steps: `FenceStart`, then `FenceOff` once the server is off and the
+  host fenced. It has no rollback: if the server cannot be powered off, the operation
+  moves the host back to failed and fails. The leader finishes it once the stacks the host
+  had (`HostFence.Stacks`, recorded as it is fenced) run elsewhere, or after `StepTime`.
+  Its lock is what keeps fencing to one host at a time.
 - **Moving a stack** (`move-stack`, `StackMove`; the placement starts it, `controller.RunMoves`
   drives it). It locks the stack and its volumes. Its steps, each the last one done:
   `MoveCopies` (the leader placed a copy of each volume on the new host), `MoveSynced` (the
@@ -160,6 +168,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   that moved records `Stack.LastMove`; one that failed `Stack.MoveFailed`, and within
   `MoveCooldown` the placement starts no move of its own for that stack again (a user's
   request still goes), so a move that cannot work does not resync copies over and over.
+  A host of the move that goes down (no longer active or draining) ends it at once
+  (`abandon`): before `MoveStopped` it rolls back, after it the move fails, and either way
+  the stack keeps its old host; from `MoveHost` on, a new host that goes down ends it as
+  failed and the failover takes the stack.
   A running stack that cannot move gets the alert `stack-waiting` with "cannot move". To follow one through the code: `scheduler.place`
   decides it, `controller.startMove` starts it, `controller.mover.placeCopies` (with
   `scheduler.MoveVolumes`) runs the first step, `agent.moveSteps.synced` and `stoppedHere`
@@ -170,7 +182,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   takes a copy off a host each add the copies they give up to `Retired` (volume, data
   generation, host). The host removes those and forgets each with `forget-copy`; a removed
   host's go with it. A copy that is merely missing from the state stays: a bug in the
-  placement must not cost data.
+  placement must not cost data. A retired copy keeps its volume's DRBD minor taken
+  (`RetiredMinors`) until every host forgot its copies: the resource on the host has the
+  minor, and drbdadm refuses every command while two resources share one.
 - **Initialized volumes.** `Volume.Initialized` says that a copy of the current data
   generation was primary with its file system. The first host that has its copy so tells
   with `set-volume-initialized` (only a host with a copy with a disk in that generation).
@@ -182,23 +196,68 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 
   ```
   joining ─L→ passive ─L→ active ⇄L draining
-     └──────L──────────────↗  │ L        │ L
-                         failed ←────────┘
-             active ←H── failed ─L→ fenced ─H→ recovering ─H→ active
-                                    fenced ⇄L disabled (flapping brake)
+     └──────L──────────────↗
+  active, draining, recovering ─L→ failed
+  failed ─L→ active                       (heard again, before the fence)
+  failed ─O→ fencing ─O→ fenced           (the server is off)
+             fencing ─O→ failed           (it could not be powered off)
+  failed ─U→ fenced                       (fence-confirm)
+  fenced ─H→ recovering ─H→ active        (all its copies synced)
+  fenced ─L→ disabled ─U→ fenced          (flapping brake, host enable)
   any phase ─L→ removed
   ```
 
+  O is the fence-host operation (`OperationFenceHost`, `HostFence`), U a user (the state
+  allows the leader these too, `byLeaderOrUser`; the API lets a user make only these).
+  Each move checks the phase it starts from (`From`), so of two that race only the first
+  passes.
+
+  | From | To | Who | When |
+  |---|---|---|---|
+  | `joining` | `passive`, `active` | members loop | the host reported; passive while it is the second |
+  | `passive` | `active` | members loop | the third host is there |
+  | `active` | `draining` and back | user | `host drain`, `host undrain` |
+  | `active`, `draining`, `recovering` | `failed` | fencing loop | a majority of the voters has not heard it for `FailAfter` |
+  | `failed` | `active` | fencing loop | a majority heard it again within `backWithin`; never the host itself |
+  | `failed` | `fencing` | the operation's start | `start-operation` of a fence, in the same command; only a failed host with a checked server ref and a stack another host can take (`needsFence`) |
+  | `fencing` | `fenced` | the operation | its server is off: the time joins `FencedAt`, the host's copies are no longer synced, the operation records the host's stacks |
+  | `fencing` | `failed` | the operation | `PowerOff` failed `powerOffTries` times; the operation fails |
+  | `failed` | `fenced` | user | `host fence-confirm`, after the user checked the server is off |
+  | `fenced` | `recovering` | the host | its agent runs again and caught up with the leader |
+  | `recovering` | `active` | the host | every copy of it with a disk is synced (`checkCaughtUp`) |
+  | `fenced` | `disabled` | fencing loop | fenced `FlapLimit` times within `FlapWindow` (`Host.Flapping`) |
+  | `disabled` | `fenced` | user | `host enable`: clears `FencedAt`; the leader powers it on |
+
   In words: a new host joins as `joining` (`add-host`); the members loop makes it
   `passive` (waiting) or `active` (running stacks), and a user drains it for maintenance
-  and back. A host that stops answering is `failed`; it comes back `active` by itself, or
-  the leader powers it off (`fenced`) before its stacks start elsewhere. A fenced host
-  that is back recovers (`recovering`, then `active`); one that fails again and again is
-  `disabled` until a user enables it. Until failover comes, a host never reaches
-  `failed` and the phases after it. A drain moves the host's stacks off it and keeps new
-  ones off; its volume copies stay, as the host comes back after the maintenance. While an operation holds `host/<id>` (fencing,
-  drain, remove), only it moves the host, and the host's own reports of a phase are
-  refused too.
+  and back. A drain moves the host's stacks off it and keeps new ones off; its volume
+  copies stay, as the host comes back after the maintenance. A host the voters stop
+  hearing is `failed`; the leader powers it off before any of its stacks start elsewhere
+  (loops.md, Fencing). A host can never leave `failed` by itself: it cannot tell whether the
+  leader is about to fence it, and while a peer promotes its volume it would write on
+  (split-brain). Once a fence started, nothing stops it, a late beat neither: `fencing`
+  has no move back to `active`, and only its operation moves it on
+  (`checkFenceDecided` keeps the operation from ending while the host is still fencing).
+  While an operation holds `host/<id>` (fencing, drain, remove), only it moves the host,
+  and the host's own reports of a phase are refused too. `KeepsStacks` says which phases
+  run the stacks placed on the host: a failed or fencing host goes on, since no other host
+  runs them before it is off; a fenced, recovering or disabled one runs none.
+
+  What each phase means elsewhere, in one place (Y: yes; the functions decide):
+
+  | Phase | runs its stacks (`state.KeepsStacks`) | its stacks fail over (`state.FailsOver`) | takes new stacks (`scheduler.takesStacks`) | its copies count (`scheduler.counts`) | votes (`controller.votes`) |
+  |---|---|---|---|---|---|
+  | `joining`, `passive` | | | | | |
+  | `active` | Y | | Y, unless leaving | Y, unless leaving | Y |
+  | `draining` | Y | | | Y, unless leaving | Y |
+  | `failed`, `fencing` | Y | | | Y | Y |
+  | `fenced` | | Y | | for `CopyWait` | Y |
+  | `recovering` | | | | Y | Y |
+  | `disabled` | | Y | | | Y |
+  | `removed` | | | | | |
+
+  A failed host's copies are no longer synced (`unsync`): the others went on without it,
+  so until DRBD caught them up and the host says so, no stack fails over or moves to it.
 
   **Removing** (`checkRemoval`; the CLI asks first) refuses the last host that runs stacks
   (`active` or `draining`), and a host that runs stacks while a stack or a volume copy is
@@ -308,6 +367,19 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   handshake, and removing a host revokes its certificate, so it leaves Raft and the API at
   once. `pki.ClientTLSToHosts` and `pki.ServerTLSForHosts` are the one way hosts are checked,
   by Raft and by the API alike: the chain and the role, not the name.
+- **Leading starts with a barrier.** `followLead` sets `IsLeader` only once Raft's barrier
+  has applied every entry before the lead: a new leader may not have applied what its
+  predecessor committed, and its loops and `runOnLeader` would decide on an old state.
+  `VerifyLeader` asks a majority whether this member still leads; the leader asks before
+  it powers a server off or moves the Floating IP, as one cut off from the others believes
+  it leads until its lease runs out.
+- **Catching up.** `CatchUp` waits for a leader (and on the leader for the barrier). A
+  follower then asks the leader's commit index (`api.Server.CatchUpWithLeader`,
+  `/v1/internal/commit-index`, answered after `VerifyLeader`) and waits until its state
+  holds it (`WaitCommitted`): Raft's own entries never reach the state, so it waits for
+  Raft to have applied the index and then for the last command up to it. The agent starts
+  its stacks and volumes only after that (host.md, The agent): a host that was away must
+  not start a stack that moved meanwhile.
 - `Propose` commits a command through the leader and returns its index, or the state's
   refusal. `Read` gives the current state under a lock; nothing may keep it, as `Apply`
   changes it in place. `WaitIndex` lets a read follow a write made through another member.
@@ -329,8 +401,12 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   3. A joining host whose agent reported (`report-host`) becomes `passive` while it is
      the second host of a cluster that is not `HA` yet, else `active`. A passive host
      becomes active once there are three.
-  4. Of the active and draining hosts, 1, 3 or 5 vote (`voterCount`): those that voted
-     already, then the lowest IDs. The leader keeps its own vote.
+  4. Of the hosts that run stacks or are to come back after a failure (`votes`: active,
+     draining, failed, fencing, fenced, recovering, disabled), 1, 3 or 5 vote
+     (`voterCount`): those that voted already, then the lowest IDs. Only an active or
+     draining host gets a vote; a failed voter keeps its own, as taking it would take a
+     live host's instead (with three, the cluster would stop at the next failure). The
+     leader keeps its own vote.
   5. A removed host leaves Raft, after step 4 gave its vote to another.
   6. `set-host-voter` mirrors each host's vote in the state, which shows it.
 
@@ -353,7 +429,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **Any agent answers.** Reads come from its own copy of the state; writes it commits as the
   leader or forwards to the leader's `/v1/internal/propose`. A write answers with its Raft
   index (`X-Clowder-Index`); the client sends it on with later reads (`X-Clowder-Min-Index`),
-  and the agent waits until it has applied it.
+  and the agent waits until it has applied it. Without a leader (an election, a peer that
+  restarted, a new leader still at its barrier) every way to the leader (a command, the
+  batch of an apply, a join, the catch-up) waits up to `leaderWait` for one
+  (`waitForLeader`) instead of failing at once.
 - **Who speaks.** The actor of a command is the caller of the first agent; its time (`At`) is
   the leader's clock. `/v1/internal/propose` takes two things only: a user's command that a
   follower forwards (`userKinds`, exactly the kinds the user routes, the bootstrap and the
@@ -643,6 +722,23 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   than `replicas` (`checkVolume`): the one a move or a leaving host leaves behind, until
   `keepCopies` gives it up. A volume of replicas 0 that no stack runs with on a leaving
   host starts anew, empty, on another (`leaveThrownAway`).
+  **After a failure** (`counts`): a copy on a failed or fencing host counts, as the
+  leader has not decided yet; one on a fenced host for `CopyWait` after the fence, as the
+  leader powers it on again; one on a recovering host while it catches up. A copy on a
+  disabled host, or one fenced for longer, is made anew elsewhere, and once the host is
+  back, the surplus goes: the copy that is not synced first. Only a copy on a host that
+  runs (active, draining, recovering) takes the resync limit; one on a host that is down
+  waits for it.
+- **Failover** (`failover.go`): a stack whose host is fenced or disabled
+  (`state.FailsOver`) gets another host at once, with `set-stack-status` and no move: the
+  old host is off and stops nothing, and the state allows such a change of host without an
+  operation (`checkLeaderStatus`), only to an active host. The new host must have a synced
+  copy with a disk of each of the stack's volumes of replicas 1 and more, as nothing can
+  sync from the host that is down; a volume of replicas 0 starts anew there, empty, in a
+  new data generation. Of those hosts, the best fit, as for any placement. A stack that
+  finds none waits on its old host, with the reason in `get stacks` and the alert
+  `stack-waiting` ("is down"): with replicas 1 until the host is back or a user restores
+  the volume elsewhere. A failed host's stacks stay where they are until it is fenced.
 - **Room, one measure for everything.** A host offers what it reported (memory, CPUs) less
   `system_reserve` (default 512M, 0.25). Each service of a stack on it that is `starting` or
   `running` takes its reservations (`resources.reserve`, default `defaults.reservations`,

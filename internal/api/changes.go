@@ -243,12 +243,16 @@ func (s *Server) sealSecret(id string, value []byte) (state.SealedSecret, error)
 // runOnLeader has the leader run a batch: here if this agent leads, else on
 // the leader's /v1/internal/changes.
 func (s *Server) runOnLeader(w http.ResponseWriter, r *http.Request, batch changeBatch) {
+	leader, here, err := s.waitForLeader(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
 	var answer ChangeResult
-	if s.config.Cluster.IsLeader() {
+	if here {
 		answer = s.runChanges(r.Context(), batch)
 	} else {
-		var err error
-		if answer, err = s.forwardChanges(r.Context(), batch); err != nil {
+		if answer, err = s.forwardChanges(r.Context(), leader, batch); err != nil {
 			var statusError *StatusError
 			if errors.As(err, &statusError) {
 				writeError(w, statusError.Status, errors.New(statusError.Message))
@@ -265,11 +269,7 @@ func (s *Server) runOnLeader(w http.ResponseWriter, r *http.Request, batch chang
 }
 
 // forwardChanges hands a batch to the leader and returns its answer.
-func (s *Server) forwardChanges(ctx context.Context, batch changeBatch) (ChangeResult, error) {
-	leader, ok := s.config.Cluster.Leader()
-	if !ok {
-		return ChangeResult{}, errors.New("the cluster has no leader right now")
-	}
+func (s *Server) forwardChanges(ctx context.Context, leader state.HostID, batch changeBatch) (ChangeResult, error) {
 	body, err := json.Marshal(batch)
 	if err != nil {
 		return ChangeResult{}, fmt.Errorf("encode the batch: %w", err)

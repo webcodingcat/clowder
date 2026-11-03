@@ -16,7 +16,7 @@ the package you change. This file has the whole and the rules that hold everywhe
 | [What users write](docs/developing/specs.md) | namespaces and names, stack specs, rendering, cluster config and directory, encrypted values |
 | [The cluster](docs/developing/cluster.md) | cluster state, certificates, Raft and the data key, API and the CLI, placement |
 | [A host](docs/developing/host.md) | the agent, network, storage, containers, host check |
-| [Ingress, certificates, alerts and metrics](docs/developing/loops.md) | Traefik, hoster and ingress, certificates of the routes, alerts, metrics |
+| [Ingress, fencing, certificates, alerts and metrics](docs/developing/loops.md) | Traefik, hoster and ingress, fencing, certificates of the routes, alerts, metrics |
 | [Shipping](docs/developing/shipping.md) | packages and units, CI, releases |
 
 ## Getting started

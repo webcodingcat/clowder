@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 
 	"github.com/webcodingcat/clowder/internal/agent/loop"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
@@ -166,12 +167,21 @@ type Runner struct {
 	propose     func(context.Context, state.Command) (uint64, error)
 	logger      *slog.Logger
 
-	// Only the runner's loop (Run) uses what follows, so it needs no lock.
-
+	// jobs counts the running jobs, so Run returns only after them
+	jobs sync.WaitGroup
+	// mu guards what the pass and the jobs share.
+	mu sync.Mutex
 	// applied is what each stack last came up with (by project). It starts
 	// empty, so every stack comes up again after the agent started: after
 	// a boot nothing runs (restart: "no").
 	applied map[string]loop.BroughtUp
+	// busy are the stacks, by project, that have a job running; stale are
+	// those of them that a pass skipped, so the job starts another pass
+	// when it ends
+	busy, stale map[string]bool
+
+	// Only the pass uses what follows.
+
 	// logins holds a hash of each registry's login, so the agent logs in
 	// again only when it changed
 	logins map[string][32]byte
@@ -183,7 +193,8 @@ func New(parts Parts) *Runner {
 		files: parts.Files, host: parts.Host, nodeAddress: parts.NodeAddress, cluster: parts.Cluster,
 		docker: parts.Docker, volumes: parts.Volumes, open: parts.Open, digestKey: parts.DigestKey,
 		supervisor: parts.Supervisor, signal: parts.Signal, propose: parts.Propose, logger: parts.Logger,
-		applied: map[string]loop.BroughtUp{}, logins: map[string][32]byte{},
+		applied: map[string]loop.BroughtUp{}, busy: map[string]bool{}, stale: map[string]bool{},
+		logins: map[string][32]byte{},
 	}
 }
 
@@ -210,6 +221,11 @@ func readDesired(cluster loop.Cluster, self state.HostID) (desiredState, error) 
 		config: copied.Config.Spec, stacks: map[string]*state.Stack{}, volumes: copied.Volumes,
 		secrets: copied.Secrets, registries: copied.RegistryLogins(),
 	}
+	// a host that was fenced runs nothing until it is active again: its
+	// stacks may run elsewhere by now (state.KeepsStacks)
+	if self, ok := copied.Hosts[self]; !ok || !state.KeepsStacks(self.Phase) {
+		return desired, nil
+	}
 	for _, stack := range copied.Stacks {
 		// a stack that stops for a move is a leaver here (stopLeavers)
 		if stack.Host != nil && *stack.Host == self && !copied.StopsForMove(stack.ID()) {
@@ -219,13 +235,16 @@ func readDesired(cluster loop.Cluster, self state.HostID) (desiredState, error) 
 	return desired, nil
 }
 
-// Run runs passes until ctx ends (loop.Run).
+// Run runs passes until ctx ends (loop.Run), then waits for the jobs.
 func (r *Runner) Run(ctx context.Context) {
 	loop.Run(ctx, r.cluster, r.signal.Wake(), func() { r.pass(ctx) })
+	r.jobs.Wait()
 }
 
 // pass brings this host once to what the state says. First it stops the
-// stacks that left this host, then it brings up the others. A volume that
+// stacks that left this host, then it starts a job for each of the others
+// that has none running: one stack whose image pull or compose up takes
+// long, or hangs on a suspended volume, holds up no other. A volume that
 // passes from one stack to another must never be used by both at once:
 // two databases on one file system would ruin it. If a stack fails to stop,
 // it may still use its volumes, and a stack that names one of them waits
@@ -237,22 +256,86 @@ func (r *Runner) pass(ctx context.Context) {
 		r.logger.Error("read the state", "error", err)
 		return
 	}
+	// a job may pull meanwhile; docker login writes its config file whole,
+	// so a pull reads the old login or the new one
 	r.logIn(ctx, desired)
 	inUse := r.stopLeavers(ctx, desired)
 	for _, project := range slices.Sorted(maps.Keys(desired.stacks)) {
 		stack := desired.stacks[project]
-		err := r.apply(ctx, desired, stack, inUse)
-		switch {
-		case errors.Is(err, errVolumeInUse), errors.Is(err, errVolumeNotReady):
-			// it waits, at every pass until the stop worked or the volume
-			// is mounted
-			r.logger.Info("a stack waits for its volume", "stack", stack.ID(), "reason", err)
-		case err != nil && ctx.Err() != nil:
-			return // stopping: the error says nothing about the stack
-		case err != nil:
-			r.logger.Error("run a stack", "stack", stack.ID(), "error", err)
-			r.reportFailing(ctx, stack, err)
-		}
+		// the jobs share desired and inUse, which nothing changes after this
+		r.start(project, func() { r.run(ctx, desired, stack, inUse) })
 	}
 	r.removeSecretsOfOthers(desired)
+}
+
+// start runs a job for a stack in a goroutine of its own, unless one runs:
+// then the job starts another pass when it ends, which sees the state as
+// it is by then.
+func (r *Runner) start(project string, job func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.busy[project] {
+		r.stale[project] = true
+		return
+	}
+	r.busy[project] = true
+	r.jobs.Go(func() {
+		job()
+		r.mu.Lock()
+		again := r.stale[project]
+		delete(r.busy, project)
+		delete(r.stale, project)
+		r.mu.Unlock()
+		if again {
+			r.signal.Now()
+		}
+	})
+}
+
+// busyNow tells whether a stack has a job running; if so, the job starts
+// another pass when it ends, which takes the stack on (start).
+func (r *Runner) busyNow(project string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.busy[project] {
+		r.stale[project] = true
+	}
+	return r.busy[project]
+}
+
+// run brings one stack up, as a job, and reports it failing if that fails.
+func (r *Runner) run(ctx context.Context, desired desiredState, stack *state.Stack, inUse volumesInUse) {
+	err := r.apply(ctx, desired, stack, inUse)
+	switch {
+	case errors.Is(err, errVolumeInUse), errors.Is(err, errVolumeNotReady):
+		// it waits, at every pass until the stop worked or the volume is
+		// mounted
+		r.logger.Info("a stack waits for its volume", "stack", stack.ID(), "reason", err)
+	case err != nil && ctx.Err() != nil:
+		// stopping: the error says nothing about the stack
+	case err != nil:
+		r.logger.Error("run a stack", "stack", stack.ID(), "error", err)
+		r.reportFailing(ctx, stack, err)
+	}
+}
+
+// appliedWith is what a stack last came up with on this host.
+func (r *Runner) appliedWith(project string) loop.BroughtUp {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.applied[project]
+}
+
+// setApplied records what a stack came up with.
+func (r *Runner) setApplied(project string, up loop.BroughtUp) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.applied[project] = up
+}
+
+// forgetApplied forgets what a stack came up with: it stopped.
+func (r *Runner) forgetApplied(project string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.applied, project)
 }

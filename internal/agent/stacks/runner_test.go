@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
@@ -57,16 +58,16 @@ const shopProject = agenttest.ShopProject
 func TestAFailedComposeUpIsTriedAgain(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
 	docker.FailedUps = 2
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if stack := cluster.Stack("shop"); stack.Status != state.StackFailing || stack.UpError != "pull access denied" {
 		t.Errorf("after a failed compose up the stack is %s: %q", stack.Status, stack.UpError)
 	}
 	version := cluster.Stack("shop").ResourceVersion
-	runner.pass(context.Background()) // fails again: nothing new to report
+	runner.passAndWait(context.Background()) // fails again: nothing new to report
 	if stack := cluster.Stack("shop"); stack.ResourceVersion != version {
 		t.Errorf("a second failure was reported again: %s, %q", stack.Status, stack.UpError)
 	}
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if ups := docker.Count("up " + shopProject); ups != 3 {
 		t.Errorf("%d compose ups, want 3", ups)
 	}
@@ -76,12 +77,12 @@ func TestAFailedComposeUpIsTriedAgain(t *testing.T) {
 	if status := cluster.Stack("shop").Status; status != state.StackRunning {
 		t.Errorf("after compose up the stack is %s", status)
 	}
-	runner.pass(context.Background()) // nothing changed: no compose up
+	runner.passAndWait(context.Background()) // nothing changed: no compose up
 	if ups := docker.Count("up " + shopProject); ups != 3 {
 		t.Errorf("%d compose ups without a change, want 3", ups)
 	}
 	runner.signal.DockerRestarted()
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if ups := docker.Count("up " + shopProject); ups != 4 {
 		t.Errorf("%d compose ups after Docker restarted, want 4", ups)
 	}
@@ -89,9 +90,9 @@ func TestAFailedComposeUpIsTriedAgain(t *testing.T) {
 
 func TestComposeChangesContainersOnlyWhileTheSupervisorIsPaused(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	cluster.Remove(resource.KindStack, "shop")
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	want := []string{
 		"pause " + shopProject, "up " + shopProject, "resume " + shopProject,
 		"pause " + shopProject, "down " + shopProject, "resume " + shopProject,
@@ -105,17 +106,17 @@ func TestAStackThatFailsAfterARestartOfDockerIsReportedFailing(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
 	cluster.PutSecret("db-password", "first")
 	cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{Secrets: []string{"db-password"}}))
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	applied := cluster.Stack("shop").AppliedSecrets
 
 	docker.FailedUps = 1
 	runner.signal.DockerRestarted()
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	stack := cluster.Stack("shop")
 	if stack.Status != state.StackFailing || !maps.Equal(stack.AppliedSecrets, applied) {
 		t.Errorf("the stack is %s with the secrets %v, want failing with %v", stack.Status, stack.AppliedSecrets, applied)
 	}
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if stack := cluster.Stack("shop"); stack.Status != state.StackRunning || stack.UpError != "" {
 		t.Errorf("once up, the stack is %s: %q", stack.Status, stack.UpError)
 	}
@@ -124,7 +125,7 @@ func TestAStackThatFailsAfterARestartOfDockerIsReportedFailing(t *testing.T) {
 func TestAFailingStackIsStartingAgainWithANewGeneration(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
 	docker.FailedUps = 1
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{Command: []string{"serve"}}))
 	if stack := cluster.Stack("shop"); stack.Status != state.StackStarting || stack.UpError != "" {
 		t.Errorf("a failing stack applied anew is %s: %q", stack.Status, stack.UpError)
@@ -143,7 +144,7 @@ func shopContainer(restarted string) []docker.Container {
 
 func TestARestartPullsAndRecreatesOnce(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	docker.Lock()
 	docker.Listed = shopContainer("") // as compose up left it
 	docker.Unlock()
@@ -152,7 +153,7 @@ func TestARestartPullsAndRecreatesOnce(t *testing.T) {
 	if status := cluster.Stack("shop").Status; status != state.StackStarting {
 		t.Errorf("a restarted stack is %s", status)
 	}
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if pulls, ups := docker.Count("pull "+shopProject+" app"), docker.Count("up "+shopProject); pulls != 1 || ups != 2 {
 		t.Errorf("%d pulls and %d compose ups after a restart, want 1 and 2", pulls, ups)
 	}
@@ -171,7 +172,7 @@ func TestARestartPullsAndRecreatesOnce(t *testing.T) {
 	docker.Listed = shopContainer(restarted)
 	docker.Unlock()
 	runner.signal.DockerRestarted()
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if pulls, ups := docker.Count("pull "+shopProject+" app"), docker.Count("up "+shopProject); pulls != 1 || ups != 3 {
 		t.Errorf("%d pulls and %d compose ups after Docker restarted, want 1 and 3", pulls, ups)
 	}
@@ -183,8 +184,8 @@ func TestAComposeUpThatDockersRestartOvertookIsRunAgain(t *testing.T) {
 		docker.DuringUp = nil // once
 		runner.signal.DockerRestarted()
 	}
-	runner.pass(context.Background())
-	runner.pass(context.Background()) // the pass the restart asked for
+	runner.passAndWait(context.Background())
+	runner.passAndWait(context.Background()) // the pass the restart asked for
 	if ups := docker.Count("up " + shopProject); ups != 2 {
 		t.Errorf("%d compose ups, want 2: the first may have come up before Docker restarted", ups)
 	}
@@ -192,11 +193,11 @@ func TestAComposeUpThatDockersRestartOvertookIsRunAgain(t *testing.T) {
 
 func TestAPushedOutServiceIsLeftOut(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	cluster.Lock()
 	cluster.State.Stacks["default/shop"].PushedOut = []string{"app"} // as set-pushed-out writes it
 	cluster.Unlock()
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	docker.Lock()
 	leftOut := docker.LeftOut
 	docker.Unlock()
@@ -207,9 +208,9 @@ func TestAPushedOutServiceIsLeftOut(t *testing.T) {
 
 func TestANewDataGenerationBringsTheStackUpOnTheNewLV(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	cluster.PlaceVolume("db", 2) // a restore
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if ups := docker.Count("up " + shopProject); ups != 2 {
 		t.Errorf("%d compose ups, want 2 (the new volume)", ups)
 	}
@@ -224,7 +225,7 @@ func TestAStackWaitsForItsVolumeAndFailsWithIt(t *testing.T) {
 	volumes.Lock()
 	volumes.NotReady = map[string]bool{lv: true}
 	volumes.Unlock()
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if docker.Count("up "+shopProject) != 0 || cluster.Stack("shop").Status != state.StackStarting {
 		t.Errorf("docker %q, shop %s: a stack whose volume is on its way waits", docker.Lines(), cluster.Stack("shop").Status)
 	}
@@ -232,7 +233,7 @@ func TestAStackWaitsForItsVolumeAndFailsWithIt(t *testing.T) {
 	volumes.Lock()
 	volumes.Errors = map[string]error{lv: errors.New("volume default/db holds data, but its only LV is gone")}
 	volumes.Unlock()
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if shop := cluster.Stack("shop"); shop.Status != state.StackFailing || !strings.Contains(shop.UpError, "its only LV is gone") {
 		t.Errorf("shop %s (%q): a stack whose volume cannot be mounted fails with why", shop.Status, shop.UpError)
 	}
@@ -240,7 +241,7 @@ func TestAStackWaitsForItsVolumeAndFailsWithIt(t *testing.T) {
 	volumes.Lock()
 	volumes.NotReady, volumes.Errors = nil, nil
 	volumes.Unlock()
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if docker.Count("up "+shopProject) != 1 || cluster.Stack("shop").Status != state.StackRunning {
 		t.Errorf("docker %q, shop %s", docker.Lines(), cluster.Stack("shop").Status)
 	}
@@ -248,7 +249,7 @@ func TestAStackWaitsForItsVolumeAndFailsWithIt(t *testing.T) {
 
 func TestTheStacksHoldTheLVsOfTheirComposeFiles(t *testing.T) {
 	runner, cluster, _, _ := newTestRunner(t)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	held, err := runner.files.HeldLVs()
 	if err != nil || !maps.Equal(held, map[string]bool{agenttest.DBLV(1): true}) {
 		t.Errorf("held %v, %v", held, err)
@@ -256,7 +257,7 @@ func TestTheStacksHoldTheLVsOfTheirComposeFiles(t *testing.T) {
 
 	// once compose down worked, the stack holds nothing
 	cluster.Remove(resource.KindStack, "shop")
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if held, err := runner.files.HeldLVs(); err != nil || len(held) != 0 {
 		t.Errorf("held %v, %v after the stack stopped", held, err)
 	}
@@ -283,7 +284,7 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 	cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{
 		Secrets: []string{"db-password"}, SecretEnv: map[string]string{"API_KEY": "api-key"},
 	}))
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if content, err := os.ReadFile(password); err != nil || string(content) != "first" {
 		t.Errorf("the secret file: %q, %v", content, err)
 	}
@@ -304,7 +305,7 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 
 	// a new password, the stack unchanged: rewritten, and reported
 	cluster.PutSecret("db-password", "second")
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if content, err := os.ReadFile(password); err != nil || string(content) != "second" {
 		t.Errorf("the changed secret file: %q, %v", content, err)
 	}
@@ -318,7 +319,7 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 
 	// no variable any more: env.yaml goes
 	cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{Secrets: []string{"db-password"}}))
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if _, err := os.Stat(env); !os.IsNotExist(err) {
 		t.Errorf("the secret variables stayed: %v", err)
 	}
@@ -329,7 +330,7 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 	cluster.Apply(state.KindSetStackStatus, state.LeaderActor, state.SetStackStatus{
 		ID: "default/shop", Status: state.StackPending, PlannedAt: cluster.Index(),
 	})
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if _, err := os.Stat(runner.files.secretsDir(shopProject)); !os.IsNotExist(err) {
 		t.Errorf("the secrets of a stack that left stayed: %v", err)
 	}
@@ -355,4 +356,53 @@ func secretsLabel(t *testing.T, runner *Runner) string {
 		t.Fatal("app has no digest of its secret files")
 	}
 	return label
+}
+
+// passAndWait runs a pass and waits for the jobs it started, as the tests
+// look at what they did.
+func (r *Runner) passAndWait(ctx context.Context) {
+	r.pass(ctx)
+	r.jobs.Wait()
+}
+
+func TestAStackThatHangsHoldsUpNoOther(t *testing.T) {
+	runner, cluster, docker, _ := newTestRunner(t)
+	cluster.Put(resource.KindStack, "blog", stackspec.Spec{Services: map[string]stackspec.Service{"web": {Image: "x"}}})
+	cluster.Place("blog")
+	// the first compose up hangs until the test lets it go
+	release, first := make(chan struct{}), make(chan struct{}, 1)
+	first <- struct{}{}
+	docker.DuringUp = func() {
+		select {
+		case <-first:
+			<-release
+		default:
+		}
+	}
+	runner.pass(context.Background())
+	deadline := time.Now().Add(5 * time.Second)
+	for docker.Count("up "+shopProject)+docker.Count("up default_blog") < 2 {
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatalf("one hanging compose up held up the other: %v", docker.Lines())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(release)
+	runner.jobs.Wait()
+}
+
+func TestAHostThatIsFencedStartsNoStack(t *testing.T) {
+	for phase, starts := range map[state.HostPhase]bool{
+		state.Failed: true, state.Fencing: true, state.Fenced: false, state.Recovering: false, state.Disabled: false,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			runner, cluster, docker, _ := newTestRunner(t)
+			cluster.Read(func(current *state.State) { current.Hosts[0].Phase = phase })
+			runner.passAndWait(context.Background())
+			if started := docker.Count("up "+shopProject) > 0; started != starts {
+				t.Errorf("a %s host started shop: %v", phase, started)
+			}
+		})
+	}
 }

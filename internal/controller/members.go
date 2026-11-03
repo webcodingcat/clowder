@@ -237,17 +237,22 @@ func nextPhase(current *state.State, ids []state.HostID) memberStep {
 	return memberStep{}
 }
 
-// nextVoter promotes or demotes one host, so voterCount of the active and
-// draining hosts vote. A host that voted keeps its vote while it may; the
-// leader never gives up its own. A voter in another phase does not count:
-// so far only a removed one, which leaves Raft right after. Failover must
-// decide what a failed voter is worth before its phase gets here.
+// nextVoter promotes or demotes one host, so voterCount of the hosts that
+// run stacks, or ran them and are to come back (votes), vote. A host that
+// voted keeps its vote while it may; the leader never gives up its own.
+// Only an active or draining host gets a vote: one that cannot answer
+// would count toward a quorum it does not help to reach.
+//
+// A failed or fenced voter keeps its vote. Taking it would shrink the
+// cluster below what it was built for, and with three hosts it would take
+// the vote of a live host instead: the leader would be left as the only
+// voter that answers, and the cluster would stop at the next failure.
 func nextVoter(current *state.State, configuration map[state.HostID]bool, ids []state.HostID,
 	self state.HostID,
 ) memberStep {
 	var eligible, voting []state.HostID
 	for _, id := range ids {
-		if phase := current.Hosts[id].Phase; phase == state.Active || phase == state.Draining {
+		if votes(current.Hosts[id].Phase) {
 			eligible = append(eligible, id)
 			if configuration[id] {
 				voting = append(voting, id)
@@ -258,7 +263,7 @@ func nextVoter(current *state.State, configuration map[state.HostID]bool, ids []
 	switch {
 	case len(voting) < want:
 		for _, id := range eligible {
-			if !configuration[id] {
+			if phase := current.Hosts[id].Phase; !configuration[id] && state.RunsStacks(phase) {
 				return memberStep{action: addVoter, host: id}
 			}
 		}
@@ -270,4 +275,14 @@ func nextVoter(current *state.State, configuration map[state.HostID]bool, ids []
 		}
 	}
 	return memberStep{}
+}
+
+// votes tells whether a host in this phase counts for the voters: it runs
+// stacks, or it ran them and is to come back after its failure.
+func votes(phase state.HostPhase) bool {
+	switch phase {
+	case state.Active, state.Draining, state.Failed, state.Fencing, state.Fenced, state.Recovering, state.Disabled:
+		return true
+	}
+	return false
 }

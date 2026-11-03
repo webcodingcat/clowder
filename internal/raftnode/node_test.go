@@ -303,6 +303,24 @@ func TestThreeHostsReplicateOverMutualTLS(t *testing.T) {
 	if _, err := nodes[1].Propose(ctx, addUser(t, "bob", "b1")); err == nil {
 		t.Error("a follower committed a command")
 	}
+	if err := nodes[0].VerifyLeader(waitCtx); err != nil {
+		t.Errorf("the leader: %v", err)
+	}
+	if err := nodes[1].VerifyLeader(waitCtx); err == nil {
+		t.Error("a follower verified a lead")
+	}
+	// the last entry is Raft's own, which the state never sees: a follower
+	// still catches up with the leader's commit index
+	if err := nodes[0].DemoteVoter(2); err != nil {
+		t.Fatal(err)
+	}
+	commitIndex := nodes[0].CommitIndex()
+	if commitIndex <= index {
+		t.Fatalf("commit index %d, the last command was %d", commitIndex, index)
+	}
+	if err := nodes[1].WaitCommitted(waitCtx, commitIndex); err != nil {
+		t.Errorf("host 1: %v", err)
+	}
 }
 
 func TestOnlyHostsOfTheClusterGetIn(t *testing.T) {

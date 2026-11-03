@@ -139,7 +139,7 @@ var lockCases = []lockCase{
 		byOperation: true,
 	},
 	{
-		name: "a failed host reports back", kind: KindSetHostPhase, actor: HostActor(1), lock: "host/1",
+		name: "the leader takes a failed host back", kind: KindSetHostPhase, actor: LeaderActor, lock: "host/1",
 		setup: func(c *cluster) {
 			c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Failed})
 		},

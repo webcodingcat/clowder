@@ -119,7 +119,7 @@ func (r *Runner) up(ctx context.Context, stack *state.Stack, rendered []byte, se
 	// read before compose up: a restart of Docker during it makes the
 	// stack come up again at the next pass
 	upNow := loop.BroughtUp{Hash: hash, DockerRestarts: r.signal.Restarts()}
-	if r.applied[project] == upNow {
+	if r.appliedWith(project) == upNow {
 		return nil
 	}
 	files, err := r.writeStackFiles(project, rendered, secrets, volumes)
@@ -135,7 +135,7 @@ func (r *Runner) up(ctx context.Context, stack *state.Stack, rendered []byte, se
 	if err != nil {
 		return err
 	}
-	r.applied[project] = upNow
+	r.setApplied(project, upNow)
 	// The containers of the last Compose file are gone, so the list of LVs
 	// shrinks to the new ones. If that write fails, the longer list stays:
 	// it only makes another stack wait for a volume a bit longer, so the

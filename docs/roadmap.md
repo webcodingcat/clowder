@@ -10,7 +10,7 @@ clowder is built in phases; each ends with live tests on HLab
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done, passes the live tests |
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
-| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions, the leader's plans and the locks, the network for several hosts, the join, the placement over hosts and moves |
+| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions, the leader's plans and the locks, the network for several hosts, the join, the placement over hosts and moves, failover with fencing |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -100,6 +100,38 @@ Then the placement over hosts:
 
 The state changed with it, so a cluster of an earlier build must be set up anew.
 
+Then failover:
+
+- Every agent beats to every voter every five seconds, outside the Raft log. A host a
+  majority of the voters has not heard for 45 s is `failed`; the leader alone, cut off
+  from it, fails no host. A failed host that is heard again is active again, but only
+  the leader says so, never the host.
+- The leader fences a failed host that has stacks another host can take: it powers its
+  server off through the hoster, and only then do its stacks start elsewhere, on a host
+  with a synced copy of their data. A host without such stacks, such as one drained and
+  rebooting for maintenance, stays failed until it is heard again. Once the
+  fence started (`fencing`), nothing stops it; a server that cannot be powered off leaves
+  the host failed, with an alert, until a user runs `clowder host fence-confirm`. One host
+  at a time, and only while a majority of the voters stays active.
+- The fenced host is powered on again, comes back as `recovering`, and is `active` once its
+  copies caught up. Fenced three times within an hour, it stays off (`disabled`) until
+  `clowder host enable`. A volume of replicas 1 waits for its host; one of replicas 0
+  starts anew, empty; a copy on a host that does not come back within twenty minutes is made
+  anew elsewhere.
+- A host that was away starts its stacks only once it holds the leader's commit index,
+  and a new leader acts only once it has applied the log. Each stack comes up in a job of
+  its own. The hoster's API is asked again while it is busy.
+- The live tests fail hosts through HLab's faults: frozen, cut off, with the hoster's API
+  down, with an agent that crashes at once, and during a move (`TestFailover`,
+  `TestNoFalseFailover`, `TestCrashingAgent`, `TestMoveInterrupted`).
+- The live tests found three older faults, now fixed: a deleted volume's DRBD minor went
+  to a new volume while a host still had the old copy's resource (`RetiredMinors`); a
+  resource file whose `adjust` failed counted as applied and was never adjusted again; and
+  a volume copy whose step failed was tried again at once, in a tight loop. Every way to
+  the leader waits a moment for one during an election.
+
+The state changed with it, so a cluster of an earlier build must be set up anew.
+
 Before it, the first release became installable and the commands honest: the APT
 repository keeps every version, `examples/hetzner` pins `0.1.0`, `bin/dev live release
 <tag>` tests a published release (the [release checklist](developing/shipping.md#release-checklist)),
@@ -109,8 +141,6 @@ out; its release candidate passed the live tests without the test hook.
 
 Code without a caller went then; each phase brings back what it needs:
 
-- phase 2: fencing (powering servers off and on through the hoster), the hosts' own
-  phase reports and `host enable` after the flapping brake;
 - phase 3: `backup:` in `cluster.yaml`, and resources owned by a GitOps source;
 - user management: more users per cluster, removing a user, revoking one certificate.
 
@@ -121,13 +151,23 @@ to upgrade a running cluster.
 
 They matter once there are several hosts; on one, they cost at most time.
 
-- A copy that never syncs (its host is down and stays active, as nothing fails over yet)
-  holds the resync limit, so no other new copy starts; and a host that comes back resyncs
-  all its copies at once, each at the limit. Failover brings both: a failed host's copies
-  stop counting, and are made anew elsewhere after ten minutes.
-- A move whose host goes away ends only with its deadline (a rollback, or the move
-  failed past the point of no return); failover will end it at once. After a move, the
-  published ports' DNAT and its conntrack entries follow with the ingress failover.
+- A host that comes back after a fence resyncs all its copies at once, each at the
+  resync limit's rate; the limit holds back only new copies meanwhile.
+- After a move or a failover, the published ports' DNAT and its conntrack entries follow
+  with the ingress failover.
+- A failed host that is not fenced (it needs none, or there is no hoster, a server ref not
+  confirmed, the hoster's API down for good) keeps its copies counted: none is made anew elsewhere until a user
+  runs `host fence-confirm`. The alert `fencing-blocked` says so.
+- A drained host that fails comes back active, not drained: its drain is lost; a user's
+  remove is kept.
+- After a move, the placement gives up the old copy and sets the tiebreaker in passes of
+  their own. If the stack's host fails in between, the other copy has no DRBD quorum
+  (one of two nodes), and the failover's promote fails until the host is back. The DRBD
+  quorum step should change a volume's copies and tiebreaker in one command.
+- A disabled voter keeps its vote until it is removed: with more than three hosts, an
+  active host that does not vote does not take its place.
+- An agent without quorum raises no alert of its own yet (two hosts of three down): it
+  comes with DRBD's quorum and `suspend-io`.
 - While a volume of replicas 1 moves, its resource has two copies and no tiebreaker: if
   the new host goes away during the resync, the old one may lose DRBD's quorum and suspend
   the stack's writes. The DRBD quorum step checks this and gives such a move a
@@ -152,24 +192,12 @@ They matter once there are several hosts; on one, they cost at most time.
   removed host that kept its key could answer it as the cluster, with recipients of its
   own for `secret encrypt`. Removing hosts is normal now, so the CLI needs the revocation
   list or the cluster's recipients pinned in the credentials.
-- `CatchUp` makes sure the state holds the whole log only on the leader; a follower returns
-  once it knows a leader. Before a host that was away starts its stacks, it must have
-  applied the leader's commit index.
-- `CatchUp` runs once, when the agent starts. A host that becomes leader later may not
-  have applied every committed entry yet, and its loops and `runOnLeader` would act on that
-  state. It needs a barrier when it gains the lead, before they act.
-- The agent runs its stacks one after another in one loop. A long image pull holds up
-  the others, and a `compose` command left behind on a suspended DRBD volume leaves a
-  goroutine behind at every pass.
 - A placement is several commands in a row (push-outs, volumes, the stack's host). A new
   leader repairs what one left half done in its next pass; with failover, one command per
   placement would leave fewer states between.
 - A Prometheus in a stack or outside the cluster cannot reach `/metrics` yet: only the
   hosts reach the node address. The way in (through Traefik, or a permission for certain
   stacks) comes when one is needed.
-- A host that falls silent raises no alert: `docker-down` and the pools come from the
-  host's own report, which a dead host does not send. On one host the heartbeat covers it;
-  with several, the leader needs an alert for a host whose reports stop.
 - `examples/hetzner` ignores later changes to the server's user data, so a storage class
   added later gets a volume but no thin pool on an existing host.
 

@@ -34,6 +34,8 @@ type fakeCluster struct {
 	state    *state.State
 	leader   bool
 	leaderID state.HostID
+	// noLeader: an election runs, no leader is known
+	noLeader bool
 	changes  state.ChangeRing
 	changed  chan struct{}
 	// handOvers counts TransferLeadership
@@ -106,7 +108,7 @@ func (f *fakeCluster) IsLeader() bool { return f.leader }
 func (f *fakeCluster) Leader() (state.HostID, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.leaderID, true
+	return f.leaderID, !f.noLeader
 }
 
 // TransferLeadership counts the hand-overs and names host 1 the leader;
@@ -141,6 +143,8 @@ type testCluster struct {
 	recovery *age.X25519Identity
 	// joins answers the joins on every server; only the leader's is asked
 	joins *fakeJoins
+	// healths are the servers' beats, by host
+	healths []*fakeHealth
 }
 
 func newTestCluster(t *testing.T) *testCluster {
@@ -175,13 +179,16 @@ func newTestCluster(t *testing.T) *testCluster {
 		cluster := newFakeCluster(t, id == 0)
 		cluster.state.Keys.AgeIdentity = sealedIdentity
 		cluster.state.RecoveryRecipient = recovery.Recipient().String()
+		health := &fakeHealth{beats: map[state.HostID]int{}}
+		c.healths = append(c.healths, health)
 		server := httptest.NewUnstartedServer(nil)
 		api := NewServer(ServerConfig{
-			Cluster: cluster, CA: ca.Certificate, Certificate: c.hostCertificate(id),
+			Cluster: cluster, CA: ca.Certificate, Certificate: c.hostCertificate(id), HostID: id,
 			APIAddress: func(id state.HostID) string { return addresses[id] },
 			Version:    testVersion,
 			Keys:       keys,
 			Joins:      c.joins,
+			Beats:      health,
 			Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		})
 		server.Config.Handler = api
@@ -536,4 +543,21 @@ func TestAddressAddsTheAPIPort(t *testing.T) {
 			t.Errorf("%s: %s", seed, got)
 		}
 	}
+}
+
+func (f *fakeCluster) VerifyLeader(context.Context) error {
+	if !f.leader {
+		return errors.New("not the leader")
+	}
+	return nil
+}
+
+func (f *fakeCluster) CommitIndex() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.state.Index
+}
+
+func (f *fakeCluster) WaitCommitted(ctx context.Context, index uint64) error {
+	return f.WaitIndex(ctx, index)
 }

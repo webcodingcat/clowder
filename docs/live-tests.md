@@ -197,7 +197,8 @@ The stack `echo` lives from step 2 to the last.
 ### `TestAlerts`
 
 1. `clowder alert test` reaches Discord and a webhook (both received by the test) and the
-   mail server. The heartbeat goes on while the first host's agent is stopped: another
+   mail server. The heartbeat goes on while the first host's agent is stopped (shorter
+   than the detection, or it would be fenced): another
    host leads and calls it. Filling the pool of `small` beyond 80 % raises `pool-use`; deleting the volume
    brings its all-clear. The step removes its channels and the pool's reserve at the end.
 2. `promtool check metrics` accepts `/metrics`, and a Prometheus on the host scrapes it.
@@ -231,3 +232,48 @@ The stack `echo` lives from step 2 to the last.
    interface, to the registry). The agent reloads the table every loop interval, which
    zeroes the counters, so each probe gets three tries.
 3. Both stacks go.
+
+### `TestFailover`
+
+One host, the leader at the start, is fenced three times, each time another way, so its
+steps run in this order. The joined hosts take stacks, and `keeper` (a volume of two
+replicas) and `scratch` (replicas 0) run.
+
+1. The leader's host freezes (`vm pause`, a kernel that hangs) with `keeper` on it: the
+   others fence it, and `keeper` runs on another host within three minutes, with its data,
+   once, with its volume primary on that host alone. The host is powered on, comes back
+   and is `active` again.
+2. The same host, cut off from every network (`isolate`): fenced again, the same checks.
+   The fault is removed once it is fenced, as it would outlive the power cycle.
+3. The hoster's API answers 503 and the host freezes: it is `failed`, and for two minutes
+   nothing fails over. Then the API answers again, the test powers the server off as a
+   user who checks, and `host fence-confirm` lets `keeper` run elsewhere.
+4. That was the third fence within the hour: the host stays off (`disabled`), until
+   `host enable`; then it comes back.
+5. Another host, cut off for a little longer than the detection takes and then back: it
+   was either fenced and powered off, or never fenced and not rebooted (its boot ID says
+   which), and `keeper` runs once.
+6. The stacks go, and the joined hosts are drained again.
+
+### `TestNoFalseFailover`
+
+1. `bulk` (a volume of two replicas) gets its second copy, which resyncs during the next
+   steps.
+2. The network between the leader and one host is cut: no host fails within the
+   detection time and more.
+3. Every host pauses for 20 s: none fails, none reboots, `bulk`'s container stays.
+4. The resync ends, with every host active.
+
+### `TestCrashingAgent`
+
+1. A drop-in makes `clowderd` exit at once on a joined host that runs `crasher`: it is
+   fenced, `crasher` runs elsewhere, and the host is powered on.
+2. For two minutes it stays `fenced` and does not boot again: no reboot loop.
+3. Without the drop-in the agent runs, and the host is `active` again.
+
+### `TestMoveInterrupted`
+
+1. `stack move` of `mover` (a volume of one replica) starts: a copy comes to the new host.
+2. The new host freezes during the resync: the move ends, `mover` runs where it was, once,
+   with its data, and the copy the move left goes. The new host had no stack, so it is
+   not fenced: it stays `failed` until it goes on, and is `active` again.

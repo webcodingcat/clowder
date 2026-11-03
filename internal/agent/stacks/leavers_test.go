@@ -45,9 +45,9 @@ func mountedLVs(t *testing.T, runner *Runner) []string {
 
 func TestAVolumePassesOnlyOnceItsStackStopped(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	handOver(cluster)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	lines := docker.Lines()
 	down := slices.Index(lines, "down "+shopProject)
 	up := slices.Index(lines, "up default_blog")
@@ -64,17 +64,17 @@ func TestAVolumePassesOnlyOnceItsStackStopped(t *testing.T) {
 
 func TestAStackWaitsWhileAStackThatFailedToStopUsesItsVolume(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	handOver(cluster)
 	docker.FailedDowns = 1
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if docker.Count("up default_blog") != 0 {
 		t.Fatalf("blog came up beside shop, which still runs: %q", docker.Lines())
 	}
 	if blog := cluster.Stack("blog"); blog.Status != state.StackStarting {
 		t.Errorf("a stack that waits for a volume is %s: %q", blog.Status, blog.UpError)
 	}
-	runner.pass(context.Background()) // shop stops now
+	runner.passAndWait(context.Background()) // shop stops now
 	if docker.Count("up default_blog") != 1 || cluster.Stack("blog").Status != state.StackRunning {
 		t.Errorf("docker %q, blog %s", docker.Lines(), cluster.Stack("blog").Status)
 	}
@@ -82,7 +82,7 @@ func TestAStackWaitsWhileAStackThatFailedToStopUsesItsVolume(t *testing.T) {
 
 func TestAStackWaitsWhenTheVolumesOfAStackThatFailedToStopDoNotRead(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if lvs := mountedLVs(t, runner); !slices.Equal(lvs, []string{agenttest.DBLV(1)}) {
 		t.Fatalf("the volumes shop mounts: %v", lvs)
 	}
@@ -92,11 +92,11 @@ func TestAStackWaitsWhenTheVolumesOfAStackThatFailedToStopDoNotRead(t *testing.T
 	}
 	handOver(cluster)
 	docker.FailedDowns = 1
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if docker.Count("up default_blog") != 0 {
 		t.Fatalf("blog came up beside shop, whose volumes are not known: %q", docker.Lines())
 	}
-	runner.pass(context.Background()) // shop stops now
+	runner.passAndWait(context.Background()) // shop stops now
 	if docker.Count("up default_blog") != 1 {
 		t.Errorf("docker %q", docker.Lines())
 	}
@@ -108,7 +108,7 @@ func TestEveryStackWaitsWhileTheLeaversCannotBeListed(t *testing.T) {
 	if err := os.WriteFile(runner.files.StacksDir, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if docker.Count("up "+shopProject) != 0 || cluster.Stack("shop").Status != state.StackStarting {
 		t.Errorf("shop came up beside leavers no one knows: %q, %s", docker.Lines(), cluster.Stack("shop").Status)
 	}
@@ -116,14 +116,14 @@ func TestEveryStackWaitsWhileTheLeaversCannotBeListed(t *testing.T) {
 
 func TestALeaverStoppedBeforeACrashIsOnlyForgotten(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	cluster.Remove(resource.KindStack, "shop")
 	// compose down worked and compose.yaml went, then the agent crashed
 	// before the directory went
 	if err := os.Remove(runner.files.stackFile(shopProject)); err != nil {
 		t.Fatal(err)
 	}
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if docker.Count("down "+shopProject) != 0 {
 		t.Errorf("compose down ran again: %q", docker.Lines())
 	}
@@ -134,20 +134,20 @@ func TestALeaverStoppedBeforeACrashIsOnlyForgotten(t *testing.T) {
 
 func TestAFailedComposeUpKeepsTheOldVolumesInUse(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	moveShopToLogs(cluster)
 	docker.FailedUps = 1
-	runner.pass(context.Background()) // shop's container still holds db
+	runner.passAndWait(context.Background()) // shop's container still holds db
 	if lvs := mountedLVs(t, runner); !slices.Equal(lvs, []string{agenttest.DBLV(1), logsLV}) {
 		t.Errorf("shop may hold %v, want db's LV and logs'", lvs)
 	}
 	handOver(cluster)
 	docker.FailedDowns = 1
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if docker.Count("up default_blog") != 0 {
 		t.Fatalf("blog came up on db, which shop's old container still holds: %q", docker.Lines())
 	}
-	runner.pass(context.Background()) // shop stops now
+	runner.passAndWait(context.Background()) // shop stops now
 	if docker.Count("up default_blog") != 1 {
 		t.Errorf("docker %q", docker.Lines())
 	}
@@ -155,19 +155,19 @@ func TestAFailedComposeUpKeepsTheOldVolumesInUse(t *testing.T) {
 
 func TestAFailedComposeUpLeavesVolumesThatDoNotReadUnread(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	file := runner.files.stackVolumesFile(shopProject)
 	if err := os.Remove(file); err != nil { // as a stack brought up before the file existed
 		t.Fatal(err)
 	}
 	moveShopToLogs(cluster)
 	docker.FailedUps = 1
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	// the old container may hold any LV: listing only logs' would free db
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Errorf("the volumes of a stack with an unknown container were written: %v", err)
 	}
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if lvs := mountedLVs(t, runner); !slices.Equal(lvs, []string{logsLV}) {
 		t.Errorf("once up, shop may hold %v, want only logs' LV", lvs)
 	}
@@ -175,9 +175,9 @@ func TestAFailedComposeUpLeavesVolumesThatDoNotReadUnread(t *testing.T) {
 
 func TestTheVolumesInUseShrinkOnceComposeUpWorked(t *testing.T) {
 	runner, cluster, _, _ := newTestRunner(t)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	moveShopToLogs(cluster)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if lvs := mountedLVs(t, runner); !slices.Equal(lvs, []string{logsLV}) {
 		t.Errorf("shop may hold %v, want only logs' LV", lvs)
 	}

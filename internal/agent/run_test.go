@@ -539,3 +539,8 @@ spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
 		t.Errorf("status: %q, %v", out, err)
 	}
 }
+
+// PowerOff and PowerOn are never needed here: one host is never fenced.
+func (f *fakeHoster) PowerOff(context.Context, string) error { return errors.New("not in this test") }
+
+func (f *fakeHoster) PowerOn(context.Context, string) error { return errors.New("not in this test") }

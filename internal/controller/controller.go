@@ -17,6 +17,9 @@ type Cluster interface {
 	SharedCopy() (*state.State, error)
 	Changed() <-chan struct{}
 	IsLeader() bool
+	// VerifyLeader makes sure a majority still takes this agent as leader:
+	// before it powers a server off or moves the Floating IP.
+	VerifyLeader(ctx context.Context) error
 }
 
 // Propose commits a command (api.Server.Propose).

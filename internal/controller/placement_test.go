@@ -49,6 +49,8 @@ func (l *leader) Changed() <-chan struct{} {
 
 func (l *leader) IsLeader() bool { return true }
 
+func (l *leader) VerifyLeader(context.Context) error { return nil }
+
 func (l *leader) propose(_ context.Context, cmd state.Command) (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

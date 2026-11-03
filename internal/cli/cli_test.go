@@ -70,10 +70,13 @@ func (h *oneHost) Read(use func(current *state.State)) {
 	use(h.state)
 }
 
-func (h *oneHost) WaitIndex(context.Context, uint64) error { return nil }
-func (h *oneHost) IsLeader() bool                          { return true }
-func (h *oneHost) Leader() (state.HostID, bool)            { return 0, true }
-func (h *oneHost) TransferLeadership() error               { return errors.New("one host has no other voter") }
+func (h *oneHost) WaitIndex(context.Context, uint64) error     { return nil }
+func (h *oneHost) IsLeader() bool                              { return true }
+func (h *oneHost) Leader() (state.HostID, bool)                { return 0, true }
+func (h *oneHost) TransferLeadership() error                   { return errors.New("one host has no other voter") }
+func (h *oneHost) VerifyLeader(context.Context) error          { return nil }
+func (h *oneHost) CommitIndex() uint64                         { return 0 }
+func (h *oneHost) WaitCommitted(context.Context, uint64) error { return nil }
 
 // recoveryKeyFile is where startCluster puts the cluster's recovery key, in
 // the test's home.

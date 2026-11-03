@@ -497,6 +497,10 @@ func TestObserveReadsTheHostOnceForAllCopies(t *testing.T) {
 				if err := os.WriteFile(file, []byte(RenderResource(*replicated().Resource)), 0o600); err != nil {
 					t.Fatal(err)
 				}
+				// as a successful adjust leaves it
+				if err := driver.setMarker(replicated().Resource.Name, "adjusted", "default/db"); err != nil {
+					t.Fatal(err)
+				}
 			}
 			observed, err := driver.Observe(context.Background(), []Volume{replicated(), other})
 			if err != nil {
@@ -552,5 +556,26 @@ func TestPoolUsageReadsLVS(t *testing.T) {
 	size, data, metadata, err := driver.PoolUsage(context.Background(), "vg-fast/thin")
 	if err != nil || size != 100<<30 || data != 12.5 || metadata != 3.01 {
 		t.Errorf("%d %v %v %v", size, data, metadata, err)
+	}
+}
+
+func TestAResourceFileThatAdjustDidNotApplyIsNotCurrent(t *testing.T) {
+	driver := newDriver(t, &fakeHost{})
+	resource := replicated().Resource
+	file := driver.resourceFile(resource)
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(RenderResource(*resource)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := driver.resourceFileCurrent(resource); err != nil || current {
+		t.Errorf("current %v, %v before adjust applied it", current, err)
+	}
+	if err := driver.setMarker(resource.Name, "adjusted", "default/db"); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := driver.resourceFileCurrent(resource); err != nil || !current {
+		t.Errorf("current %v, %v once adjust applied it", current, err)
 	}
 }

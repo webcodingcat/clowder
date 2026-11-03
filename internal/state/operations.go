@@ -20,8 +20,10 @@ import (
 // Each step has a deadline. Before its point of no return, an operation
 // whose step fails or runs late rolls back (roll-back-operation): the
 // leader finishes it as failed once it is undone (for a move: at once; the
-// placement gives up the copies it left once the locks are free). Moving a
-// stack is the first kind (OperationMoveStack); fencing a host comes with failover.
+// placement gives up the copies it left once the locks are free). The kinds
+// are moving a stack (OperationMoveStack) and fencing a host
+// (OperationFenceHost), which has no rollback: the leader moves the host
+// back to failed itself when it cannot power it off.
 type Operation struct {
 	// ID is the Raft index of the command that started it: unique, and
 	// sorted by start.
@@ -39,6 +41,8 @@ type Operation struct {
 	Error    string    `json:"error,omitempty"`
 	// Move is what a move-stack operation moves.
 	Move *StackMove `json:"move,omitempty"`
+	// Fence is what a fence-host operation fences.
+	Fence *HostFence `json:"fence,omitempty"`
 }
 
 // OpState is where an operation is.
@@ -53,8 +57,12 @@ const (
 	OpFailed      OpState = "failed"
 )
 
-// OperationMoveStack moves a stack to another host (StackMove).
-const OperationMoveStack = "move-stack"
+// The kinds of operations: OperationMoveStack moves a stack to another host
+// (StackMove), OperationFenceHost powers a failed host off (HostFence).
+const (
+	OperationMoveStack = "move-stack"
+	OperationFenceHost = "fence-host"
+)
 
 // StackMove is what a move-stack operation moves: a stack, from its host to
 // another, with its volumes. Its steps, each the last one done:
@@ -104,6 +112,75 @@ func MoveStepName(step int) string {
 	}
 }
 
+// HostFence is what a fence-host operation fences: a failed host, whose
+// server the leader powers off before any of its stacks or volumes start
+// elsewhere (docs/developing/loops.md, Fencing). Its steps, each the last
+// one done:
+//
+//	FenceStart  the operation started, and with it the host is fencing
+//	FenceOff    the server is off and the host fenced; its stacks fail over
+//
+// The leader finishes it once the stacks of the host run elsewhere, or
+// after StepTime; a host it could not power off goes back to failed, and
+// the operation fails. Powering the host on again comes after it, so the
+// lock on the host is the one fencing at a time.
+type HostFence struct {
+	Host HostID `json:"host"`
+	// Stacks were on the host when it was fenced: the leader waits for them
+	// to run elsewhere. The move of the host to fenced records them
+	// (applySetHostPhase), in the same command; FenceOff then gets
+	// StepTime of its own.
+	Stacks []string `json:"stacks,omitempty"`
+}
+
+// The steps of a fence-host operation (HostFence).
+const (
+	FenceStart = 0
+	FenceOff   = 1
+)
+
+// FenceOf returns the fence-host operation that holds the host's lock, if
+// one does and has not finished.
+func (s *State) FenceOf(id HostID) *Operation {
+	operation, ok := s.Operations[s.Locks[HostLock(id)]]
+	if !ok || operation.Fence == nil || operation.Fence.Host != id {
+		return nil
+	}
+	return operation
+}
+
+// HostLocked tells whether an operation holds the host's lock.
+func (s *State) HostLocked(id HostID) bool {
+	return s.Locks[HostLock(id)] != 0
+}
+
+// checkFence holds a fence-host operation to its host: it locks the host,
+// which is failed, and whose server is checked (the hoster powers off the
+// server a ServerRef names). Only a fence-host operation names a fence.
+func (s *State) checkFence(payload StartOperation) error {
+	fence := payload.Fence
+	switch {
+	case (payload.Kind == OperationFenceHost) != (fence != nil):
+		return fmt.Errorf("operation %s: a fence goes with %s, and only with it", payload.Kind, OperationFenceHost)
+	case fence == nil:
+		return nil
+	case !slices.Contains(payload.Locks, HostLock(fence.Host)):
+		return fmt.Errorf("a fence of host %d must lock it", fence.Host)
+	case len(fence.Stacks) > 0:
+		return errors.New("a fence starts without stacks; the state records them as the host is fenced")
+	}
+	host, ok := s.Hosts[fence.Host]
+	switch {
+	case !ok:
+		return fmt.Errorf("no host %d", fence.Host)
+	case host.Phase != Failed:
+		return fmt.Errorf("host %s is %s, not failed", host.Name, host.Phase)
+	case !host.ServerRefChecked:
+		return fmt.Errorf("host %s has no checked server ref", host.Name)
+	}
+	return nil
+}
+
 // StepTime is how long a step of an operation has, unless its sender
 // gives a deadline of its own: a step that waits for a resync gets more.
 const StepTime = 10 * time.Minute
@@ -135,7 +212,8 @@ func StackLock(id string) string { return stackLockPrefix + id }
 // VolumeLock is the lock on a volume, by its ID.
 func VolumeLock(id string) string { return volumeLockPrefix + id }
 
-func hostLock(id HostID) string { return hostLockPrefix + strconv.Itoa(int(id)) }
+// HostLock is the lock on a host, by its ID.
+func HostLock(id HostID) string { return hostLockPrefix + strconv.Itoa(int(id)) }
 
 // MoveOf returns the move-stack operation that holds the stack's lock, if
 // one does and has not finished.
@@ -203,6 +281,7 @@ type StartOperation struct {
 	Owner    *HostID    `json:"owner,omitempty"`
 	Deadline time.Time  `json:"deadline,omitzero"`
 	Move     *StackMove `json:"move,omitempty"`
+	Fence    *HostFence `json:"fence,omitempty"`
 }
 
 func applyStartOperation(s *State, cmd Command, payload StartOperation) (func(), error) {
@@ -220,6 +299,9 @@ func applyStartOperation(s *State, cmd Command, payload StartOperation) (func(),
 	if err := s.checkMove(payload); err != nil {
 		return nil, err
 	}
+	if err := s.checkFence(payload); err != nil {
+		return nil, err
+	}
 	for _, lock := range payload.Locks {
 		if err := s.checkLockable(lock); err != nil {
 			return nil, err
@@ -231,11 +313,17 @@ func applyStartOperation(s *State, cmd Command, payload StartOperation) (func(),
 	operation := &Operation{
 		ID: s.Index, Kind: payload.Kind, Locks: slices.Compact(slices.Sorted(slices.Values(payload.Locks))),
 		Owner: payload.Owner, Deadline: deadline(cmd, payload.Deadline), State: OpRunning, Move: payload.Move,
+		Fence: payload.Fence,
 	}
 	return func() {
 		s.Operations[operation.ID] = operation
 		for _, lock := range operation.Locks {
 			s.Locks[lock] = operation.ID
+		}
+		// in the same command: a beat that brings the host back after it
+		// cannot stop the fence (phaseChanges)
+		if fence := operation.Fence; fence != nil {
+			s.Hosts[fence.Host].Phase = Fencing
 		}
 	}, nil
 }
@@ -289,6 +377,9 @@ type AdvanceOperation struct {
 func applyAdvanceOperation(s *State, cmd Command, payload AdvanceOperation) (func(), error) {
 	operation, err := s.running(payload.ID)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.checkFenceDecided(operation); err != nil {
 		return nil, err
 	}
 	runner := LeaderActor
@@ -391,6 +482,9 @@ func applyFinishOperation(s *State, cmd Command, payload FinishOperation) (func(
 		return nil, fmt.Errorf("%s cannot finish an operation; only the leader does", cmd.Actor)
 	}
 	operation, err := s.running(payload.ID)
+	if err == nil {
+		err = s.checkFenceDecided(operation)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -451,4 +545,15 @@ func (s *State) forgetFinished() {
 	for _, id := range finished[:max(0, len(finished)-keptFinished)] {
 		delete(s.Operations, id)
 	}
+}
+
+// checkFenceDecided refuses to take a fence-host operation on while its
+// host is fencing: only the operation moves the host on, to fenced or back
+// to failed, and it must have done so before its next step or its end, or
+// the host would stay fencing with no operation left to move it.
+func (s *State) checkFenceDecided(operation *Operation) error {
+	if fence := operation.Fence; fence != nil && s.Hosts[fence.Host].Phase == Fencing {
+		return fmt.Errorf("operation %d: host %d is still fencing", operation.ID, fence.Host)
+	}
+	return nil
 }

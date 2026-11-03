@@ -83,6 +83,12 @@ type State struct {
 	// agent removes, so a copy that is merely missing from the state (a bug)
 	// keeps its data.
 	Retired []RetiredCopy `json:"retired,omitempty"`
+	// RetiredMinors are the DRBD minors of volumes with a retired copy left,
+	// with the volume's ID: a host keeps the copy's resource, minor and all,
+	// until it removed it, and a new volume with the same minor would clash
+	// with it there (drbdadm refuses every command then). retire takes a
+	// minor, forgetRetiredMinors gives it back.
+	RetiredMinors map[int]string `json:"retired_minors,omitempty"`
 	// Alerts are the open alerts by key.
 	Alerts map[string]*Alert `json:"alerts,omitempty"`
 	// Operations are the running ones and the last keptFinished finished,
@@ -118,15 +124,15 @@ type ClusterConfig struct {
 // HostPhase is where a host is in its life; see phaseChanges for the moves.
 type HostPhase string
 
-// The phases of a host. Until phase 2 a host reaches only active, draining
-// and removed; joining, passive and those of failover come with the hosts
-// that join.
+// The phases of a host. Failed, fencing, fenced, recovering and disabled are
+// failover's (controller's fencing.go).
 const (
 	Joining    HostPhase = "joining"
 	Passive    HostPhase = "passive"
 	Active     HostPhase = "active"
 	Draining   HostPhase = "draining"
 	Failed     HostPhase = "failed"
+	Fencing    HostPhase = "fencing"
 	Fenced     HostPhase = "fenced"
 	Recovering HostPhase = "recovering"
 	Disabled   HostPhase = "disabled"
@@ -134,7 +140,7 @@ const (
 )
 
 // Phases are all phases of a host, in the order of a host's life.
-var Phases = []HostPhase{Joining, Passive, Active, Draining, Failed, Fenced, Recovering, Disabled, Removed}
+var Phases = []HostPhase{Joining, Passive, Active, Draining, Failed, Fencing, Fenced, Recovering, Disabled, Removed}
 
 // Host is one member of the cluster.
 type Host struct {
@@ -171,6 +177,10 @@ type Host struct {
 	// copies (SetHostPhase.Leaving): it drains, the placement moves its copies
 	// off too, and the leader removes it once nothing is left on it.
 	Leaving bool `json:"leaving,omitempty"`
+	// FencedAt are the times the host was fenced within FlapWindow, oldest
+	// first, for the flapping brake (Flapping); a user who enables the host
+	// clears them.
+	FencedAt []time.Time `json:"fenced_at,omitempty"`
 }
 
 // Resources are a host's memory and CPUs, as it reports them; the

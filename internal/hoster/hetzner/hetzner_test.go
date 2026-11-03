@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,14 @@ type fakeAPI struct {
 	actionFails bool
 	// missingServers makes GET /v1/servers/404 the API's not found
 	missingServers bool
+	// failures are answered first, one per request, before the real ones:
+	// an HTTP status and the API's error code
+	failures []failure
+}
+
+type failure struct {
+	status int
+	code   string
 }
 
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -41,6 +50,14 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, r.Method+" "+r.URL.RequestURI())
 	f.bodies = append(f.bodies, string(body))
 	w.Header().Set("Content-Type", "application/json")
+	if len(f.failures) > 0 {
+		next := f.failures[0]
+		f.failures = f.failures[1:]
+		w.Header().Set("RateLimit-Reset", strconv.FormatInt(time.Now().Unix(), 10))
+		w.WriteHeader(next.status)
+		_, _ = io.WriteString(w, `{"error": {"code": "`+next.code+`", "message": "try later"}}`)
+		return
+	}
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/floating_ips" && r.URL.Query().Get("page") == "1":
 		_, _ = io.WriteString(w, `{"floating_ips": [
@@ -81,7 +98,59 @@ func newClient(t *testing.T, api *fakeAPI) *Client {
 	t.Cleanup(server.Close)
 	client := New(server.URL+"/v1/", "secret-token")
 	client.poll = time.Millisecond
+	client.firstWait, client.lastWait = time.Millisecond, 4*time.Millisecond
 	return client
+}
+
+func TestARequestIsSentAgainWhileTheAPIIsBusy(t *testing.T) {
+	api := &fakeAPI{t: t, failures: []failure{
+		{http.StatusTooManyRequests, "rate_limit_exceeded"},
+		{http.StatusServiceUnavailable, "unavailable"},
+		{http.StatusLocked, "locked"},
+		{http.StatusConflict, "locked"},
+	}}
+	client := newClient(t, api)
+	if err := client.PowerOff(context.Background(), "42"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"POST /v1/servers/42/actions/poweroff",
+		"POST /v1/servers/42/actions/poweroff",
+		"POST /v1/servers/42/actions/poweroff",
+		"POST /v1/servers/42/actions/poweroff",
+		"POST /v1/servers/42/actions/poweroff",
+		"GET /v1/actions/13",
+	}
+	if strings.Join(api.requests, "\n") != strings.Join(want, "\n") {
+		t.Errorf("requests:\n%s\nwant:\n%s", strings.Join(api.requests, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestARequestGivesUpAfterItsAttempts(t *testing.T) {
+	var failures []failure
+	for range attempts {
+		failures = append(failures, failure{http.StatusBadGateway, "unavailable"})
+	}
+	api := &fakeAPI{t: t, failures: failures}
+	client := newClient(t, api)
+	err := client.PowerOn(context.Background(), "42")
+	if err == nil || !strings.Contains(err.Error(), "power server 42 on: try later (unavailable, HTTP 502)") {
+		t.Errorf("got %v", err)
+	}
+	if len(api.requests) != attempts {
+		t.Errorf("%d requests, want %d", len(api.requests), attempts)
+	}
+}
+
+func TestARefusedRequestIsNotSentAgain(t *testing.T) {
+	api := &fakeAPI{t: t, failures: []failure{{http.StatusForbidden, "forbidden"}}}
+	client := newClient(t, api)
+	if err := client.PowerOn(context.Background(), "42"); err == nil {
+		t.Error("a refusal passed")
+	}
+	if len(api.requests) != 1 {
+		t.Errorf("requests %v", api.requests)
+	}
 }
 
 func TestTheFloatingIPIsFoundOnAnyPage(t *testing.T) {

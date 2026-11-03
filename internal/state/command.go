@@ -326,6 +326,9 @@ func (s *State) makeMaps() {
 	if s.Revoked == nil {
 		s.Revoked = map[string]Revocation{}
 	}
+	if s.RetiredMinors == nil {
+		s.RetiredMinors = map[int]string{}
+	}
 	if s.Forgetting == nil {
 		s.Forgetting = map[HostID][]HostID{}
 	}

@@ -316,7 +316,11 @@ func TestHostPhasesMoveOnlyAsAllowed(t *testing.T) {
 		{"leader drains", Active, Draining, UserActor("alice"), ""},
 		{"leader undrains", Draining, Active, LeaderActor, ""},
 		{"leader declares failed", Active, Failed, LeaderActor, ""},
-		{"host is back before fencing", Failed, Active, HostActor(1), ""},
+		{"leader takes a failed host back", Failed, Active, LeaderActor, ""},
+		{"a failed host cannot take itself back", Failed, Active, HostActor(1), "only the leader"},
+		{"a recovering host fails again", Recovering, Failed, LeaderActor, ""},
+		{"only its operation moves a fencing host", Fencing, Fenced, LeaderActor, "only its fence-host operation"},
+		{"a user enables a disabled host", Disabled, Fenced, UserActor("alice"), ""},
 		{"leader fences", Failed, Fenced, LeaderActor, ""},
 		{"host recovers", Fenced, Recovering, HostActor(1), ""},
 		{"host is up to date", Recovering, Active, HostActor(1), ""},
@@ -324,7 +328,7 @@ func TestHostPhasesMoveOnlyAsAllowed(t *testing.T) {
 		{"leader removes from any phase", Recovering, Removed, LeaderActor, ""},
 		{"host cannot declare itself failed", Active, Failed, HostActor(1), "only the leader"},
 		{"leader cannot report recovery", Fenced, Recovering, LeaderActor, "only host"},
-		{"another host cannot report", Failed, Active, HostActor(2), "only host"},
+		{"another host cannot report", Fenced, Recovering, HostActor(2), "only host"},
 		{"another host cannot declare failed", Active, Failed, HostActor(2), "only the leader"},
 		{"another host cannot remove", Active, Removed, HostActor(2), "only the leader"},
 		{"no shortcut", Fenced, Active, HostActor(1), "cannot go from"},
@@ -850,9 +854,21 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	if !slices.Contains(c.state.Retired, RetiredCopy{Volume: "default/pgdata", DataGeneration: 2, Host: 0}) {
 		t.Errorf("retired %v after the delete", c.state.Retired)
 	}
+	// its minor stays taken while a host still has a retired copy: the
+	// copy's resource has it there
+	c.mustApply(KindPutResource, UserActor("alice"), putResource(resource.KindVolume, "default", "other", spec))
+	other := *c.state.Volumes["default/other"]
+	other.Minor, other.Status = &minor, VolumeOK
+	other.Copies = []VolumeCopy{{Host: 0, Class: "fast"}}
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: other},
+		"minor 5 is still the retired copies' of default/pgdata")
 
 	c.mustApply(KindForgetCopy, HostActor(0), ForgetCopy{Copy: want[1]})
 	c.mustApply(KindForgetCopy, HostActor(0), ForgetCopy{Copy: RetiredCopy{Volume: "default/pgdata", DataGeneration: 2, Host: 0}})
+	if len(c.state.RetiredMinors) != 0 {
+		t.Errorf("retired minors %v once every copy is gone", c.state.RetiredMinors)
+	}
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: other})
 
 	// a removed host forgets nothing any more: its copies leave the list
 	c.state.Retired = append(c.state.Retired, RetiredCopy{Volume: "default/blog", DataGeneration: 1, Host: 1})

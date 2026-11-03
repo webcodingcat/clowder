@@ -45,8 +45,8 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
      reach without them. The state's mesh replaces it once the state answers.
   2. The Raft member. It waits up to `catchUpTimeout` for its state to catch up with the
      Raft log. If the state met an entry or snapshot it cannot read by then, the agent
-     ends here, before its loops start; a follower may meet it later (`CatchUp` does not
-     wait for a follower to apply the leader's log, see the roadmap).
+     ends here, before its loops start; a follower may meet it later, as it applies the
+     leader's log.
   3. The containers' DNS resolver.
   4. `newDaemon` makes the parts, each from what they all share (`shared`: the files,
      this host, its keys, the Raft member, the host's parts, the logger); then the API, once each on the underlay, the node
@@ -57,11 +57,13 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
      serve, only an API that fails ends the agent: without the other two the host still
      runs its stacks, so their failure is logged.
   5. The loops (`startLoops`): this host's that start no container (the network,
-     supervisor), the leader's, which do nothing while it does not lead, and, once the
-     state caught up (`runOnceCaughtUp`), the report, Traefik, the volume reconciler with
-     its trim, the forgetting of removed hosts (`forgetPeers`: `storage.ForgetPeer`, then
-     `report-peer-forgotten`), the prefetcher, the steps of moves (`moveSteps`), and the
-     stack runner.
+     supervisor, the beats to the voters), the leader's, which do nothing while it does
+     not lead, and, once the state caught up with the leader's commit index
+     (`runOnceCaughtUp`, `waitForState`; cluster.md, Raft), the report, Traefik, the volume
+     reconciler with its trim, the forgetting of removed hosts (`forgetPeers`:
+     `storage.ForgetPeer`, then `report-peer-forgotten`), the prefetcher, the steps of moves
+     (`moveSteps`), the report of a host back after a fence (`reportRecovery`), and the
+     stack runner. A host that was away must not start a stack that moved meanwhile.
   6. It tells systemd `READY=1` and feeds the watchdog as long as the state's lock answers.
 
   When it stops, it ends its loops and waits for them, at most `loopsTimeout`: a host tool
@@ -103,7 +105,9 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   The steps of a volume run in a job, a goroutine of their own: mkfs, `mkdir data/`, a
   mount or an unmount write to the volume and hang while DRBD suspends I/O, and they must
   hold up neither the other volumes nor the agent. A volume has one job at a time
-  (`busy`); the pass does not wait for it, and the job starts the next pass when it ends.
+  (`busy`); the pass does not wait for it, and a job that worked starts the next pass when
+  it ends. One that failed leaves it to the next change of the state or `loop.Interval`:
+  tried again at once, a step that keeps failing would spin.
   `Run` waits for the jobs when it stops, within the agent's `loopsTimeout`. The stack
   runner asks `Mounted(lv)`: the mount point once the copy is ready, the error that keeps
   it from getting there (it is logged once, when it is new), or neither while it is on its
@@ -114,7 +118,11 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   trim in `trim.go`.
 - **The stack runner** (`agent/stacks`, `stacks.Runner`) keeps everything of a stack under its project
   (`names.Project`). A pass first stops the stacks that left the host (`compose down`), and
-  only then, for each stack the state places here, renders its Compose file with its
+  only then starts a job for each stack the state places here that has none running
+  (`Runner.start`): one stack's long image pull, or a `compose up` that hangs on a
+  suspended volume, holds up no other. A pass that finds a stack's job still running
+  leaves it, and the job starts another pass when it ends; a leaver whose job still runs
+  is stopped at a later pass, and its volumes count as in use until then. The job renders its Compose file with its
   mounted volume copies, writes its secrets, runs `compose up` unless all of it came up
   before, and reports `running`: a volume that passes from one stack to another is never
   used by both at once. A stack that fails to come up (any step, from its secrets to
@@ -129,7 +137,9 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   agent hands the runner its parts (`stacks.Parts`): where its files are
   (`stacks.Files`), this host, the Raft member, Docker, the volume reconciler, the data key
   and the supervisor.
-  A stack that stops for a move is a leaver here, as if it had left.
+  A stack that stops for a move is a leaver here, as if it had left. A host that is not
+  `state.KeepsStacks` (fenced, recovering, disabled) runs none: its stacks may run
+  elsewhere by then.
 - **The prefetcher** (`stacks.Prefetcher`) pulls the images of the stacks this host may
   take in a failover or a move, before it needs them (`docker.Client.PullMissing`): those
   whose volumes with data all have a copy with a disk here, those without such volumes on
@@ -313,7 +323,9 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   give it up. Which steps a copy needs, the volume reconciler decides from `Observe`, which
   only reads: the volume groups' LVs, the roles of all resources (`drbdsetup status
   --json`; a resource that is down is not listed), the mount table, and whether the
-  resource file is current. Markers in the driver's `StateDir` let `Ensure` pick up after a
+  resource file is current, which needs `adjust` to have applied it too (the marker
+  `<resource>.adjusted`): an `adjust` that failed, say without quorum, runs again at the
+  next pass. Markers in the driver's `StateDir` let `Ensure` pick up after a
   crash at any point (`created`: clowder made the LV; `metadata`: DRBD metadata written).
 A tiebreaker (`Volume.Diskless`) has no LV and no metadata: `Ensure` writes
   its resource file and runs `adjust`, `Remove` takes it down. When a resource's file loses

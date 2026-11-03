@@ -274,3 +274,40 @@ func TestTheResyncTimeOfALargeVolumeDoesNotOverflow(t *testing.T) {
 		t.Errorf("sync time of 100 GiB: %s", got)
 	}
 }
+
+func TestAMoveWhoseHostFailsEndsAtOnce(t *testing.T) {
+	tests := []struct {
+		name      string
+		step      int
+		failed    state.HostID
+		wantState state.OpState
+	}{
+		{"the new host before the stack stopped: a rollback", state.MoveStart, 1, state.OpRollingBack},
+		{"the old host before the stack stopped: a rollback", state.MoveStart, 0, state.OpRollingBack},
+		{"the new host after the stack stopped: the move fails", state.MoveStopped, 1, state.OpFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := error(nil)
+			l, mover := startedMove(t, nil, &err)
+			operation := l.move()
+			if test.step != state.MoveStart {
+				l.apply(state.KindAdvanceOperation, state.LeaderActor, state.AdvanceOperation{
+					ID: operation.ID, FromStep: state.MoveStart, Step: test.step,
+				})
+			}
+			l.apply(state.KindSetHostPhase, state.LeaderActor, state.SetHostPhase{Host: test.failed, Phase: state.Failed})
+			mover.pass(context.Background())
+			var got *state.Operation
+			l.Read(func(current *state.State) { got = current.Operations[operation.ID] })
+			if got.State != test.wantState || !strings.Contains(got.Error, "is failed") {
+				t.Errorf("operation %+v", got)
+			}
+			var stack state.Stack
+			l.Read(func(current *state.State) { stack = *current.Stacks["default/shop"] })
+			if *stack.Host != 0 {
+				t.Errorf("the stack is on host %d", *stack.Host)
+			}
+		})
+	}
+}

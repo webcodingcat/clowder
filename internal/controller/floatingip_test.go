@@ -20,6 +20,20 @@ type fakeHoster struct {
 	target  string
 	assigns []string
 	servers map[string][]netip.Addr
+	// powered are the power actions in order, "off 41", "on 41"
+	powered []string
+	// powerFails makes every power action fail
+	powerFails error
+}
+
+func (f *fakeHoster) PowerOff(_ context.Context, serverRef string) error {
+	f.powered = append(f.powered, "off "+serverRef)
+	return f.powerFails
+}
+
+func (f *fakeHoster) PowerOn(_ context.Context, serverRef string) error {
+	f.powered = append(f.powered, "on "+serverRef)
+	return f.powerFails
 }
 
 func (f *fakeHoster) ServerAddresses(_ context.Context, serverRef string) ([]netip.Addr, error) {

@@ -182,6 +182,9 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 				return nil, fmt.Errorf("volume %s: minor %d belongs to %s", id, *volume.Minor, otherID)
 			}
 		}
+		if owner, ok := s.RetiredMinors[*volume.Minor]; ok && owner != id {
+			return nil, fmt.Errorf("volume %s: minor %d is still the retired copies' of %s", id, *volume.Minor, owner)
+		}
 	}
 	// fewer copies than replicas is allowed: a degraded volume waits for
 	// its missing ones
@@ -241,6 +244,9 @@ func (s *State) retire(old *Volume, kept *Volume) {
 		if !slices.Contains(s.Retired, retired) {
 			s.Retired = append(s.Retired, retired)
 		}
+		if old.Minor != nil {
+			s.RetiredMinors[*old.Minor] = old.ID()
+		}
 	}
 }
 
@@ -258,7 +264,20 @@ func applyForgetCopy(s *State, cmd Command, payload ForgetCopy) (func(), error) 
 		return nil, fmt.Errorf("no retired copy of %s (data generation %d) on host %d",
 			payload.Copy.Volume, payload.Copy.DataGeneration, payload.Copy.Host)
 	}
-	return func() { s.Retired = slices.Delete(s.Retired, index, index+1) }, nil
+	return func() {
+		s.Retired = slices.Delete(s.Retired, index, index+1)
+		s.forgetRetiredMinors()
+	}, nil
+}
+
+// forgetRetiredMinors gives the minors back of the volumes that have no
+// retired copy left: no host has their resource any more.
+func (s *State) forgetRetiredMinors() {
+	left := map[string]bool{}
+	for _, retired := range s.Retired {
+		left[retired.Volume] = true
+	}
+	maps.DeleteFunc(s.RetiredMinors, func(_ int, volume string) bool { return !left[volume] })
 }
 
 // SetVolumeInitialized is a host telling that its copy of a volume is

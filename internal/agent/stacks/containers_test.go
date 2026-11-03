@@ -27,11 +27,11 @@ func TestDockerLogsInOnceForEachRegistryLogin(t *testing.T) {
 		cluster.Apply(state.KindApplyConfig, state.UserActor("alice"), applied)
 	}
 	login("first")
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	login("first") // sealed anew, the same login
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	login("second")
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if docker.Count("login ghcr.io robot first") != 1 || docker.Count("login ghcr.io robot second") != 1 {
 		t.Errorf("docker %q", docker.Lines())
 	}

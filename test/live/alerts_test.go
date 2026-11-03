@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/controller"
 )
 
 // TestAlerts sends alerts to every kind of channel and lets Prometheus
@@ -119,9 +120,11 @@ func heartbeat(t *testing.T, server host, received *receiver) {
 	// the diagnosis
 	t.Cleanup(func() { _, _ = server.run("systemctl start clowderd") })
 	stopped := len(received.got("/heartbeat"))
-	// one call may have been on its way: two more come from the others
-	eventually(t, 2*time.Minute, "the heartbeat from the other hosts", func() error {
-		if calls := len(received.got("/heartbeat")); calls < stopped+3 {
+	// one call may have been on its way: one more comes from the others.
+	// The agent stays stopped well below controller.FailAfter, or the
+	// others would fence the host (TestCrashingAgent does that)
+	eventually(t, controller.FailAfter-15*time.Second, "the heartbeat from the other hosts", func() error {
+		if calls := len(received.got("/heartbeat")); calls < stopped+2 {
 			return fmt.Errorf("%d calls since the stop", calls-stopped)
 		}
 		return nil

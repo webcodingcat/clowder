@@ -190,6 +190,10 @@ func (d Driver) ensureResource(ctx context.Context, volume Volume) error {
 	if err := d.noteDropped(resource); err != nil {
 		return err
 	}
+	// the file is applied only once adjust worked (resourceFileCurrent)
+	if err := os.Remove(d.marker(resource.Name, "adjusted")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("volume %s: %w", volume.ID, err)
+	}
 	if err := atomicfile.Write(d.resourceFile(resource), []byte(RenderResource(*resource)), 0o644); err != nil {
 		return err
 	}
@@ -219,6 +223,9 @@ func (d Driver) ensureResource(ctx context.Context, volume Volume) error {
 	// keeps its role
 	if _, err := d.Run(ctx, shortTimeout, "drbdadm", "adjust", resource.Name); err != nil {
 		return fmt.Errorf("bring up the DRBD resource of %s: %w", volume.ID, err)
+	}
+	if err := d.setMarker(resource.Name, "adjusted", volume.ID); err != nil {
+		return err
 	}
 	return d.forgetDropped(ctx, resource)
 }
@@ -322,7 +329,8 @@ func (d Driver) Remove(ctx context.Context, volume Volume) error {
 		case !errors.Is(err, fs.ErrNotExist):
 			return fmt.Errorf("look for the DRBD resource of %s: %w", volume.ID, err)
 		}
-		leftovers = append(leftovers, resourceFile, d.marker(name, "metadata"), d.marker(name, "forget"))
+		leftovers = append(leftovers, resourceFile, d.marker(name, "metadata"), d.marker(name, "forget"),
+			d.marker(name, "adjusted"))
 	}
 	if volume.Diskless {
 		return removeFiles(append(leftovers, d.MountPoint(volume)), volume.ID)

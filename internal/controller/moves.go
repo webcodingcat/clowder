@@ -87,10 +87,12 @@ func (m *mover) pass(ctx context.Context) time.Duration {
 }
 
 // step takes a move on: it rolls back what is late before its point of no
-// return, ends what is late after it, and runs the leader's steps.
+// return, ends what is late after it, and runs the leader's steps. A move
+// whose host went down ends at once, the same way (abandon).
 func (m *mover) step(ctx context.Context, copied *state.State, operation *state.Operation, now time.Time) error {
 	move := operation.Move
 	stack, ok := copied.Stacks[move.Stack]
+	down, isDown := downHost(copied, move)
 	switch {
 	case operation.State == state.OpRollingBack:
 		// nothing to undo: the stack runs on its old host again (its status
@@ -99,6 +101,11 @@ func (m *mover) step(ctx context.Context, copied *state.State, operation *state.
 		return m.finish(ctx, operation, true, "")
 	case !ok:
 		return m.finish(ctx, operation, true, "the stack is gone")
+	case isDown && operation.Step < state.MoveHost:
+		return m.abandon(ctx, operation, fmt.Sprintf("host %s is %s", down.Name, down.Phase))
+	case isDown && down.ID == move.To:
+		// the stack is the new host's: the failover takes it from there
+		return m.finish(ctx, operation, true, fmt.Sprintf("host %s is %s", down.Name, down.Phase))
 	case now.After(operation.Deadline):
 		return m.late(ctx, copied, operation, now)
 	case operation.Owner != nil:
@@ -308,4 +315,30 @@ func (m *mover) finish(ctx context.Context, operation *state.Operation, failed b
 		ID: operation.ID, Failed: failed, Error: reason,
 	})
 	return err
+}
+
+// downHost is a host of the move that went down: no longer active or
+// draining, as when it failed. The move cannot wait for it to come back.
+func downHost(copied *state.State, move *state.StackMove) (*state.Host, bool) {
+	ids := []state.HostID{move.To}
+	if move.From != nil {
+		ids = append(ids, *move.From)
+	}
+	for _, id := range ids {
+		if host := copied.Hosts[id]; !state.RunsStacks(host.Phase) {
+			return host, true
+		}
+	}
+	return nil, false
+}
+
+// abandon ends a move whose host went down before the new host got the
+// stack: before the point of no return it rolls back, after it the move
+// fails. Either way the stack keeps its old host; if that is the one that
+// is down, the failover takes the stack once the host is fenced.
+func (m *mover) abandon(ctx context.Context, operation *state.Operation, reason string) error {
+	if operation.Step >= state.MoveStopped {
+		return m.finish(ctx, operation, true, reason)
+	}
+	return m.rollBack(ctx, operation, reason)
 }

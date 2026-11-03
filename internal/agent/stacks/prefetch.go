@@ -127,7 +127,7 @@ func mayTake(current *state.State, stack *state.Stack, host state.HostID) bool {
 		}
 	}
 	self, ok := current.Hosts[host]
-	return ok && (self.Phase == state.Active || self.Phase == state.Draining)
+	return ok && state.RunsStacks(self.Phase)
 }
 
 // images are the images of a stack's services.

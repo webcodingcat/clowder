@@ -5,9 +5,9 @@ RAM). It replicates volumes with DRBD 9, keeps the client's real IP behind a Flo
 places services by priority and fences failed hosts through the hoster's API. The first
 hoster is Hetzner Cloud.
 
-**Status:** under construction; hosts join and stacks move between them, but no host
-fails over yet. [docs/roadmap.md](docs/roadmap.md) says how far it is. Until
-`v1.0.0`, a new release may need a cluster set up anew.
+**Status:** under construction; hosts join, stacks move between them, and a failed host
+is fenced and its stacks start elsewhere. [docs/roadmap.md](docs/roadmap.md) says how far
+it is. Until `v1.0.0`, a new release may need a cluster set up anew.
 
 ## What it does
 
@@ -22,6 +22,11 @@ fails over yet. [docs/roadmap.md](docs/roadmap.md) says how far it is. Until
   copies resync one at a time at `replication.resync_rate`. A stack moves to another host
   with its data (`clowder stack move`, `clowder host drain`), its images pulled there
   first.
+- **Failover with fencing:** a host with stacks that the others stop hearing for 45 s is
+  powered off through the hoster, and its stacks start on a host with a synced copy of
+  their data, within about three minutes. The host is powered on again and takes stacks
+  once its copies caught up; one that fails three times within an hour stays off until
+  `clowder host enable`.
 - **HTTP routes with certificates:** Traefik on the Floating IP, the client's address in
   `X-Forwarded-For`. A certificate comes from Let's Encrypt once the domain's DNS points at
   the Floating IP (not through a proxying CDN). The cluster accepts Let's Encrypt's terms
@@ -118,7 +123,13 @@ hoster that each host's server is its own, so give each cluster a Hetzner projec
 own. `clowder host drain` moves a host's stacks to the others for maintenance (its volume
 copies stay), and `clowder host remove` of a host that still has stacks or copies moves
 them off before it goes. A volume with `replicas: 0` holds throw-away data: it starts empty on
-the new host whenever its stack moves. No host fails over yet.
+the new host whenever its stack moves or fails over.
+
+A host that fails is powered off and its stacks start elsewhere: a volume with
+`replicas: 2` or `3` keeps its data, one with `replicas: 1` waits for its host. When the
+hoster's API cannot power the host off, nothing fails over and an alert says so; once you
+know the server is off, `clowder host fence-confirm <host>` lets the stacks start
+elsewhere.
 
 ## Running a stack
 

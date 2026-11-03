@@ -282,10 +282,13 @@ func (s *Server) join(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), joinTimeout)
 	defer cancel()
 	var answer JoinAnswer
-	if s.config.Cluster.IsLeader() {
+	leader, here, err := s.waitForLeader(ctx)
+	switch {
+	case err != nil:
+	case here:
 		answer, err = s.config.Joins.Join(ctx, request)
-	} else {
-		answer, err = s.forwardJoin(ctx, request)
+	default:
+		answer, err = s.forwardJoin(ctx, leader, request)
 	}
 	s.answerJoin(w, answer, err)
 }
@@ -332,11 +335,7 @@ func (s *Server) answerJoin(w http.ResponseWriter, answer JoinAnswer, err error)
 }
 
 // forwardJoin hands a join request to the leader's internal endpoint.
-func (s *Server) forwardJoin(ctx context.Context, request JoinRequest) (JoinAnswer, error) {
-	id, ok := s.config.Cluster.Leader()
-	if !ok {
-		return JoinAnswer{}, errors.New("the cluster has no leader right now")
-	}
+func (s *Server) forwardJoin(ctx context.Context, id state.HostID, request JoinRequest) (JoinAnswer, error) {
 	body, err := json.Marshal(request)
 	if err != nil {
 		return JoinAnswer{}, fmt.Errorf("encode the request: %w", err)

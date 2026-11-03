@@ -148,3 +148,17 @@ func TestAHostThatLeavesGoesOnceEmptyAndHandsItsLeadOverFirst(t *testing.T) {
 		t.Errorf("a leader that leaves: %+v", got)
 	}
 }
+
+func TestAFailedVoterKeepsItsVoteAndADeadHostGetsNone(t *testing.T) {
+	for _, phase := range []state.HostPhase{state.Failed, state.Fencing, state.Fenced, state.Recovering, state.Disabled} {
+		// a failed voter among three: the live ones keep theirs too
+		current := hostsIn(state.Active, state.Active, phase)
+		if got := nextMemberStep(current, voters(3, 0, 1, 2), 0); got.action == demoteVoter {
+			t.Errorf("%s: %+v", phase, got)
+		}
+		// a host that is down gets no vote, though one is missing
+		if got := nextMemberStep(current, voters(3, 0, 1), 0); got.action == addVoter {
+			t.Errorf("%s: %+v", phase, got)
+		}
+	}
+}

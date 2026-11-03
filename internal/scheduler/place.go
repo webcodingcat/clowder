@@ -200,6 +200,10 @@ func newPlanner(current *state.State) *planner {
 			p.syncing = true
 		}
 	}
+	// a retired copy keeps its minor on its host until it is gone
+	for minor := range current.RetiredMinors {
+		p.minors[minor] = true
+	}
 	for _, volume := range current.Volumes {
 		if volume.Minor != nil {
 			p.minors[*volume.Minor] = true
@@ -242,13 +246,16 @@ func (p *planner) activeHosts(leftOut *state.HostID) []state.HostID {
 	return hosts
 }
 
-// keep decides for a stack that has a host: it moves it if its host drains
-// or a user asked to (the volumes it newly names go with it), else it
-// places those volumes where it runs.
+// keep decides for a stack that has a host: it fails it over if its host
+// is down (fenced), moves it if its host drains or a user asked to (the
+// volumes it newly names go with it), else it places those volumes where
+// it runs.
 func (p *planner) keep(stack *state.Stack) []decision {
 	host := *stack.Host
 	switch {
-	case p.current.Hosts[host].Phase == state.Draining:
+	case state.FailsOver(p.current.Hosts[host].Phase):
+		return p.failover(stack)
+	case p.current.Hosts[host].Phase == state.Draining || p.current.Hosts[host].Leaving:
 		return p.place(stack, p.activeHosts(&host), "its host drains")
 	case stack.MoveTo != nil:
 		return p.place(stack, []state.HostID{*stack.MoveTo}, "a user asked to move it")

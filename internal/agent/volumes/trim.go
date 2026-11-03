@@ -47,7 +47,7 @@ func (r *Reconciler) trimNow(ctx context.Context) {
 			continue
 		}
 		err := r.storage.Trim(ctx, volume)
-		r.release(ctx, volume.ID)
+		r.release(ctx, volume.ID, false)
 		if err != nil {
 			r.logger.Error("trim a volume", "volume", volume.ID, "error", err)
 		}

@@ -109,6 +109,11 @@ func holdFloatingIP(ctx context.Context, cluster Cluster, propose Propose, open 
 	if target == host.ServerRef {
 		return true, nil
 	}
+	// a leader cut off from the others must not take the address from the
+	// host the new leader routes it to
+	if err := cluster.VerifyLeader(ctx); err != nil {
+		return true, err
+	}
 	logger.Info("routing the Floating IP to the ingress host", "host", host.Name, "server", host.ServerRef, "was", target)
 	return true, client.AssignFloatingIP(ctx, ip, host.ServerRef)
 }

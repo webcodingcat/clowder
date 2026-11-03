@@ -124,7 +124,8 @@ func sameDevice(source, device string) bool {
 	return errSource == nil && errDevice == nil && sourceNode == deviceNode
 }
 
-// resourceFileCurrent tells whether the resource file says what it should.
+// resourceFileCurrent tells whether the resource file says what it should,
+// and adjust applied it.
 func (d Driver) resourceFileCurrent(resource *Resource) (bool, error) {
 	content, err := os.ReadFile(d.resourceFile(resource))
 	if errors.Is(err, os.ErrNotExist) {
@@ -133,5 +134,10 @@ func (d Driver) resourceFileCurrent(resource *Resource) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read the resource file of %s: %w", resource.Name, err)
 	}
-	return bytes.Equal(content, []byte(RenderResource(*resource))), nil
+	if !bytes.Equal(content, []byte(RenderResource(*resource))) {
+		return false, nil
+	}
+	// a file adjust did not apply (it failed, say for want of quorum) is
+	// not current yet: the next pass runs adjust again
+	return d.hasMarker(resource.Name, "adjusted")
 }

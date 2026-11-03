@@ -372,11 +372,26 @@ func (s *State) checkLeaderStatus(stack *Stack, payload SetStackStatus) error {
 		return err
 	}
 	moves := payload.Host != nil && stack.Host != nil && *payload.Host != *stack.Host
-	if moves && (payload.Operation == 0 || s.Locks[lock] != payload.Operation) {
+	switch {
+	case !moves:
+	case FailsOver(s.Hosts[*stack.Host].Phase):
+		// its host is off and stops nothing: the stack fails over at once
+		if to := s.Hosts[*payload.Host]; to.Phase != Active {
+			return fmt.Errorf("stack %s cannot fail over to host %s: it is %s", payload.ID, to.Name, to.Phase)
+		}
+	case payload.Operation == 0 || s.Locks[lock] != payload.Operation:
 		return fmt.Errorf("stack %s runs on host %d; only an operation that holds its lock moves it",
 			payload.ID, *stack.Host)
 	}
 	return nil
+}
+
+// FailsOver tells whether the stacks of a host in this phase start
+// elsewhere without a move: its server is off (fenced), or stays off
+// (disabled). Until the leader powered it off, a failed host may still run
+// them.
+func FailsOver(phase HostPhase) bool {
+	return phase == Fenced || phase == Disabled
 }
 
 // checkHostReport refuses a host's report that does not match the stack as

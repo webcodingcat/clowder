@@ -1,7 +1,8 @@
-# Ingress, certificates, alerts and metrics
+# Ingress, fencing, certificates, alerts and metrics
 
 Part of [DEVELOPING.md](../../DEVELOPING.md): Traefik on every host, and the leader's
-loops that talk to the world outside.
+loops that talk to the world outside: the hoster (Floating IP, fencing), ACME, the alert
+channels.
 
 ## Traefik (`internal/ingress`, `agent/traefik.go`)
 
@@ -57,7 +58,7 @@ loops that talk to the world outside.
   for a lab's API instead of the hoster's (a full `http://` or `https://` URL: the token
   goes there).
 - `hoster.Hoster` is what clowder asks of a hoster: where the Floating IP is routed, route
-  it, a server's private addresses, power a server off and on (fencing, phase 2). A
+  it, a server's private addresses, power a server off and on (fencing). A
   server is its `ServerRef`, the hoster's ID that `clowderd init` and `join --server-ref`
   record. A host names it itself, so `hoster.CheckServerRef` makes sure one of the
   server's private addresses is the host's underlay (`ErrOtherServer` if not): the join
@@ -65,7 +66,12 @@ loops that talk to the world outside.
 - `hoster/hetzner` is a small client of the Hetzner Cloud API on `net/http`: the official
   SDK would bring Prometheus' client and more into clowderd. It finds the Floating IP among
   the project's (the API cannot look one up by its address) and waits for each action to
-  finish. Its errors carry the API's message, never the token.
+  finish. It sends a request again, up to `attempts` times with a growing wait and jitter,
+  while the API answers 429 (until `RateLimit-Reset`; Hetzner sends no `Retry-After`), 5xx
+  or `locked`, or the network fails: one busy moment of the API must not hold up a fence.
+  Every request clowder sends may go twice (a read, an assignment to the same server, a
+  power action on a server in that state). Its errors carry the API's message, never the
+  token.
 - `controller.RunFloatingIP` (`floatingip.go`) acts only on the leader. The ingress host (`State.Ingress`,
   `set-ingress`) is the recorded one while it is active and has a server ref, so the
   Floating IP never switches back by itself; otherwise the first of
@@ -74,7 +80,9 @@ loops that talk to the world outside.
   (`confirm-server-ref`); one that fails the check gets no Floating IP. At a change
   of the state and every 30 s it asks the hoster where the Floating IP is and routes it to
   the ingress host when it is elsewhere (moved by hand, or a new ingress host); it reads
-  the API at most once per 30 s, about 120 of Hetzner's 3600 requests an hour.
+  the API at most once per 30 s, about 120 of Hetzner's 3600 requests an hour. Before it
+  routes the address, it confirms its lead (`VerifyLeader`): a leader cut off from the
+  others must not take the address back from the host the new leader routed it to.
 - Every host has the Floating IP on its public interface, held or not (`clowderd check`
   requires it): the hoster routes it to one host only, so whatever binds it (published
   ports, Traefik) can bind it on every host and at boot.
@@ -85,6 +93,59 @@ loops that talk to the world outside.
   Raft 7400 and the API 7443 (node address and underlay), `/metrics` 7444 and Traefik's
   internal entrypoint 7480 (node address), the ACME challenges 7445 and Traefik's health
   check 7446 (127.0.0.1). On the Floating IP, 80 and 443 are Traefik's.
+
+## Fencing (`controller/health.go`, `controller/fencing.go`, `agent/health.go`)
+
+A host that fails is powered off through the hoster before any of its stacks or volumes
+start elsewhere: until then it is the only one that runs them, and it may still write.
+
+- **Beats.** Every agent tells every voter every `BeatInterval` that it is alive
+  (`sendBeats`, `POST /v1/internal/beats`), from its start on, before its state caught
+  up: the beat says the agent runs, not what it runs. The beats are not in the Raft log:
+  each voter keeps the last one of each host in memory (`controller.Heard`), and after its
+  own start counts from the start. As every voter has them, a new leader knows at once how
+  long each host has been silent, and the time runs on across a change of leader.
+- **Failed** (`fencer.watch`): a host that is active, draining or recovering, and that a
+  majority of the voters (the leader counts itself; the others it asks with
+  `GET /v1/internal/beats/{id}`, `askTimeout` each) has not heard for `FailAfter`, is
+  `failed`. A voter that does not answer, and the host itself, count against the change
+  either way: as having heard it for `failed`, as not having heard it for `active`.
+  So a cut between the leader and one host alone fails no host, and a pause of all hosts
+  shorter than `FailAfter` fails none. A failed host that a majority hears again within
+  `backWithin` is `active` again; the leader decides that, never the host (cluster.md,
+  Host phases). A failed host keeps running its stacks (`state.KeepsStacks`).
+- **Only what needs it** (`needsFence`): a failed host is fenced only if it has a stack that
+  another active host could take over. A host without stacks (drained and rebooting for
+  maintenance) or whose stacks no other host could take gains nothing from a power cycle:
+  it stays failed, with its alert, and is active again once a majority hears it.
+- **Fenced** (`fencer.fence`, `fencer.step`): the leader starts a fence-host operation for
+  the first failed host that may be fenced (`whyNotFence`): the cluster has a hoster, the
+  hoster confirmed the host's server ref, no operation holds the host, a majority of the
+  voters stays active without it (more hosts failed at once points to the network, and
+  powering hosts off would not help), and the last try to power it off is `fenceAgain`
+  ago. One host at a time: the next waits until the operation is over. The start makes the
+  host `fencing`; the leader confirms its lead (`VerifyLeader`) and powers the server off,
+  up to `powerOffTries` times with a pause that doubles. Once it is off, the host is
+  `fenced` and its stacks fail over (cluster.md, Placement); if it cannot, the host goes
+  back to `failed` and the operation fails, with the alert `fencing-blocked`. Then
+  `clowder host fence-confirm` lets a user say the server is off. The operation ends
+  once the host's stacks run elsewhere, or after `StepTime`.
+- **Back** (`fencer.powerOn`, `agent/recovery.go`): a fenced host whose operation is over
+  is powered on, once per fence and leader, if the hoster confirmed its server ref (after
+  a user's `fence-confirm` it may not have: then the user powers it on). It boots, starts
+  nothing (no container runs after a boot, and `stacks.Runner` runs none on a host that is
+  not `KeepsStacks`), catches up with the leader (cluster.md, Raft), and reports itself
+  `recovering`. Its copies are no longer synced since the fence; the volume reconciler
+  reports each synced once DRBD caught it up, and then the host reports itself `active`.
+  Its stacks stay where they went, apart from those with replicas 1, which waited for it.
+- **The flapping brake:** a host fenced `FlapLimit` times within `FlapWindow` (`FencedAt`)
+  is not powered on again but `disabled`, with the alert `host-disabled`, until a user runs
+  `clowder host enable`. A host whose agent crashes at once after each start is fenced
+  once and stays `fenced`, as it never reports: no reboot loop.
+- **Voters keep their vote** while they are down (cluster.md, Raft, step 4).
+- `fencing_test.go` runs the loop against the fake leader and a fake hoster: the majority,
+  a host that is back, the fence through to power on, a power-off that fails, several
+  hosts down at once, the brake.
 
 ## Certificates of the routes (`controller/acme.go`)
 
@@ -146,7 +207,8 @@ loops that talk to the world outside.
   tried also while the cluster has no leader.
 - **Conditions** that the state does not show are kept in memory (`controller.Conditions`)
   with the time they began, observed by the loop that sees them (`Observe`): the Floating IP not held (the
-  Floating IP's loop), a host over capacity (the placement), Docker not answering and a stack
+  Floating IP's loop), a host over capacity (the placement), a failed host that cannot be
+  fenced (the fencing loop), Docker not answering and a stack
   failing (the alerts, from `report-host` and `set-stack-status`). After a change of leader they start again, so a new alert comes a
   little later rather than wrongly; one that is open stays until the loop that observes its
   condition has looked (`Conditions.Seen`). An agent that leads no more forgets them, and
@@ -168,12 +230,16 @@ loops that talk to the world outside.
 | `renew-before-ignored` | warning | for any certificate | value changed |
 | `stack-waiting` | warning | 5 min (`WaitingSince`) | placed |
 | `stack-failing` | critical | 2 min `failing` | up, applied anew or restarted |
+| `host-failed` | warning | `failed` or `fencing` | active again, or fenced |
+| `fencing-blocked` | critical | a failed host the leader cannot fence (`whyNotFence`) | fenced, active again |
+| `host-fenced` | critical | `fenced` or `recovering` | active again |
+| `host-disabled` | critical | `disabled` (flapping brake) | enabled |
 
 A value is resolved below its raise threshold, so one that hovers there does not raise and
 resolve at every report. Likewise an alert that gets better and then worse again, up to the
 severity the channels were told of, sends nothing new: only its reminder and its
-all-clear. The quorum watch (an agent without quorum alerts by itself) comes with phase 2:
-one host has no quorum to lose.
+all-clear. The quorum watch (an agent without quorum alerts by itself) comes with DRBD's
+quorum (phase 2): without a leader, the leader's alerts above are silent.
 
 ## Metrics (`internal/metrics`, `agent/metrics.go`)
 

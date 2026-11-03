@@ -81,8 +81,8 @@ type SetHostPhase struct {
 	// moves the host, and the host itself reports no phase either.
 	Operation uint64 `json:"operation,omitempty"`
 	// Leaving goes with draining only: a user removes a host that still
-	// has stacks or volume copies (Host.Leaving). Any other phase change
-	// takes it back.
+	// has stacks or volume copies (Host.Leaving). An undrain takes it
+	// back; a failure keeps it, and the host leaves once it is back.
 	Leaving bool `json:"leaving,omitempty"`
 }
 
@@ -100,23 +100,117 @@ const (
 
 // phaseChanges are the allowed moves; any phase may also go to Removed, by
 // the leader or a user, unless checkRemoval refuses. A host joins as
-// joining (add-host); nothing reaches failed, fenced, recovering or
-// disabled before failover.
+// joining (add-host), and becomes fencing only as a fence-host operation
+// starts (StartOperation.Fence), which holds the host's lock: only that
+// operation moves it on, to fenced once its server is off, or back to
+// failed when it could not power it off.
+//
+// A failed host that is heard again is active once more, but only the
+// leader says so, from the beats a majority of the voters hear: the host
+// cannot tell whether the leader is about to fence it. Once it is fencing,
+// nothing stops the operation, a late beat neither.
 var phaseChanges = map[HostPhase]map[HostPhase]mover{
 	Joining:    {Passive: byLeaderOrUser, Active: byLeaderOrUser},
 	Passive:    {Active: byLeaderOrUser},
 	Active:     {Draining: byLeaderOrUser, Failed: byLeaderOrUser},
 	Draining:   {Active: byLeaderOrUser, Failed: byLeaderOrUser},
-	Failed:     {Active: byTheHost, Fenced: byLeaderOrUser},
+	Failed:     {Active: byLeaderOrUser, Fenced: byLeaderOrUser}, // fenced: a user's fence-confirm
+	Fencing:    {Fenced: byLeaderOrUser, Failed: byLeaderOrUser},
 	Fenced:     {Recovering: byTheHost, Disabled: byLeaderOrUser},
-	Recovering: {Active: byTheHost},
-	Disabled:   {Fenced: byLeaderOrUser},
+	Recovering: {Active: byTheHost, Failed: byLeaderOrUser},
+	Disabled:   {Fenced: byLeaderOrUser}, // a user's host enable
 }
 
-// runsStacks tells whether a host in this phase runs stacks: a draining
+// FlapWindow and FlapLimit are the flapping brake: a host fenced FlapLimit
+// times within FlapWindow stays off (disabled) until a user enables it. A
+// host that fails again and again would otherwise move its stacks back and
+// forth, each time with a failover.
+const (
+	FlapWindow = time.Hour
+	FlapLimit  = 3
+)
+
+// Flapping tells whether the host was fenced FlapLimit times within
+// FlapWindow before now.
+func (h *Host) Flapping(now time.Time) bool {
+	recent := 0
+	for _, at := range h.FencedAt {
+		if now.Sub(at) < FlapWindow {
+			recent++
+		}
+	}
+	return recent >= FlapLimit
+}
+
+// LastFenced is when the host was last fenced; zero if it was not since a
+// user enabled it. FencedAt keeps a fence until the next one drops what is
+// older than FlapWindow, so the time may be older than that.
+func (h *Host) LastFenced() time.Time {
+	if len(h.FencedAt) == 0 {
+		return time.Time{}
+	}
+	return h.FencedAt[len(h.FencedAt)-1]
+}
+
+// fence records that the host's server is off: the time for the flapping
+// brake, and its copies no longer synced (unsync).
+func (s *State) fence(host *Host, at time.Time) {
+	host.FencedAt = slices.DeleteFunc(host.FencedAt, func(t time.Time) bool { return at.Sub(t) >= FlapWindow })
+	host.FencedAt = append(host.FencedAt, at)
+	s.unsync(host)
+}
+
+// unsync marks the copies of a host that failed as no longer synced: the
+// others go on without them, and once it is back, DRBD must catch them up
+// first. Until its host reports a copy synced again, no stack fails over
+// or moves to it, and a recovering host is not active. A failed host's
+// own stacks run on (KeepsStacks), whatever its copies' flag says.
+func (s *State) unsync(host *Host) {
+	for _, id := range slices.Sorted(maps.Keys(s.Volumes)) {
+		volume := s.Volumes[id]
+		for index, volumeCopy := range volume.Copies {
+			if volumeCopy.Host == host.ID && !volumeCopy.Tiebreaker && volumeCopy.Synced {
+				volume.Copies[index].Synced = false
+				s.changed(resource.KindVolume, &volume.Meta)
+			}
+		}
+	}
+}
+
+// checkCaughtUp refuses to make a recovering host active while one of its
+// copies with a disk is not synced: it would take stacks it cannot run
+// with their data.
+func (s *State) checkCaughtUp(host *Host) error {
+	for _, id := range slices.Sorted(maps.Keys(s.Volumes)) {
+		for _, volumeCopy := range s.Volumes[id].Copies {
+			if volumeCopy.Host == host.ID && !volumeCopy.Tiebreaker && !volumeCopy.Synced {
+				return fmt.Errorf("host %s: its copy of volume %s is not synced yet", host.Name, id)
+			}
+		}
+	}
+	return nil
+}
+
+// KeepsStacks tells whether a host in this phase runs the stacks placed on
+// it: a failed host goes on until it is powered off, as no other host runs
+// them before (fencing); one that was fenced runs none until it is active
+// again, as they may run elsewhere by then. docs/developing/cluster.md
+// (Host phases) has a table of what each phase means where.
+func KeepsStacks(phase HostPhase) bool {
+	return RunsStacks(phase) || phase == Failed || phase == Fencing
+}
+
+// RunsStacks tells whether a host in this phase runs stacks: a draining
 // host keeps those it has.
-func runsStacks(phase HostPhase) bool {
+func RunsStacks(phase HostPhase) bool {
 	return phase == Active || phase == Draining
+}
+
+// Up tells whether a host in this phase runs and is heard: it runs stacks,
+// or catches its copies up after a fence. The leader fails such a host
+// when its beats stop, and only its copies resync.
+func Up(phase HostPhase) bool {
+	return RunsStacks(phase) || phase == Recovering
 }
 
 // MinHAHosts is how many hosts run stacks in a cluster that is highly
@@ -128,7 +222,7 @@ const MinHAHosts = 3
 func (s *State) hostsRunningStacks(leftOut ...HostID) int {
 	count := 0
 	for _, other := range s.Hosts {
-		if !slices.Contains(leftOut, other.ID) && runsStacks(other.Phase) {
+		if !slices.Contains(leftOut, other.ID) && RunsStacks(other.Phase) {
 			count++
 		}
 	}
@@ -167,7 +261,7 @@ func (s *State) CheckLeaving(id HostID) error {
 // is still on it: they would be lost with it. Such a host leaves instead
 // (SetHostPhase.Leaving): they move off it, and then it goes.
 func (s *State) checkRemoval(host *Host) error {
-	if err := s.checkMayGo(host); err != nil || !runsStacks(host.Phase) {
+	if err := s.checkMayGo(host); err != nil || !RunsStacks(host.Phase) {
 		return err
 	}
 	return s.checkEmpty(host)
@@ -197,7 +291,7 @@ func (s *State) checkMayGo(host *Host) error {
 	case s.HA && remaining < MinHAHosts:
 		return fmt.Errorf("host %s cannot go: %d hosts would be left to run stacks, and a highly available "+
 			"cluster keeps %d; join a replacement first", host.Name, remaining, MinHAHosts)
-	case runsStacks(host.Phase) && remaining == 0:
+	case RunsStacks(host.Phase) && remaining == 0:
 		return fmt.Errorf("host %s is the last that runs stacks; the cluster cannot do without it", host.Name)
 	}
 	return nil
@@ -231,6 +325,7 @@ func (s *State) remove(host *Host, at time.Time) {
 	s.revoke(host.CertificateSerial, host.CertificateNotAfter, at)
 	// nobody is left to remove the host's retired copies
 	s.Retired = slices.DeleteFunc(s.Retired, func(c RetiredCopy) bool { return c.Host == host.ID })
+	s.forgetRetiredMinors()
 	// the removed host forgets nothing any more
 	for peer := range s.Forgetting {
 		s.forgot(host.ID, peer)
@@ -271,7 +366,7 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), err
 	if payload.Operation != 0 && cmd.Actor != LeaderActor {
 		return nil, fmt.Errorf("%s cannot act for operation %d; only the leader runs operations", cmd.Actor, payload.Operation)
 	}
-	if err := s.checkUnlocked(hostLock(host.ID), payload.Operation); err != nil {
+	if err := s.checkUnlocked(HostLock(host.ID), payload.Operation); err != nil {
 		return nil, err
 	}
 	who, allowed := phaseChanges[host.Phase][payload.Phase]
@@ -300,22 +395,50 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), err
 		return nil, fmt.Errorf("only host %s itself reports %s", host.Name, payload.Phase)
 	case who == byLeaderOrUser && fromHost:
 		return nil, fmt.Errorf("%s cannot move host %s to %s; only the leader or a user does", cmd.Actor, host.Name, payload.Phase)
+	case host.Phase == Recovering && payload.Phase == Active:
+		if err := s.checkCaughtUp(host); err != nil {
+			return nil, err
+		}
+	case host.Phase == Fencing && (s.FenceOf(host.ID) == nil || s.FenceOf(host.ID).ID != payload.Operation):
+		return nil, fmt.Errorf("host %s is fencing; only its fence-host operation moves it on", host.Name)
 	}
 	return func() {
 		if payload.Phase == Removed {
 			s.remove(host, cmd.At)
 			return
 		}
-		host.Phase = payload.Phase
-		// an undrain takes the remove back
-		host.Leaving = payload.Leaving
-		if payload.Phase != Active || payload.Leaving {
-			s.forgetMovesTo(host.ID)
-		}
-		if s.hostsRunningStacks() >= MinHAHosts {
-			s.HA = true
-		}
+		s.enterPhase(host, payload, cmd.At)
 	}, nil
+}
+
+// enterPhase moves a host to a phase applySetHostPhase allowed, with what
+// goes with it: the fence's record and copies, the user's remove, the
+// requests to move stacks to it, the cluster's HA.
+func (s *State) enterPhase(host *Host, payload SetHostPhase, at time.Time) {
+	switch {
+	case payload.Phase == Fenced && host.Phase == Disabled:
+		// a user enabled it: the brake counts anew
+		host.FencedAt = nil
+	case payload.Phase == Fenced:
+		s.fence(host, at)
+		// in the same command, so the operation waits for exactly these
+		if operation := s.Operations[payload.Operation]; operation != nil && operation.Fence != nil {
+			operation.Fence.Stacks = s.stacksOn(host.ID)
+		}
+	case payload.Phase == Failed:
+		s.unsync(host)
+	}
+	// an undrain takes the remove back; a failure keeps it, so the host
+	// leaves once it is back
+	undrain := host.Phase == Draining && payload.Phase == Active
+	host.Leaving = payload.Leaving || (host.Leaving && !undrain)
+	host.Phase = payload.Phase
+	if payload.Phase != Active || payload.Leaving {
+		s.forgetMovesTo(host.ID)
+	}
+	if s.hostsRunningStacks() >= MinHAHosts {
+		s.HA = true
+	}
 }
 
 // SetHostVoter records whether a host votes in Raft, after the leader
@@ -434,4 +557,22 @@ func (s *State) forgetMovesTo(id HostID) {
 			s.changed(resource.KindStack, &stack.Meta)
 		}
 	}
+}
+
+// stacksOn are the IDs of the stacks placed on a host, sorted.
+func (s *State) stacksOn(id HostID) []string {
+	var stacks []string
+	for _, stackID := range slices.Sorted(maps.Keys(s.Stacks)) {
+		if placed := s.Stacks[stackID].Host; placed != nil && *placed == id {
+			stacks = append(stacks, stackID)
+		}
+	}
+	return stacks
+}
+
+// CaughtUp tells whether every copy with a disk that the host has is
+// synced: a recovering host is active only then (checkCaughtUp).
+func (s *State) CaughtUp(id HostID) bool {
+	host, ok := s.Hosts[id]
+	return ok && s.checkCaughtUp(host) == nil
 }

@@ -59,7 +59,7 @@ func TestAStackWhoseSecretsDoNotOpenDoesNotComeUp(t *testing.T) {
 			cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{Secrets: []string{"db-password"}}))
 			open := runner.open
 			test.lose(runner, cluster)
-			runner.pass(context.Background())
+			runner.passAndWait(context.Background())
 			if ups := docker.Count("up " + shopProject); ups != 0 {
 				t.Errorf("%d compose ups without the secret", ups)
 			}
@@ -73,7 +73,7 @@ func TestAStackWhoseSecretsDoNotOpenDoesNotComeUp(t *testing.T) {
 			// once the secret opens, the next pass brings the stack up
 			runner.open = open
 			cluster.PutSecret("db-password", "first")
-			runner.pass(context.Background())
+			runner.passAndWait(context.Background())
 			if ups := docker.Count("up " + shopProject); ups != 1 {
 				t.Errorf("%d compose ups once the secret opens, want 1", ups)
 			}
@@ -86,7 +86,7 @@ func TestOnlyChangedSecretFilesAreReplaced(t *testing.T) {
 	cluster.PutSecret("db-password", "password")
 	cluster.PutSecret("api-key", "first")
 	cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{Secrets: []string{"db-password", "api-key"}}))
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	stat := func(name string) os.FileInfo {
 		t.Helper()
 		info, err := os.Stat(runner.files.secretFile(shopProject, name))
@@ -98,7 +98,7 @@ func TestOnlyChangedSecretFilesAreReplaced(t *testing.T) {
 	password, key := stat("db-password"), stat("api-key")
 
 	cluster.PutSecret("api-key", "second")
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	// a file is replaced by a rename: the same file means it was left alone
 	if !os.SameFile(password, stat("db-password")) {
 		t.Error("the unchanged secret file was written anew")
@@ -116,7 +116,7 @@ func TestASecretFileTheStackNoLongerAsksForGoes(t *testing.T) {
 	// a second service with the same secret shares its file
 	shop.Services["worker"] = stackspec.Service{Image: "worker", Secrets: []string{"api-key"}}
 	cluster.Put(resource.KindStack, "shop", shop)
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	files, err := os.ReadDir(runner.files.secretFilesDir(shopProject))
 	if err != nil || len(files) != 2 {
 		t.Fatalf("secret files %v, %v; want 2", files, err)
@@ -124,12 +124,12 @@ func TestASecretFileTheStackNoLongerAsksForGoes(t *testing.T) {
 
 	cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{Secrets: []string{"db-password"}}))
 	docker.FailedUps = 1
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	// until compose up worked, the old containers may still read it
 	if _, err := os.Stat(runner.files.secretFile(shopProject, "api-key")); err != nil {
 		t.Errorf("the secret file went before compose up worked: %v", err)
 	}
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if _, err := os.Stat(runner.files.secretFile(shopProject, "api-key")); !os.IsNotExist(err) {
 		t.Errorf("the secret file no service asks for stayed: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestTheSecretsOfAStackThatLeftGoOnlyOnceItStopped(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
 	cluster.PutSecret("db-password", "password")
 	cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{Secrets: []string{"db-password"}}))
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	// what a crash left, and the secrets of clowder's own Traefik
 	for _, project := range []string{"default_crashed", ingress.Project} {
 		if err := os.MkdirAll(filepath.Join(runner.files.secretsDir(project), "files"), 0o700); err != nil {
@@ -154,7 +154,7 @@ func TestTheSecretsOfAStackThatLeftGoOnlyOnceItStopped(t *testing.T) {
 		ID: "default/shop", Status: state.StackPending, PlannedAt: cluster.Index(),
 	})
 	docker.FailedDowns = 1
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	exists := func(project string) bool {
 		_, err := os.Stat(runner.files.secretsDir(project))
 		return err == nil
@@ -165,7 +165,7 @@ func TestTheSecretsOfAStackThatLeftGoOnlyOnceItStopped(t *testing.T) {
 	if exists("default_crashed") {
 		t.Error("the secrets a crash left stayed")
 	}
-	runner.pass(context.Background())
+	runner.passAndWait(context.Background())
 	if exists(shopProject) {
 		t.Error("the secrets of the stopped stack stayed")
 	}

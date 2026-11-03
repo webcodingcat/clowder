@@ -92,7 +92,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		// the state brings the mesh too, if a leader is in reach without it
 		logger.Error("start without the mesh of the last run", "error", err)
 	}
-	node, caughtUp, err := openNode(ctx, files, host, credentials, logger)
+	node, err := openNode(ctx, files, host, credentials, logger)
 	if err != nil {
 		return err
 	}
@@ -121,7 +121,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	if err != nil {
 		return err
 	}
-	daemon.startLoops(loopsCtx, &loops, caughtUp)
+	daemon.startLoops(loopsCtx, &loops)
 	logger.Info("serving", "host", host.Name, "api", host.apiAddresses(), "raft", host.raftAddress(),
 		"metrics", metricsAddress(host))
 	if err := notify("READY=1"); err != nil {
@@ -141,35 +141,35 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 // openNode opens this host's Raft member and waits a while for its state to
 // catch up with the log, so the agent answers from the state as the log has
 // it, not from an empty one. A host without quorum starts anyway after
-// catchUpTimeout, says so, and returns caughtUp false.
+// catchUpTimeout and says so. Before it starts stacks, the agent catches up
+// with the leader's commit index too (waitForState).
 func openNode(ctx context.Context, files Files, host Host, credentials credentials, logger *slog.Logger) (
-	node *raftnode.Node, caughtUp bool, err error,
+	*raftnode.Node, error,
 ) {
-	node, err = raftnode.Open(raftnode.Config{
+	node, err := raftnode.Open(raftnode.Config{
 		Dir: files.raftDir(), ID: host.ID, Bind: host.raftAddress(), Advertise: host.raftAddress(),
 		Certificate: credentials.certificate, CA: credentials.ca, Logger: logger,
 	})
 	if errors.Is(err, state.ErrUnreadable) {
 		// Open restores the last snapshot, and could not read it
-		return nil, false, haltError(err)
+		return nil, haltError(err)
 	}
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	catchUp, cancel := context.WithTimeout(ctx, catchUpTimeout)
 	defer cancel()
-	err = node.CatchUp(catchUp)
-	if err != nil {
+	if err := node.CatchUp(catchUp); err != nil {
 		logger.Warn("serving before the state caught up with the Raft log", "error", err)
 	}
 	// A halt this early ends the agent before its loops start. A follower
-	// may still meet the entry later, as CatchUp does not wait for it to
-	// apply the leader's log (roadmap); then watch ends the agent.
+	// may still meet the entry later, as it applies the leader's log; then
+	// watch ends the agent.
 	if err := node.HaltError(); err != nil {
 		_ = node.Close() // the log is on disk; nothing is lost
-		return nil, false, haltError(err)
+		return nil, haltError(err)
 	}
-	return node, err == nil, nil
+	return node, nil
 }
 
 // shared is what every part of the agent is made with.
@@ -195,6 +195,7 @@ type daemon struct {
 	reporter   *hostReporter
 	supervisor *supervisor.Supervisor
 	conditions *controller.Conditions
+	heard      *controller.Heard
 	alerts     *controller.Alerts
 	server     *api.Server
 }
@@ -230,7 +231,8 @@ func newDaemon(base shared) (*daemon, error) {
 	conditions := controller.NewConditions()
 	alerts := controller.NewAlerts(base.node, proposer.propose, base.credentials.dataKey.Open, conditions, base.logger)
 	joins := &joiner{cluster: base.node, propose: proposer.propose, dataKey: base.credentials.dataKey, connect: base.parts.Hoster}
-	proposer.server = newAPIServer(base, runner, reconciler, alerts, joins)
+	heard := controller.NewHeard()
+	proposer.server = newAPIServer(base, runner, reconciler, alerts, heard, joins)
 
 	return &daemon{
 		shared:     base,
@@ -242,6 +244,7 @@ func newDaemon(base shared) (*daemon, error) {
 		reporter:   newHostReporter(base, proposer.propose),
 		supervisor: watcher,
 		conditions: conditions,
+		heard:      heard,
 		alerts:     alerts,
 		server:     proposer.server,
 	}, nil
@@ -329,8 +332,9 @@ func newHostReporter(base shared, propose controller.Propose) *hostReporter {
 }
 
 // newAPIServer makes the API server, which answers for the stack runner
-// (a stack's containers), the alerts and the joins.
-func newAPIServer(base shared, runner *stacks.Runner, volumes api.Volumes, alerts *controller.Alerts, joins api.Joins,
+// (a stack's containers), the alerts, the hosts' beats and the joins.
+func newAPIServer(base shared, runner *stacks.Runner, volumes api.Volumes, alerts *controller.Alerts,
+	heard *controller.Heard, joins api.Joins,
 ) *api.Server {
 	return api.NewServer(api.ServerConfig{
 		Cluster: base.node, CA: base.credentials.ca, Certificate: base.credentials.certificate,
@@ -339,18 +343,19 @@ func newAPIServer(base shared, runner *stacks.Runner, volumes api.Volumes, alert
 			return net.JoinHostPort(network.NodeAddress(id).String(), strconv.Itoa(base.host.APIPort))
 		},
 		Keys: base.credentials.dataKey, Version: buildinfo.Version, Logger: base.logger,
-		HostID: base.host.ID, Containers: runner, Volumes: volumes, Alerts: alertsAPI{alerts}, Joins: joins,
+		HostID: base.host.ID, Containers: runner, Volumes: volumes, Alerts: alertsAPI{alerts}, Beats: heard,
+		Joins: joins,
 	})
 }
 
-// startLoops starts every loop of the agent; each ends with ctx. caughtUp
-// is openNode's: whether the state caught up at the start.
-func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup, caughtUp bool) {
+// startLoops starts every loop of the agent; each ends with ctx.
+func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup) {
 	node, propose, logger := d.node, d.propose, d.logger
 
 	// this host's loops that start no container
 	loops.Go(func() { reconcileNetwork(ctx, node, d.files, d.host.ID, d.parts.Network, logger) })
 	loops.Go(func() { d.supervisor.Run(ctx, compose.LabelStack) })
+	loops.Go(func() { sendBeats(ctx, node, d.host.ID, d.server.Beat, logger) })
 
 	// the leader's loops: each does nothing while this host does not lead
 	loops.Go(func() {
@@ -366,11 +371,17 @@ func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup, caughtUp
 		controller.RunFloatingIP(ctx, node, propose, d.credentials.dataKey.Open, d.parts.Hoster, d.conditions, logger)
 	})
 	loops.Go(func() { controller.RunACME(ctx, node, propose, d.credentials.dataKey, logger) })
+	loops.Go(func() {
+		controller.RunFencing(ctx, controller.FenceParts{
+			Cluster: node, Propose: propose, Open: d.credentials.dataKey.Open, Connect: d.parts.Hoster,
+			Heard: d.heard, Ask: d.server.AskSilence, Self: d.host.ID, Conditions: d.conditions, Logger: logger,
+		})
+	})
 	loops.Go(func() { d.alerts.Run(ctx) })
 	loops.Go(func() { d.alerts.RunHeartbeat(ctx) })
 
 	// the loops that wait for the state
-	loops.Go(func() { d.runOnceCaughtUp(ctx, loops, caughtUp) })
+	loops.Go(func() { d.runOnceCaughtUp(ctx, loops) })
 }
 
 // runOnceCaughtUp runs the volumes, the stacks, Traefik and the report once
@@ -378,8 +389,8 @@ func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup, caughtUp
 // this host that has already moved to another one, so containers must not
 // start yet, nor its volume become primary here. The report waits too, as
 // it compares the host with the state.
-func (d *daemon) runOnceCaughtUp(ctx context.Context, loops *sync.WaitGroup, caughtUp bool) {
-	if !caughtUp && !waitForState(ctx, d.node, d.logger) {
+func (d *daemon) runOnceCaughtUp(ctx context.Context, loops *sync.WaitGroup) {
+	if !waitForState(ctx, d.node, d.server, d.logger) {
 		return
 	}
 	// this function runs as one of the loops, so loops.Wait cannot have
@@ -390,6 +401,7 @@ func (d *daemon) runOnceCaughtUp(ctx context.Context, loops *sync.WaitGroup, cau
 	loops.Go(func() { d.volumes.Trim(ctx) })
 	loops.Go(func() { forgetPeers(ctx, d.node, d.host.ID, d.parts.Storage, d.propose, d.logger) })
 	loops.Go(func() { d.prefetcher.Run(ctx) })
+	loops.Go(func() { reportRecovery(ctx, d.node, d.host.ID, d.propose, d.logger) })
 	loops.Go(func() {
 		moveSteps{
 			cluster: d.node, self: d.host.ID, propose: d.propose, imagesReady: d.prefetcher.Ready,
@@ -432,17 +444,22 @@ func stopLoops(stop context.CancelFunc, loops *sync.WaitGroup, timeout time.Dura
 }
 
 // waitForState tries until ctx ends to catch the state up with the Raft
-// log; it tells whether it did.
-func waitForState(ctx context.Context, node *raftnode.Node, logger *slog.Logger) bool {
+// log, as far as the leader has committed it
+// (api.Server.CatchUpWithLeader); it tells whether it did.
+func waitForState(ctx context.Context, node *raftnode.Node, server *api.Server, logger *slog.Logger) bool {
 	for ctx.Err() == nil {
 		catchUp, cancel := context.WithTimeout(ctx, catchUpTimeout)
 		err := node.CatchUp(catchUp)
+		if err == nil {
+			err = server.CatchUpWithLeader(catchUp)
+		}
 		cancel()
 		if err == nil {
-			logger.Info("the state caught up; starting the stacks")
+			logger.Info("the state caught up with the leader; starting the stacks")
 			return true
 		}
-		// a failed barrier returns at once; do not spin
+		logger.Warn("the state has not caught up with the leader yet", "error", err)
+		// a refusal returns at once; do not spin
 		select {
 		case <-ctx.Done():
 		case <-time.After(time.Second):

@@ -82,18 +82,38 @@ func (p *planner) leaveThrownAway(volume *state.Volume) (state.Volume, bool) {
 	return record, true
 }
 
-// resyncs tells whether a copy with a disk catches up, on a host that
-// counts: it takes the resync limit.
+// resyncs tells whether a copy with a disk catches up: it takes the resync
+// limit. Only a host that runs does: a copy on a host that is down waits
+// for it, and syncs nothing meanwhile.
 func (p *planner) resyncs(volume *state.Volume, volumeCopy state.VolumeCopy) bool {
-	return volume.Status != state.VolumePending && volume.Spec.Replicas > 0 && !volumeCopy.Synced &&
+	host, ok := p.current.Hosts[volumeCopy.Host]
+	up := ok && state.Up(host.Phase)
+	return volume.Status != state.VolumePending && volume.Spec.Replicas > 0 && !volumeCopy.Synced && up &&
 		p.counts(volumeCopy.Host)
 }
 
 // counts tells whether a copy on a host counts toward its volume's
-// replicas: the host runs stacks and stays.
+// replicas: the host runs stacks and stays, or is down but comes back
+// soon. A failed host is not given up while the leader fences it; a
+// fenced one for CopyWait, as the leader powers it on again; a recovering
+// one catches its copies up. A disabled host, or one fenced for longer,
+// has its copies made anew elsewhere (addCopy), and once it is back, the
+// surplus goes (dropSurplus).
 func (p *planner) counts(id state.HostID) bool {
 	host, ok := p.current.Hosts[id]
-	return ok && (host.Phase == state.Active || host.Phase == state.Draining) && !host.Leaving
+	if !ok {
+		return false
+	}
+	switch host.Phase {
+	case state.Active, state.Draining:
+		return !host.Leaving
+	case state.Failed, state.Fencing, state.Recovering:
+		// also when it leaves: it moves its copies off once it is back
+		return true
+	case state.Fenced:
+		return p.now.Sub(host.LastFenced()) < CopyWait
+	}
+	return false
 }
 
 // diskCopies are a volume's copies with a disk.

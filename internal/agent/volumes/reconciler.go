@@ -215,7 +215,7 @@ func (r *Reconciler) reconcile(ctx context.Context, want wantedCopy, seen storag
 			released: want.target == targetSecondary,
 		})
 	default:
-		r.start(ctx, volume.ID, func() { r.runSteps(ctx, want, steps) })
+		r.start(ctx, volume.ID, func() error { return r.runSteps(ctx, want, steps) })
 	}
 }
 
@@ -238,25 +238,28 @@ func (r *Reconciler) claim(volumeID string) bool {
 	return true
 }
 
-// release marks a volume free again; the next pass looks at its copies.
-func (r *Reconciler) release(ctx context.Context, volumeID string) {
+// release marks a volume free again. After a job that worked, the next pass
+// comes at once and takes the copy on; after one that failed, it comes with
+// the next change of the state or loop.Interval: tried again at once, a step
+// that keeps failing would spin.
+func (r *Reconciler) release(ctx context.Context, volumeID string, failed bool) {
 	r.mu.Lock()
 	delete(r.busy, volumeID)
 	r.mu.Unlock()
-	if ctx.Err() == nil {
+	if ctx.Err() == nil && !failed {
 		r.signal.Now()
 	}
 }
 
 // start runs a job for a volume in a goroutine of its own; the pass
 // checked that the volume is not busy, and only the pass starts jobs.
-func (r *Reconciler) start(ctx context.Context, volumeID string, job func()) {
+func (r *Reconciler) start(ctx context.Context, volumeID string, job func() error) {
 	if !r.claim(volumeID) {
 		return // the trim took it meanwhile; the next pass tries again
 	}
 	r.jobs.Go(func() {
-		defer r.release(ctx, volumeID)
-		job()
+		err := job()
+		r.release(ctx, volumeID, err != nil)
 	})
 }
 
@@ -279,7 +282,7 @@ func (r *Reconciler) setStatus(volume storage.Volume, status copyStatus) {
 
 // runSteps runs a copy's steps in order and stops at the first that fails;
 // the next pass plans afresh.
-func (r *Reconciler) runSteps(ctx context.Context, want wantedCopy, steps []step) {
+func (r *Reconciler) runSteps(ctx context.Context, want wantedCopy, steps []step) error {
 	volume := want.volume
 	if want.target != targetMounted {
 		// the job gives the copy up: no stack may take it meanwhile
@@ -290,9 +293,10 @@ func (r *Reconciler) runSteps(ctx context.Context, want wantedCopy, steps []step
 			if ctx.Err() == nil {
 				r.setStatus(volume, copyStatus{err: fmt.Errorf("volume %s: %s: %w", volume.ID, step, err)})
 			}
-			return
+			return err
 		}
 	}
+	return nil
 }
 
 // runStep runs one step on a copy.
@@ -344,7 +348,7 @@ func (r *Reconciler) removeRetired(ctx context.Context, copied *state.State, hel
 				r.warnUnexplained(volume)
 				continue
 			}
-			r.start(ctx, id, func() { r.removeCopy(ctx, volume, retired) })
+			r.start(ctx, id, func() error { return r.removeCopy(ctx, volume, retired) })
 		}
 	}
 }
@@ -352,7 +356,7 @@ func (r *Reconciler) removeRetired(ctx context.Context, copied *state.State, hel
 // removeCopy removes a retired copy, forgets it in the state and then in
 // its record. Remove picks up where it left, so a copy whose forgetting
 // failed stays recorded and is tried again at the next pass.
-func (r *Reconciler) removeCopy(ctx context.Context, volume storage.Volume, retired state.RetiredCopy) {
+func (r *Reconciler) removeCopy(ctx context.Context, volume storage.Volume, retired state.RetiredCopy) error {
 	err := r.storage.Remove(ctx, volume)
 	if err == nil {
 		err = loop.CommitAsHost(ctx, r.propose, r.host, state.KindForgetCopy, state.ForgetCopy{Copy: retired})
@@ -367,6 +371,7 @@ func (r *Reconciler) removeCopy(ctx context.Context, volume storage.Volume, reti
 	case err != nil:
 		r.logger.Error("remove a retired volume copy", "volume", volume.ID, "lv", volume.LV, "error", err)
 	}
+	return err
 }
 
 // warnUnexplained says once per agent run that a copy is kept which the

@@ -59,9 +59,18 @@ type clusterHost struct {
 // clusterHosts reads clowder host list.
 func clusterHosts(t *testing.T) []clusterHost {
 	t.Helper()
-	output, err := clowder("host", "list")
+	hosts, err := listHosts()
 	if err != nil {
 		t.Fatal(err)
+	}
+	return hosts
+}
+
+// listHosts reads clowder host list; while the lead changes, it may fail.
+func listHosts() ([]clusterHost, error) {
+	output, err := clowder("host", "list")
+	if err != nil {
+		return nil, err
 	}
 	var hosts []clusterHost
 	for index, line := range strings.Split(strings.TrimSpace(output), "\n") {
@@ -71,11 +80,11 @@ func clusterHosts(t *testing.T) []clusterHost {
 		}
 		id, err := strconv.Atoi(fields[0])
 		if err != nil {
-			t.Fatalf("host list: %q", line)
+			return nil, fmt.Errorf("host list: %q", line)
 		}
 		hosts = append(hosts, clusterHost{ID: id, Name: fields[1], Phase: fields[2], Voter: fields[3] == "yes"})
 	}
-	return hosts
+	return hosts, nil
 }
 
 // findHost is the host of that name in the cluster.

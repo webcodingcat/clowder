@@ -28,6 +28,11 @@ func (r *Runner) stopLeavers(ctx context.Context, desired desiredState) volumesI
 		if _, staying := desired.stacks[project]; staying {
 			continue
 		}
+		if r.busyNow(project) {
+			// its job may be in compose up still: the pass after it stops it
+			r.markInUse(inUse, project)
+			continue
+		}
 		if err := r.stop(ctx, project); err != nil {
 			r.logger.Error("stop a stack that left this host", "project", project, "error", err)
 			r.markInUse(inUse, project)
@@ -51,7 +56,7 @@ func (r *Runner) stop(ctx context.Context, project string) error {
 	if err != nil {
 		return err
 	}
-	delete(r.applied, project)
+	r.forgetApplied(project)
 	return os.Remove(file)
 }
 

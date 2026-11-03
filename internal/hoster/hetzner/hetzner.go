@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -28,7 +29,13 @@ type Client struct {
 	http  *http.Client
 	// poll is how often it asks whether an action has finished.
 	poll time.Duration
+	// firstWait and lastWait bound the wait before a request is sent
+	// again (do); it doubles from the first to the last.
+	firstWait, lastWait time.Duration
 }
+
+// attempts is how often do sends a request at most.
+const attempts = 5
 
 // New is a client of the API at api (DefaultAPI when empty) with the
 // project's token.
@@ -37,10 +44,12 @@ func New(api, token string) *Client {
 		api = DefaultAPI
 	}
 	return &Client{
-		api:   strings.TrimSuffix(api, "/"),
-		token: token,
-		http:  &http.Client{Timeout: 30 * time.Second},
-		poll:  time.Second,
+		api:       strings.TrimSuffix(api, "/"),
+		token:     token,
+		http:      &http.Client{Timeout: 30 * time.Second},
+		poll:      time.Second,
+		firstWait: time.Second,
+		lastWait:  time.Minute,
 	}
 }
 
@@ -77,6 +86,27 @@ func (c *Client) AssignFloatingIP(ctx context.Context, ip netip.Addr, serverRef 
 	}
 	return c.act(ctx, fmt.Sprintf("/floating_ips/%d/actions/assign", found.ID), map[string]int64{"server": server},
 		fmt.Sprintf("assign the Floating IP %s to server %s", ip, serverRef))
+}
+
+// PowerOff cuts the server's power, as pulling the plug would, and waits
+// until Hetzner has done it. A server that is off stays off.
+func (c *Client) PowerOff(ctx context.Context, serverRef string) error {
+	return c.power(ctx, serverRef, "poweroff", "power server %s off")
+}
+
+// PowerOn switches the server on and waits until Hetzner has done it. A
+// server that runs keeps running.
+func (c *Client) PowerOn(ctx context.Context, serverRef string) error {
+	return c.power(ctx, serverRef, "poweron", "power server %s on")
+}
+
+// power runs a power action on the server; what names it in the error.
+func (c *Client) power(ctx context.Context, serverRef, action, what string) error {
+	server, err := serverID(serverRef)
+	if err != nil {
+		return err
+	}
+	return c.act(ctx, fmt.Sprintf("/servers/%d/actions/%s", server, action), nil, fmt.Sprintf(what, serverRef))
 }
 
 // ServerAddresses are the server's IPv4 addresses: in the project's
@@ -192,15 +222,58 @@ func (c *Client) act(ctx context.Context, path string, body any, what string) er
 	}
 }
 
-// do sends one request with the token and reads the answer into out. An
-// error carries the API's message, never the token.
+// do sends a request with the token and reads the answer into out. It
+// sends it again, up to attempts times, after an error that may pass
+// (apiError.passes, or the network): the leader fences through this, and
+// one busy moment of the API must not hold up a failover. Every request
+// clowder sends may go twice: reads, and actions that change nothing the
+// second time (an assignment to the same server, a power action on a
+// server in that state). An error carries the API's message, never the
+// token.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
-	var reader io.Reader
+	var encoded []byte
 	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
+		var err error
+		if encoded, err = json.Marshal(body); err != nil {
 			return err
 		}
+	}
+	wait := c.firstWait
+	for attempt := 1; ; attempt++ {
+		err := c.send(ctx, method, path, encoded, out)
+		var failure *apiError
+		isAPIError := errors.As(err, &failure)
+		switch {
+		case err == nil:
+			return nil
+		case attempt == attempts || ctx.Err() != nil:
+			return err
+		case isAPIError && !failure.passes():
+			return err
+		}
+		pause := jitter(wait)
+		if isAPIError && failure.reset > pause {
+			pause = min(failure.reset, c.lastWait) // the rate limit has room again then
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w (and %w)", err, ctx.Err())
+		case <-time.After(pause):
+		}
+		wait = min(2*wait, c.lastWait)
+	}
+}
+
+// jitter is a wait between half of it and all of it, so that the leader's
+// loops do not ask again in step.
+func jitter(wait time.Duration) time.Duration {
+	return wait/2 + rand.N(wait/2+1) //nolint:gosec // a wait, no secret
+}
+
+// send sends one request; encoded is the body, nil for none.
+func (c *Client) send(ctx context.Context, method, path string, encoded []byte, out any) error {
+	var reader io.Reader
+	if encoded != nil {
 		reader = bytes.NewReader(encoded)
 	}
 	request, err := http.NewRequestWithContext(ctx, method, c.api+path, reader)
@@ -208,30 +281,16 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		return err
 	}
 	request.Header.Set("Authorization", "Bearer "+c.token)
-	if body != nil {
+	if encoded != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
-		return err
+		return err // the network, which may pass
 	}
 	defer func() { _ = response.Body.Close() }() // read only
 	if response.StatusCode >= http.StatusMultipleChoices {
-		var failure struct {
-			Error struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		_ = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&failure) // the status says enough without it
-		var status error = statusCode(response.StatusCode)
-		if response.StatusCode == http.StatusNotFound {
-			status = errNotFound
-		}
-		if failure.Error.Message != "" {
-			return fmt.Errorf("%s (%s, %w)", failure.Error.Message, failure.Error.Code, status)
-		}
-		return status
+		return readError(response)
 	}
 	if err := json.NewDecoder(response.Body).Decode(out); err != nil {
 		return fmt.Errorf("read the answer: %w", err)
@@ -239,7 +298,50 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	return nil
 }
 
-// statusCode is an answer of the API that is not 2xx.
+// apiError is an answer of the API that is not 2xx.
+type apiError struct {
+	status  statusCode
+	code    string // the API's own, such as "locked"
+	message string
+	// reset is how long until the rate limit has room again
+	reset time.Duration
+}
+
+func (e *apiError) Error() string {
+	if e.message == "" {
+		return e.status.Error()
+	}
+	return fmt.Sprintf("%s (%s, %s)", e.message, e.code, e.status)
+}
+
+func (e *apiError) Unwrap() error { return e.status }
+
+// passes tells whether the same request may succeed a little later: the
+// project's requests are used up (429), the API has trouble (5xx), or
+// another action runs on the same server (locked).
+func (e *apiError) passes() bool {
+	return e.status == http.StatusTooManyRequests || e.status >= http.StatusInternalServerError ||
+		e.status == http.StatusLocked || e.code == "locked"
+}
+
+// readError reads the API's error. RateLimit-Reset is when the rate limit
+// is full again, as a Unix time; the API sends no Retry-After.
+func readError(response *http.Response) *apiError {
+	var failure struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	_ = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&failure) // the status says enough without it
+	answer := &apiError{status: statusCode(response.StatusCode), code: failure.Error.Code, message: failure.Error.Message}
+	if reset, err := strconv.ParseInt(response.Header.Get("RateLimit-Reset"), 10, 64); err == nil {
+		answer.reset = max(0, time.Until(time.Unix(reset, 0)))
+	}
+	return answer
+}
+
+// statusCode is the HTTP status of an answer that is not 2xx.
 type statusCode int
 
 func (s statusCode) Error() string { return fmt.Sprintf("HTTP %d", int(s)) }
