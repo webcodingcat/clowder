@@ -246,6 +246,13 @@ resolve at every report. Likewise an alert that gets better and then worse again
 severity the channels were told of, sends nothing new: only its reminder and its
 all-clear.
 
+**Without a leader** the alerts above are silent: a majority of the voters is gone (two
+hosts of three), or this host is cut off. So every agent watches for itself
+(`QuorumWatch`): once it has known no Raft leader for `noLeaderFor` (2 min), it sends
+`no-leader/<host>` (critical) to the channels of its own last state, reminds every 6 h
+and gives the all-clear once a leader is back. What it told is in its memory, not the
+state: an agent that restarts without a leader tells again.
+
 ## Metrics (`internal/metrics`, `agent/metrics.go`)
 
 - Every agent serves `/metrics` on its node address, port 7444 (`MetricsPort`), plain HTTP

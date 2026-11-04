@@ -381,6 +381,14 @@ func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup) {
 	})
 	loops.Go(func() { d.alerts.Run(ctx) })
 	loops.Go(func() { d.alerts.RunHeartbeat(ctx) })
+	// on every agent, leading or not: it alerts while there is no leader
+	loops.Go(func() {
+		knowsLeader := func() bool {
+			_, ok := d.node.Leader()
+			return ok
+		}
+		controller.NewQuorumWatch(d.alerts, d.host.Name, knowsLeader).Run(ctx)
+	})
 
 	// the loops that wait for the state
 	loops.Go(func() { d.runOnceCaughtUp(ctx, loops) })
