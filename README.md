@@ -65,7 +65,7 @@ tofu init
 tofu apply -var 'ssh_public_key=ssh-ed25519 AAAA...' -var 'admin_cidrs=["203.0.113.7/32"]'
 mkdir ~/prod && cd ~/prod      # the cluster directory
 clowder cluster bootstrap me --name prod \
-  --seed "$(tofu -chdir=<module directory> output -raw public_address)" \
+  --endpoint "$(tofu -chdir=<module directory> output -raw public_address)" \
   --key-file <(tofu -chdir=<module directory> output -raw bootstrap_key)
 ```
 
@@ -84,7 +84,7 @@ more users come later.
 Lost your credentials, or your laptop? Get a code as root on a host (the Hetzner console
 works without SSH): `clowderd user recovery-code me`. Then
 `clowder user recover me --code <code>` gives you new credentials (outside the cluster
-directory, add `--name prod --seed <address>`) and locks every other certificate of yours
+directory, add `--name prod --endpoint <address>`) and locks every other certificate of yours
 out. With your credentials and the second code, `clowder recovery rotate --code <code>`
 replaces the recovery key; then encrypt your files for it with
 `clowder secret rekey -f <directory>`. Each code is valid for 15 to 30 minutes and works
@@ -121,7 +121,15 @@ tofu apply ... -var 'hosts=["clowder1", "clowder2"]' \
 The second host waits as `passive`; with the third, all three run stacks and vote, and the
 cluster stays at three hosts or more: `clowder host remove` refuses to go below, so a
 replacement joins first, even for a host that is dead. `clowder host list` shows the
-hosts. The leader checks with the
+hosts.
+
+The CLI reaches the cluster only through the `endpoints` of `cluster.yaml`, in turn, and
+learns no others. Once hosts have joined, take the endpoints of `tofu output cluster_yaml`
+again (it lists every host): with the first host alone, the CLI cannot reach the cluster
+while that host is down. `--connect-timeout` (default 5s) is how long it waits for an
+endpoint before it tries the next.
+
+The leader checks with the
 hoster that each host's server is its own, so give each cluster a Hetzner project of its
 own. `clowder host drain` moves a host's stacks to the others for maintenance (its volume
 copies stay), and `clowder host remove` of a host that still has stacks or copies moves

@@ -32,9 +32,9 @@ func recoverAccess(t *testing.T, server host) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// whoever saw the code cannot take the user's place with it: the seed
-	// refuses it if its state has the use already, else the leader's state
-	// does (a seed that follows may be a moment behind)
+	// whoever saw the code cannot take the user's place with it: the host
+	// the CLI asks refuses it if its state has the use already, else the leader's state
+	// does (a host that follows may be a moment behind)
 	if output, err := clowder("user", "recover", "tester", "--code", code); err == nil ||
 		!strings.Contains(output, "the code does not fit") && !strings.Contains(output, "the code was used already") {
 		t.Errorf("the same code once more: %v\n%s", err, output)

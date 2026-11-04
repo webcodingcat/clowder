@@ -328,7 +328,7 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	if err := os.WriteFile(keyFile, []byte(tofu.BootstrapKey.Value), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	mustClowder(t, "cluster", "bootstrap", "tester", "--name", "live", "--seed", tofu.PublicAddress.Value,
+	mustClowder(t, "cluster", "bootstrap", "tester", "--name", "live", "--endpoint", tofu.PublicAddress.Value,
 		"--key-file", keyFile, "--recovery-out", filepath.Join(workDir, "recovery-key"))
 	bootstrapped, err := clusterdir.Load(clusterDir())
 	if err != nil {
@@ -475,11 +475,11 @@ func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 		want++
 	}
 	// each clowder call is a client of its own, and reads come from the
-	// seed's copy of the state, which may be a follower's a moment behind
+	// copy of the state of the host the CLI asks, which may be a follower's a moment behind
 	// the write; the secrets come before the stack in the log, so they are
 	// there with it
 	var generation int64
-	eventually(t, time.Minute, "the apply in the seed's state", func() error {
+	eventually(t, time.Minute, "the apply in the asked host's state", func() error {
 		if generation = stackInfo(t, "shop").generation; generation < want {
 			return fmt.Errorf("generation %d", generation)
 		}

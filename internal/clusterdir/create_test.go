@@ -11,7 +11,7 @@ import (
 
 func TestTheBootstrapsClusterYAMLLoadsAndNamesWhatIsMissing(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "prod")
-	if err := Create(NewDirectory{Path: dir, Name: "prod", Seed: "203.0.113.10"}); err != nil {
+	if err := Create(NewDirectory{Path: dir, Name: "prod", Endpoint: "203.0.113.10"}); err != nil {
 		t.Fatal(err)
 	}
 	directory, err := Load(dir)
@@ -19,7 +19,7 @@ func TestTheBootstrapsClusterYAMLLoadsAndNamesWhatIsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := directory.Config
-	if config.Name != "prod" || !slices.Equal(config.Seeds, []string{"203.0.113.10"}) || len(directory.Encrypted) != 0 {
+	if config.Name != "prod" || !slices.Equal(config.Endpoints, []string{"203.0.113.10"}) || len(directory.Encrypted) != 0 {
 		t.Errorf("config %+v, values %v", config, directory.Encrypted)
 	}
 	problems := clusterspec.Check(config).Error()

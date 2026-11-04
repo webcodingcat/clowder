@@ -1,5 +1,5 @@
 name: prod
-seeds: [203.0.113.10, 203.0.113.11]
+endpoints: [203.0.113.10, 203.0.113.11]
 hoster:
   type: hetzner
   token: !secret |

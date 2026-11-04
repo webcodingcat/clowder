@@ -26,10 +26,12 @@ type Config struct {
 	// Name of the cluster, shown by the CLI; it finds the user's credentials
 	// by it.
 	Name string `yaml:"name" json:"name" jsonschema:"required"`
-	// Seeds are a few addresses the CLI tries first; it asks the cluster for
-	// the current members.
-	Seeds  []string `yaml:"seeds" json:"seeds" jsonschema:"required,minItems=1"`
-	Hoster Hoster   `yaml:"hoster" json:"hoster" jsonschema:"required"`
+	// Endpoints are the addresses of the agents the CLI asks, in turn: the
+	// hosts' public addresses. It learns no others from the cluster, so it
+	// reaches the cluster only while an endpoint answers: list every host,
+	// and add each that joins. The agents never read them.
+	Endpoints []string `yaml:"endpoints" json:"endpoints" jsonschema:"required,minItems=1"`
+	Hoster    Hoster   `yaml:"hoster" json:"hoster" jsonschema:"required"`
 	// Registries are the logins for private image registries, by host.
 	Registries map[string]Registry `yaml:"registries,omitempty" json:"registries,omitempty"`
 	// PrivateNetwork is the hoster's private network the hosts share, as a

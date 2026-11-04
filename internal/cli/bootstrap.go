@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"filippo.io/age"
 	"github.com/spf13/cobra"
@@ -23,8 +24,8 @@ import (
 
 // bootstrapFlags are the flags of clowder cluster bootstrap.
 type bootstrapFlags struct {
-	name, seed, keyFile, recoveryOut string
-	force                            bool
+	name, endpoint, keyFile, recoveryOut string
+	force                                bool
 }
 
 func newBootstrap(g *globals) *cobra.Command {
@@ -36,7 +37,9 @@ func newBootstrap(g *globals) *cobra.Command {
 			"the bootstrap key. Makes the recovery key, shows it once and asks for its last 8\n" +
 			"characters (or writes it to --recovery-out), then gets the user's first certificate.\n" +
 			"Writes your credentials into your config directory, under the cluster's name, and\n" +
-			"cluster.yaml to fill in into the cluster directory.",
+			"cluster.yaml to fill in into the cluster directory, with the first host as its only\n" +
+			"endpoint. The CLI tries the endpoints in turn and learns no others: add each host\n" +
+			"that joins, so the CLI reaches the cluster while the first host is down.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			user := args[0]
@@ -58,10 +61,10 @@ func newBootstrap(g *globals) *cobra.Command {
 			}
 			// before a recovery key is made: nobody may hold two and not know
 			// which one counts
-			cluster, err := api.FindCluster(cmd.Context(), flags.seed, []byte(bootstrapKey), buildinfo.Version)
+			cluster, err := api.FindCluster(cmd.Context(), flags.endpoint, g.connectTimeout, []byte(bootstrapKey), buildinfo.Version)
 			if errors.Is(err, api.ErrBootstrapped) {
 				return fmt.Errorf("%w. If that was an earlier try of yours, the recovery key it gave out is the one "+
-					"that counts; %s", err, accessByCode(user, flags.name, flags.seed))
+					"that counts; %s", err, accessByCode(user, flags.name, flags.endpoint))
 			}
 			if err != nil {
 				return err
@@ -82,10 +85,10 @@ func newBootstrap(g *globals) *cobra.Command {
 			if err := clusterdir.WriteCredentials(flags.name, credentials); err != nil {
 				return fmt.Errorf("%w. The cluster has %s as its user and the recovery key just made counts; "+
 					"%s, and write cluster.yaml after the README's example", err, user,
-					accessByCode(user, flags.name, flags.seed))
+					accessByCode(user, flags.name, flags.endpoint))
 			}
-			newDirectory := clusterdir.NewDirectory{Path: path, Name: flags.name, Seed: flags.seed}
-			if err := createDirectory(cmd.Context(), newDirectory, credentials, cluster, recovery); err != nil {
+			newDirectory := clusterdir.NewDirectory{Path: path, Name: flags.name, Endpoint: flags.endpoint}
+			if err := createDirectory(cmd.Context(), newDirectory, credentials, cluster, recovery, g.connectTimeout); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s is the user of cluster %s. Next:\n"+
@@ -97,12 +100,12 @@ func newBootstrap(g *globals) *cobra.Command {
 	}
 	command.Flags().StringVar(&flags.name, "name", "", "the cluster's name, by which the CLI finds your credentials")
 	command.Flags().BoolVar(&flags.force, "force", false, "replace your credentials for a cluster of the same name")
-	command.Flags().StringVar(&flags.seed, "seed", "", "address of the first host")
+	command.Flags().StringVar(&flags.endpoint, "endpoint", "", "address of the first host")
 	command.Flags().StringVar(&flags.keyFile, "key-file", "",
 		"a file with the cluster's bootstrap key (from OpenTofu); not the key itself, which shell histories would keep")
 	command.Flags().StringVar(&flags.recoveryOut, "recovery-out", "",
 		"write the recovery key to this new file instead of showing it (scripts, no terminal)")
-	for _, flag := range []string{"name", "seed", "key-file"} {
+	for _, flag := range []string{"name", "endpoint", "key-file"} {
 		_ = command.MarkFlagRequired(flag) // the flags exist; this cannot fail
 	}
 	return command
@@ -132,13 +135,13 @@ func becomeFirstUser(ctx context.Context, cluster *api.TrustedCluster, user stri
 // in, once the cluster, asked with the new credentials, has the recovery
 // key just made.
 func createDirectory(ctx context.Context, directory clusterdir.NewDirectory, credentials clusterdir.Credentials,
-	cluster *api.TrustedCluster, recovery *age.X25519Identity,
+	cluster *api.TrustedCluster, recovery *age.X25519Identity, connectTimeout time.Duration,
 ) error {
 	certificate, err := tls.X509KeyPair([]byte(credentials.Certificate), []byte(credentials.Key))
 	if err != nil {
 		return err
 	}
-	client := api.NewClient([]string{directory.Seed}, certificate, cluster.CA, buildinfo.Version)
+	client := api.NewClient([]string{directory.Endpoint}, connectTimeout, certificate, cluster.CA, buildinfo.Version)
 	_, encryption, err := clusterRecipients(ctx, client)
 	if err != nil {
 		return err
@@ -153,9 +156,9 @@ func createDirectory(ctx context.Context, directory clusterdir.NewDirectory, cre
 }
 
 // accessByCode says how a user of the cluster gets in without credentials.
-func accessByCode(user, cluster, seed string) string {
+func accessByCode(user, cluster, endpoint string) string {
 	return fmt.Sprintf("get access with a code from a host: clowderd user recovery-code %s, as root there, "+
-		"then clowder user recover %s --code <code> --name %s --seed %s", user, user, cluster, seed)
+		"then clowder user recover %s --code <code> --name %s --endpoint %s", user, user, cluster, endpoint)
 }
 
 // confirmChars is how much of the recovery key the user types back: enough

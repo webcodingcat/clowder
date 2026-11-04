@@ -19,7 +19,7 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   name in the cluster is its hostname, by which DRBD names it in a resource. The
   bootstrap key has at least `pki.MinBootstrapKeyLength` characters.
 - **`clowderd join`** (from cloud-init) makes a host a member of a cluster, with a join
-  token from a file (`--token-file`) and an agent of the cluster as `--seed`; the other
+  token from a file (`--token-file`) and an agent of the cluster to join through as `--via`; the other
   flags are init's. In this order:
   1. It makes the host's own key and WireGuard key and keeps them in `keys/join.json`.
   2. It trusts the cluster's CA by the token's proof and sends the join

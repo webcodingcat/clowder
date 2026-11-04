@@ -301,8 +301,8 @@ time_synchronized() {
   [[ "$(timedatectl show --property=NTPSynchronized --value)" == yes ]]
 }
 
-# join_cluster <host flags...>: clowderd join through the seed, tried again
-# for a while: the seed may still boot, or the leader be busy with another
+# join_cluster <host flags...>: clowderd join through the first host, tried
+# again for a while: it may still boot, or the leader be busy with another
 # host. clowderd says in the journal why a try failed.
 join_cluster() {
   local deadline=$((SECONDS + 900))
@@ -311,9 +311,9 @@ join_cluster() {
     log "${TOKEN_FILE} holds no join token; put one there (clowder host join-token) and reboot"
     return 1
   fi
-  until clowderd join "$@" --seed "${SEED}" --token-file "${TOKEN_FILE}"; do
+  until clowderd join "$@" --via "${JOIN_VIA}" --token-file "${TOKEN_FILE}"; do
     if ((SECONDS >= deadline)); then
-      log "gave up joining through ${SEED}; if the cluster lists this host as joining," \
+      log "gave up joining through ${JOIN_VIA}; if the cluster lists this host as joining," \
         "clowder host remove it, then put a new token into ${TOKEN_FILE} and reboot"
       return 1
     fi

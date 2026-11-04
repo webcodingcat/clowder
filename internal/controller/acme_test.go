@@ -263,7 +263,7 @@ func newACMERunner(t *testing.T, ca *fakeCA) (*acmeRunner, *leader) {
 	})
 	l.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
 		Spec: clusterspec.Config{
-			Name: "prod", Seeds: []string{"10.0.0.2"},
+			Name: "prod", Endpoints: []string{"10.0.0.2"},
 			Hoster:         clusterspec.Hoster{Type: "hetzner", Token: "hoster.token"},
 			Ingress:        clusterspec.Ingress{FloatingIP: "127.0.0.1"},
 			StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},

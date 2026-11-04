@@ -172,9 +172,9 @@ func startCluster(t *testing.T) string {
 	t.Cleanup(server.Close)
 
 	dir := t.TempDir()
-	// no secret in it: these commands need only the cluster's name and seeds
+	// no secret in it: these commands need only the cluster's name and endpoints
 	config := clusterspec.Config{
-		Name: "test", Seeds: []string{server.Listener.Addr().String()},
+		Name: "test", Endpoints: []string{server.Listener.Addr().String()},
 		Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.11"},
 		StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 	}
@@ -299,13 +299,39 @@ func run(t *testing.T, args ...string) (string, error) {
 	return out.String(), err
 }
 
+func TestTheConnectTimeoutMustBePositive(t *testing.T) {
+	dir := startCluster(t)
+	_, err := run(t, "--cluster", dir, "--connect-timeout", "0s", "host", "list")
+	if ExitCode(err) != 2 || !strings.Contains(err.Error(), "--connect-timeout") {
+		t.Errorf("want a wrong call that names --connect-timeout, got %v", err)
+	}
+	if _, err := run(t, "--cluster", dir, "--connect-timeout", "2s", "host", "list"); err != nil {
+		t.Errorf("with --connect-timeout 2s: %v", err)
+	}
+}
+
+func TestHostListShowsThePublicAddressOrADash(t *testing.T) {
+	var out bytes.Buffer
+	hosts := []api.HostInfo{
+		{ID: 0, Name: "node0", Phase: "active", Underlay: "10.0.0.2", PublicAddress: "203.0.113.10"},
+		{ID: 1, Name: "node1", Phase: "active", Underlay: "198.51.100.3"},
+	}
+	if err := printHosts(&out, hosts); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 3 || strings.Fields(lines[1])[5] != "203.0.113.10" || strings.Fields(lines[2])[5] != "-" {
+		t.Errorf("host list:\n%s", out.String())
+	}
+}
+
 func TestHostCommandsTalkToTheCluster(t *testing.T) {
 	dir := startCluster(t)
 	out, err := run(t, "--cluster", dir, "host", "list")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "node0") || !strings.Contains(out, "active") {
+	if !strings.Contains(out, "node0") || !strings.Contains(out, "active") || !strings.Contains(out, "PUBLIC-ADDRESS") {
 		t.Errorf("host list:\n%s", out)
 	}
 

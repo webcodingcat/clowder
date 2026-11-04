@@ -152,7 +152,7 @@ resource "hcloud_volume_attachment" "class" {
 }
 
 # The hosts that join: the same as the first, with a join token instead of
-# the bootstrap key, through the first host as their seed.
+# the bootstrap key, through the first host.
 
 resource "hcloud_volume" "joining" {
   for_each = local.joining_volumes
@@ -242,7 +242,7 @@ locals {
           path = "/etc/clowder-setup.env", permissions = "0600",
           content = join("\n", concat(local.common_settings, [
             "VOLUMES='${join(" ", [for key, volume in local.joining_volumes : "${volume.class}=${hcloud_volume.joining[key].id}" if volume.host == host])}'",
-            "SEED='${one(hcloud_server.host.network).ip}'",
+            "JOIN_VIA='${one(hcloud_server.host.network).ip}'",
             "",
           ]))
         },

@@ -82,13 +82,14 @@ type BootstrapAnswer struct {
 	Certificate string `json:"certificate"`
 }
 
-// TrustedCluster is a cluster the CLI found at seed and trusts: its CA
+// TrustedCluster is a cluster the CLI found at endpoint and trusts: its CA
 // proved it knows the bootstrap key.
 type TrustedCluster struct {
-	seed, version string
-	bootstrapKey  []byte
-	CA            *x509.Certificate
-	CAPEM         string
+	endpoint, version string
+	connectTimeout    time.Duration
+	bootstrapKey      []byte
+	CA                *x509.Certificate
+	CAPEM             string
 }
 
 // ErrBootstrapped is FindCluster's answer when the cluster has its user
@@ -96,30 +97,35 @@ type TrustedCluster struct {
 // nothing with it either.
 var ErrBootstrapped = errors.New("the cluster has a user already, and a cluster has only one")
 
-// FindCluster asks the agent at seed for its CA and trusts it only if it
+// FindCluster asks the agent at endpoint for its CA and trusts it only if it
 // proves it knows the bootstrap key.
-func FindCluster(ctx context.Context, seed string, bootstrapKey []byte, version string) (*TrustedCluster, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+Address(seed)+"/v1/bootstrap", nil)
+func FindCluster(ctx context.Context, endpoint string, connectTimeout time.Duration, bootstrapKey []byte,
+	version string,
+) (*TrustedCluster, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+Address(endpoint)+"/v1/bootstrap", nil)
 	if err != nil {
-		return nil, fmt.Errorf("ask %s for its CA: %w", seed, err)
+		return nil, fmt.Errorf("ask %s for its CA: %w", endpoint, err)
 	}
 	request.Header.Set(VersionHeader, version)
 	var offer BootstrapOffer
-	if err := send(uncheckedClient(), request, &offer); err != nil {
-		return nil, fmt.Errorf("ask %s for its CA: %w", seed, err)
+	if err := send(uncheckedClient(connectTimeout), request, &offer); err != nil {
+		return nil, fmt.Errorf("ask %s for its CA: %w", endpoint, err)
 	}
 	// unchecked, but harmless: it stops a bootstrap, the user's own
 	if offer.Bootstrapped {
 		return nil, ErrBootstrapped
 	}
 	if !pki.CheckTrustProof(bootstrapKey, []byte(offer.CACertificate), offer.Proof) {
-		return nil, fmt.Errorf("%s cannot prove it knows the bootstrap key: wrong key, or not your cluster", seed)
+		return nil, fmt.Errorf("%s cannot prove it knows the bootstrap key: wrong key, or not your cluster", endpoint)
 	}
 	ca, err := pki.ParseCertificate([]byte(offer.CACertificate))
 	if err != nil {
-		return nil, fmt.Errorf("read the CA of %s: %w", seed, err)
+		return nil, fmt.Errorf("read the CA of %s: %w", endpoint, err)
 	}
-	return &TrustedCluster{seed: seed, version: version, bootstrapKey: bootstrapKey, CA: ca, CAPEM: offer.CACertificate}, nil
+	return &TrustedCluster{
+		endpoint: endpoint, version: version, connectTimeout: connectTimeout, bootstrapKey: bootstrapKey,
+		CA: ca, CAPEM: offer.CACertificate,
+	}, nil
 }
 
 // Bootstrap gets the user's first certificate (PEM), over TLS checked
@@ -133,35 +139,40 @@ func (c *TrustedCluster) Bootstrap(ctx context.Context, user string, public ed25
 	if err != nil {
 		return "", fmt.Errorf("encode the request: %w", err)
 	}
-	url := "https://" + Address(c.seed) + "/v1/bootstrap"
+	url := "https://" + Address(c.endpoint) + "/v1/bootstrap"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("get the first certificate from %s: %w", c.seed, err)
+		return "", fmt.Errorf("get the first certificate from %s: %w", c.endpoint, err)
 	}
 	request.Header.Set(VersionHeader, c.version)
 	var answer BootstrapAnswer
-	if err := send(checkedClient(c.CA), request, &answer); err != nil {
-		return "", fmt.Errorf("get the first certificate from %s: %w", c.seed, err)
+	if err := send(checkedClient(c.CA, c.connectTimeout), request, &answer); err != nil {
+		return "", fmt.Errorf("get the first certificate from %s: %w", c.endpoint, err)
 	}
 	return answer.Certificate, nil
 }
 
 // uncheckedClient is for a first contact without a certificate (bootstrap,
-// recovery): there is nothing to check the agent against yet, so a trust
-// proof in its answer decides.
-func uncheckedClient() *http.Client {
-	return &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{
+// join, recovery): there is nothing to check the agent against yet, so a
+// trust proof in its answer decides.
+func uncheckedClient(connectTimeout time.Duration) *http.Client {
+	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true, // the caller checks the trust proof
 		MinVersion:         tls.VersionTLS13,
-	}}}
+	}
+	return &http.Client{
+		Timeout:   answerTimeout,
+		Transport: endpointTransport(tlsConfig, connectTimeout),
+	}
 }
 
 // checkedClient talks without a certificate to agents of a CA a trust
 // proof made trustworthy.
-func checkedClient(ca *x509.Certificate) *http.Client {
-	return &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
-		TLSClientConfig: pki.ClientTLSToHosts(tls.Certificate{}, ca, nil),
-	}}
+func checkedClient(ca *x509.Certificate, connectTimeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout:   answerTimeout,
+		Transport: endpointTransport(pki.ClientTLSToHosts(tls.Certificate{}, ca, nil), connectTimeout),
+	}
 }
 
 // bootstrapOffer answers the first contact.

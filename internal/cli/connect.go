@@ -3,6 +3,7 @@ package cli
 import (
 	"crypto/tls"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -14,12 +15,22 @@ import (
 
 // globals are the flags every command shares.
 type globals struct {
-	cluster string
+	cluster        string
+	connectTimeout time.Duration
 }
 
 func (g *globals) register(root *cobra.Command) {
 	root.PersistentFlags().StringVar(&g.cluster, "cluster", "",
 		"cluster directory (default: $"+clusterdir.EnvVar+" or the working directory)")
+	root.PersistentFlags().DurationVar(&g.connectTimeout, "connect-timeout", api.DefaultConnectTimeout,
+		"how long to wait for a host to take the connection before the next is tried")
+	// checked before any command runs: every command that asks a host uses it
+	root.PersistentPreRunE = func(*cobra.Command, []string) error {
+		if g.connectTimeout <= 0 {
+			return usage("--connect-timeout %s: give a positive duration like 5s", g.connectTimeout)
+		}
+		return nil
+	}
 }
 
 // connect reads the cluster directory and the user's credentials for the
@@ -46,5 +57,5 @@ func (g *globals) connect() (*api.Client, *clusterdir.Directory, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("the credentials for cluster %s: %w", directory.Config.Name, err)
 	}
-	return api.NewClient(directory.Config.Seeds, certificate, ca, buildinfo.Version), directory, nil
+	return api.NewClient(directory.Config.Endpoints, g.connectTimeout, certificate, ca, buildinfo.Version), directory, nil
 }

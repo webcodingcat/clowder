@@ -45,8 +45,8 @@ func (c *testCluster) code(use recoverycode.Use, user string) recoverycode.Code 
 	return recoverycode.Make(key, use, user, time.Now())
 }
 
-func (c *testCluster) seed(host int) string {
-	return c.servers[host].Listener.Addr().String()
+func (c *testCluster) endpoint(id int) string {
+	return c.servers[id].Listener.Addr().String()
 }
 
 func TestARecoveredUserIsBackAndTheOldCertificateIsOut(t *testing.T) {
@@ -68,7 +68,7 @@ func TestARecoveredUserIsBackAndTheOldCertificateIsOut(t *testing.T) {
 	}
 
 	// through the follower, which forwards recover-user to the leader
-	found, err := FindClusterByCode(context.Background(), []string{"127.0.0.1:1", cluster.seed(1)}, "alice",
+	found, err := FindClusterByCode(context.Background(), []string{"127.0.0.1:1", cluster.endpoint(1)}, DefaultConnectTimeout, "alice",
 		cluster.code(recoverycode.ForRecover, "alice"), testVersion)
 	if err != nil {
 		t.Fatal(err)
@@ -106,12 +106,12 @@ func TestARecoveredUserIsBackAndTheOldCertificateIsOut(t *testing.T) {
 	// whoever saw the code must not lock alice out with it: the leader's
 	// state knows it was used, and so refuses the command of a follower
 	// that does not know it yet
-	found.seed = cluster.seed(0)
+	found.endpoint = cluster.endpoint(0)
 	_, err = found.Recover(context.Background(), key.Public().(ed25519.PublicKey))
 	if statusOf(err) != http.StatusUnauthorized {
 		t.Errorf("the code once more: want 401, got %v", err)
 	}
-	found.seed = cluster.seed(1)
+	found.endpoint = cluster.endpoint(1)
 	_, err = found.Recover(context.Background(), key.Public().(ed25519.PublicKey))
 	if statusOf(err) != http.StatusConflict || !strings.Contains(err.Error(), "used already") {
 		t.Errorf("the code once more through a follower behind the leader: want 409, got %v", err)
@@ -122,11 +122,11 @@ func TestTheRecoveryTellsNobodyWhichUsersThereAre(t *testing.T) {
 	cluster := newTestCluster(t)
 	cluster.withRealCA()
 	// the offer for a user that does not exist proves the code as for one that does
-	if _, err := FindClusterByCode(context.Background(), []string{cluster.seed(0)}, "mallory",
+	if _, err := FindClusterByCode(context.Background(), []string{cluster.endpoint(0)}, DefaultConnectTimeout, "mallory",
 		cluster.code(recoverycode.ForRecover, "mallory"), testVersion); err != nil {
 		t.Fatalf("offer for an unknown user: %v", err)
 	}
-	if _, err := FindClusterByCode(context.Background(), []string{cluster.seed(0)}, "alice",
+	if _, err := FindClusterByCode(context.Background(), []string{cluster.endpoint(0)}, DefaultConnectTimeout, "alice",
 		cluster.code(recoverycode.ForRecover, "bob"), testVersion); err == nil ||
 		!strings.Contains(err.Error(), "cannot prove") {
 		t.Errorf("another user's code: %v", err)
@@ -138,7 +138,7 @@ func TestTheRecoveryTellsNobodyWhichUsersThereAre(t *testing.T) {
 	}
 	tryRecover := func(user string, code recoverycode.Code) error {
 		found := &RecoveringCluster{
-			seed: cluster.seed(0), version: testVersion, user: user, code: code, CA: cluster.ca.Certificate,
+			endpoint: cluster.endpoint(0), version: testVersion, user: user, code: code, CA: cluster.ca.Certificate,
 		}
 		_, err := found.Recover(context.Background(), key.Public().(ed25519.PublicKey))
 		return err
@@ -206,7 +206,7 @@ func TestTheRecoveryTakesOnlySoManyTries(t *testing.T) {
 	cluster := newTestCluster(t)
 	cluster.withRealCA()
 	for try := range triesPerSender + 1 {
-		_, err := FindClusterByCode(context.Background(), []string{cluster.seed(0)}, "alice",
+		_, err := FindClusterByCode(context.Background(), []string{cluster.endpoint(0)}, DefaultConnectTimeout, "alice",
 			cluster.code(recoverycode.ForRecover, "alice"), testVersion)
 		switch {
 		case try < triesPerSender && err != nil:
@@ -221,13 +221,13 @@ func TestTheBootstrapTakesOnlySoManyTriesOfItsOwn(t *testing.T) {
 	cluster := newTestCluster(t)
 	cluster.withRealCA()
 	for try := range triesPerSender + 1 {
-		request, err := http.NewRequest(http.MethodGet, "https://"+cluster.seed(0)+"/v1/bootstrap", nil)
+		request, err := http.NewRequest(http.MethodGet, "https://"+cluster.endpoint(0)+"/v1/bootstrap", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		// the test's join keys are not really sealed, so every offer fails
 		// with 500; this test checks only which tries get 429
-		err = send(uncheckedClient(), request, &BootstrapOffer{})
+		err = send(uncheckedClient(DefaultConnectTimeout), request, &BootstrapOffer{})
 		switch {
 		case try < triesPerSender && statusOf(err) == http.StatusTooManyRequests:
 			t.Fatalf("try %d was refused under the limit", try+1)
@@ -236,7 +236,7 @@ func TestTheBootstrapTakesOnlySoManyTriesOfItsOwn(t *testing.T) {
 		}
 	}
 	// the recovery counts apart: strangers at the bootstrap do not block it
-	if _, err := FindClusterByCode(context.Background(), []string{cluster.seed(0)}, "alice",
+	if _, err := FindClusterByCode(context.Background(), []string{cluster.endpoint(0)}, DefaultConnectTimeout, "alice",
 		cluster.code(recoverycode.ForRecover, "alice"), testVersion); err != nil {
 		t.Errorf("a recovery after the bootstrap's limit: %v", err)
 	}

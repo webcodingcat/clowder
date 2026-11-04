@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -19,14 +20,14 @@ import (
 
 func printHosts(out io.Writer, hosts []api.HostInfo) error {
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(table, "ID\tNAME\tPHASE\tVOTER\tUNDERLAY\tVERSION") // tabwriter reports errors on Flush
+	_, _ = fmt.Fprintln(table, "ID\tNAME\tPHASE\tVOTER\tUNDERLAY\tPUBLIC-ADDRESS\tVERSION") // tabwriter reports errors on Flush
 	for _, host := range hosts {
 		voter := "no"
 		if host.Voter {
 			voter = "yes"
 		}
-		_, _ = fmt.Fprintf(table, "%d\t%s\t%s\t%s\t%s\t%s\n",
-			host.ID, host.Name, host.Phase, voter, host.Underlay, host.Version)
+		_, _ = fmt.Fprintf(table, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			host.ID, host.Name, host.Phase, voter, host.Underlay, cmp.Or(host.PublicAddress, "-"), host.Version)
 	}
 	return table.Flush()
 }

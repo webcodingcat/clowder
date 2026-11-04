@@ -29,12 +29,12 @@ const (
 	MinIndexHeader = "X-Clowder-Min-Index"
 )
 
-// Address joins a host and the API port; a seed may name its own port.
-func Address(seed string) string {
-	if _, _, err := net.SplitHostPort(seed); err == nil {
-		return seed
+// Address joins an endpoint and the API port; an endpoint may name its own port.
+func Address(endpoint string) string {
+	if _, _, err := net.SplitHostPort(endpoint); err == nil {
+		return endpoint
 	}
-	return net.JoinHostPort(seed, strconv.Itoa(Port))
+	return net.JoinHostPort(endpoint, strconv.Itoa(Port))
 }
 
 // Error is the body of every answer that is not 2xx.
@@ -97,7 +97,10 @@ type HostInfo struct {
 	Phase    string `json:"phase"`
 	Voter    bool   `json:"voter"`
 	Underlay string `json:"underlay"`
-	Version  string `json:"version,omitempty"`
+	// PublicAddress is where users reach the host's API when the underlay
+	// is a private network; empty when they reach it at the underlay.
+	PublicAddress string `json:"public_address,omitempty"`
+	Version       string `json:"version,omitempty"`
 }
 
 // UserInfo is one user.

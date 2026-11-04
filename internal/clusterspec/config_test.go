@@ -107,7 +107,7 @@ func TestThePrivateNetworkIsAnIPv4NetworkOutsideClowders(t *testing.T) {
 
 func TestCheckReportsEveryProblem(t *testing.T) {
 	config := Config{
-		Seeds:          []string{"10.0.0.1:99999"},
+		Endpoints:      []string{"10.0.0.1:99999"},
 		Hoster:         Hoster{Type: "aws", API: "api.example.com/v1"},
 		PrivateNetwork: "10.77.0.0/16",
 		Ingress:        Ingress{FloatingIP: "2001:db8::1"},

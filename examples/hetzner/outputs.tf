@@ -1,10 +1,10 @@
 output "public_address" {
-  description = "The first host's public IPv4: the seed for clowder cluster bootstrap."
+  description = "The first host's public IPv4: --endpoint of clowder cluster bootstrap."
   value       = hcloud_server.host.ipv4_address
 }
 
 output "private_address" {
-  description = "The first host's address in the private network (its underlay); the joining hosts' seed."
+  description = "The first host's address in the private network (its underlay); the joining hosts join through it."
   value       = one(hcloud_server.host.network).ip
 }
 
@@ -47,7 +47,11 @@ output "bootstrap_key" {
 output "cluster_yaml" {
   description = "What cluster.yaml needs from this module."
   value = {
-    seeds           = [hcloud_server.host.ipv4_address]
+    # every host: the CLI tries them in turn and learns no others
+    endpoints = concat(
+      [hcloud_server.host.ipv4_address],
+      [for server in hcloud_server.joining : server.ipv4_address],
+    )
     private_network = var.network_ip_range
     ingress         = { floating_ip = hcloud_floating_ip.ingress.ip_address }
     storage_classes = { for name in keys(var.storage_classes) : name => { pool = "vg-${name}/thin" } }

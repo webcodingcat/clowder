@@ -28,8 +28,9 @@ import (
 type JoinOptions struct {
 	// Token is the join token a user made (clowder host join-token).
 	Token jointoken.Token
-	// Seed is an agent of the cluster, by its address (and port).
-	Seed          string
+	// Via is an agent of the cluster to join through, by its address (and
+	// port).
+	Via           string
 	Name          string
 	Underlay      netip.Addr
 	PublicAddress netip.Addr
@@ -39,8 +40,9 @@ type JoinOptions struct {
 	APIPort  int
 }
 
-// Join makes this host a member of the cluster at the seed: it makes its
-// own keys, asks the cluster to add it, and writes what the answer brings.
+// Join makes this host a member of the cluster through the agent at
+// options.Via: it makes its own keys, asks the cluster to add it, and
+// writes what the answer brings.
 // The leader adds the host to Raft as a non-voter at once, and moves it on
 // once its agent runs (clowderd run) and reports. It refuses a host that
 // has a cluster already. joiner.go is the leader's side.
@@ -136,7 +138,9 @@ func (f Files) writeJoining(saved joining) error {
 // askToJoin trusts the cluster's CA by the token, sends the join and keeps
 // the answer in join.json.
 func askToJoin(ctx context.Context, files Files, options JoinOptions, saved *joining) error {
-	cluster, err := api.FindClusterByToken(ctx, options.Seed, options.Token, buildinfo.Version)
+	// clowderd join has no --connect-timeout: one host, and nobody waits at a
+	// terminal
+	cluster, err := api.FindClusterByToken(ctx, options.Via, api.DefaultConnectTimeout, options.Token, buildinfo.Version)
 	if err != nil {
 		return err
 	}

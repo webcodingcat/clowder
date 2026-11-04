@@ -591,10 +591,26 @@ them.
 
 ### The CLI
 
-- **The client** tries the seeds of `cluster.yaml` in turn and trusts any host certificate of
-  the cluster's CA, whatever name the seed has. A read goes on to the next seed after any
-  network error; a write only if it never left (`httptrace`), since one that was sent may
-  have committed without an answer.
+- **The client** tries the endpoints of `cluster.yaml` in turn and trusts any host
+  certificate of the cluster's CA, whatever name the endpoint has. A read goes on to the
+  next endpoint after any network error; a write only if it never left (`httptrace`),
+  since one that was sent may have committed without an answer.
+- **The endpoints** are all the CLI knows: it learns no other agents from the cluster, so
+  it reaches the cluster only while an endpoint answers. The bootstrap writes the first
+  host alone; the user adds each host that joins (`host list` shows its public address,
+  the module's `cluster_yaml` output lists every host).
+- **An endpoint that does not answer** costs little. One that has not connected within
+  `--connect-timeout` (`api.DefaultConnectTimeout` without it), or not finished TLS
+  within as long again, counts as unreachable: a host cut off drops the packets, and the
+  request's own timeout (`answerTimeout`) would hold up the next endpoint. An agent that
+  set up the connection and then hangs still holds a request for `answerTimeout`. The
+  client starts each request with the endpoint that answered last (`inTurn`), so one
+  that is down costs its timeout once per command, not once per request. Every client
+  that asks endpoints shares this transport (`endpointTransport`), bootstrap and recover
+  included; `clowderd join`, which has no `--connect-timeout`, waits the default.
+- `endpoints` are for the CLI alone: it reads them from the file, so a change works
+  without `cluster apply`. They go to the cluster with the rest of `cluster.yaml`, so
+  `cluster diff` shows a change of them until the next apply; the agents ignore them.
 - **The CLI** finds the cluster directory (`--cluster`, `$CLOWDER_CLUSTER`, the working
   directory) and by its `name` the user's credentials, then talks to the cluster with the
   user's certificate. An agent whose certificate is of another CA than the credentials'
@@ -770,8 +786,8 @@ them.
   laptop is locked out. As with the bootstrap, the agent sets the actor to the recovered
   user (`user/<name>`), so the audit shows a recovery as `recover-user` by that user. A
   user that does not exist gets the same offer and the same refusal as a wrong code, so the
-  routes tell nobody which users there are. Name and seeds come from the cluster directory,
-  or from `--name` and `--seed` without one.
+  routes tell nobody which users there are. Name and endpoints come from the cluster directory,
+  or from `--name` and `--endpoint` without one.
 - **Both routes come without a certificate,** so each agent takes at most `triesPerSender`
   tries a minute per sender and `triesInAll` in all, in memory (`api/limit.go`); then 429.
   A sender is its IPv4 address, or for IPv6 its /64. The bootstrap's two routes are limited

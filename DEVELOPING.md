@@ -108,6 +108,7 @@ What follows from there:
 |---|---|
 | underlay | the network the hosts share at the hoster (private network or public addresses) |
 | node address | a host's address in the overlay (`network.NodeAddress`); on `clowder0`, reached by other hosts through WireGuard |
+| endpoint | an address in `endpoints` of `cluster.yaml`: an agent the CLI asks, at a host's public address; the CLI learns no others |
 | Floating IP | the cluster's one public address; the hoster routes it to the ingress host |
 | leader | the Raft leader among the agents; it decides (placement, failover) and commits every write |
 | voter | a host that takes part in Raft's elections; others follow the log only |

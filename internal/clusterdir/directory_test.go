@@ -81,9 +81,9 @@ func TestASecretStandsOnlyWhereOneMay(t *testing.T) {
 }
 
 func TestMisspeltKeysAreRefused(t *testing.T) {
-	dir := withConfig(t, func(content string) string { return strings.Replace(content, "seeds:", "seed:", 1) })
-	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "seed") {
-		t.Errorf("want an error about seed, got %v", err)
+	dir := withConfig(t, func(content string) string { return strings.Replace(content, "endpoints:", "endpoint:", 1) })
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "endpoint") {
+		t.Errorf("want an error about endpoint, got %v", err)
 	}
 }
 
@@ -114,7 +114,7 @@ func TestTheSchemaDescribesClusterYAML(t *testing.T) {
 	if err := json.Unmarshal(encoded, &schema); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"name", "seeds", "storage_classes", "priorities", "alerts", "private_network", "registries"} {
+	for _, key := range []string{"name", "endpoints", "storage_classes", "priorities", "alerts", "private_network", "registries"} {
 		if _, ok := schema.Properties[key]; !ok {
 			t.Errorf("schema lacks %s", key)
 		}

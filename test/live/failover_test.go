@@ -139,7 +139,7 @@ func TestFailover(t *testing.T) {
 			})
 			rebooted := bootID(t, hosts[other]) != boot
 			// the CLI may not reach the cluster while the host is cut off (it
-			// is a seed), so the short phases can pass unseen; recovering
+			// is the first of its endpoints), so the short phases can pass unseen; recovering
 			// comes only after a fence
 			fenced := seen["fencing"] || seen["fenced"] || seen["recovering"]
 			switch {
@@ -306,7 +306,7 @@ func TestMoveInterrupted(t *testing.T) {
 			waitRunning(t, "mover", 1)
 			from = stackInfo(t, "mover").Host
 			writeProof(t, hosts[from], "mover", "here")
-			// not the first host: it is the CLI's seed, which a pause would cut off
+			// not the first host: the CLI asks it first, and a pause would cut it off
 			to = otherThan(joined, from)
 			mustClowder(t, "stack", "move", "mover", to)
 			eventually(t, placementDeadline, "a copy of mover on "+to, func() error {

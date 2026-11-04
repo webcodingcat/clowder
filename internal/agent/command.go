@@ -113,13 +113,13 @@ func newInit() *cobra.Command {
 
 func newJoin() *cobra.Command {
 	var flags hostFlags
-	var seed, tokenFile string
+	var via, tokenFile string
 	joinCommand := &cobra.Command{
 		Use:   "join",
 		Short: "Make this host a member of a cluster, with a join token (from cloud-init)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			options := JoinOptions{Seed: seed, ServerRef: flags.serverRef}
+			options := JoinOptions{Via: via, ServerRef: flags.serverRef}
 			var err error
 			if options.Name, options.Underlay, options.PublicAddress, err = flags.parse(); err != nil {
 				return err
@@ -139,10 +139,10 @@ func newJoin() *cobra.Command {
 		},
 	}
 	flags.add(joinCommand)
-	joinCommand.Flags().StringVar(&seed, "seed", "", "an agent of the cluster: its underlay address")
+	joinCommand.Flags().StringVar(&via, "via", "", "an agent of the cluster to join through: its underlay address")
 	joinCommand.Flags().StringVar(&tokenFile, "token-file", "",
 		"a file with the join token (clowder host join-token); not a flag of its own, which /proc would show")
-	_ = joinCommand.MarkFlagRequired("seed") // the flags exist; this cannot fail
+	_ = joinCommand.MarkFlagRequired("via") // the flags exist; this cannot fail
 	_ = joinCommand.MarkFlagRequired("token-file")
 	return joinCommand
 }

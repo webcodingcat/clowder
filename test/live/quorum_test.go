@@ -35,7 +35,7 @@ func TestQuorum(t *testing.T) {
 			createAndApply(t, "shifter", volumeDocument("shifter", "fast", failoverVolumeSize, 2)+simpleStack("shifter", "shifter"))
 			waitRunning(t, "shifter", 1)
 			volumeSteady(t, hosts, "shifter")
-			// not the first host: it is the CLI's seed, which a pause would cut off
+			// not the first host: the CLI asks it first, and a pause would cut it off
 			target := otherThan(joined, stackInfo(t, "shifter").Host)
 			moveTo(t, "shifter", target)
 			writeProof(t, hosts[target], "shifter", "moved")

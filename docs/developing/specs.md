@@ -129,12 +129,12 @@ on a host (`compose.Render`).
   (`secretvalue.Extract`), checks that the places they came from are exactly
   `SecretPlaces` (a `!secret` elsewhere, or a place in clear, is an error), decodes the
   rest strictly and keeps the values apart, still encrypted (`Directory.Encrypted`). It
-  does not run `Check`: the commands that need only the name and the seeds (`secret
+  does not run `Check`: the commands that need only the name and the endpoints (`secret
   encrypt`) work with the `cluster.yaml` the bootstrap writes, which is not complete yet.
   `cluster apply` and `diff` run it. `Schema` makes the JSON schema of `cluster.yaml` from
   the Go types; it lives here so the state does not link the schema library. Editors with
   the yaml-language-server need `customTags: ["!secret scalar"]`.
-- `Create` writes the `cluster.yaml` of `cluster bootstrap`: name, seed, the bootstrap
+- `Create` writes the `cluster.yaml` of `cluster bootstrap`: name, endpoint, the bootstrap
   key encrypted, and as comments what the first `cluster apply` still needs.
 - **The user's credentials** (`credentials.go`) are not in the cluster directory, which a
   team shares in a repository, but in the user's config directory

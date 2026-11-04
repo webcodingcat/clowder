@@ -72,47 +72,49 @@ var errCodeRefused = errors.New("the code does not fit: wrong, expired, used alr
 // RecoveringCluster is a cluster the CLI found and trusts: its CA proved it
 // knows the code root on a host made.
 type RecoveringCluster struct {
-	seed, version, user string
-	code                recoverycode.Code
-	CA                  *x509.Certificate
-	CAPEM               string
+	endpoint, version, user string
+	connectTimeout          time.Duration
+	code                    recoverycode.Code
+	CA                      *x509.Certificate
+	CAPEM                   string
 }
 
-// FindClusterByCode asks the agents at seeds in turn for their CA, until
+// FindClusterByCode asks the agents at endpoints in turn for their CA, until
 // one answers, and trusts it only if it proves it knows the user's code.
-func FindClusterByCode(ctx context.Context, seeds []string, user string, code recoverycode.Code,
-	version string,
+func FindClusterByCode(ctx context.Context, endpoints []string, connectTimeout time.Duration, user string,
+	code recoverycode.Code, version string,
 ) (*RecoveringCluster, error) {
 	var unreachable []string
-	for _, seed := range seeds {
-		address := "https://" + Address(seed) + "/v1/recover/offer?user=" + url.QueryEscape(user)
+	for _, endpoint := range endpoints {
+		address := "https://" + Address(endpoint) + "/v1/recover/offer?user=" + url.QueryEscape(user)
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
 		if err != nil {
-			return nil, fmt.Errorf("ask %s for its CA: %w", seed, err)
+			return nil, fmt.Errorf("ask %s for its CA: %w", endpoint, err)
 		}
 		request.Header.Set(VersionHeader, version)
 		var offer RecoverOffer
-		err = send(uncheckedClient(), request, &offer)
+		err = send(uncheckedClient(connectTimeout), request, &offer)
 		var statusError *StatusError
 		switch {
 		case errors.As(err, &statusError):
-			return nil, fmt.Errorf("ask %s for its CA: %w", seed, err)
+			return nil, fmt.Errorf("ask %s for its CA: %w", endpoint, err)
 		case err != nil:
-			unreachable = append(unreachable, fmt.Sprintf("%s: %v", seed, err))
+			unreachable = append(unreachable, fmt.Sprintf("%s: %v", endpoint, err))
 			continue
 		}
 		if !slices.ContainsFunc(offer.Proofs, func(proof []byte) bool {
 			return pki.CheckTrustProof(code[:], []byte(offer.CACertificate), proof)
 		}) {
 			return nil, fmt.Errorf("%s cannot prove it knows the code: a wrong or expired code, "+
-				"one for another user, or not your cluster", seed)
+				"one for another user, or not your cluster", endpoint)
 		}
 		ca, err := pki.ParseCertificate([]byte(offer.CACertificate))
 		if err != nil {
-			return nil, fmt.Errorf("read the CA of %s: %w", seed, err)
+			return nil, fmt.Errorf("read the CA of %s: %w", endpoint, err)
 		}
 		return &RecoveringCluster{
-			seed: seed, version: version, user: user, code: code, CA: ca, CAPEM: offer.CACertificate,
+			endpoint: endpoint, version: version, user: user, connectTimeout: connectTimeout, code: code,
+			CA: ca, CAPEM: offer.CACertificate,
 		}, nil
 	}
 	return nil, fmt.Errorf("no agent answered:\n  %s", strings.Join(unreachable, "\n  "))
@@ -126,15 +128,15 @@ func (c *RecoveringCluster) Recover(ctx context.Context, public ed25519.PublicKe
 	if err != nil {
 		return "", fmt.Errorf("encode the request: %w", err)
 	}
-	address := "https://" + Address(c.seed) + "/v1/recover"
+	address := "https://" + Address(c.endpoint) + "/v1/recover"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, address, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("get a new certificate from %s: %w", c.seed, err)
+		return "", fmt.Errorf("get a new certificate from %s: %w", c.endpoint, err)
 	}
 	request.Header.Set(VersionHeader, c.version)
 	var answer RecoverAnswer
-	if err := send(checkedClient(c.CA), request, &answer); err != nil {
-		return "", fmt.Errorf("get a new certificate from %s: %w", c.seed, err)
+	if err := send(checkedClient(c.CA, c.connectTimeout), request, &answer); err != nil {
+		return "", fmt.Errorf("get a new certificate from %s: %w", c.endpoint, err)
 	}
 	return answer.Certificate, nil
 }

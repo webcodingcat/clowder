@@ -153,9 +153,9 @@ reads within a step.
    `up` copies to `/work/bin`). The first waits `passive` without a vote; with the second,
    all three are active and vote. Each joined host has its `net.json` and reaches the
    first host's API over the private network. The test drains both, keeps their
-   tokens for `TestJoin` and lists all three hosts as seeds in `cluster.yaml`, so a
-   scenario that cuts off the first host, the leader after the setup, still reaches the
-   cluster.
+   tokens for `TestJoin` and takes the endpoints of the module's `cluster_yaml`, all
+   three hosts, into `cluster.yaml`, so a scenario that cuts off the first host, the leader
+   after the setup, still reaches the cluster.
 4. Each host is a server of its own, whether it started from the image or from Debian's:
    cloud-init ran for a new instance, and no two hosts share an instance ID, a machine-id
    or an SSH host key. DRBD's module fits the running kernel.

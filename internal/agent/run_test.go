@@ -408,12 +408,12 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", home)
 	t.Setenv(clusterdir.EnvVar, "")
 	dir := t.TempDir()
-	seed := net.JoinHostPort("127.0.0.2", strconv.Itoa(apiPort))
+	endpoint := net.JoinHostPort("127.0.0.2", strconv.Itoa(apiPort))
 	recoveryFile := filepath.Join(t.TempDir(), "recovery-key")
 	bootstrap := func(user, name, cluster, key string, more ...string) error {
 		_, err := clowder(t, append([]string{
 			"--cluster", cluster, "cluster", "bootstrap", user, "--name", name,
-			"--seed", seed, "--key-file", key,
+			"--endpoint", endpoint, "--key-file", key,
 		}, more...)...)
 		return err
 	}
@@ -453,7 +453,7 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 		strings.Contains(string(written), testBootstrapKey) || strings.Contains(string(written), "BEGIN AGE") {
 		t.Fatalf("cluster.yaml: %q, %v", written, err)
 	}
-	offer, err := api.FindCluster(context.Background(), seed, []byte(testBootstrapKey), buildinfo.Version)
+	offer, err := api.FindCluster(context.Background(), endpoint, api.DefaultConnectTimeout, []byte(testBootstrapKey), buildinfo.Version)
 	if !errors.Is(err, api.ErrBootstrapped) || offer != nil {
 		t.Errorf("the bootstrap key after the bootstrap: %v, %v", offer, err)
 	}

@@ -120,33 +120,39 @@ type JoinTokenAnswer struct {
 // JoiningCluster is a cluster a joining host found and trusts: its CA
 // proved it knows the token.
 type JoiningCluster struct {
-	seed, version string
-	token         jointoken.Token
-	CA            *x509.Certificate
-	CAPEM         string
+	endpoint, version string
+	connectTimeout    time.Duration
+	token             jointoken.Token
+	CA                *x509.Certificate
+	CAPEM             string
 }
 
-// FindClusterByToken asks the agent at seed for its CA and trusts it only
+// FindClusterByToken asks the agent at endpoint for its CA and trusts it only
 // if it proves it knows the token.
-func FindClusterByToken(ctx context.Context, seed string, token jointoken.Token, version string) (*JoiningCluster, error) {
-	address := "https://" + Address(seed) + "/v1/join?token=" + url.QueryEscape(token.ID)
+func FindClusterByToken(ctx context.Context, endpoint string, connectTimeout time.Duration, token jointoken.Token,
+	version string,
+) (*JoiningCluster, error) {
+	address := "https://" + Address(endpoint) + "/v1/join?token=" + url.QueryEscape(token.ID)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
 	if err != nil {
-		return nil, fmt.Errorf("ask %s for its CA: %w", seed, err)
+		return nil, fmt.Errorf("ask %s for its CA: %w", endpoint, err)
 	}
 	request.Header.Set(VersionHeader, version)
 	var offer JoinOffer
-	if err := send(uncheckedClient(), request, &offer); err != nil {
-		return nil, fmt.Errorf("ask %s for its CA: %w", seed, err)
+	if err := send(uncheckedClient(connectTimeout), request, &offer); err != nil {
+		return nil, fmt.Errorf("ask %s for its CA: %w", endpoint, err)
 	}
 	if !pki.CheckTrustProof(jointoken.ProofKey(token.Hash()), []byte(offer.CACertificate), offer.Proof) {
-		return nil, fmt.Errorf("%s cannot prove it knows the join token: a wrong token, or not your cluster", seed)
+		return nil, fmt.Errorf("%s cannot prove it knows the join token: a wrong token, or not your cluster", endpoint)
 	}
 	ca, err := pki.ParseCertificate([]byte(offer.CACertificate))
 	if err != nil {
-		return nil, fmt.Errorf("read the CA of %s: %w", seed, err)
+		return nil, fmt.Errorf("read the CA of %s: %w", endpoint, err)
 	}
-	return &JoiningCluster{seed: seed, version: version, token: token, CA: ca, CAPEM: offer.CACertificate}, nil
+	return &JoiningCluster{
+		endpoint: endpoint, version: version, connectTimeout: connectTimeout, token: token,
+		CA: ca, CAPEM: offer.CACertificate,
+	}, nil
 }
 
 // Join asks the cluster to add the host, over TLS checked against the
@@ -161,19 +167,19 @@ func (c *JoiningCluster) Join(ctx context.Context, request JoinRequest) (JoinAns
 	if err != nil {
 		return JoinAnswer{}, fmt.Errorf("encode the request: %w", err)
 	}
-	address := "https://" + Address(c.seed) + "/v1/join"
+	address := "https://" + Address(c.endpoint) + "/v1/join"
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, address, bytes.NewReader(body))
 	if err != nil {
-		return JoinAnswer{}, fmt.Errorf("join through %s: %w", c.seed, err)
+		return JoinAnswer{}, fmt.Errorf("join through %s: %w", c.endpoint, err)
 	}
 	httpRequest.Header.Set(VersionHeader, c.version)
 	// longer than the leader takes: an answer given up on would leave the
 	// host joined in the state, its token used, and nothing on the host
-	client := checkedClient(c.CA)
+	client := checkedClient(c.CA, c.connectTimeout)
 	client.Timeout = joinClientTimeout
 	var answer JoinAnswer
 	if err := send(client, httpRequest, &answer); err != nil {
-		return JoinAnswer{}, fmt.Errorf("join through %s: %w", c.seed, err)
+		return JoinAnswer{}, fmt.Errorf("join through %s: %w", c.endpoint, err)
 	}
 	return answer, nil
 }

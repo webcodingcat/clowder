@@ -242,12 +242,17 @@ func growToThreeHosts(t *testing.T) {
 			t.Errorf("%s does not reach the first host's API", name)
 		}
 	}
-	// every host a seed, as a user of three hosts would list them: a
-	// scenario that cuts off the first host, the leader after TestSetup,
-	// still reaches the cluster through the others
+	// the endpoints of the module's cluster_yaml, as a user takes them after
+	// the hosts joined: every host, so a scenario that cuts off the first host,
+	// the leader after TestSetup, still reaches the cluster through the others
+	endpoints, ok := tofu.ClusterYAML.Value["endpoints"].([]any)
+	if !ok || len(endpoints) != 3 {
+		t.Fatalf("the module's cluster_yaml has the endpoints %v, want all three hosts", tofu.ClusterYAML.Value["endpoints"])
+	}
 	changeConfig(t, func(config *clusterspec.Config) {
-		for _, name := range []string{firstJoining, secondJoining} {
-			config.Seeds = append(config.Seeds, tofu.Hosts.Value[name].PublicAddress)
+		config.Endpoints = nil
+		for _, endpoint := range endpoints {
+			config.Endpoints = append(config.Endpoints, fmt.Sprint(endpoint))
 		}
 	})
 	if err := os.WriteFile(filepath.Join(workDir, baselineConfigFile), clusterConfigJSON(t), 0o600); err != nil {
@@ -284,7 +289,8 @@ func TestJoin(t *testing.T) {
 
 // bootstrapKeyIsSpent asks for the bootstrap's offer with the key.
 func bootstrapKeyIsSpent(t *testing.T, tofu outputs) {
-	_, err := api.FindCluster(context.Background(), tofu.PublicAddress.Value, []byte(tofu.BootstrapKey.Value), buildinfo.Version)
+	_, err := api.FindCluster(context.Background(), tofu.PublicAddress.Value, api.DefaultConnectTimeout,
+		[]byte(tofu.BootstrapKey.Value), buildinfo.Version)
 	if !errors.Is(err, api.ErrBootstrapped) {
 		t.Errorf("the bootstrap key after the bootstrap: %v", err)
 	}
@@ -299,7 +305,7 @@ func tokensThatDoNotOpen(t *testing.T, tofu outputs) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = api.FindClusterByToken(ctx, tofu.PublicAddress.Value, token, buildinfo.Version)
+		_, err = api.FindClusterByToken(ctx, tofu.PublicAddress.Value, api.DefaultConnectTimeout, token, buildinfo.Version)
 		var statusError *api.StatusError
 		if !errors.As(err, &statusError) || statusError.Status != http.StatusForbidden || !strings.Contains(err.Error(), want) {
 			t.Errorf("want a refusal with %q, got %v", want, err)
@@ -331,7 +337,7 @@ func serversOfOthers(t *testing.T, tofu outputs) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cluster, err := api.FindClusterByToken(context.Background(), tofu.PublicAddress.Value, token, buildinfo.Version)
+	cluster, err := api.FindClusterByToken(context.Background(), tofu.PublicAddress.Value, api.DefaultConnectTimeout, token, buildinfo.Version)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -47,12 +47,12 @@ func Check(config Config) Problems {
 	case !names.Valid(config.Name): // the CLI keeps the credentials in a directory of this name
 		report("name %q: %s", config.Name, names.Rule)
 	}
-	if len(config.Seeds) == 0 {
-		report("seeds: at least one address is required")
+	if len(config.Endpoints) == 0 {
+		report("endpoints: at least one address is required")
 	}
-	for _, seed := range config.Seeds {
-		if !validSeed(seed) {
-			report("seeds: %q is neither an address nor a host name", seed)
+	for _, endpoint := range config.Endpoints {
+		if !validEndpoint(endpoint) {
+			report("endpoints: %q is neither an address nor a host name", endpoint)
 		}
 	}
 	problems = append(problems, checkHoster(config.Hoster)...)
@@ -125,10 +125,11 @@ func Check(config Config) Problems {
 	return problems
 }
 
-// validSeed accepts an IP address or a host name, each with an optional port.
-func validSeed(seed string) bool {
-	host := seed
-	if splitHost, port, err := net.SplitHostPort(seed); err == nil {
+// validEndpoint accepts an IP address or a host name, each with an optional
+// port.
+func validEndpoint(address string) bool {
+	host := address
+	if splitHost, port, err := net.SplitHostPort(address); err == nil {
 		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
 			return false
 		}

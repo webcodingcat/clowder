@@ -103,12 +103,12 @@ func TestOnlyAnOpenTokenGetsAProofOfTheCA(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if _, err := FindClusterByToken(ctx, cluster.seed(1), token, testVersion); statusOf(err) != http.StatusForbidden ||
+	if _, err := FindClusterByToken(ctx, cluster.endpoint(1), DefaultConnectTimeout, token, testVersion); statusOf(err) != http.StatusForbidden ||
 		!strings.Contains(err.Error(), "it is unknown") {
 		t.Errorf("a token that is not open: %v", err)
 	}
 	cluster.openToken(token)
-	found, err := FindClusterByToken(ctx, cluster.seed(1), token, testVersion)
+	found, err := FindClusterByToken(ctx, cluster.endpoint(1), DefaultConnectTimeout, token, testVersion)
 	if err != nil || !found.CA.Equal(cluster.ca.Certificate) {
 		t.Fatalf("an open token: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestOnlyAnOpenTokenGetsAProofOfTheCA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := FindClusterByToken(ctx, cluster.seed(1), guess, testVersion); err == nil ||
+	if _, err := FindClusterByToken(ctx, cluster.endpoint(1), DefaultConnectTimeout, guess, testVersion); err == nil ||
 		!strings.Contains(err.Error(), "cannot prove it knows the join token") {
 		t.Errorf("a wrong secret: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestAFollowerHandsAJoinToTheLeader(t *testing.T) {
 	}
 	cluster.openToken(token)
 	ctx := context.Background()
-	found, err := FindClusterByToken(ctx, cluster.seed(1), token, testVersion)
+	found, err := FindClusterByToken(ctx, cluster.endpoint(1), DefaultConnectTimeout, token, testVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,18 +228,18 @@ func TestTheBootstrapKeyProvesNothingOnceTheClusterHasItsUser(t *testing.T) {
 	cluster := newTestCluster(t)
 	cluster.withRealCA()
 	var offer BootstrapOffer
-	request, err := http.NewRequest(http.MethodGet, "https://"+cluster.seed(0)+"/v1/bootstrap", nil)
+	request, err := http.NewRequest(http.MethodGet, "https://"+cluster.endpoint(0)+"/v1/bootstrap", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request.Header.Set(VersionHeader, testVersion)
-	if err := send(uncheckedClient(), request, &offer); err != nil {
+	if err := send(uncheckedClient(DefaultConnectTimeout), request, &offer); err != nil {
 		t.Fatal(err)
 	}
 	if !offer.Bootstrapped || len(offer.Proof) != 0 {
 		t.Errorf("offer %+v", offer)
 	}
-	if _, err := FindCluster(context.Background(), cluster.seed(0), []byte("join"), testVersion); !errors.Is(err, ErrBootstrapped) {
+	if _, err := FindCluster(context.Background(), cluster.endpoint(0), DefaultConnectTimeout, []byte("join"), testVersion); !errors.Is(err, ErrBootstrapped) {
 		t.Errorf("a bootstrap after the user: %v", err)
 	}
 }

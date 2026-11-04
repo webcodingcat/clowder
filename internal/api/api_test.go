@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -278,13 +279,13 @@ func (c *testCluster) userCertificate(name string) tls.Certificate {
 	})
 }
 
-// client connects as a user to the given hosts' servers.
-func (c *testCluster) client(certificate tls.Certificate, version string, hosts ...int) *Client {
-	var seeds []string
-	for _, host := range hosts {
-		seeds = append(seeds, c.servers[host].Listener.Addr().String())
+// client connects as a user to the given servers.
+func (c *testCluster) client(certificate tls.Certificate, version string, ids ...int) *Client {
+	var endpoints []string
+	for _, id := range ids {
+		endpoints = append(endpoints, c.servers[id].Listener.Addr().String())
 	}
-	return NewClient(seeds, certificate, c.ca.Certificate, version)
+	return NewClient(endpoints, time.Second, certificate, c.ca.Certificate, version)
 }
 
 func statusOf(err error) int {
@@ -474,7 +475,7 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 	}
 }
 
-func TestTheClientTriesTheNextSeed(t *testing.T) {
+func TestTheClientTriesTheNextEndpoint(t *testing.T) {
 	cluster := newTestCluster(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -482,8 +483,8 @@ func TestTheClientTriesTheNextSeed(t *testing.T) {
 	}
 	dead := listener.Addr().String()
 	_ = listener.Close() // nobody listens here now
-	seeds := []string{dead, cluster.servers[0].Listener.Addr().String()}
-	client := NewClient(seeds, cluster.userCertificate("alice"), cluster.ca.Certificate, testVersion)
+	endpoints := []string{dead, cluster.servers[0].Listener.Addr().String()}
+	client := NewClient(endpoints, time.Second, cluster.userCertificate("alice"), cluster.ca.Certificate, testVersion)
 	var users []UserInfo
 	if err := client.Get(context.Background(), "/v1/users", &users); err != nil {
 		t.Fatal(err)
@@ -491,16 +492,102 @@ func TestTheClientTriesTheNextSeed(t *testing.T) {
 	if len(users) != 1 || users[0].Name != "alice" {
 		t.Errorf("users %+v", users)
 	}
-	// a write that could not leave goes on to the next seed
+	// a write that could not leave goes on to the next endpoint
 	if _, err := client.Post(context.Background(), "/v1/hosts/0/drain", nil); err != nil {
-		t.Errorf("a write after an unreachable seed: %v", err)
+		t.Errorf("a write after an unreachable endpoint: %v", err)
+	}
+}
+
+// silentEndpoint takes connections and never answers, as a host whose network
+// hangs; it counts the connections it took.
+func silentEndpoint(t *testing.T) (string, *atomic.Int32) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var taken atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var held []net.Conn
+		defer func() {
+			for _, connection := range held {
+				_ = connection.Close()
+			}
+		}()
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			taken.Add(1)
+			held = append(held, connection)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		<-done
+	})
+	return listener.Addr().String(), &taken
+}
+
+func TestTheClientGivesUpOnASilentEndpointAfterTheConnectTimeout(t *testing.T) {
+	cluster := newTestCluster(t)
+	silent, _ := silentEndpoint(t)
+	endpoints := []string{silent, cluster.servers[0].Listener.Addr().String()}
+	// a client each, so that each request meets the silent endpoint first
+	newClient := func() *Client {
+		return NewClient(endpoints, 200*time.Millisecond, cluster.userCertificate("alice"), cluster.ca.Certificate, testVersion)
+	}
+	started := time.Now()
+	if err := newClient().Get(context.Background(), "/v1/users", &[]UserInfo{}); err != nil {
+		t.Errorf("a read after a silent endpoint: %v", err)
+	}
+	// a write that never got past the handshake goes on as well
+	if _, err := newClient().Post(context.Background(), "/v1/hosts/0/drain", nil); err != nil {
+		t.Errorf("a write after a silent endpoint: %v", err)
+	}
+	if err := newClient().Stream(context.Background(), "/v1/users", io.Discard); err != nil {
+		t.Errorf("a stream after a silent endpoint: %v", err)
+	}
+	// generous for the race detector; the request's own timeout would be
+	// 30 s each
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Errorf("three requests took %s", elapsed)
+	}
+}
+
+func TestTheClientStartsWithTheEndpointThatAnsweredLast(t *testing.T) {
+	cluster := newTestCluster(t)
+	silent, taken := silentEndpoint(t)
+	endpoints := []string{silent, cluster.servers[0].Listener.Addr().String()}
+	client := NewClient(endpoints, 200*time.Millisecond, cluster.userCertificate("alice"), cluster.ca.Certificate, testVersion)
+	for range 3 {
+		if err := client.Get(context.Background(), "/v1/users", &[]UserInfo{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := taken.Load(); got != 1 {
+		t.Errorf("the silent endpoint was tried %d times, want once", got)
+	}
+}
+
+func TestTheHostsShowThePublicAddressWhereThereIsOne(t *testing.T) {
+	current := &state.State{Hosts: map[state.HostID]*state.Host{
+		0: {ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), PublicAddress: netip.MustParseAddr("203.0.113.10")},
+		1: {ID: 1, Name: "node1", Underlay: netip.MustParseAddr("198.51.100.3")},
+	}}
+	hosts := hostInfos(current)
+	if hosts[0].PublicAddress != "203.0.113.10" || hosts[1].PublicAddress != "" {
+		t.Errorf("hosts %+v", hosts)
 	}
 }
 
 func TestTheClientNamesAClusterOfAnotherCA(t *testing.T) {
 	cluster, other := newTestCluster(t), newTestCluster(t)
 	// credentials of the other cluster, against this one's agent
-	client := NewClient([]string{cluster.servers[0].Listener.Addr().String()},
+	client := NewClient([]string{cluster.servers[0].Listener.Addr().String()}, time.Second,
 		other.userCertificate("alice"), other.ca.Certificate, testVersion)
 	err := client.Get(context.Background(), "/v1/users", &[]UserInfo{})
 	if err == nil || !strings.Contains(err.Error(), "belongs to another cluster than your credentials") {
@@ -539,25 +626,25 @@ func TestAWriteThatLeftIsNotSentAgain(t *testing.T) {
 	hangsUp.StartTLS()
 	defer hangsUp.Close()
 
-	seeds := []string{hangsUp.Listener.Addr().String(), cluster.servers[0].Listener.Addr().String()}
-	client := NewClient(seeds, cluster.userCertificate("alice"), cluster.ca.Certificate, testVersion)
+	endpoints := []string{hangsUp.Listener.Addr().String(), cluster.servers[0].Listener.Addr().String()}
+	client := NewClient(endpoints, time.Second, cluster.userCertificate("alice"), cluster.ca.Certificate, testVersion)
 	_, err := client.Post(context.Background(), "/v1/hosts/0/drain", nil)
 	if err == nil || !strings.Contains(err.Error(), "may have gone through") {
 		t.Errorf("want a warning that the write may have gone through, got %v", err)
 	}
 	cluster.clusters[0].Read(func(current *state.State) {
 		if current.Hosts[0].Phase != state.Active {
-			t.Error("the write went to the second seed as well")
+			t.Error("the write went to the second endpoint as well")
 		}
 	})
 }
 
 func TestAddressAddsTheAPIPort(t *testing.T) {
-	for seed, want := range map[string]string{
+	for endpoint, want := range map[string]string{
 		"10.0.0.2": "10.0.0.2:" + strconv.Itoa(Port), "node0.example.com": "node0.example.com:7443", "10.0.0.2:9000": "10.0.0.2:9000",
 	} {
-		if got := Address(seed); got != want {
-			t.Errorf("%s: %s", seed, got)
+		if got := Address(endpoint); got != want {
+			t.Errorf("%s: %s", endpoint, got)
 		}
 	}
 }

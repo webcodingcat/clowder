@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -19,27 +21,58 @@ import (
 	"github.com/webcodingcat/clowder/internal/pki"
 )
 
-// Client is the CLI's connection to the cluster. It tries the seeds in turn
-// until one answers, and after a write it asks reads to wait for that write,
-// whichever agent answers them.
+// Client is the CLI's connection to the cluster. It tries the endpoints in
+// turn until one answers (it learns no other agents), and after a write it
+// asks reads to wait for that write, whichever agent answers them.
 type Client struct {
-	seeds []string
+	endpoints []string
 	// http answers within its timeout; streaming has none (logs that follow)
 	http      *http.Client
 	streaming *http.Client
 	version   string
 	// written is the index of this client's last write.
 	written uint64
+	// answered is the endpoint that answered last; the next request tries it
+	// first. Atomic: a watch runs beside the other requests.
+	answered atomic.Pointer[string]
 }
 
-// NewClient connects with a user's certificate to the agents at seeds.
-func NewClient(seeds []string, certificate tls.Certificate, ca *x509.Certificate, version string) *Client {
-	transport := &http.Transport{TLSClientConfig: pki.ClientTLSToHosts(certificate, ca, nil)}
+// NewClient connects with a user's certificate to the agents at endpoints.
+// An endpoint that has not connected within connectTimeout, or not finished
+// TLS within as long again, is skipped like one that refused it: a host cut
+// off drops the packets, and without a timeout of its own the whole
+// request's would pass before the next endpoint is tried.
+func NewClient(endpoints []string, connectTimeout time.Duration, certificate tls.Certificate, ca *x509.Certificate,
+	version string,
+) *Client {
+	transport := endpointTransport(pki.ClientTLSToHosts(certificate, ca, nil), connectTimeout)
 	return &Client{
-		seeds:     seeds,
+		endpoints: endpoints,
 		version:   version,
-		http:      &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		http:      &http.Client{Timeout: answerTimeout, Transport: transport},
 		streaming: &http.Client{Transport: transport},
+	}
+}
+
+// answerTimeout is how long the CLI waits for a request, its connection
+// included.
+const answerTimeout = 30 * time.Second
+
+// DefaultConnectTimeout is how long the CLI waits for an endpoint to
+// connect, and again for TLS, unless --connect-timeout says otherwise: long
+// enough for a TLS handshake across the internet, short enough that a host
+// cut off (whose packets are dropped) does not hold up the next endpoint for
+// long.
+const DefaultConnectTimeout = 5 * time.Second
+
+// endpointTransport is the transport of every client that asks endpoints:
+// the TCP connection and the TLS handshake each have connectTimeout, so an
+// endpoint that does not answer fails soon and the next is tried.
+func endpointTransport(tlsConfig *tls.Config, connectTimeout time.Duration) *http.Transport {
+	return &http.Transport{
+		TLSClientConfig:     tlsConfig,
+		DialContext:         (&net.Dialer{Timeout: connectTimeout}).DialContext,
+		TLSHandshakeTimeout: connectTimeout,
 	}
 }
 
@@ -175,25 +208,26 @@ func (c *Client) Watch(ctx context.Context, path string, each func(event WatchEv
 	}
 }
 
-// openStream asks the first seed that answers for path, without a timeout:
+// openStream asks the first endpoint that answers for path, without a timeout:
 // the answer streams until ctx ends. An answer other than 2xx becomes a
 // StatusError.
 func (c *Client) openStream(ctx context.Context, path string) (io.ReadCloser, error) {
 	var unreachable []string
-	for _, seed := range c.seeds {
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+Address(seed)+path, nil)
+	for _, endpoint := range c.inTurn() {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+Address(endpoint)+path, nil)
 		if err != nil {
-			return nil, fmt.Errorf("ask %s: %w", seed, err)
+			return nil, fmt.Errorf("ask %s: %w", endpoint, err)
 		}
 		request.Header.Set(VersionHeader, c.version)
 		response, err := c.streaming.Do(request)
 		if isForeignCA(err) {
-			return nil, foreignCA(seed, err)
+			return nil, foreignCA(endpoint, err)
 		}
 		if err != nil {
-			unreachable = append(unreachable, fmt.Sprintf("%s: %v", seed, err))
+			unreachable = append(unreachable, fmt.Sprintf("%s: %v", endpoint, err))
 			continue
 		}
+		c.answered.Store(&endpoint)
 		if response.StatusCode >= 300 {
 			defer func() { _ = response.Body.Close() }() // read for the message
 			return nil, statusError(response)
@@ -201,6 +235,21 @@ func (c *Client) openStream(ctx context.Context, path string) (io.ReadCloser, er
 		return response.Body, nil
 	}
 	return nil, fmt.Errorf("no agent answered:\n  %s", strings.Join(unreachable, "\n  "))
+}
+
+// inTurn is the endpoints in the order to try them: the one that answered
+// last first, so that an endpoint that is down costs its connect timeout once per
+// command, not once per request.
+func (c *Client) inTurn() []string {
+	last := c.answered.Load()
+	if last == nil {
+		return c.endpoints
+	}
+	index := slices.Index(c.endpoints, *last)
+	if index <= 0 {
+		return c.endpoints
+	}
+	return append(slices.Clone(c.endpoints[index:]), c.endpoints[:index]...)
 }
 
 // sendChange sends a request that changes the state, and remembers its
@@ -222,20 +271,20 @@ func (c *Client) sendChange(ctx context.Context, method, path string, in any) (W
 	return written, nil
 }
 
-// do sends a request to the first seed that answers. A seed that cannot be
+// do sends a request to the first endpoint that answers. An endpoint that cannot be
 // reached is skipped; an answer, even an error, ends the search.
 func (c *Client) do(ctx context.Context, method, path string, body []byte, out any) error {
 	var unreachable []string
-	for _, seed := range c.seeds {
-		request, err := http.NewRequestWithContext(ctx, method, "https://"+Address(seed)+path, bytes.NewReader(body))
+	for _, endpoint := range c.inTurn() {
+		request, err := http.NewRequestWithContext(ctx, method, "https://"+Address(endpoint)+path, bytes.NewReader(body))
 		if err != nil {
-			return fmt.Errorf("ask %s: %w", seed, err)
+			return fmt.Errorf("ask %s: %w", endpoint, err)
 		}
 		request.Header.Set(VersionHeader, c.version)
 		if method == http.MethodGet && c.written > 0 {
 			request.Header.Set(MinIndexHeader, strconv.FormatUint(c.written, 10))
 		}
-		// a write goes to the next seed only if it never left: one that was
+		// a write goes to the next endpoint only if it never left: one that was
 		// sent may have committed even though no answer came back
 		var sent atomic.Bool // set in the transport's goroutine
 		request = request.WithContext(httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
@@ -245,13 +294,16 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 		var statusError *StatusError
 		switch {
 		case err == nil || errors.As(err, &statusError):
+			// any answer, an error too, shows the endpoint is reachable: all
+			// that inTurn goes by
+			c.answered.Store(&endpoint)
 			return err
 		case isForeignCA(err):
-			return foreignCA(seed, err)
+			return foreignCA(endpoint, err)
 		case sent.Load() && method != http.MethodGet:
-			return fmt.Errorf("%s: %w (the write may have gone through: look before you repeat it)", seed, err)
+			return fmt.Errorf("%s: %w (the write may have gone through: look before you repeat it)", endpoint, err)
 		}
-		unreachable = append(unreachable, fmt.Sprintf("%s: %v", seed, err))
+		unreachable = append(unreachable, fmt.Sprintf("%s: %v", endpoint, err))
 	}
 	return fmt.Errorf("no agent answered:\n  %s", strings.Join(unreachable, "\n  "))
 }
@@ -264,10 +316,10 @@ func isForeignCA(err error) bool {
 }
 
 // foreignCA says what a foreign CA most likely means, instead of x509's
-// words alone. The next seed is not tried: it belongs to the same cluster.
-func foreignCA(seed string, err error) error {
+// words alone. The next endpoint is not tried: it belongs to the same cluster.
+func foreignCA(endpoint string, err error) error {
 	return fmt.Errorf("%s belongs to another cluster than your credentials: a cluster of the same name, "+
-		"or one set up anew? (%w)", seed, err)
+		"or one set up anew? (%w)", endpoint, err)
 }
 
 // statusError reads an answer that is not 2xx: the API's Error, or the text.

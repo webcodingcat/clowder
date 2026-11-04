@@ -92,7 +92,7 @@ func restartRecreatesAndTheWatchSeesIt(t *testing.T, server host) {
 	app := server.service(t, "app")
 	generation := stackInfo(t, "shop").generation
 	mustClowder(t, "stack", "restart", "shop")
-	// a restart keeps the generation, and the seed may be a follower that
+	// a restart keeps the generation, and the host asked may be a follower that
 	// still shows the stack running from before: the new container shows
 	// that the restart happened
 	eventually(t, stackDeadline, "app's container recreated", func() error {

@@ -230,6 +230,9 @@ Phase 4 (comfort and operations):
   remove is kept.
 - A disabled voter keeps its vote until it is removed: with more than three hosts, an
   active host that does not vote does not take its place.
+- The CLI learns no hosts from the cluster: the user keeps `endpoints` in `cluster.yaml`
+  current after each join and remove, or the CLI cannot reach the cluster while the
+  endpoints it lists are down.
 - A published port whose stack moved while the agent of the ingress host was down keeps
   its connections to the old host until they end: the agent forgets connections only
   when it sees a target change.

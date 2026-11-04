@@ -157,7 +157,7 @@ type Host struct {
 	ServerRefChecked bool       `json:"server_ref_checked,omitempty"`
 	Underlay         netip.Addr `json:"underlay"`
 	// PublicAddress is where users reach the host's API when the underlay is
-	// a private network; the CLI learns it from the cluster.
+	// a private network.
 	PublicAddress netip.Addr `json:"public_address,omitzero"`
 	WGPublicKey   string     `json:"wg_public_key"`
 	// CertificateSerial is the host certificate; removing the host revokes it,

@@ -27,14 +27,14 @@ func newUser(g *globals) *cobra.Command {
 }
 
 func newUserRecover(g *globals) *cobra.Command {
-	var codeText, name, seed string
+	var codeText, name, endpoint string
 	command := &cobra.Command{
 		Use:   "recover <user>",
 		Short: "Get new credentials with a code from a host; your other certificates stop working",
 		Long: "Gets new credentials without the old ones, with a code from a host (clowderd user\n" +
 			"recovery-code <user>, as root there). The cluster revokes every other certificate of the\n" +
-			"user, so a stolen laptop is locked out. The cluster's name and seeds come from the cluster\n" +
-			"directory; without one, give --name and --seed. Credentials under that name are replaced.",
+			"user, so a stolen laptop is locked out. The cluster's name and endpoints come from the cluster\n" +
+			"directory; without one, give --name and --endpoint. Credentials under that name are replaced.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			user := args[0]
@@ -45,7 +45,7 @@ func newUserRecover(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			name, seeds, err := recoveryTarget(g.cluster, name, seed)
+			name, endpoints, err := recoveryTarget(g.cluster, name, endpoint)
 			if err != nil {
 				return err
 			}
@@ -54,7 +54,7 @@ func newUserRecover(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cluster, err := api.FindClusterByCode(cmd.Context(), seeds, user, code, buildinfo.Version)
+			cluster, err := api.FindClusterByCode(cmd.Context(), endpoints, g.connectTimeout, user, code, buildinfo.Version)
 			if err != nil {
 				return err
 			}
@@ -88,31 +88,31 @@ func newUserRecover(g *globals) *cobra.Command {
 	}
 	command.Flags().StringVar(&codeText, "code", "", "the code from clowderd user recovery-code on a host")
 	command.Flags().StringVar(&name, "name", "", "the cluster's name (default: from the cluster directory)")
-	command.Flags().StringVar(&seed, "seed", "", "address of a host (default: the cluster directory's seeds)")
+	command.Flags().StringVar(&endpoint, "endpoint", "", "address of a host (default: the cluster directory's endpoints)")
 	_ = command.MarkFlagRequired("code") // the flag exists; this cannot fail
 	return command
 }
 
-// recoveryTarget is the cluster a recovery goes to: its name and seeds
+// recoveryTarget is the cluster a recovery goes to: its name and endpoints
 // from the flags, and what they leave out from the cluster directory. A
 // recovery may well start on a machine without one.
-func recoveryTarget(clusterFlag, name, seed string) (string, []string, error) {
-	if name != "" && seed != "" {
-		return name, []string{seed}, nil
+func recoveryTarget(clusterFlag, name, endpoint string) (string, []string, error) {
+	if name != "" && endpoint != "" {
+		return name, []string{endpoint}, nil
 	}
 	path, err := clusterdir.Find(clusterFlag)
 	if err != nil {
-		return "", nil, usage("give --name and --seed, or run where the cluster directory is: %w", err)
+		return "", nil, usage("give --name and --endpoint, or run where the cluster directory is: %w", err)
 	}
 	directory, err := clusterdir.Load(path)
 	if err != nil {
 		return "", nil, err
 	}
-	seeds := directory.Config.Seeds
-	if seed != "" {
-		seeds = []string{seed}
+	endpoints := directory.Config.Endpoints
+	if endpoint != "" {
+		endpoints = []string{endpoint}
 	}
-	return cmp.Or(name, directory.Config.Name), seeds, nil
+	return cmp.Or(name, directory.Config.Name), endpoints, nil
 }
 
 // hasCredentials tells whether there are credentials for the cluster of

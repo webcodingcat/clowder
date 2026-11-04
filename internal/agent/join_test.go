@@ -230,7 +230,7 @@ func (j *joinTest) joinedFiles(key ed25519.PrivateKey) Files {
 func TestAJoinGoesOnFromItsAnswerAndKeepsTheMeshForTheFirstStart(t *testing.T) {
 	j := newJoinTest(t)
 	files := j.joinedFiles(j.key)
-	// no seed: with the answer in join.json, Join asks the cluster nothing
+	// no agent to join through: with the answer in join.json, Join asks the cluster nothing
 	options := JoinOptions{Name: "node2", Underlay: netip.MustParseAddr("10.0.0.4"), ServerRef: "42"}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if err := Join(context.Background(), files, options, &fakeNetwork{interfaceFails: true}, logger); err == nil {

@@ -58,12 +58,12 @@ func TestAUserRecoversWithACodeFromAHost(t *testing.T) {
 	}
 }
 
-func TestARecoveryWithoutAClusterDirectoryNeedsNameAndSeed(t *testing.T) {
+func TestARecoveryWithoutAClusterDirectoryNeedsNameAndEndpoint(t *testing.T) {
 	startCluster(t)
 	t.Chdir(t.TempDir()) // no cluster.yaml here
 	_, err := run(t, "user", "recover", "alice", "--code", codeOf(recoverycode.ForRecover, "alice"))
-	if ExitCode(err) != 2 || !strings.Contains(err.Error(), "--name and --seed") {
-		t.Errorf("want a wrong call that names --name and --seed, got %v", err)
+	if ExitCode(err) != 2 || !strings.Contains(err.Error(), "--name and --endpoint") {
+		t.Errorf("want a wrong call that names --name and --endpoint, got %v", err)
 	}
 }
 

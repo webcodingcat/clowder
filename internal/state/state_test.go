@@ -527,7 +527,7 @@ func TestAUsedCodeGoesAWhileAfterItExpired(t *testing.T) {
 
 func testConfig() clusterspec.Config {
 	return clusterspec.Config{
-		Name: "prod", Seeds: []string{"10.0.0.2"},
+		Name: "prod", Endpoints: []string{"10.0.0.2"},
 		Hoster:         clusterspec.Hoster{Type: "hetzner", Token: "hoster.token"},
 		Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.11"},
 		StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},

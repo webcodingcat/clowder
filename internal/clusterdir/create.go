@@ -13,8 +13,8 @@ import (
 type NewDirectory struct {
 	Path string
 	// Name is the cluster's name in cluster.yaml.
-	Name string
-	Seed string
+	Name     string
+	Endpoint string
 }
 
 // CheckBootstrap tells whether a bootstrap may write a cluster of that name
@@ -52,7 +52,7 @@ func checkNoConfig(path string) error {
 }
 
 // Create writes cluster.yaml into a new cluster directory: the name and the
-// seed, and as comments what the first cluster apply
+// endpoint, and as comments what the first cluster apply
 // still needs. It refuses a directory that has a cluster.yaml already.
 func Create(directory NewDirectory) error {
 	if err := checkNoConfig(directory.Path); err != nil {
@@ -72,7 +72,10 @@ func configTemplate(directory NewDirectory) string {
 		"# stands here encrypted, tagged !secret: clowder secret encrypt --cluster-yaml",
 		"# writes one, and only the cluster opens it.",
 		"name: " + directory.Name,
-		"seeds: [" + directory.Seed + "]",
+		"# The CLI tries the endpoints in turn and learns no others: add each host that",
+		"# joins (clowder host list shows their addresses), so that the CLI reaches the",
+		"# cluster while this first host is down.",
+		"endpoints: [" + directory.Endpoint + "]",
 		"# Before the first clowder cluster apply, fill in the rest (clowder cluster",
 		"# schema has every field), for example:",
 		"# hoster:",

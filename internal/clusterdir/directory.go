@@ -55,7 +55,7 @@ func Find(flag string) (string, error) {
 // (clusterspec.SecretPlaces), and decodes the rest strictly. It does not
 // run clusterspec.Check: a cluster.yaml that is not complete yet, as the
 // bootstrap writes it, still names the cluster for the commands that need
-// only its name and seeds. cluster apply and diff check it.
+// only its name and endpoints. cluster apply and diff check it.
 func Load(dir string) (*Directory, error) {
 	content, err := os.ReadFile(filepath.Join(dir, ConfigFile))
 	if err != nil {
