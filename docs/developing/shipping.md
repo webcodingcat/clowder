@@ -47,9 +47,10 @@ with them.
 ## CI
 
 `.github/workflows/ci.yml` runs `bin/dev lint`, `bin/dev test`, `bin/dev test-tools` and
-`bin/dev package` on every push and pull request and keeps `dist/` as an artifact. `test-tools` checks the renderers' golden files with Debian's `nft -c`,
-`drbdadm` and `docker-compose` (`test/tools/check-golden-files.sh`). The live tests need
-`/dev/kvm` and stay manual.
+`bin/dev package` on every push and pull request and keeps `dist/` as an artifact.
+`test-tools` checks the renderers' golden files with Debian's `nft -c`, `drbdadm` and
+`docker-compose` (`test/tools/check-golden-files.sh`). The live tests need `/dev/kvm` and
+stay manual.
 
 ## Releases
 
@@ -76,10 +77,10 @@ The workflow needs two secrets in this repository:
 `publish.sh` imports the key into a throw-away keyring and publishes the public half as
 `clowder.asc`. The packages stay in the APT repository's pool, and the index lists every
 version there, so a host pinned to an older release still installs it (Debian's reprepro
-5.3 in Debian 13 has no `Limit` and keeps one version per package, so it is not used). A release candidate (`v1.2.3-rc1`,
-Debian version `1.2.3~rc1`) lands in the same distribution; only a host without a pin
-would take it. The APT repository still holds reprepro's `conf/` and `db/` from `v0.0.1`;
-nothing reads them.
+5.3 in Debian 13 has no `Limit` and keeps one version per package, so it is not used). A
+release candidate (`v1.2.3-rc1`, Debian version `1.2.3~rc1`) lands in the same
+distribution; only a host without a pin would take it. The APT repository still holds
+reprepro's `conf/` and `db/` from `v0.0.1`; nothing reads them.
 
 ### Release checklist
 

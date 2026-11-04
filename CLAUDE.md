@@ -24,7 +24,7 @@ are not needed on the host.
 | `bin/dev build` | `clowderd` for Linux, `clowder` for Linux, macOS and Windows into `dist/` |
 | `bin/dev package` | build, then the Debian packages into `dist/` |
 | `bin/dev all` | lint, test, test-tools, package – what CI runs |
-| `bin/dev live` | the live tests: a cluster of three hosts from `examples/hetzner` in an HLab lab of their own, driven by `test/live` (about an hour; `HLAB` points at HLab's `bin/hlab`, needs `/dev/kvm`): `live up` makes the hosts, `live run [-run <test>]` runs the scenarios on them, `live down` removes them; `bin/dev live` does all three; `bin/dev live release <tag>` tests a published release (Shipping, Release checklist) |
+| `bin/dev live` | the live tests: a cluster of three hosts from `examples/hetzner` in an HLab lab of their own, driven by `test/live` (about two hours; `HLAB` points at HLab's `bin/hlab`, needs `/dev/kvm`): `live up` makes the hosts, `live run [-run <test>]` runs the scenarios on them, `live down` removes them; `bin/dev live` does all three; `bin/dev live release <tag>` tests a published release (Shipping, Release checklist) |
 
 Run the live tests only at the end of a piece of work, on its finished state. A lock keeps
 two runs apart; after a failure, `bin/dev live run -run <test>` runs one scenario again on

@@ -30,12 +30,19 @@ func main() {
 	slog.SetDefault(logging.New(os.Stderr, logging.JSON, slog.LevelInfo))
 	if err := agent.NewRoot().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "clowderd:", err)
-		switch {
-		case errors.Is(err, state.ErrUnreadable):
-			os.Exit(exitUnreadable)
-		case errors.Is(err, agent.ErrRetired):
-			os.Exit(exitRetired)
-		}
-		os.Exit(1)
+		os.Exit(exitStatus(err))
 	}
+}
+
+// exitStatus is the status clowderd ends with after err. The errors after
+// which systemd must not restart the agent get a status of their own; any
+// other error gets 1.
+func exitStatus(err error) int {
+	switch {
+	case errors.Is(err, state.ErrUnreadable):
+		return exitUnreadable
+	case errors.Is(err, agent.ErrRetired):
+		return exitRetired
+	}
+	return 1
 }

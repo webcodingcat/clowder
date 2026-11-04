@@ -5,9 +5,10 @@ RAM). It replicates volumes with DRBD 9, keeps the client's real IP behind a Flo
 places services by priority and fences failed hosts through the hoster's API. The first
 hoster is Hetzner Cloud.
 
-**Status:** under construction; hosts join, stacks move between them, and a failed host
-is fenced and its stacks start elsewhere. [docs/roadmap.md](docs/roadmap.md) says how far
-it is. Until `v1.0.0`, a new release may need a cluster set up anew.
+**Status:** under construction. Three hosts and more work: hosts join, stacks move between
+them with their data, and a failed host is fenced and its stacks start elsewhere. Backups
+come next. [docs/roadmap.md](docs/roadmap.md) says how far it is. Until `v1.0.0`, a new
+release may need a cluster set up anew.
 
 ## What it does
 
@@ -31,7 +32,9 @@ it is. Until `v1.0.0`, a new release may need a cluster set up anew.
   `X-Forwarded-For`. A certificate comes from Let's Encrypt once the domain's DNS points at
   the Floating IP (not through a proxying CDN). The cluster accepts Let's Encrypt's terms
   of service for you when it makes its account.
-- **The Floating IP stays on the ingress host,** also when someone moves it by hand.
+- **The Floating IP stays on the ingress host,** also when someone moves it by hand, and
+  follows to another host when the ingress host drains or fails. Every host routes to
+  every stack, so the stacks need not run where the Floating IP is.
 - **Alerts** to Discord, email or a webhook, with an optional heartbeat;
   **metrics** for Prometheus on every host, which only the cluster's hosts reach.
 

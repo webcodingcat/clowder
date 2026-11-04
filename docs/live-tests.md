@@ -8,7 +8,7 @@ those tools and from where the tools reach the hosts. Point `HLAB` at its wrappe
 
 ```bash
 export HLAB=/path/to/hlab/bin/hlab
-bin/dev live                        # up, run, and down once it passes; about an hour
+bin/dev live                        # up, run, and down once it passes; about two hours
 bin/dev live up                     # package, make the first host, bootstrap, two more join
 bin/dev live run                    # every scenario on that cluster
 bin/dev live run -run TestIngress   # one scenario; the flags go to go test
@@ -22,7 +22,8 @@ against the real tools, the packages.
 
 `up`, `run` and `down` split the work so a fix costs only the scenario it touches: after
 `up` the host stays, and `run -run <test>` runs a scenario again on it as often as
-needed. A lock in the volume (`flock` on `.lock`, held while `bin/dev` runs) refuses a
+needed. After `up <tag>`, `run` refuses a checkout that is not the tag's, as the tests
+must match the release on the hosts. A lock in the volume (`flock` on `.lock`, held while `bin/dev` runs) refuses a
 second `bin/dev live` while one runs, since both would share the lab and the volume.
 
 ## What `bin/dev live up` sets up
@@ -36,8 +37,9 @@ second `bin/dev live` while one runs, since both would share the lab and the vol
   password.
 - It runs a mail server for the alerts on `192.0.2.2:1025`: mailpit, with STARTTLS from
   the registry's certificate, any login, and its API on `:8025`.
-- It applies `examples/hetzner` with `admin_cidrs` = `192.0.2.2/32`, a third storage
-  class `small` of 10 GB, the published port `udp/9987`, and the test hook: the package's
+- It applies `examples/hetzner` with `admin_cidrs` = `192.0.2.2/32`, the storage class
+  `bulk` at 30 GB (for the 20 GB volume of `TestNoFalseFailover`), a third storage class
+  `small` of 10 GB, the published port `udp/9987`, and the test hook: the package's
   URL and SHA-256. With a tag there is no hook: `clowderd_version` names the release.
 - It copies OpenTofu's binary to `/work/bin`, for the tests that add and remove hosts.
 - It runs `TestSetup`, which bootstraps the cluster and has two more hosts join.
@@ -48,7 +50,9 @@ host is left: `down` removes them first, with the hosts of `/work/hosts.tfvars`.
 
 Everything a run keeps is in the Docker volume `clowder-live`: the OpenTofu state and the
 joining hosts' variables (`hosts.tfvars`, with their tokens), a throw-away SSH key and
-`known_hosts`, the CLI, the registry's files, the cluster and stack directories. A failed scenario leaves the host and what it made for a look.
+`known_hosts`, the CLI, the registry's files, the cluster and stack directories, and the
+release's tag after `up <tag>`. A failed scenario leaves the host and what it made for a
+look.
 
 ## The scenarios
 
@@ -110,10 +114,16 @@ reads within a step.
 
 ### `TestReplace`
 
+The stack `steady` (a volume of two replicas) runs on the first host from the first step to
+the last, with a copy on `clowder2`, the host that is replaced.
+
 1. A fourth host, `clowder3`, joins: active, without a vote (three vote).
 2. `clowder2` is removed; removing `clowder3` then is refused, as it would leave two.
+   `clowder2` leaves: its copy moves to `clowder3`, and then it is removed.
 3. `clowder4` joins in `clowder2`'s place (OpenTofu removes its server) and takes its ID,
    once every host forgot it as a DRBD peer.
+4. `steady` ran on throughout, in the same container, with its data, and writes.
+5. The stack goes, and the joined hosts are drained again.
 
 ### `TestPlacement`
 
@@ -251,9 +261,11 @@ replicas) and `scratch` (replicas 0) run.
    The fault is removed once it is fenced, as it would outlive the power cycle.
 3. The hoster's API answers 503 and the host freezes: it is `failed`, and for two minutes
    nothing fails over. Then the API answers again, the test powers the server off as a
-   user who checks, and `host fence-confirm` lets `keeper` run elsewhere.
-4. That was the third fence within the hour: the host stays off (`disabled`), until
-   `host enable`; then it comes back.
+   user who checks, and `host fence-confirm` lets `keeper` run elsewhere. Meanwhile the
+   alert `fencing-blocked` is open.
+4. That was the third fence within the hour: the host stays off (`disabled`), with the
+   alert `host-disabled`, until `host enable`; then it comes back, and both alerts are
+   resolved.
 5. Another host, cut off for a little longer than the detection takes and then back: it
    was either fenced and powered off, or never fenced and not rebooted (its boot ID says
    which), and `keeper` runs once.
@@ -261,12 +273,12 @@ replicas) and `scratch` (replicas 0) run.
 
 ### `TestNoFalseFailover`
 
-1. `bulk` (a volume of two replicas) gets its second copy, which resyncs during the next
-   steps.
+1. `bulk` (a volume of 20 GB with two replicas) gets its second copy, which resyncs at
+   the default resync rate during the next steps, and is still resyncing after them.
 2. The network between the leader and one host is cut: no host fails within the
    detection time and more.
 3. Every host pauses for 20 s: none fails, none reboots, `bulk`'s container stays.
-4. The resync ends, with every host active.
+4. The resync ends, with every host active (the test logs how long it took).
 
 ### `TestCrashingAgent`
 
@@ -330,8 +342,10 @@ host.
    `restore-pending`, and its stack waits for a restore.
 5. The retired servers, switched on, start neither Raft nor a container: their agent ended
    with status 4 and says why.
-6. The stacks go, new servers under the same names join, three hosts vote, `no-ha` is
-   resolved, and the joined hosts are drained again.
+6. `lost` goes. New servers under the same names join while `keeper` runs: the cluster of
+   one host grows to three, `keeper`'s volume gets its second copy and its tiebreaker,
+   its container stays, and three hosts vote; `no-ha` is resolved. Then `keeper` goes, and
+   the joined hosts are drained again.
 
 A split brain has no scenario: with DRBD's quorum neither a fault of the lab nor a hand on
 the hosts makes one. A copy promoted (`--force`) apart from the newer data has no quorum,

@@ -373,6 +373,20 @@ fetch_release_cli() {
   echo "clowderd_version = \"$(package_version "${tag}")\""
 }
 
+# at_release_checkout <tag>: Fail unless the checkout is the tag's commit,
+# without changes: the tests of a release come from the checkout.
+at_release_checkout() {
+  local tag="$1"
+  if [[ "$(cd "${ROOT}" && git rev-parse "${tag}^{commit}" 2>/dev/null)" != "$(cd "${ROOT}" && git rev-parse HEAD)" ]]; then
+    echo "bin/dev live: the hosts run the release ${tag}; check out its tag first" >&2
+    return 1
+  fi
+  if [[ -n "$(cd "${ROOT}" && git status --porcelain)" ]]; then
+    echo "bin/dev live: the tests come from the checkout; commit or stash its changes first" >&2
+    return 1
+  fi
+}
+
 # cmd_live_up [<tag>]: Make the first host in the lab, started unless it runs;
 # TestSetup bootstraps its cluster and has two more hosts join, with
 # OpenTofu copied to /work/bin. The registry and the mail server run on
@@ -387,20 +401,15 @@ cmd_live_up() {
     return 1
   fi
   if [[ -n "${tag}" ]]; then
-    if [[ "$(cd "${ROOT}" && git rev-parse "${tag}^{commit}" 2>/dev/null)" != "$(cd "${ROOT}" && git rev-parse HEAD)" ]]; then
-      echo "bin/dev live release: check out the tag ${tag} first" >&2
-      return 1
-    fi
-    if [[ -n "$(cd "${ROOT}" && git status --porcelain)" ]]; then
-      echo "bin/dev live release: the tests come from the checkout; commit or stash its changes first" >&2
-      return 1
-    fi
+    at_release_checkout "${tag}"
   else
     cmd_package
   fi
   live_lab
   in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/* \
     && ssh-keygen -q -t ed25519 -N "" -C clowder-live -f /work/id_ed25519'
+  # live run checks again that the checkout is at this tag
+  printf '%s' "${tag}" | in_lab "${GO_IMAGE}" sh -c 'cat >/work/release-tag'
   if [[ -n "${tag}" ]]; then
     package_variables="$(fetch_release_cli "${tag}")"
   else
@@ -408,10 +417,12 @@ cmd_live_up() {
     in_lab "${GO_IMAGE}" sh -c 'mkdir /work/cli && cp dist/linux-amd64/clowder /work/cli/'
   fi
   public_key="$(in_lab "${GO_IMAGE}" cat /work/id_ed25519.pub)"
+  # bulk holds the 20 GB volume of TestNoFalseFailover (resyncVolumeSize): its
+  # pool is 90 % of the disk, and the placement keeps 20 % of that free
   in_lab "${GO_IMAGE}" sh -c 'cat >/work/live.tfvars' <<EOF
 ssh_public_key  = "${public_key}"
 admin_cidrs     = ["${LAB_ADDRESS}/32"]
-storage_classes = { fast = 20, bulk = 20, small = 10 }
+storage_classes = { fast = 20, bulk = 30, small = 10 }
 published_ports = ["udp/9987"]
 ${package_variables}
 EOF
@@ -429,6 +440,7 @@ EOF
 # cmd_live_run [<go test flags>]: Run the scenarios on the host that
 # bin/dev live up made; it stays, whatever the outcome.
 cmd_live_run() {
+  local tag
   live_lock
   # not live_lab: a lab started now would have no host
   if ! lab_runs; then
@@ -444,6 +456,11 @@ cmd_live_run() {
   if ! container_runs "${LIVE_REGISTRY}" || ! container_runs "${LIVE_MAIL}"; then
     echo "bin/dev live run: the registry or the mail server stopped; bin/dev live down, then up" >&2
     return 1
+  fi
+  # after live up <tag> the hosts run that release, and the tests must match
+  tag="$(in_lab "${GO_IMAGE}" sh -c 'cat /work/release-tag 2>/dev/null || true' </dev/null)"
+  if [[ -n "${tag}" ]]; then
+    at_release_checkout "${tag}"
   fi
   live_go_test -skip '^TestSetup$' "$@" \
     || live_failed "bin/dev live run -run <test> runs a scenario again, bin/dev live down removes it all"

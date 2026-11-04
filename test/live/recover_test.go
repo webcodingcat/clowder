@@ -20,8 +20,9 @@ import (
 //     from the cluster; the first host leads alone and holds the Floating IP,
 //     and the alert no-ha is open;
 //   - switched on again, the retired servers start neither Raft nor a stack;
-//   - new servers under the same names join, and the cluster is highly
-//     available again.
+//   - new servers under the same names join while keeper runs on, untouched:
+//     the cluster of one host grows to three, keeper's volume gets its copy
+//     and its tiebreaker, and the cluster is highly available again.
 func TestRecover(t *testing.T) {
 	server, tofu := baseline(t)
 	hosts := scenarioHosts(server, tofu)
@@ -38,7 +39,7 @@ func TestRecover(t *testing.T) {
 			createAndApply(t, "lost", volumeDocument("lost", "fast", failoverVolumeSize, 1)+simpleStack("lost", "lost"))
 			waitRunning(t, "lost", 1)
 			moveTo(t, "lost", joined[0])
-			waitSynced(t, "lost")
+			waitSynced(t, "lost", placementDeadline)
 		}},
 		{"the other hosts go, and recover on the first host goes on alone", func(t *testing.T) {
 			for _, name := range joined {
@@ -108,9 +109,9 @@ func TestRecover(t *testing.T) {
 				t.Errorf("%s is %s (%v) after the retired servers came up", firstHost, phase, err)
 			}
 		}},
-		{"new hosts join, and the cluster is highly available again", func(t *testing.T) {
-			removeStack(t, "keeper")
+		{"new hosts join while keeper runs, and the cluster is highly available again", func(t *testing.T) {
 			removeStack(t, "lost")
+			container := stackContainer(t, server, "keeper")
 			// empty, not nil: OpenTofu iterates over the lists
 			applyHosts(t, []string{}, map[string]string{})
 			tokens := map[string]string{}
@@ -120,6 +121,13 @@ func TestRecover(t *testing.T) {
 			applyHosts(t, joined, tokens)
 			waitForJoined(t, joined...)
 			eventually(t, time.Minute, "three voters", func() error { return checkThreeVoters(clusterHosts(t)) })
+			// the new servers have new addresses
+			volumeSteady(t, scenarioHosts(server, readOutputs(t)), "keeper")
+			if now := stackContainer(t, server, "keeper"); now != container {
+				t.Errorf("keeper's container changed while the hosts joined: %s, then %s", container, now)
+			}
+			checkProof(t, server, "keeper", "after")
+			removeStack(t, "keeper")
 			eventually(t, time.Minute, "the alert no-ha resolved", func() error {
 				if status := mustClowder(t, "cluster", "status"); strings.Contains(status, "not highly available") {
 					return fmt.Errorf("it is open:\n%s", status)

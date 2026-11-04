@@ -353,7 +353,8 @@ const (
 type Volume struct {
 	Meta
 	Spec resource.VolumeSpec `json:"spec"`
-	// DataGeneration grows with a restore or a class move; it is part of
+	// DataGeneration grows with each new, empty LV (a volume of replicas 0
+	// that moves, fails over or starts anew after a recover); it is part of
 	// the LV's name (names.VolumeName), at most names.MaxDataGeneration.
 	DataGeneration int64        `json:"data_generation"`
 	Minor          *int         `json:"minor,omitempty"` // DRBD minor; nil with replicas 0

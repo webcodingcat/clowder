@@ -78,8 +78,8 @@ channels.
   or `locked`, or the network fails: one busy moment of the API must not hold up a fence.
   Every request clowder sends may go twice (a read, an assignment to the same server, a
   power action on a server in that state, the same labels). `SetRetired` reads the
-  server's labels and writes them back with its own, as the API replaces all at once. Its errors carry the API's message, never the
-  token.
+  server's labels and writes them back with its own, as the API replaces all at once. Its
+  errors carry the API's message, never the token.
 - `controller.RunFloatingIP` (`floatingip.go`) acts only on the leader. The ingress host (`State.Ingress`,
   `set-ingress`) is the recorded one while it is active and has a server ref, so the
   Floating IP never switches back by itself; otherwise the first of
@@ -214,14 +214,14 @@ start elsewhere: until then it is the only one that runs them, and it may still 
   asks: the one exception to "only the leader calls external services", so a channel can be
   tried also while the cluster has no leader.
 - **Conditions** that the state does not show are kept in memory (`controller.Conditions`)
-  with the time they began, observed by the loop that sees them (`Observe`): the Floating IP not held (the
-  Floating IP's loop), a host over capacity (the placement), a failed host that cannot be
-  fenced (the fencing loop), Docker not answering and a stack
-  failing (the alerts, from `report-host` and `set-stack-status`). After a change of leader they start again, so a new alert comes a
-  little later rather than wrongly; one that is open stays until the loop that observes its
-  condition has looked (`Conditions.Seen`). An agent that leads no more forgets them, and
-  each alerts pass forgets those of stacks and hosts that are gone or removed
-  (`conditionKeys`, `Conditions.Keep`).
+  with the time they began, observed by the loop that sees them (`Observe`): the Floating
+  IP not held (the Floating IP's loop), a host over capacity (the placement), a failed host
+  that cannot be fenced (the fencing loop), Docker not answering and a stack failing (the
+  alerts, from `report-host` and `set-stack-status`). After a change of leader they start
+  again, so a new alert comes a little later rather than wrongly; one that is open stays
+  until the loop that observes its condition has looked (`Conditions.Seen`). An agent that
+  leads no more forgets them, and each alerts pass forgets those of stacks and hosts that
+  are gone or removed (`conditionKeys`, `Conditions.Keep`).
 - `wanted_test.go` and `conditions_test.go` check `wantedAlerts` and `Conditions` on a
   state in memory: the thresholds, how long a condition must last, what keeps an open
   alert; `alerts_test.go` checks the loop: delivery, retries, channels, and the conditions

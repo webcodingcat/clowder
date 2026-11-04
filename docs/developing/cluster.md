@@ -49,7 +49,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   |---|---|
   | `Meta.Generation` | the changes of a resource's spec |
   | `Meta.ResourceVersion` | the index of the command that last changed the resource, spec or status |
-  | `Volume.DataGeneration` | a volume's data: a restore or a class move makes a new LV (`-g<N>`) |
+  | `Volume.DataGeneration` | a volume's data: each new, empty LV (`-g<N>`) gets the next one, as when a volume of replicas 0 moves, fails over or starts anew after a recover; restores (phase 3) will too |
 
   - `put-resource` and `delete-resource` carry the kind; `resourceKinds` holds each kind's
     `find`, `put` and `remove`, where `put` and `remove` return their change like a
@@ -154,38 +154,41 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   had (`HostFence.Stacks`, recorded as it is fenced) run elsewhere, or after `StepTime`.
   Its lock is what keeps fencing to one host at a time.
 - **Moving a stack** (`move-stack`, `StackMove`; the placement starts it, `controller.RunMoves`
-  drives it). It locks the stack and its volumes. Its steps, each the last one done:
-  `MoveCopies` (the leader placed a copy of each volume on the new host), `MoveSynced` (the
-  new host has them synced, `VolumeCopy.Synced`, and the images pulled), `MoveStopped` (the
-  old host stopped the stack and its copies are secondary), `MoveHost` (the leader set the
-  stack's host; a volume of replicas 0 gets a new data generation there, empty). The
-  leader finishes it once the stack runs on the new host. The hosts do the work through
-  their loops: from `MoveSynced` on, `StopsForMove` takes the stack off its old host's
-  runner and reconciler, and the new host's reconciler promotes once the stack is placed
-  there. `MoveStopped` is the point of no return. The deadline of `MoveCopies` allows the
-  resync at `replication.resync_rate` twice over; once it passed, the leader asks the new
-  host how much is left (`/v1/internal/volumes/progress`) and extends while that shrinks.
-  A move that ends answers a user's `request-move` (`Stack.MoveTo`), worked or not; one
-  that moved records `Stack.LastMove`; one that failed `Stack.MoveFailed`, and within
-  `MoveCooldown` the placement starts no move of its own for that stack again (a user's
-  request still goes), so a move that cannot work does not resync copies over and over.
-  A host of the move that goes down (no longer active or draining) ends it at once
-  (`abandon`): before `MoveStopped` it rolls back, after it the move fails, and either way
-  the stack keeps its old host; from `MoveHost` on, a new host that goes down ends it as
-  failed and the failover takes the stack.
-  A running stack that cannot move gets the alert `stack-waiting` with "cannot move". To follow one through the code: `scheduler.place`
-  decides it, `controller.startMove` starts it, `controller.mover.placeCopies` (with
-  `scheduler.MoveVolumes`) runs the first step, `agent.moveSteps.synced` and `stoppedHere`
-  record the hosts' steps, `controller.mover.setHost` the leader's last one, and
-  `controller.mover.late` minds the deadlines.
+  drives it). It locks the stack and its volumes.
+  - Its steps, each the last one done: `MoveCopies` (the leader placed a copy of each
+    volume on the new host), `MoveSynced` (the new host has them synced,
+    `VolumeCopy.Synced`, and the images pulled), `MoveStopped` (the old host stopped the
+    stack and its copies are secondary), `MoveHost` (the leader set the stack's host; a
+    volume of replicas 0 gets a new data generation there, empty). The leader finishes it
+    once the stack runs on the new host.
+  - The hosts do the work through their loops: from `MoveSynced` on, `StopsForMove` takes
+    the stack off its old host's runner and reconciler, and the new host's reconciler
+    promotes once the stack is placed there. `MoveStopped` is the point of no return.
+  - The deadline of `MoveCopies` allows the resync at `replication.resync_rate` twice
+    over. Once it passed, the leader asks the new host how much is left
+    (`/v1/internal/volumes/progress`) and extends while that shrinks.
+  - A move that ends answers a user's `request-move` (`Stack.MoveTo`), worked or not. One
+    that moved records `Stack.LastMove`; one that failed `Stack.MoveFailed`, and within
+    `MoveCooldown` the placement starts no move of its own for that stack again (a user's
+    request still goes), so a move that cannot work does not resync copies over and over.
+  - A host of the move that goes down (no longer active or draining) ends it at once
+    (`abandon`): before `MoveStopped` it rolls back, after it the move fails, and either
+    way the stack keeps its old host. From `MoveHost` on, a new host that goes down ends
+    it as failed, and the failover takes the stack.
+  - A running stack that cannot move gets the alert `stack-waiting` with "cannot move".
+  - To follow one through the code: `scheduler.place` decides it, `controller.startMove`
+    starts it, `controller.mover.placeCopies` (with `scheduler.MoveVolumes`) runs the first
+    step, `agent.moveSteps.synced` and `stoppedHere` record the hosts' steps,
+    `controller.mover.setHost` the leader's last one, and `controller.mover.late` minds the
+    deadlines.
 - **Retired copies.** A volume copy's data goes only when the state says so:
   `delete-resource` of a volume, and a `put-volume` that changes the data generation or
   takes a copy off a host each add the copies they give up to `Retired` (volume, data
-  generation, host). The host removes those and forgets each with `forget-copy`; a removed
-  host's go with it. A copy that is merely missing from the state stays: a bug in the
-  placement must not cost data. A retired copy keeps its volume's DRBD minor taken
-  (`RetiredMinors`) until every host forgot its copies: the resource on the host has the
-  minor, and drbdadm refuses every command while two resources share one.
+  generation, host). The host removes those and forgets each with `forget-copy`; the
+  copies of a removed host go with the host. A copy that is merely missing from the state
+  stays: a bug in the placement must not cost data. A retired copy keeps its volume's DRBD
+  minor taken (`RetiredMinors`) until every host forgot its copies: the resource on the
+  host has the minor, and drbdadm refuses every command while two resources share one.
 - **Initialized volumes.** `Volume.Initialized` says that a copy of the current data
   generation was primary with its file system. The first host that has its copy so tells
   with `set-volume-initialized` (only a host with a copy with a disk in that generation).
@@ -487,6 +490,8 @@ them.
 
 ## API (`internal/api`) and the CLI (`internal/cli`)
 
+### Requests and the leader
+
 - **Every call is checked.** Every agent serves `/v1` with mutual TLS (`agent.APIPort`), and
   each call is checked against the CA and the state's revocation list, so a revoked
   certificate is refused at once on every agent. User routes take user certificates,
@@ -516,58 +521,6 @@ them.
   on the internal routes catch an agent's bug, not a host that lies; what keeps strangers
   out is the CA, and removing a host revokes its certificate.
 - A refusal of the state is HTTP 409 with its reason; a write that did not commit is 503.
-- **Resources** (`changes.go` changes them, `resources.go` reads them; the CLI's `apply`,
-  `get` and `delete` below):
-  - `POST /v1/apply` (`ApplyRequest`) and `POST /v1/delete` (`DeleteRequest`) take
-    resources in order and answer per resource (`ChangeResult`): `applied` or `deleted`,
-    `unchanged`,
-    `refused` (the state's no), `failed` (did not commit: no leader, no quorum; try again),
-    and `not-tried` after a refusal or failure, since what follows usually needs it. No
-    transaction: a repeat converges. They are the only way to change resources; every
-    user's change is the channel `cli`. Requests are read strictly, so a typo is an error,
-    not an empty request; the internal routes read leniently, as an agent of the next
-    release may send fields this one does not know.
-  - The agent that took the request turns each resource into its `put-resource`
-    (`putCommand`): the spec read strictly (`resource.DecodeVolumeSpec`, a field the kind
-    does not have is an error; `replicas` has no default), a secret's value sealed and its
-    digest computed (`sealSecret`: `digest.HMAC` over the ID and the value, with a key
-    `Keys.Derive` gives for "clowder secret resource digest", apart from the containers'
-    labels).
-  - **The leader decides** (`runOnLeader`): a follower hands the commands on as a batch to
-    `/v1/internal/changes`, since its own state may be behind and would answer
-    `unchanged` or `refused` for what has changed since. `runChanges` applies each command
-    to a copy of the leader's state first (`State.Copy`), with every check of the state: a
-    refusal answers at once, an unchanged resource is not proposed (no Raft entry), and
-    `?dryRun=true` ends there and answers what a real apply would, with index 0, so a
-    volume in a namespace the same request makes passes too. Only a change is proposed;
-    the state checks it once more as it commits.
-  - `GET /v1/resources/{kind}` lists the resources of `?namespace=` or of
-    `?allNamespaces=true` (no default, so no reader gets the wrong namespace by
-    accident), with the state's index it read at (for the watch); `GET
-    /v1/resources/{kind}/{namespace}/{name}` and `/v1/resources/namespace/{name}` read one.
-    The kind is written in lower case. A secret shows its digest, never its value; any
-    other resource a read answers applies again as it is (`resource.Metadata`'s owner,
-    generation and resource version and the status are the cluster's, an apply ignores
-    them).
-  - **The watch** (`watch.go`): `GET /v1/watch?kind=&namespace=|allNamespaces=true&since=`
-    streams the changes of a kind after `since`, the index of the client's list, one JSON
-    object per line (`WatchEvent`: the resource, its resource version, whether it is gone).
-    Spec and status changes are both events. The client reads a resource itself when it
-    needs it.
-    - Every agent keeps the last `state.ChangeRingSize` changes (`state.ChangeRing`),
-      filled only from the Raft log (`raftnode`'s `fsm.Apply`), so a dry run never reaches
-      it. Hosts' reports about themselves are no change, so on a quiet cluster the ring
-      covers hours.
-    - The ring knows the index it is complete from: the snapshot the agent started from or
-      installed, or the oldest change it dropped. A `since` before that answers 410, and
-      the client lists afresh, as with Kubernetes. So a client that listed on one agent
-      can watch on another.
-    - A `since` this agent has not applied yet waits at most `watchWaitTimeout`, then
-      answers 504: a follower cut off from the leader would wait forever.
-    - The stream runs until the client stops. It ends early when the ring dropped changes
-      the client has not read yet; the client lists afresh then too, and says so. The
-      agent's stop ends it (`Server.EndStreams`, as for logs that follow): `Shutdown`
-      would wait for it.
 - **JSON names.** What users write and read as resources (`resource.Object`, the specs and
   the statuses `get` shows) is camelCase, as in the files users apply; everything else
   (commands, the state, snapshots, the other bodies of the API, `cluster.yaml`) is
@@ -579,6 +532,65 @@ them.
   then at most one minor version apart). Development builds and callers without a
   version talk to everything; the agent logs a warning once per version when a
   development build talks to another build.
+
+### Resources
+
+`changes.go` changes resources, `resources.go` reads them; the CLI's `apply`, `get` and
+`delete` are under The CLI, below.
+
+- `POST /v1/apply` (`ApplyRequest`) and `POST /v1/delete` (`DeleteRequest`) take
+  resources in order and answer per resource (`ChangeResult`): `applied` or `deleted`,
+  `unchanged`,
+  `refused` (the state's no), `failed` (did not commit: no leader, no quorum; try again),
+  and `not-tried` after a refusal or failure, since what follows usually needs it. No
+  transaction: a repeat converges. They are the only way to change resources; every
+  user's change is the channel `cli`. Requests are read strictly, so a typo is an error,
+  not an empty request; the internal routes read leniently, as an agent of the next
+  release may send fields this one does not know.
+- The agent that took the request turns each resource into its `put-resource`
+  (`putCommand`): the spec read strictly (`resource.DecodeVolumeSpec`, a field the kind
+  does not have is an error; `replicas` has no default), a secret's value sealed and its
+  digest computed (`sealSecret`: `digest.HMAC` over the ID and the value, with a key
+  `Keys.Derive` gives for "clowder secret resource digest", apart from the containers'
+  labels).
+- **The leader decides** (`runOnLeader`): a follower hands the commands on as a batch to
+  `/v1/internal/changes`, since its own state may be behind and would answer
+  `unchanged` or `refused` for what has changed since. `runChanges` applies each command
+  to a copy of the leader's state first (`State.Copy`), with every check of the state: a
+  refusal answers at once, an unchanged resource is not proposed (no Raft entry), and
+  `?dryRun=true` ends there and answers what a real apply would, with index 0, so a
+  volume in a namespace the same request makes passes too. Only a change is proposed;
+  the state checks it once more as it commits.
+- `GET /v1/resources/{kind}` lists the resources of `?namespace=` or of
+  `?allNamespaces=true` (no default, so no reader gets the wrong namespace by
+  accident), with the state's index it read at (for the watch); `GET
+  /v1/resources/{kind}/{namespace}/{name}` and `/v1/resources/namespace/{name}` read one.
+  The kind is written in lower case. A secret shows its digest, never its value; any
+  other resource a read answers applies again as it is (`resource.Metadata`'s owner,
+  generation and resource version and the status are the cluster's, an apply ignores
+  them).
+- **The watch** (`watch.go`): `GET /v1/watch?kind=&namespace=|allNamespaces=true&since=`
+  streams the changes of a kind after `since`, the index of the client's list, one JSON
+  object per line (`WatchEvent`: the resource, its resource version, whether it is gone).
+  Spec and status changes are both events. The client reads a resource itself when it
+  needs it.
+  - Every agent keeps the last `state.ChangeRingSize` changes (`state.ChangeRing`),
+    filled only from the Raft log (`raftnode`'s `fsm.Apply`), so a dry run never reaches
+    it. Hosts' reports about themselves are no change, so on a quiet cluster the ring
+    covers hours.
+  - The ring knows the index it is complete from: the snapshot the agent started from or
+    installed, or the oldest change it dropped. A `since` before that answers 410, and
+    the client lists afresh, as with Kubernetes. So a client that listed on one agent
+    can watch on another.
+  - A `since` this agent has not applied yet waits at most `watchWaitTimeout`, then
+    answers 504: a follower cut off from the leader would wait forever.
+  - The stream runs until the client stops. It ends early when the ring dropped changes
+    the client has not read yet; the client lists afresh then too, and says so. The
+    agent's stop ends it (`Server.EndStreams`, as for logs that follow): `Shutdown`
+    would wait for it.
+
+### The CLI
+
 - **The client** tries the seeds of `cluster.yaml` in turn and trusts any host certificate of
   the cluster's CA, whatever name the seed has. A read goes on to the next seed after any
   network error; a write only if it never left (`httptrace`), since one that was sent may
@@ -636,6 +648,9 @@ them.
   `RestartRequest`). The list of stacks, also as JSON for scripts
   and the live tests, is `get stacks`; its table shows a priority that comes from
   `cluster.yaml`'s default as `(default)`.
+
+### Secret values
+
 - **A Secret's value** the agent that takes the request opens with the cluster's age key
   (`openValue`) and refuses unless it was encrypted for the Secret's ID: a value copied
   from another Secret or from `cluster.yaml` (the hoster's token, which a container would
@@ -677,6 +692,9 @@ them.
   space at either end, or starts like a marker shows as `base64:`; one that does not open
   or is meant for another place shows as `error:` with the reason, and the command fails
   after printing every line.
+
+### The first user and joining hosts
+
 - **The user** has no certificate yet (`cluster bootstrap`). `GET /v1/bootstrap` gives
   the CA certificate with a `pki.TrustProof` made with the bootstrap key, and the CLI
   trusts the CA only if it matches its key (`api.FindCluster`). The offer also says
@@ -720,6 +738,9 @@ them.
   the Floating IP's loop checks once `cluster.yaml` brings the hoster's token
   (`confirm-server-ref`). Only a host with a checked one holds the Floating IP
   (`set-ingress`).
+
+### Codes from a host
+
 - **A code from a host** gives access back (`internal/recoverycode`, `api/recover.go`): root
   on a host runs `clowderd user recovery-code <user>`, which reads only the data key, so it
   works while the agent is down. A code is the first 80 bits of an HMAC over its use
@@ -762,6 +783,9 @@ them.
   `set-recovery-recipient`. Values encrypted afterwards are for the new key; `secret rekey`
   brings the files to it. Old ciphertext, in the Git history say, stays readable with the
   old key.
+
+### Tests
+
 - The tests run real HTTPS servers: a follower forwarding to the leader, refused callers, the
   CLI against an agent with a cluster directory and credentials in a temporary config
   directory.
@@ -811,8 +835,9 @@ them.
   sync from the host that is down; a volume of replicas 0 starts anew there, empty, in a
   new data generation. Of those hosts, the best fit, as for any placement. A stack that
   finds none waits on its old host, with the reason in `get stacks` and the alert
-  `stack-waiting` ("is down"): with replicas 1 until the host is back or a user restores
-  the volume elsewhere. A failed host's stacks stay where they are until it is fenced.
+  `stack-waiting` ("is down"): with replicas 1 until the host is back (or, once phase 3
+  brings restores, a user restores the volume elsewhere). A failed host's stacks stay
+  where they are until it is fenced.
 - **Room, one measure for everything.** A host offers what it reported (memory, CPUs) less
   `system_reserve` (default 512M, 0.25). Each service of a stack on it that is `starting` or
   `running` takes its reservations (`resources.reserve`, default `defaults.reservations`,

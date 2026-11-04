@@ -99,6 +99,7 @@ func TestFailover(t *testing.T) {
 				}
 				return nil
 			})
+			alertOpen(t, target+" cannot be fenced", true)
 			labControl(t, "/api-fault", map[string]int{"status": 0, "count": 0})
 			// the user makes sure the server is off, then says so
 			powerOff(t, target)
@@ -111,8 +112,11 @@ func TestFailover(t *testing.T) {
 			if status := serverStatus(t, target); status != "off" {
 				t.Errorf("the disabled host's server is %s", status)
 			}
+			alertOpen(t, target+" is disabled", true)
 			mustClowder(t, "host", "enable", target)
 			waitBack(t, hosts, target, "keeper")
+			alertOpen(t, target+" is disabled", false)
+			alertOpen(t, target+" cannot be fenced", false)
 		}},
 		{"a host that is back before the leader acts is fenced or not, never both", func(t *testing.T) {
 			other := otherThan(slices.Sorted(maps.Keys(hosts)), target, leaderName(t))
@@ -156,17 +160,29 @@ func TestFailover(t *testing.T) {
 	})
 }
 
+// resyncVolumeSize is the size of TestNoFalseFailover's volume: its resync
+// at the default resync rate (clusterspec.DefaultResyncRate, 50M/s: about 7
+// minutes) outlasts the scenario's faults (about 3 minutes); a faster rate
+// needs a bigger volume. The storage class bulk is 30 GB in the lab
+// (bin/dev, live up) so that it fits: its pool is 90 % of the disk, and the
+// placement keeps a reserve of 20 % free.
+const resyncVolumeSize = "20G"
+
+// resyncDeadline is how long the resync of resyncVolumeSize may take.
+const resyncDeadline = 15 * time.Minute
+
 // TestNoFalseFailover checks what must fail no host: a cut between the
 // leader and one host only, and a pause of every host for 20 s, while a
-// volume resyncs.
+// volume of 20 GB resyncs.
 func TestNoFalseFailover(t *testing.T) {
 	server, tofu := baseline(t)
 	hosts := scenarioHosts(server, tofu)
 	joined := undrainJoined(t)
 	cleanUpFaults(t)
+	var resyncStart time.Time
 	runSteps(t, []step{
 		{"a volume resyncs", func(t *testing.T) {
-			createAndApply(t, "bulk", volumeDocument("bulk", "fast", placedVolumeSize, 2)+simpleStack("bulk", "bulk"))
+			createAndApply(t, "bulk", volumeDocument("bulk", "bulk", resyncVolumeSize, 2)+simpleStack("bulk", "bulk"))
 			waitRunning(t, "bulk", 1)
 			eventually(t, placementDeadline, "a second copy of bulk", func() error {
 				if copies := len(volumeStatus(t, "bulk").Copies); copies < 2 {
@@ -174,6 +190,7 @@ func TestNoFalseFailover(t *testing.T) {
 				}
 				return nil
 			})
+			resyncStart = time.Now()
 		}},
 		{"a cut between the leader and one host fails no host", func(t *testing.T) {
 			leader := leaderName(t)
@@ -205,9 +222,14 @@ func TestNoFalseFailover(t *testing.T) {
 			if now := stackContainer(t, hosts[bulkHost], "bulk"); now != container {
 				t.Errorf("bulk's container on %s changed: %s, then %s", bulkHost, container, now)
 			}
+			// else the faults did not meet a resync, which is what this checks
+			if status := volumeStatus(t, "bulk").Status; status == "ok" {
+				t.Errorf("bulk synced before the faults ended; it needs to be bigger than %s", resyncVolumeSize)
+			}
 		}},
 		{"the resync ends without a host failed", func(t *testing.T) {
-			waitSynced(t, "bulk")
+			waitSynced(t, "bulk", resyncDeadline)
+			t.Logf("bulk's second copy of %s synced in %s", resyncVolumeSize, time.Since(resyncStart).Round(time.Second))
 			if err := allActive(); err != nil {
 				t.Error(err)
 			}
@@ -509,6 +531,23 @@ func stays(t *testing.T, during time.Duration, what string, check func() error) 
 	}
 }
 
+// alertOpen waits until clowder cluster status lists an alert with the
+// subject as open, or (open false) no longer lists it.
+func alertOpen(t *testing.T, subject string, open bool) {
+	t.Helper()
+	what := "the alert " + subject + " resolved"
+	if open {
+		what = "the alert " + subject + " open"
+	}
+	eventually(t, time.Minute, what, func() error {
+		status, err := clowder("cluster", "status")
+		if err == nil && strings.Contains(status, subject) != open {
+			err = fmt.Errorf("cluster status:\n%s", status)
+		}
+		return err
+	})
+}
+
 // allActive says why not every host is active, if one is not; a failed
 // listing (a change of leader) passes.
 func allActive() error {
@@ -539,10 +578,11 @@ func moveTo(t *testing.T, stack, to string) {
 	})
 }
 
-// waitSynced waits until every copy of a volume is synced.
-func waitSynced(t *testing.T, volume string) {
+// waitSynced waits until every copy of a volume is synced, at most until
+// the deadline.
+func waitSynced(t *testing.T, volume string, deadline time.Duration) {
 	t.Helper()
-	eventually(t, placementDeadline, "volume "+volume+" synced", func() error {
+	eventually(t, deadline, "volume "+volume+" synced", func() error {
 		if status := volumeStatus(t, volume); status.Status != "ok" {
 			return fmt.Errorf("%s, copies %+v", status.Status, status.Copies)
 		}

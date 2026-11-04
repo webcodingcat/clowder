@@ -18,9 +18,11 @@ import (
 // themselves, so the caller tries again without alarm.
 var ErrNotYet = errors.New("not yet")
 
-// unknownPeer is how drbdsetup forget-peer refuses a peer the resource has
-// no slot for in its metadata (the kernel's ERR_INVALID_PEER_NODE_ID): it
-// never knew the peer, so there is nothing to forget.
+// unknownPeer is how drbdsetup forget-peer refuses a node-id it has no slot
+// for (the kernel's ERR_INVALID_PEER_NODE_ID): there is nothing to forget.
+// DRBD 9.3 says so only for a node-id out of range; one in range that the
+// resource never knew, or forgot already, it forgets again without a word.
+// The case stays for other versions of DRBD.
 const unknownPeer = "invalid peer-node-id"
 
 // ForgetPeer forgets a removed host as a peer of every DRBD resource here

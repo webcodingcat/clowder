@@ -35,17 +35,18 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   reports (The cluster, Raft). It refuses a host that has a `raft/` directory or `host.json`.
 - **`clowderd user recovery-code <user>`** prints the codes that give the user access back,
   one for `user recover` and one for `recovery rotate`, each in its command (the code from
-  a host, in [API and the CLI](cluster.md#api-internalapi-and-the-cli-internalcli)). It reads the data key only and changes
-  nothing, so it works while the agent is down; it does not know the users, so a mistyped
-  name gives codes that fit nowhere.
+  a host, in [API and the CLI](cluster.md#codes-from-a-host)). It
+  reads the data key only and changes nothing, so it works while the agent is down; it
+  does not know the users, so a mistyped name gives codes that fit nowhere.
 - **`clowderd recover --power-off`** makes this host its cluster's only one when the others are
   gone for good: it powers them off and labels their servers `clowder-retired`
   ([Recover](cluster.md#recover-clowderd-recover-agentrecovergo)). It stops the agent while
   it works on Raft's files and starts it again at its end.
 - **`clowderd run`** (the service) starts in this order:
   1. It asks the hoster whether `clowderd recover` retired this host (`checkRetired`: the
-     label `clowder-retired` of its server names its certificate; [Recover](cluster.md#recover-clowderd-recover-agentrecovergo)), with the token
-     of the state its Raft log on disk holds (`raftnode.ReadState`). A retired server's
+     label `clowder-retired` of its server names its certificate;
+     [Recover](cluster.md#recover-clowderd-recover-agentrecovergo)), with the token of the
+     state its Raft log on disk holds (`raftnode.ReadState`). A retired server's
      agent ends with `ErrRetired`, exit status 4, before Raft, the mesh or a stack: two
      retired hosts would still have the old cluster's majority. A host without a server
      ref or a hoster, or a hoster that does not answer within `retiredCheckTimeout`,
@@ -60,13 +61,13 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
      leader's log.
   4. The containers' DNS resolver.
   5. `newDaemon` makes the parts, each from what they all share (`shared`: the files,
-     this host, its keys, the Raft member, the host's parts, the logger); then the API, once each on the underlay, the node
-     address and the public address. It binds them with `IP_FREEBIND` (`freeBind`): at
-     boot the public address may come up after the agent, which must neither fail nor
-     lock users out then. Then the answers to ACME's challenges and the metrics. If any
-     of them cannot listen, the agent ends before it started any container. Once they
-     serve, only an API that fails ends the agent: without the other two the host still
-     runs its stacks, so their failure is logged.
+     this host, its keys, the Raft member, the host's parts, the logger); then the API,
+     once each on the underlay, the node address and the public address. It binds them
+     with `IP_FREEBIND` (`freeBind`): at boot the public address may come up after the
+     agent, which must neither fail nor lock users out then. Then the answers to ACME's
+     challenges and the metrics. If any of them cannot listen, the agent ends before it
+     started any container. Once they serve, only an API that fails ends the agent:
+     without the other two the host still runs its stacks, so their failure is logged.
   6. The loops (`startLoops`): this host's that start no container (the network,
      supervisor, the beats to the voters), the leader's, which do nothing while it does
      not lead, and, once the state caught up with the leader's commit index
@@ -123,10 +124,11 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   runner asks `Mounted(lv)`: the mount point once the copy is ready, the error that keeps
   it from getting there (it is logged once, when it is new), or neither while it is on its
   way. A copy that becomes ready starts a pass of the stack runner. Retired copies are
-  removed in a job too and forgotten ([Cluster state](cluster.md#cluster-state-internalstate), Retired copies), once no stack holds them. A copy
-  the state neither places nor retires here stays, with a warning once per run. The pass
-  is in `reconciler.go`, the targets in `desired.go`, the records in `records.go`, the
-  trim in `trim.go`.
+  removed in a job too and forgotten
+  ([Cluster state](cluster.md#cluster-state-internalstate), Retired copies), once no stack
+  holds them. A copy the state neither places nor retires here stays, with a warning once
+  per run. The pass is in `reconciler.go`, the targets in `desired.go`, the records in
+  `records.go`, the trim in `trim.go`.
 - **The stack runner** (`agent/stacks`, `stacks.Runner`) keeps everything of a stack under its project
   (`names.Project`). A pass first stops the stacks that left the host (`compose down`), and
   only then starts a job for each stack the state places here that has none running
@@ -186,7 +188,8 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   by rename, so a running container keeps the old file until it is recreated. After a
   successful `compose up` it removes what the stack no longer asks for. The hash that decides
   about `compose up` covers the rendered file, `env.yaml` and the secret files; a changed
-  secret file changes its services' digest label, which recreates them ([Rendering](specs.md#rendering-internalcompose), Labels).
+  secret file changes its services' digest label, which recreates them
+  ([Rendering](specs.md#rendering-internalcompose), Labels).
 - **After a boot no container runs** (`restart: "no"`). The runner remembers only in memory
   what each stack came up with, so its first pass runs `compose up` for every stack. A
   restart of Docker leaves the containers running (`live-restore` in `daemon.json`), but
@@ -343,8 +346,9 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   test-tools` checks with `drbdadm`): quorum majority with `suspend-io`, `auto-promote no`,
   node-id = host ID, port `drbdBasePort` + minor on the node address. With replicas 0 it is a
   plain LV. A copy's LV is `names.VolumeName(volume ID, data generation)` and its resource
-  and mount point (`volumes/<LV>`) have the same name, so a restored volume (a new
-  generation) is a new LV next to the old one, mounted apart from it.
+  and mount point (`volumes/<LV>`) have the same name, so a new data generation (today a
+  new, empty LV of replicas 0; a restore from phase 3 on) is a new LV next to the old one,
+  mounted apart from it.
 - **Each step is a method, and does only what is missing.** `Ensure` makes the LV and, with
   replicas, brings the resource up (`drbdadm adjust`, which also applies new peers); a new
   resource comes up secondary, and `Ensure` changes no role and mounts nothing. `Promote`
@@ -369,7 +373,8 @@ A tiebreaker (`Volume.Diskless`) has no LV and no metadata: `Ensure` writes
   `ForgetPeer` forgets a removed host on every resource (`drbdsetup forget-peer`), so
   its node-id can serve a new host. It fails, and the agent tries again, while a resource
   is down or still has the peer configured (its `adjust` takes it out), and for any
-  refusal but `unknownPeer`: a resource that never knew the peer has nothing to forget.
+  refusal but `unknownPeer` (a node-id without a slot has nothing to forget; DRBD 9.3
+  forgets a peer it never knew, or forgot already, again without a word).
   Whether a volume holds data is no marker: the state knows, for every host
   (`Volume.Initialized`). The driver refuses an LV it did not create and never wrote
   metadata on or formatted (plain or replicated), a device with another file system, and a

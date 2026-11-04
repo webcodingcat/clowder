@@ -393,39 +393,99 @@ func joinRequest(t *testing.T, serverRef, underlay string) api.JoinRequest {
 	}
 }
 
-// TestReplace replaces a host: a new one joins, the old one goes, and once
-// every host forgot it, the next host takes its ID. A host remove that
-// would leave fewer than three is refused.
+// TestReplace replaces a host while a stack runs with a copy of its volume
+// on it: a new host joins, the old one leaves, its copy moves to the new
+// one, and the stack runs on, its container untouched. Once every host
+// forgot the old one as a DRBD peer, the next host takes its ID. A host
+// remove that would leave fewer than three is refused.
 func TestReplace(t *testing.T) {
-	baseline(t)
+	server, _ := baseline(t)
 	var removed clusterHost
+	var container string
 	runSteps(t, []step{
+		{"a stack runs with a copy of its volume on the host to replace", func(t *testing.T) {
+			// the joined hosts are drained at the baseline; the host to replace
+			// takes stacks again, so it gets the volume's second copy
+			mustClowder(t, "host", "undrain", secondJoining)
+			createAndApply(t, "steady", volumeDocument("steady", "fast", failoverVolumeSize, 2)+simpleStack("steady", "steady"))
+			waitRunning(t, "steady", 1)
+			moveTo(t, "steady", firstHost)
+			waitCopies(t, "steady", firstHost, secondJoining)
+			writeProof(t, server, "steady", "before")
+			container = stackContainer(t, server, "steady")
+		}},
 		{"a fourth host joins as a host that does not vote", func(t *testing.T) {
 			applyHosts(t, []string{firstJoining, secondJoining, thirdJoining},
 				map[string]string{thirdJoining: joinToken(t, time.Hour)})
 			waitForJoined(t, thirdJoining)
-			mustClowder(t, "host", "drain", thirdJoining)
 			if found, _ := findHost(clusterHosts(t), thirdJoining); found.Voter {
 				t.Errorf("the fourth host votes: %+v", found)
 			}
 		}},
-		{"the old host goes, and no host below three", func(t *testing.T) {
+		{"the old host leaves, its copy moves, and no host below three", func(t *testing.T) {
 			removed, _ = findHost(clusterHosts(t), secondJoining)
 			mustClowder(t, "host", "remove", secondJoining, "--yes")
 			if output, err := clowder("host", "remove", thirdJoining, "--yes"); err == nil ||
 				!strings.Contains(output, "join a replacement first") {
 				t.Errorf("a remove below three: %v\n%s", err, output)
 			}
-			eventually(t, time.Minute, "three voters", func() error { return checkThreeVoters(clusterHosts(t)) })
+			// the copy goes to the fourth host: it joined active and is not
+			// drained, while the other joined host stays drained from the baseline
+			waitCopies(t, "steady", firstHost, thirdJoining)
+			eventually(t, placementDeadline, secondJoining+" removed and three voters", func() error {
+				hosts := clusterHosts(t)
+				if gone, _ := findHost(hosts, secondJoining); gone.Phase != "removed" {
+					return fmt.Errorf("%s is %s", secondJoining, gone.Phase)
+				}
+				return checkThreeVoters(hosts)
+			})
 		}},
 		{"the replacement takes the old host's ID", func(t *testing.T) {
 			applyHosts(t, []string{firstJoining, thirdJoining, replacement},
 				map[string]string{replacement: joinToken(t, time.Hour)})
 			waitForJoined(t, replacement)
-			mustClowder(t, "host", "drain", replacement)
 			if found, _ := findHost(clusterHosts(t), replacement); found.ID != removed.ID {
 				t.Errorf("the replacement has ID %d, not the removed host's %d", found.ID, removed.ID)
 			}
 		}},
+		{"the stack ran on through it all, with its data", func(t *testing.T) {
+			if now := stackContainer(t, server, "steady"); now != container {
+				t.Errorf("steady's container changed: %s, then %s", container, now)
+			}
+			if listed := stackInfo(t, "steady"); listed.Status != "running" || listed.Host != firstHost {
+				t.Errorf("steady is %s on %s (%s)", listed.Status, listed.Host, listed.WaitReason)
+			}
+			checkProof(t, server, "steady", "before")
+			// a write that hung without quorum would end here
+			server.must(t, "timeout 60 docker exec "+container+" sh -c 'echo after > /data/proof && sync'")
+		}},
+		{"the hosts are as the baseline wants them again", func(t *testing.T) {
+			removeStack(t, "steady")
+			drainJoined(t)
+		}},
+	})
+}
+
+// waitCopies waits until a volume's copies with a disk are on the hosts
+// named, and no others, each synced.
+func waitCopies(t *testing.T, volume string, hosts ...string) {
+	t.Helper()
+	want := slices.Sorted(slices.Values(hosts))
+	eventually(t, placementDeadline, "volume "+volume+" synced on "+strings.Join(want, ", "), func() error {
+		status := volumeStatus(t, volume)
+		var synced []string
+		for _, volumeCopy := range status.Copies {
+			if volumeCopy.Tiebreaker {
+				continue
+			}
+			if !volumeCopy.Synced {
+				return fmt.Errorf("the copy on %s is not synced yet: %+v", volumeCopy.Host, status.Copies)
+			}
+			synced = append(synced, volumeCopy.Host)
+		}
+		if slices.Sort(synced); !slices.Equal(synced, want) {
+			return fmt.Errorf("%s, copies %+v", status.Status, status.Copies)
+		}
+		return nil
 	})
 }

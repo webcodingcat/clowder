@@ -82,9 +82,9 @@ step names the file and function to read; the package's section explains the rul
    job per volume makes the copy, makes it primary and mounts it. `agent/stacks/runner.go`
    `Runner.pass` sees the stack placed on its host and waits until its copies are mounted
    (`stackVolumes`). `agent/stacks/apply.go` `apply` renders the Compose file (`render`),
-   and `up` writes the secrets to tmpfs and runs `docker compose up`. The host reports `running` (`reportRunning`, through
-   `agent/loop` `CommitAsHost`), or `failing` with why (`reportFailing`) and tries
-   again at the next pass.
+   and `up` writes the secrets to tmpfs and runs `docker compose up`. The host reports
+   `running` (`reportRunning`, through `agent/loop` `CommitAsHost`), or `failing` with why
+   (`reportFailing`) and tries again at the next pass.
 7. **The supervisor keeps it running.** Docker restarts nothing itself;
    `supervisor.Supervisor` follows Docker's events and restarts what crashes.
 
@@ -114,13 +114,14 @@ What follows from there:
 | quorum | a majority of the voters (Raft) or of a volume's copies (DRBD); without it, nothing changes |
 | fencing | powering a failed host off through the hoster's API before its stacks start elsewhere |
 | tiebreaker | a diskless DRBD member that gives a volume with two copies its third vote |
-| active, passive | a host that runs stacks; a second host that waits until there are three |
+| active, passive | phases of a host. Active: it takes and runs stacks and may vote; the first host starts active, a host that joins becomes active, and so does one back from `recovering`. Passive: the second host of a cluster that is not yet highly available; it waits without stacks and without a vote until a third host joins (`state.MinHAHosts`), then it becomes active too |
 | actor | who sent a command: `leader`, `host/<id>` or `user/<name>` |
 | channel, owner | the way a resource came in: `cli` (`clowder apply`) or, later, a GitOps source; a resource's owner is the channel that made it, and only that channel changes it |
 | sealed | encrypted with the cluster's data key before it goes into the state |
-| generation | of a resource: counts the changes of its spec; an apply that changes nothing does not count. A volume's data generation grows with a restore or class move and is part of its LV's name |
+| generation | of a resource: counts the changes of its spec; an apply that changes nothing does not count |
+| data generation | of a volume: part of its LV's name; grows with each new, empty LV (a volume of replicas 0 that moves, fails over or starts anew after a recover); restores (phase 3) will raise it too |
 | pushed out, coming back | a service stopped to make room for one of higher priority; it comes back once there is room again |
-| retired copy | a volume's copy the state gave up (the volume deleted, moved or restored); its host removes it, and only then is the data gone |
+| retired copy | a volume's copy the state gave up (the volume deleted, the copy moved off its host, or its data given up for a new, empty LV); its host removes it, and only then is the data gone |
 | leavers, in use | on a host: leavers are the stacks that left the host (moved elsewhere or deleted); they are stopped before anything else starts. A volume is in use while a leaver whose stop failed still holds it; no other stack may take it until then |
 | pass | one run of a loop that brings its part of the host or the cluster to what the state says; a loop runs a pass at every change of the state and every 30 s |
 | room | what a host offers its services (memory, CPUs) less what they reserve: the scheduler's one measure |
