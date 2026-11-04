@@ -39,6 +39,7 @@ type Storage interface {
 	Demote(ctx context.Context, volume storage.Volume) error
 	Remove(ctx context.Context, volume storage.Volume) error
 	Trim(ctx context.Context, volume storage.Volume) error
+	ResolveSplitBrain(ctx context.Context, volume storage.Volume, discard bool) error
 	MountPoint(volume storage.Volume) string
 }
 
@@ -96,11 +97,12 @@ type Reconciler struct {
 	copies map[string]copyStatus
 	// mounted are the copies the last pass saw mounted, for the trim
 	mounted []storage.Volume
+	// volumes are the copies here as the last pass described them, by
+	// volume ID, and seen what it found of each (Seen)
+	volumes map[string]storage.Volume
+	seen    map[string]storage.Observed
 	// reporting are the copies, by LV, whose set-copy-synced is on its way
 	reporting map[string]bool
-	// outOfSync is what each copy here (by volume ID) differed by from a
-	// peer at the last pass: while it resyncs, what is left (Progress)
-	outOfSync map[string]int64
 
 	// unexplained are the LVs of copies kept without a reason, warned
 	// about once; only the pass uses it
@@ -121,7 +123,7 @@ func New(parts Parts) *Reconciler {
 	return &Reconciler{
 		files: parts.Files, host: parts.Host, cluster: parts.Cluster, storage: parts.Storage, held: parts.Held,
 		signal: parts.Signal, stacksReady: parts.StacksReady, propose: parts.Propose, logger: parts.Logger,
-		busy: map[string]bool{}, copies: map[string]copyStatus{}, outOfSync: map[string]int64{}, reporting: map[string]bool{},
+		busy: map[string]bool{}, copies: map[string]copyStatus{}, reporting: map[string]bool{},
 		unexplained: map[string]bool{},
 	}
 }
@@ -173,19 +175,22 @@ func (r *Reconciler) pass(ctx context.Context) {
 	}
 	var mounted []storage.Volume
 	placed := map[string]bool{}
-	outOfSync := map[string]int64{}
+	described := map[string]storage.Volume{}
+	seenNow := map[string]storage.Observed{}
 	for _, want := range wanted {
 		seen := observed[want.volume.LV]
 		if seen.Mounted && !seen.OtherDevice {
 			mounted = append(mounted, want.volume)
 		}
 		placed[want.volume.LV] = true
-		outOfSync[want.volume.ID] = seen.OutOfSyncBytes
+		if want.err == nil {
+			described[want.volume.ID], seenNow[want.volume.ID] = want.volume, seen
+		}
 		r.reportSynced(ctx, want, seen)
 		r.reconcile(ctx, want, seen)
 	}
 	r.mu.Lock()
-	r.mounted, r.outOfSync = mounted, outOfSync
+	r.mounted, r.volumes, r.seen = mounted, described, seenNow
 	// a copy the state no longer places here is no stack's to use
 	maps.DeleteFunc(r.copies, func(lv string, _ copyStatus) bool { return !placed[lv] })
 	r.mu.Unlock()
@@ -438,5 +443,42 @@ func (r *Reconciler) Released(lv string) bool {
 func (r *Reconciler) Progress() map[string]int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return maps.Clone(r.outOfSync)
+	progress := map[string]int64{}
+	for id, seen := range r.seen {
+		progress[id] = seen.OutOfSyncBytes
+	}
+	return progress
+}
+
+// Seen is what the last pass found of each copy on this host, by volume
+// ID: its DRBD role, disk state, quorum and split brain, for the host's
+// report and /metrics.
+func (r *Reconciler) Seen() map[string]storage.Observed {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return maps.Clone(r.seen)
+}
+
+// ResolveSplitBrain connects this host's copy of a volume again to the
+// peers it stands alone from (storage.Driver.ResolveSplitBrain); with
+// discard, the copy takes their data. It runs while no job holds the
+// volume, and holds it meanwhile: the command touches no data on the copy
+// to keep, and a copy that discards is secondary, so neither waits on a
+// write.
+func (r *Reconciler) ResolveSplitBrain(ctx context.Context, volumeID string, discard bool) (connected bool, err error) {
+	r.mu.Lock()
+	volume, ok := r.volumes[volumeID]
+	r.mu.Unlock()
+	if !ok {
+		return false, fmt.Errorf("this host has no copy of volume %s", volumeID)
+	}
+	if !r.claim(volumeID) {
+		return false, fmt.Errorf("volume %s: a step runs on the copy here; try again", volumeID)
+	}
+	err = r.storage.ResolveSplitBrain(ctx, volume, discard)
+	r.release(ctx, volumeID, err != nil)
+	if errors.Is(err, storage.ErrNoSplitBrain) {
+		return false, nil
+	}
+	return err == nil, err
 }

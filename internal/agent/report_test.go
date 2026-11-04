@@ -4,11 +4,13 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"testing"
 
 	"github.com/webcodingcat/clowder/internal/agent/agenttest"
 	"github.com/webcodingcat/clowder/internal/state"
+	"github.com/webcodingcat/clowder/internal/storage"
 )
 
 // newTestReporter reports host 0 of agenttest.NewCluster.
@@ -19,6 +21,7 @@ func newTestReporter(t *testing.T) (*hostReporter, *agenttest.Cluster, *agenttes
 	reporter := &hostReporter{
 		host: Host{ID: 0, Name: "node0"}, version: "1.0.0", cluster: cluster, docker: docker, storage: storage,
 		propose: cluster.Propose, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), root: t.TempDir(),
+		seen: noCopiesSeen,
 	}
 	return reporter, cluster, docker, storage
 }
@@ -106,5 +109,21 @@ func TestTheRootFileSystemsUseIsAWholePercent(t *testing.T) {
 	}
 	if _, err := usedPercent("/no/such/dir"); err == nil {
 		t.Error("a missing file system was read")
+	}
+}
+
+// noCopiesSeen is a volume reconciler that found no copies here.
+func noCopiesSeen() map[string]storage.Observed { return nil }
+
+func TestTheReportNamesSplitBrainsAndPrimariesWithoutQuorum(t *testing.T) {
+	splitBrain, noQuorum := drbdProblems(map[string]storage.Observed{
+		"default/a": {Role: storage.RoleSecondary, Disk: storage.DiskUpToDate, Quorum: true, SplitBrain: true},
+		"default/b": {Role: storage.RolePrimary, Disk: storage.DiskUpToDate},
+		// a secondary without quorum writes nothing, so nothing hangs
+		"default/c": {Role: storage.RoleSecondary, Disk: storage.DiskUpToDate},
+		"default/d": {Role: storage.RolePrimary, Disk: storage.DiskUpToDate, Quorum: true},
+	})
+	if !slices.Equal(splitBrain, []string{"default/a"}) || !slices.Equal(noQuorum, []string{"default/b"}) {
+		t.Errorf("split brain %v, no quorum %v", splitBrain, noQuorum)
 	}
 }

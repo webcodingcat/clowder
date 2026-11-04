@@ -187,6 +187,15 @@ func (a *Alerts) pass(ctx context.Context) {
 	for id, stack := range copied.Stacks {
 		a.conditions.Observe(stackFailingKey(id), stack.Status == state.StackFailing)
 	}
+	noQuorum := map[string]bool{}
+	for _, host := range copied.Hosts {
+		for _, volume := range host.NoQuorum {
+			noQuorum[volume] = true
+		}
+	}
+	for id := range copied.Volumes {
+		a.conditions.Observe(noQuorumKey(id), noQuorum[id])
+	}
 	wanted := wantedAlerts(copied, a.conditions, now)
 	for _, key := range slices.Sorted(maps.Keys(copied.Alerts)) {
 		if _, ok := wanted[key]; !ok {

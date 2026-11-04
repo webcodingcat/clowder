@@ -517,6 +517,8 @@ type ReportHost struct {
 	Pools           map[string]Pool `json:"pools,omitempty"`
 	DockerDown      bool            `json:"docker_down,omitempty"`
 	RootUsedPercent int             `json:"root_used_percent,omitempty"`
+	SplitBrain      []string        `json:"split_brain,omitempty"`
+	NoQuorum        []string        `json:"no_quorum,omitempty"`
 }
 
 func applyReportHost(s *State, cmd Command, payload ReportHost) (func(), error) {
@@ -540,6 +542,7 @@ func applyReportHost(s *State, cmd Command, payload ReportHost) (func(), error) 
 	return func() {
 		host.Version, host.Capacity, host.Pools = payload.Version, payload.Capacity, payload.Pools
 		host.DockerDown, host.RootUsedPercent = payload.DockerDown, payload.RootUsedPercent
+		host.SplitBrain, host.NoQuorum = payload.SplitBrain, payload.NoQuorum
 	}, nil
 }
 

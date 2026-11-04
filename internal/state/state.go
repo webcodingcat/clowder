@@ -173,6 +173,12 @@ type Host struct {
 	DockerDown bool `json:"docker_down,omitempty"`
 	// RootUsedPercent is how full the root file system is, in whole percent.
 	RootUsedPercent int `json:"root_used_percent,omitempty"`
+	// SplitBrain are the volumes, by ID, whose copy here stands alone from a
+	// peer (a split brain DRBD could not resolve), and NoQuorum those whose
+	// primary copy here lacks DRBD's quorum, so its stack's writes hang;
+	// both sorted, from the host's report.
+	SplitBrain []string `json:"split_brain,omitempty"`
+	NoQuorum   []string `json:"no_quorum,omitempty"`
 	// Leaving is a host a user removes while it still has stacks or volume
 	// copies (SetHostPhase.Leaving): it drains, the placement moves its copies
 	// off too, and the leader removes it once nothing is left on it.

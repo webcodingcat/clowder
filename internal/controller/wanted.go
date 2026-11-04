@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
@@ -17,6 +18,7 @@ const (
 	ingressLostFor  = 5 * time.Minute
 	stackWaitFor    = 5 * time.Minute
 	stackFailingFor = 2 * time.Minute
+	noQuorumFor     = 2 * time.Minute
 )
 
 // The keys of the conditions other loops hold (Conditions). They name a
@@ -39,6 +41,9 @@ func conditionKeys(current *state.State) map[string]bool {
 	}
 	for id := range current.Stacks {
 		keys[stackFailingKey(id)] = true
+	}
+	for id := range current.Volumes {
+		keys[noQuorumKey(id)] = true
 	}
 	return keys
 }
@@ -63,6 +68,12 @@ func fencingBlockedKey(host state.HostID) string {
 // like the alert's key, it names the stack by its ID.
 func stackFailingKey(stack string) string {
 	return "stack-failing/" + stack
+}
+
+// noQuorumKey is the condition of a volume whose primary copy lacks DRBD's
+// quorum; like the alert's key, it names the volume by its ID.
+func noQuorumKey(volume string) string {
+	return "no-quorum/" + volume
 }
 
 // level is a threshold of a value in percent: it raises at raise and clears
@@ -151,6 +162,7 @@ func wantedAlerts(current *state.State, conditions *Conditions, now time.Time) m
 			fmt.Sprintf("For %v or more the leader could not route the Floating IP to a host that can hold it: "+
 				"no request reaches the stacks. The agents' logs say why.", ingressLostFor))
 	}
+	addVolumeAlerts(current, held, add)
 	addCertificateAlerts(current, now, add)
 	for _, name := range slices.Sorted(maps.Keys(current.Stacks)) {
 		stack := current.Stacks[name]
@@ -228,5 +240,39 @@ func addHostAlerts(host *state.Host, blocked bool, add func(key, kind, severity,
 			"The host failed, but the leader cannot power it off: no hoster, an unconfirmed server, the hoster's "+
 				"API, or more hosts failed at once. Its stacks do not start elsewhere. The leader's log says why. If "+
 				"you know the host is off, run clowder host fence-confirm "+host.Name+".")
+	}
+}
+
+// addVolumeAlerts adds the alerts of the volumes whose copies the hosts
+// report: a split brain at once, as it needs a human and does not pass; a
+// primary without DRBD's quorum once it lasted noQuorumFor, as a host that
+// fails takes the quorum away until the failover.
+func addVolumeAlerts(current *state.State, held func(condition, alert string, atLeast time.Duration) bool,
+	add func(key, kind, severity, subject, message string),
+) {
+	splitBrain, noQuorum := map[string][]string{}, map[string][]string{}
+	for _, id := range slices.Sorted(maps.Keys(current.Hosts)) {
+		host := current.Hosts[id]
+		for _, volume := range host.SplitBrain {
+			splitBrain[volume] = append(splitBrain[volume], host.Name)
+		}
+		for _, volume := range host.NoQuorum {
+			noQuorum[volume] = append(noQuorum[volume], host.Name)
+		}
+	}
+	for _, volume := range slices.Sorted(maps.Keys(splitBrain)) {
+		add("split-brain/"+volume, "split-brain", clusterspec.SeverityCritical, fmt.Sprintf("volume %s: split brain", volume),
+			fmt.Sprintf("Copies of the volume changed apart and DRBD cannot tell which to keep, so they no longer "+
+				"connect (a copy on %s stands alone from a peer). Look at the copies, then run clowder volume "+
+				"resolve-splitbrain %s --keep <host>: the copies on the other hosts give up their changes since "+
+				"the split.", strings.Join(splitBrain[volume], ", "), volume))
+	}
+	for _, volume := range slices.Sorted(maps.Keys(current.Volumes)) {
+		if key := noQuorumKey(volume); held(key, key, noQuorumFor) {
+			add(key, "no-quorum", clusterspec.SeverityCritical, fmt.Sprintf("volume %s has no quorum", volume),
+				fmt.Sprintf("For %v or more the volume's primary copy (on %s) reaches too few of its peers: DRBD "+
+					"suspends its writes, and its stack hangs until enough peers are back.",
+					noQuorumFor, strings.Join(noQuorum[volume], ", ")))
+		}
 	}
 }

@@ -82,6 +82,9 @@ func (f *fakeHost) status() string {
 	if f.existing["diskless"] {
 		devices = `, "devices": [{"disk-state": "Diskless"}]`
 	}
+	if f.existing["standalone"] {
+		devices += `, "connections": [{"peer-node-id": 1, "connection-state": "StandAlone"}]`
+	}
 	return `[{"name": "clw-shop-pgdata", "node-id": 0, "role": "` + role + `", "suspended": false` + devices + `}]`
 }
 
@@ -611,5 +614,30 @@ func TestATiebreakerRemovesTheLVOfTheDiskItHad(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(driver.StateDir, marker)); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("the marker %s is left: %v", marker, err)
 		}
+	}
+}
+
+func TestASplitBrainIsResolvedOnTheConnectionsThatStandAlone(t *testing.T) {
+	host := &fakeHost{existing: map[string]bool{"lv": true, "up": true}}
+	driver := newDriver(t, host)
+	ctx := context.Background()
+	volume := replicated()
+	volume.Resource.Nodes = append(volume.Resource.Nodes, Node{Host: "node1", ID: 1, Disk: "/dev/vg-fast/clw-shop-pgdata-g1"})
+	if err := driver.ResolveSplitBrain(ctx, volume, true); !errors.Is(err, ErrNoSplitBrain) {
+		t.Errorf("without a peer that stands alone: %v", err)
+	}
+	host.existing["standalone"], host.existing["primary"] = true, true
+	if err := driver.ResolveSplitBrain(ctx, volume, true); err == nil || host.ran("drbdadm connect") {
+		t.Errorf("a primary discarded its data (%v):\n%s", err, strings.Join(host.commands, "\n"))
+	}
+	host.existing["primary"] = false
+	if err := driver.ResolveSplitBrain(ctx, volume, true); err != nil {
+		t.Fatal(err)
+	}
+	if !host.ran("drbdadm connect --discard-my-data clw-shop-pgdata:node1") {
+		t.Errorf("ran:\n%s", strings.Join(host.commands, "\n"))
+	}
+	if err := driver.ResolveSplitBrain(ctx, volume, false); err != nil || !host.ran("drbdadm connect clw-shop-pgdata:node1") {
+		t.Errorf("the kept copy (%v):\n%s", err, strings.Join(host.commands, "\n"))
 	}
 }

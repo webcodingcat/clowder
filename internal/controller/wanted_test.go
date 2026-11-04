@@ -195,3 +195,28 @@ func TestACertificateAlertComesWhenHalfOfTheConfiguredWindowIsLeft(t *testing.T)
 		t.Errorf("alerts %v once half of the window is gone", wanted)
 	}
 }
+
+func TestASplitBrainRaisesAnAlertAtOnceAndNoQuorumOnceItLasted(t *testing.T) {
+	current := node0(state.Active, 10, 10, 10)
+	current.Hosts[0].SplitBrain = []string{"default/data"}
+	current.Hosts[0].NoQuorum = []string{"default/db"}
+	current.Volumes = map[string]*state.Volume{
+		"default/data": {Meta: state.Meta{Namespace: "default", Name: "data"}},
+		"default/db":   {Meta: state.Meta{Namespace: "default", Name: "db"}},
+	}
+	conditions := NewConditions()
+	conditions.Observe(noQuorumKey("default/db"), true)
+	now := time.Now()
+	wanted := wantedAlerts(current, conditions, now)
+	alert, ok := wanted["split-brain/default/data"]
+	if !ok || alert.Severity != clusterspec.SeverityCritical || !strings.Contains(alert.Message, "on node0") ||
+		!strings.Contains(alert.Message, "resolve-splitbrain default/data --keep") {
+		t.Errorf("the split brain's alert: %+v", alert)
+	}
+	if _, ok := wanted["no-quorum/default/db"]; ok {
+		t.Error("no quorum raised an alert at once")
+	}
+	if _, ok := wantedAlerts(current, conditions, now.Add(noQuorumFor))["no-quorum/default/db"]; !ok {
+		t.Errorf("no alert once no quorum lasted %v", noQuorumFor)
+	}
+}

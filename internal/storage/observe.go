@@ -27,6 +27,9 @@ type Observed struct {
 	// resource is up.
 	Disk           string
 	OutOfSyncBytes int64
+	// Quorum says the copy has DRBD's quorum, and SplitBrain that a peer
+	// stands alone (standAlonePeers); both only while the resource is up.
+	Quorum, SplitBrain bool
 	// Mounted says a file system is mounted at the copy's mount point;
 	// OtherDevice that it is not the copy's device.
 	Mounted, OtherDevice bool
@@ -81,6 +84,7 @@ func (d Driver) Observe(ctx context.Context, volumes []Volume) (map[string]Obser
 		if volume.Resource != nil {
 			resource := resources[volume.Resource.Name]
 			copyNow.Role, copyNow.Disk, copyNow.OutOfSyncBytes = resource.Role, resource.disk(), resource.outOfSyncBytes()
+			copyNow.Quorum, copyNow.SplitBrain = resource.quorum(), len(resource.standAlonePeers()) > 0
 			if copyNow.ResourceFileCurrent, err = d.resourceFileCurrent(volume.Resource); err != nil {
 				return nil, err
 			}

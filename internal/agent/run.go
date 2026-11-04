@@ -23,6 +23,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/raftnode"
 	"github.com/webcodingcat/clowder/internal/state"
+	"github.com/webcodingcat/clowder/internal/storage"
 	"github.com/webcodingcat/clowder/internal/supervisor"
 )
 
@@ -241,7 +242,7 @@ func newDaemon(base shared) (*daemon, error) {
 		runner:     runner,
 		prefetcher: stacks.NewPrefetcher(base.host.ID, base.node, base.parts.Docker, base.logger),
 		traefik:    newTraefikRunner(base, watcher, traefikSignal),
-		reporter:   newHostReporter(base, proposer.propose),
+		reporter:   newHostReporter(base, proposer.propose, reconciler.Seen),
 		supervisor: watcher,
 		conditions: conditions,
 		heard:      heard,
@@ -318,8 +319,9 @@ func newTraefikRunner(base shared, watcher loop.Pauser, signal *loop.Signal) *tr
 }
 
 // newHostReporter makes the report of this host, of its root file system.
-func newHostReporter(base shared, propose controller.Propose) *hostReporter {
+func newHostReporter(base shared, propose controller.Propose, seen func() map[string]storage.Observed) *hostReporter {
 	return &hostReporter{
+		seen:    seen,
 		host:    base.host,
 		version: buildinfo.Version,
 		cluster: base.node,

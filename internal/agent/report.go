@@ -19,11 +19,13 @@ import (
 	"github.com/webcodingcat/clowder/internal/agent/loop"
 	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/state"
+	"github.com/webcodingcat/clowder/internal/storage"
 )
 
 // hostReporter tells the cluster about this host: its version, memory and
-// CPUs, its pools, whether Docker answers and how full the root file system
-// is. It has a loop of its own, so a Docker that hangs cannot hold up the
+// CPUs, its pools, whether Docker answers, how full the root file system
+// is, and the volumes whose copies here need a human (split brain) or
+// hang (no quorum). It has a loop of its own, so a Docker that hangs cannot hold up the
 // report that says so. Each probe ends by its driver's timeout (Docker's
 // ping, lvs), so a pass takes at most those timeouts added up.
 type hostReporter struct {
@@ -36,6 +38,9 @@ type hostReporter struct {
 	logger  *slog.Logger
 	// root is the file system whose use it reports: "/"
 	root string
+	// seen is what the volume reconciler last found of the copies here
+	// (volumes.Reconciler.Seen)
+	seen func() map[string]storage.Observed
 }
 
 // run reports until ctx ends: every loop.Interval, and at once when a
@@ -111,8 +116,10 @@ func (r *hostReporter) pass(ctx context.Context) error {
 		}
 		report.Pools[name] = pool
 	}
+	report.SplitBrain, report.NoQuorum = drbdProblems(r.seen())
 	if report.Version == self.Version && report.Capacity == self.Capacity && maps.Equal(report.Pools, self.Pools) &&
-		report.DockerDown == self.DockerDown && report.RootUsedPercent == self.RootUsedPercent {
+		report.DockerDown == self.DockerDown && report.RootUsedPercent == self.RootUsedPercent &&
+		slices.Equal(report.SplitBrain, self.SplitBrain) && slices.Equal(report.NoQuorum, self.NoQuorum) {
 		return nil
 	}
 	if err := loop.CommitAsHost(ctx, r.propose, r.host.ID, state.KindReportHost, report); err != nil {
@@ -124,6 +131,11 @@ func (r *hostReporter) pass(ctx context.Context) error {
 		r.logger.Warn("Docker does not answer")
 	case !report.DockerDown && self.DockerDown:
 		r.logger.Info("Docker answers again")
+	}
+	for _, volume := range report.SplitBrain {
+		if !slices.Contains(self.SplitBrain, volume) {
+			r.logger.Error("a volume's copy stands alone from a peer: split brain", "volume", volume)
+		}
 	}
 	return nil
 }
@@ -200,4 +212,21 @@ func readCapacity() (state.Resources, error) {
 		return state.Resources{}, fmt.Errorf("read the memory of this host: %w", err)
 	}
 	return state.Resources{}, errors.New("read the memory of this host: no MemTotal in /proc/meminfo")
+}
+
+// drbdProblems are the volumes, by ID and sorted, whose copy here stands
+// alone from a peer (split brain), and those whose primary copy here lacks
+// DRBD's quorum.
+func drbdProblems(seen map[string]storage.Observed) (splitBrain, noQuorum []string) {
+	for _, id := range slices.Sorted(maps.Keys(seen)) {
+		copyNow := seen[id]
+		if copyNow.SplitBrain {
+			splitBrain = append(splitBrain, id)
+		}
+		// a resource that is down has no device, and no quorum to tell of
+		if copyNow.Role == storage.RolePrimary && copyNow.Disk != "" && !copyNow.Quorum {
+			noQuorum = append(noQuorum, id)
+		}
+	}
+	return splitBrain, noQuorum
 }

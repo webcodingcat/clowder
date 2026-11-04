@@ -14,6 +14,10 @@ type Volumes interface {
 	// Progress is what each copy here differs by from a peer, by volume
 	// ID, in bytes: while it resyncs, what is left.
 	Progress() map[string]int64
+	// ResolveSplitBrain connects the copy here of a volume, by ID, again to
+	// the peers it stands alone from; with discard it takes their data.
+	// connected is false when it stood alone from none.
+	ResolveSplitBrain(ctx context.Context, volumeID string, discard bool) (connected bool, err error)
 }
 
 // moveStack commits request-move for a host named by the user; the

@@ -163,7 +163,7 @@ func (f *Storage) Ensure(ctx context.Context, volume storage.Volume) error {
 	return f.step(ctx, "ensure", volume, func(copyNow *storage.Observed) {
 		copyNow.LV = !volume.Diskless
 		if volume.Resource != nil {
-			copyNow.ResourceFileCurrent = true
+			copyNow.ResourceFileCurrent, copyNow.Quorum = true, true
 			if copyNow.Role == storage.RoleDown {
 				copyNow.Role = storage.RoleSecondary
 			}
@@ -224,6 +224,15 @@ func (f *Storage) Trim(_ context.Context, volume storage.Volume) error {
 		return errors.New("fstrim timed out")
 	}
 	return nil
+}
+
+// ResolveSplitBrain records the call and connects the copy again.
+func (f *Storage) ResolveSplitBrain(ctx context.Context, volume storage.Volume, discard bool) error {
+	name := "resolve"
+	if discard {
+		name = "resolve --discard-my-data"
+	}
+	return f.step(ctx, name, volume, func(copyNow *storage.Observed) { copyNow.SplitBrain = false })
 }
 
 // ForgetPeer records the call.

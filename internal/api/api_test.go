@@ -145,6 +145,8 @@ type testCluster struct {
 	joins *fakeJoins
 	// healths are the servers' beats, by host
 	healths []*fakeHealth
+	// volumes are the servers' volume copies, by host
+	volumes []*fakeVolumes
 }
 
 func newTestCluster(t *testing.T) *testCluster {
@@ -181,6 +183,8 @@ func newTestCluster(t *testing.T) *testCluster {
 		cluster.state.RecoveryRecipient = recovery.Recipient().String()
 		health := &fakeHealth{beats: map[state.HostID]int{}}
 		c.healths = append(c.healths, health)
+		volumes := &fakeVolumes{}
+		c.volumes = append(c.volumes, volumes)
 		server := httptest.NewUnstartedServer(nil)
 		api := NewServer(ServerConfig{
 			Cluster: cluster, CA: ca.Certificate, Certificate: c.hostCertificate(id), HostID: id,
@@ -189,6 +193,7 @@ func newTestCluster(t *testing.T) *testCluster {
 			Keys:       keys,
 			Joins:      c.joins,
 			Beats:      health,
+			Volumes:    volumes,
 			Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		})
 		server.Config.Handler = api

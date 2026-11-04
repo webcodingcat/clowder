@@ -193,10 +193,14 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   metrics](loops.md). Every `trimInterval` it trims the copies the reconciler last saw
   mounted, each with its volume claimed like a job's, so no job unmounts it meanwhile;
   the driver skips a copy no longer mounted (fstrim on an empty mount point would trim the
-  root file system).
+  root file system). fstrim writes to the volume, so it trims only a copy with DRBD's
+  quorum (and a plain one); the others wait for the next round, an hour later, and so
+  does the whole trim until every mounted copy was trimmed (the exception in
+  [Volumes](../../DEVELOPING.md#volumes)).
 - **The host's report** (`hostReporter`, `report-host`): version, memory, CPUs, the pools'
   data and metadata use, whether Docker answers a ping (`DockerDown`) and how full the root
-  file system is: the inputs of the alerts. It runs in a loop of its own, after the state
+  file system is, and the volumes whose copy here stands alone from a peer (`SplitBrain`)
+  or is primary without DRBD's quorum (`NoQuorum`), from the reconciler's last pass (`Seen`): the inputs of the alerts. It runs in a loop of its own, after the state
   caught up, so a Docker that hangs cannot hold up the report that says so; each probe ends
   by its driver's timeout (Docker's ping, lvs). It probes every 30 s and when a new
   `cluster.yaml` may name a new pool, not at every change of the state: lvs on a host whose
@@ -375,6 +379,15 @@ A tiebreaker (`Volume.Diskless`) has no LV and no metadata: `Ensure` writes
   copy from its resource.
 - `PoolUsage` reads a pool's size and use; `Trim` (fstrim) gives the deleted blocks of
   mounted copies back.
+- `Observe` reads each copy's quorum (`Observed.Quorum`) and whether a peer stands alone
+  from it (`SplitBrain`): `connection-state` `StandAlone`, after a split brain that the
+  `after-sb-*` rules could not resolve, or another refusal a human must look at.
+  `ResolveSplitBrain` connects those peers again (`drbdadm connect resource:peer`); the
+  copies that give their changes up (`--discard-my-data`) must be secondary. A human
+  decides which copy is kept: `clowder volume resolve-splitbrain <volume> --keep <host>`
+  asks the hosts that give up first, then the one to keep and the tiebreaker, through
+  any agent (`api/splitbrain.go`), and refuses while the stack runs on another host than
+  the one kept.
 
 ## Containers (`internal/docker`, `internal/supervisor`)
 

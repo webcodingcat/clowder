@@ -45,3 +45,16 @@ clowder_root_used_percent{host="node0"} 31
 # HELP clowder_volume_out_of_sync_bytes How much this host's copy of a volume differs from a peer: while it resyncs, what is left.
 # TYPE clowder_volume_out_of_sync_bytes gauge
 clowder_volume_out_of_sync_bytes{host="node0",volume="default/db"} 4096
+clowder_volume_out_of_sync_bytes{host="node0",volume="default/files"} 0
+# HELP clowder_volume_primary 1 while this host's copy of a volume is DRBD's primary.
+# TYPE clowder_volume_primary gauge
+clowder_volume_primary{host="node0",volume="default/db"} 1
+# HELP clowder_volume_quorum 1 while this host's copy of a volume has DRBD's quorum; a primary without it suspends its writes.
+# TYPE clowder_volume_quorum gauge
+clowder_volume_quorum{host="node0",volume="default/db"} 1
+# HELP clowder_volume_split_brain 1 while a peer stands alone from this host's copy of a volume: a split brain for a human.
+# TYPE clowder_volume_split_brain gauge
+clowder_volume_split_brain{host="node0",volume="default/db"} 0
+# HELP clowder_volume_up_to_date 1 while this host's copy of a volume holds its current data (a tiebreaker holds none).
+# TYPE clowder_volume_up_to_date gauge
+clowder_volume_up_to_date{host="node0",volume="default/db"} 0

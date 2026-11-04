@@ -201,6 +201,11 @@ runs in a job per volume, a goroutine the pass does not wait for, and each tool 
 through `internal/command` with a timeout. A job that hangs holds up only its own volume,
 and the stacks that wait for it.
 
+One exception: the weekly trim (`fstrim`, `agent/volumes/trim.go`) writes to mounted copies
+from a loop of its own and waits for each. It trims only a copy whose DRBD has its
+quorum, so fstrim does not start on a volume that hangs; should the quorum go while it
+runs, its timeout lets the loop go on, and only the trim waits.
+
 ## Logging and errors
 
 - `internal/logging` sets up `log/slog`: JSON on stderr for the agent (systemd passes it to

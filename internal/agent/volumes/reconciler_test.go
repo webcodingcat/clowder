@@ -484,8 +484,42 @@ func TestTrimRunsOnceAWeekAcrossRestartsOnTheMountedCopies(t *testing.T) {
 	if got := trims(); got != 2 {
 		t.Errorf("%d trims a week later, want 2", got)
 	}
-	// a failed trim counts too: the next try is in a week, not in an hour
-	if got := trims(); got != 2 {
-		t.Errorf("%d trims after a failed trim, want 2", got)
+	// a failed trim is tried again in the next round, in an hour
+	r.storage.Lock()
+	r.storage.TrimFails = false
+	r.storage.Unlock()
+	if got := trims(); got != 3 {
+		t.Errorf("%d trims after a failed trim, want 3", got)
+	}
+	if got := trims(); got != 3 {
+		t.Errorf("%d trims once it worked, want 3", got)
+	}
+}
+
+// fstrim on a copy without DRBD's quorum would hang until the quorum is
+// back: such a copy waits for the next round.
+func TestTrimSkipsACopyWithoutQuorum(t *testing.T) {
+	r := newTestReconciler(t)
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	placeData(r.cluster)
+	placeBlog(r.cluster)
+	r.settle()
+	lv := dataLV
+	if !r.storage.Copy(lv).Mounted {
+		t.Fatalf("data is not mounted: %q", r.storage.Lines())
+	}
+	r.storage.Lock()
+	copyNow := r.storage.Copies[lv]
+	copyNow.Quorum = false
+	r.storage.Copies[lv] = copyNow
+	r.storage.Unlock()
+	r.settle()
+	r.Trim(done)
+	if got := r.storage.Count("trim " + lv); got != 0 {
+		t.Errorf("%d trims without quorum", got)
+	}
+	if _, err := os.Stat(r.files.LastTrim); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the trim counts as done: %v", err)
 	}
 }

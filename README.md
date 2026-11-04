@@ -184,6 +184,7 @@ Put both in a directory and run `clowder apply -f shop/`. Then:
 | `clowder stack ps\|logs shop/web` | the containers and their logs |
 | `clowder stack restart shop/web [app]` | recreates services with their images pulled again |
 | `clowder stack move shop/web node2` | moves the stack with its volumes' data to another host; a volume of replicas 0 starts there empty |
+| `clowder volume resolve-splitbrain shop/data --keep node1` | after the alert `split-brain`: the copy on node1 keeps its data, the others take it |
 | `clowder delete -f shop/ --with-data` | deletes the resources; a volume only with `--with-data` |
 | `clowder cluster status` | the hosts, the leader and the open alerts |
 | `clowder secret rekey -f shop/` | encrypts the values in files again, for the cluster's current keys |

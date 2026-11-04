@@ -238,12 +238,13 @@ start elsewhere: until then it is the only one that runs them, and it may still 
 | `fencing-blocked` | critical | a failed host the leader cannot fence (`whyNotFence`) | fenced, active again |
 | `host-fenced` | critical | `fenced` or `recovering` | active again |
 | `host-disabled` | critical | `disabled` (flapping brake) | enabled |
+| `split-brain` | critical | a host reports a copy that stands alone from a peer (`Host.SplitBrain`) | connected again (`volume resolve-splitbrain`) |
+| `no-quorum` | critical | 2 min a primary copy without DRBD's quorum (`Host.NoQuorum`) | quorum back |
 
 A value is resolved below its raise threshold, so one that hovers there does not raise and
 resolve at every report. Likewise an alert that gets better and then worse again, up to the
 severity the channels were told of, sends nothing new: only its reminder and its
-all-clear. The quorum watch (an agent without quorum alerts by itself) comes with DRBD's
-quorum (phase 2): without a leader, the leader's alerts above are silent.
+all-clear.
 
 ## Metrics (`internal/metrics`, `agent/metrics.go`)
 

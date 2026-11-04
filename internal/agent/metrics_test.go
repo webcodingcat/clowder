@@ -15,6 +15,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/state"
+	"github.com/webcodingcat/clowder/internal/storage"
 	"github.com/webcodingcat/clowder/internal/supervisor"
 )
 
@@ -58,9 +59,14 @@ func newTestMetrics(t *testing.T, leads bool) *metricsSource {
 			return map[supervisor.Service]int{{Stack: agenttest.ShopProject, Name: "app"}: 3}
 		},
 		failures: func() []controller.Failure { return []controller.Failure{{Key: "root-use/node0"}} },
-		progress: func() map[string]int64 { return map[string]int64{"default/db": 4096} },
-		memory:   func() (int64, error) { return 41 << 20, nil },
-		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		seen: func() map[string]storage.Observed {
+			return map[string]storage.Observed{
+				"default/db":    {Role: storage.RolePrimary, Disk: "Inconsistent", Quorum: true, OutOfSyncBytes: 4096},
+				"default/files": {},
+			}
+		},
+		memory: func() (int64, error) { return 41 << 20, nil },
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 

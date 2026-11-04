@@ -24,6 +24,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/scheduler"
 	"github.com/webcodingcat/clowder/internal/state"
+	"github.com/webcodingcat/clowder/internal/storage"
 	"github.com/webcodingcat/clowder/internal/supervisor"
 )
 
@@ -52,8 +53,9 @@ type metricsSource struct {
 	docker   Docker
 	restarts func() map[supervisor.Service]int
 	failures func() []controller.Failure
-	// progress is how far this host's copies are (volumes.Reconciler.Progress)
-	progress func() map[string]int64
+	// seen is what the volume reconciler last found of the copies here
+	// (volumes.Reconciler.Seen)
+	seen func() map[string]storage.Observed
 	// memory reads the agent's resident memory (readRSS); tests replace it
 	memory func() (int64, error)
 	logger *slog.Logger
@@ -107,10 +109,31 @@ func (m *metricsSource) addHost(set *metrics.Set, copied *state.State, leads boo
 		set.Add("clowder_pool_metadata_percent", "How full a thin pool's metadata is.", metrics.Gauge,
 			float64(host.Pools[pool].MetadataPercent), "host", name, "pool", pool)
 	}
-	progress := m.progress()
-	for _, volume := range slices.Sorted(maps.Keys(progress)) {
+	m.addCopies(set)
+}
+
+// addCopies adds what this host's copies of the volumes are: how far each
+// is from its peers and, for one whose DRBD resource is up, its role,
+// whether its data is current, whether it has its quorum and whether a peer
+// stands alone from it (split brain).
+func (m *metricsSource) addCopies(set *metrics.Set) {
+	name := m.host.Name
+	seen := m.seen()
+	for _, volume := range slices.Sorted(maps.Keys(seen)) {
+		copyNow := seen[volume]
 		set.Add("clowder_volume_out_of_sync_bytes", "How much this host's copy of a volume differs from a peer: while it resyncs, what is left.",
-			metrics.Gauge, float64(progress[volume]), "host", name, "volume", volume)
+			metrics.Gauge, float64(copyNow.OutOfSyncBytes), "host", name, "volume", volume)
+		if copyNow.Role == storage.RoleDown {
+			continue
+		}
+		set.Add("clowder_volume_primary", "1 while this host's copy of a volume is DRBD's primary.", metrics.Gauge,
+			boolValue(copyNow.Role == storage.RolePrimary), "host", name, "volume", volume)
+		set.Add("clowder_volume_up_to_date", "1 while this host's copy of a volume holds its current data (a tiebreaker holds none).",
+			metrics.Gauge, boolValue(copyNow.Disk == storage.DiskUpToDate), "host", name, "volume", volume)
+		set.Add("clowder_volume_quorum", "1 while this host's copy of a volume has DRBD's quorum; a primary without it suspends its writes.",
+			metrics.Gauge, boolValue(copyNow.Quorum), "host", name, "volume", volume)
+		set.Add("clowder_volume_split_brain", "1 while a peer stands alone from this host's copy of a volume: a split brain for a human.",
+			metrics.Gauge, boolValue(copyNow.SplitBrain), "host", name, "volume", volume)
 	}
 }
 

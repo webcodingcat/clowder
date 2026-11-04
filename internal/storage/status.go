@@ -22,6 +22,9 @@ type drbdResource struct {
 	Role    Role   `json:"role"`
 	Devices []struct {
 		DiskState string `json:"disk-state"`
+		// Quorum is false while the copy here lacks DRBD's quorum: a
+		// primary then suspends its writes (on-no-quorum suspend-io)
+		Quorum bool `json:"quorum"`
 	} `json:"devices"`
 	Connections []struct {
 		PeerNodeID      int    `json:"peer-node-id"`
@@ -80,6 +83,25 @@ func (d Driver) resources(ctx context.Context) (map[string]drbdResource, error) 
 		resources[resource.Name] = resource
 	}
 	return resources, nil
+}
+
+// quorum tells whether the copy here has DRBD's quorum; false without a
+// device.
+func (r drbdResource) quorum() bool {
+	return len(r.Devices) > 0 && r.Devices[0].Quorum
+}
+
+// standAlonePeers are the peers, by node-id, that the resource here no
+// longer tries to connect to (StandAlone): after a split brain DRBD could
+// not resolve by its rules, or another refusal that needs a human.
+func (r drbdResource) standAlonePeers() []int {
+	var peers []int
+	for _, connection := range r.Connections {
+		if connection.ConnectionState == "StandAlone" {
+			peers = append(peers, connection.PeerNodeID)
+		}
+	}
+	return peers
 }
 
 // hasPeer tells whether the resource has the peer configured.

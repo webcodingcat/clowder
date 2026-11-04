@@ -60,14 +60,16 @@ func (s *State) deleted(kind string, meta Meta) {
 }
 
 // The verbs Authorize knows: put, delete, restart and move change resources in
-// the state, read is for what never passes Raft (the API's lists, a stack's
-// ps and logs).
+// the state; read and resolve are for what never passes Raft (the API's
+// lists, a stack's ps and logs; a volume's split brain, which its hosts
+// resolve).
 const (
 	VerbPut     = "put"
 	VerbDelete  = "delete"
 	VerbRestart = "restart"
 	VerbMove    = "move"
 	VerbRead    = "read"
+	VerbResolve = "resolve"
 )
 
 // Authorize tells whether an actor may apply a verb to the resources of a
