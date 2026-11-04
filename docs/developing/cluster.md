@@ -714,7 +714,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   there gets a disk); a copy beyond `replicas` goes once the others are synced, the one on
   a leaving host first, never the one where its stack runs; a volume with two copies gets
   a tiebreaker (diskless) on a host without a copy, the one with the fewest, once three
-  hosts take stacks. A copy on a host that leaves does not count, one on a draining host
+  hosts take stacks. **Quorum while copies change** (`fitTiebreaker`): the change that
+  gives a volume a second copy with a disk, or takes it away, brings or takes the
+  tiebreaker in the same record, as two copies without their third vote lose DRBD's
+  quorum should one fail (one of two nodes). The copy a move gives up becomes the
+  tiebreaker on its host, so no node leaves the resource: its host detaches the disk and
+  removes the LV, whose pool the copy's class still names. A volume of replicas 1 has a
+  tiebreaker while a move gives it two copies. A copy on a host that leaves does not count, one on a draining host
   does. **The resync limit:** a new copy with a disk starts only while no other copy
   syncs, in the whole cluster, so each resyncs at `replication.resync_rate` and no link
   carries more. A move that has not got its copies synced counts as that one resync, though

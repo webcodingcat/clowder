@@ -342,7 +342,10 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   next pass. Markers in the driver's `StateDir` let `Ensure` pick up after a
   crash at any point (`created`: clowder made the LV; `metadata`: DRBD metadata written).
 A tiebreaker (`Volume.Diskless`) has no LV and no metadata: `Ensure` writes
-  its resource file and runs `adjust`, `Remove` takes it down. When a resource's file loses
+  its resource file and runs `adjust`, `Remove` takes it down. A copy that became the
+  tiebreaker on its host keeps its `Pool`: once `adjust` detached the disk, `Ensure`
+  removes the LV and its markers (`removeDetachedLV`), so a disk that comes back gets new
+  metadata. When a resource's file loses
   a peer (a copy went), `Ensure` notes the peer first (the marker `<resource>.forget`) and
   forgets it after the `adjust` (`ForgetPeerOf`), so the next copy finds a free slot in the
   metadata (`maxPeers`). `Observe` also reads each copy's disk state and how much it

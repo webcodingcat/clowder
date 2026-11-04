@@ -13,7 +13,8 @@ import (
 
 // Observed is what the host has of a copy right now.
 type Observed struct {
-	// LV says the copy's LV exists; a tiebreaker has none.
+	// LV says the copy's LV exists; a tiebreaker has none, but for the one
+	// of a copy that had a disk until its host removes it.
 	LV bool
 	// ResourceFileCurrent says the DRBD resource file is the one the copy
 	// should have (only with replicas); a new peer changes it.
@@ -49,7 +50,7 @@ func (d Driver) Observe(ctx context.Context, volumes []Volume) (map[string]Obser
 	var groups []string
 	replicated := false
 	for _, volume := range volumes {
-		if !volume.Diskless {
+		if volume.Pool != "" {
 			groups = append(groups, volumeGroup(volume.Pool))
 		}
 		replicated = replicated || volume.Resource != nil
@@ -76,7 +77,7 @@ func (d Driver) Observe(ctx context.Context, volumes []Volume) (map[string]Obser
 	}
 	observed := map[string]Observed{}
 	for _, volume := range volumes {
-		copyNow := Observed{LV: !volume.Diskless && lvs[volumeGroup(volume.Pool)+"/"+volume.LV]}
+		copyNow := Observed{LV: volume.Pool != "" && lvs[volumeGroup(volume.Pool)+"/"+volume.LV]}
 		if volume.Resource != nil {
 			resource := resources[volume.Resource.Name]
 			copyNow.Role, copyNow.Disk, copyNow.OutOfSyncBytes = resource.Role, resource.disk(), resource.outOfSyncBytes()

@@ -56,7 +56,8 @@ func TestAMissingCopyGoesToTheHostWithTheMostFreeSpace(t *testing.T) {
 	runningShop(current, 2, state.VolumeCopy{Host: 0})
 	current.Hosts[1].Pools = map[string]state.Pool{"vg-fast/thin": {SizeBytes: 50 * gib}}
 	copies := Plan(current, planTime).Copies
-	if len(copies) != 1 || !slices.Equal(hostsOf(copies[0]), []string{"0", "2"}) {
+	// with the tiebreaker the two copies need, in the same record
+	if len(copies) != 1 || !slices.Equal(hostsOf(copies[0]), []string{"0", "2", "t1"}) {
 		t.Fatalf("copies %+v", copies)
 	}
 	if added := copies[0].Copies[1]; added.Synced {
@@ -129,8 +130,10 @@ func TestASurplusCopyGoesOnceTheOthersAreSyncedButNotWhereItsStackRuns(t *testin
 		t.Fatalf("copies %+v", copies)
 	}
 	data.Copies[0].Synced, data.Copies[1].Synced = false, true
-	if copies := Plan(current, planTime).Copies; len(copies) != 0 {
-		t.Fatalf("the stack's own copy, or one that leaves an unsynced copy alone: %+v", copies)
+	// neither goes: the stack's own copy, nor one that leaves an unsynced
+	// copy alone; meanwhile the two copies get a tiebreaker
+	if copies := Plan(current, planTime).Copies; len(copies) != 1 || !slices.Equal(hostsOf(copies[0]), []string{"0", "1", "t2"}) {
+		t.Fatalf("copies %+v", copies)
 	}
 	// both synced: the one beside the stack's goes
 	data.Copies[0].Synced = true
@@ -261,5 +264,56 @@ func TestAFailedMoveIsNotTriedAgainWithinTheCooldownUnlessAUserAsks(t *testing.T
 	current.Hosts[0].Phase = state.Draining
 	if moves := Plan(current, planTime.Add(MoveCooldown)).Moves; len(moves) != 1 {
 		t.Errorf("after the cooldown: %+v", moves)
+	}
+}
+
+// After a move the old copy becomes the tiebreaker, in the record that
+// gives it up: no node leaves the resource, so no window opens in which
+// the two copies left have no third vote.
+func TestTheCopyAMoveGivesUpBecomesTheTiebreaker(t *testing.T) {
+	current := hosts(2)
+	runningShop(current, 2, state.VolumeCopy{Host: 0}, state.VolumeCopy{Host: 1}, state.VolumeCopy{Host: 2})
+	// the stack moved from host 1 to host 0, whose tiebreaker got a disk
+	copies := Plan(current, planTime).Copies
+	if len(copies) != 1 || !slices.Equal(hostsOf(copies[0]), []string{"0", "1", "t2"}) {
+		t.Fatalf("copies %+v", copies)
+	}
+	if tiebreaker := copies[0].Copies[2]; tiebreaker.Class != "fast" {
+		t.Errorf("the tiebreaker forgot the class of its LV: %+v", tiebreaker)
+	}
+	// a host that leaves gives its copy up, and the tiebreaker goes elsewhere
+	// in the same record
+	current = hosts(3)
+	runningShop(current, 2, state.VolumeCopy{Host: 0}, state.VolumeCopy{Host: 1}, state.VolumeCopy{Host: 2})
+	current.Hosts[2].Phase, current.Hosts[2].Leaving = state.Draining, true
+	copies = Plan(current, planTime).Copies
+	if len(copies) != 1 || !slices.Equal(hostsOf(copies[0]), []string{"0", "1", "t3"}) {
+		t.Fatalf("copies %+v", copies)
+	}
+}
+
+// A volume of replicas 1 that moves has two copies for a while: they get a
+// tiebreaker with the new copy, and lose it with the old one.
+func TestAMoveOfOneReplicaHasATiebreakerWhileItLasts(t *testing.T) {
+	current := hosts(2)
+	runningShop(current, 1, state.VolumeCopy{Host: 0})
+	shop := current.Stacks["default/shop"]
+	to := state.HostID(1)
+	shop.MoveTo = &to
+	moves := Plan(current, planTime).Moves
+	if len(moves) != 1 {
+		t.Fatalf("moves %+v", moves)
+	}
+	moved := firstStep(t, current, moves[0])
+	if len(moved) != 1 || !slices.Equal(hostsOf(moved[0]), []string{"0", "1", "t2"}) {
+		t.Fatalf("the move's copies %+v", moved)
+	}
+	current.Volumes["default/data"].Copies = moved[0].Copies
+	current.Volumes["default/data"].Copies[1].Synced = true
+	host := state.HostID(1)
+	shop.Host, shop.MoveTo = &host, nil
+	copies := Plan(current, planTime).Copies
+	if len(copies) != 1 || !slices.Equal(hostsOf(copies[0]), []string{"1"}) {
+		t.Errorf("copies %+v", copies)
 	}
 }

@@ -76,10 +76,11 @@ func (r *Reconciler) describe(copied *state.State, volume *state.Volume) (storag
 	described := storage.Volume{ID: id, LV: lv, SizeBytes: int64(volume.Spec.Size)}
 	config := copied.Config.Spec
 	index := slices.IndexFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host })
-	if volume.Copies[index].Tiebreaker {
-		described.Diskless = true
-	} else {
-		pool, err := poolOf(config, id, volume.Copies[index].Class)
+	// a tiebreaker has no pool, but for the one of a copy that had a disk:
+	// its class names the pool of the LV to remove
+	described.Diskless = volume.Copies[index].Tiebreaker
+	if class := volume.Copies[index].Class; !described.Diskless || class != "" {
+		pool, err := poolOf(config, id, class)
 		if err != nil {
 			return described, err
 		}

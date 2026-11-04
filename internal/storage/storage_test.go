@@ -78,7 +78,11 @@ func (f *fakeHost) status() string {
 	if f.existing["primary"] {
 		role = "Primary"
 	}
-	return `[{"name": "clw-shop-pgdata", "node-id": 0, "role": "` + role + `", "suspended": false}]`
+	devices := ""
+	if f.existing["diskless"] {
+		devices = `, "devices": [{"disk-state": "Diskless"}]`
+	}
+	return `[{"name": "clw-shop-pgdata", "node-id": 0, "role": "` + role + `", "suspended": false` + devices + `}]`
 }
 
 // mountTable is findmnt's list: the root and, while mounted, the copy's.
@@ -577,5 +581,35 @@ func TestAResourceFileThatAdjustDidNotApplyIsNotCurrent(t *testing.T) {
 	}
 	if current, err := driver.resourceFileCurrent(resource); err != nil || !current {
 		t.Errorf("current %v, %v once adjust applied it", current, err)
+	}
+}
+
+// A copy that became the tiebreaker on its host keeps the pool of its LV:
+// Ensure removes the LV once adjust detached DRBD from it, and the marker
+// of its metadata, so a disk that comes back gets new metadata.
+func TestATiebreakerRemovesTheLVOfTheDiskItHad(t *testing.T) {
+	host := &fakeHost{existing: map[string]bool{}}
+	driver := newDriver(t, host)
+	ctx := context.Background()
+	if err := driver.Ensure(ctx, replicated()); err != nil {
+		t.Fatal(err)
+	}
+	tiebreaker := replicated()
+	tiebreaker.Diskless = true
+	host.commands = nil
+	if err := driver.Ensure(ctx, tiebreaker); err == nil || host.ran("lvremove") {
+		t.Fatalf("removed the LV while DRBD still has it (%v):\n%s", err, strings.Join(host.commands, "\n"))
+	}
+	host.existing["diskless"] = true
+	if err := driver.Ensure(ctx, tiebreaker); err != nil {
+		t.Fatal(err)
+	}
+	if !host.ran("lvremove --yes vg-fast/clw-shop-pgdata-g1") {
+		t.Errorf("did not remove the LV:\n%s", strings.Join(host.commands, "\n"))
+	}
+	for _, marker := range []string{"clw-shop-pgdata-g1.created", "clw-shop-pgdata.metadata"} {
+		if _, err := os.Stat(filepath.Join(driver.StateDir, marker)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the marker %s is left: %v", marker, err)
+		}
 	}
 }

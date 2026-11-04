@@ -212,9 +212,9 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 
 // keptSynced is the Synced of a copy in a volume's new record: only its
 // host tells (set-copy-synced), so a copy that stays what it was keeps the
-// word, and any other starts unsynced. A copy with a disk cannot become a
-// tiebreaker on its host: its LV would stay behind, as no retired copy
-// names it.
+// word, and any other starts unsynced. A copy with a disk that becomes the
+// tiebreaker on its host keeps its class: it names the pool of the LV that
+// its host removes, as no retired copy does.
 func keptSynced(old *Volume, generation int64, volumeCopy VolumeCopy) (bool, error) {
 	if generation != old.DataGeneration {
 		return false, nil
@@ -223,8 +223,9 @@ func keptSynced(old *Volume, generation int64, volumeCopy VolumeCopy) (bool, err
 	switch {
 	case index < 0:
 		return false, nil
-	case !old.Copies[index].Tiebreaker && volumeCopy.Tiebreaker:
-		return false, fmt.Errorf("the copy on host %d has a disk; it cannot become a tiebreaker", volumeCopy.Host)
+	case !old.Copies[index].Tiebreaker && volumeCopy.Tiebreaker && volumeCopy.Class != old.Copies[index].Class:
+		return false, fmt.Errorf("the copy on host %d becomes a tiebreaker and must keep its class %q, the pool of its LV",
+			volumeCopy.Host, old.Copies[index].Class)
 	case old.Copies[index].Tiebreaker != volumeCopy.Tiebreaker || old.Copies[index].Class != volumeCopy.Class:
 		return false, nil
 	}
@@ -378,8 +379,9 @@ func checkVolume(volume Volume) error {
 		// one more than replicas while a new copy takes an old one's
 		// place (a move); DRBD's metadata has room for it (max-peers)
 		return fmt.Errorf("volume %s: %d copies for %d replicas", id, copies, replicas)
-	case tiebreakers > 0 && (replicas != 2 || tiebreakers > 1):
-		// a tiebreaker gives two copies their third vote, and only them
+	case tiebreakers > 1 || tiebreakers > 0 && replicas != 2 && (replicas != 1 || copies != 2):
+		// a tiebreaker gives two copies their third vote, and only them: a
+		// volume of replicas 2, or one of replicas 1 while it moves
 		return fmt.Errorf("volume %s: %d tiebreakers for %d replicas", id, tiebreakers, replicas)
 	case volume.Status == VolumePending && (len(volume.Copies) > 0 || volume.Minor != nil):
 		// the minor comes with the first copy, from the placement

@@ -22,6 +22,9 @@ const minTiebreakerHosts = 3
 //     copy that holds the fewest tiebreakers, once there are three hosts
 //     that take stacks; one on a host that no longer takes them moves.
 //
+// A change that gives a volume two copies with a disk, or takes the second
+// away, brings the tiebreaker that needs in the same record (fitTiebreaker).
+//
 // The resync limit: a new copy with a disk starts only while no other
 // syncs, in the whole cluster. Each copy then resyncs at
 // replication.resync_rate, and so no link carries more.
@@ -44,6 +47,7 @@ func (p *planner) keepCopies() []state.Volume {
 		}
 		for _, change := range []func(*state.Volume) (state.Volume, bool){p.addCopy, p.dropSurplus, p.setTiebreaker} {
 			if record, ok := change(volume); ok {
+				p.countTiebreakers(record)
 				records = append(records, record)
 				break
 			}
@@ -161,9 +165,7 @@ func (p *planner) addCopy(volume *state.Volume) (state.Volume, bool) {
 	record.Copies = slices.DeleteFunc(slices.Clone(volume.Copies), func(c state.VolumeCopy) bool { return c.Host == best.host })
 	record.Copies = append(record.Copies, state.VolumeCopy{Host: best.host, Class: best.class})
 	p.take(best.host, p.classes[best.class].Pool, int64(volume.Spec.Size))
-	if best.tiebreaker {
-		p.tiebreakers[best.host]--
-	}
+	p.fitTiebreaker(&record, nil)
 	p.syncing = true
 	return record, true
 }
@@ -219,6 +221,7 @@ func (p *planner) dropSurplus(volume *state.Volume) (state.Volume, bool) {
 	})
 	record := *volume
 	record.Copies = slices.DeleteFunc(slices.Clone(volume.Copies), func(c state.VolumeCopy) bool { return c.Host == dropped.Host })
+	p.fitTiebreaker(&record, &dropped)
 	return record, true
 }
 
@@ -234,45 +237,83 @@ func (p *planner) stackHostOf(volume *state.Volume) (state.HostID, bool) {
 	return 0, false
 }
 
-// setTiebreaker puts the tiebreaker of a volume with two copies on a host
-// that takes stacks, and moves one from a host that leaves or no longer
-// runs stacks; a draining host keeps its tiebreaker, as it keeps its
-// copies.
+// setTiebreaker gives a volume the tiebreaker its copies need
+// (fitTiebreaker) and moves one from a host that leaves or no longer runs
+// stacks; a draining host keeps its tiebreaker, as it keeps its copies.
+// The old one goes even without a new one: a host that leaves must not
+// keep it.
 func (p *planner) setTiebreaker(volume *state.Volume) (state.Volume, bool) {
-	if volume.Spec.Replicas != 2 || len(diskCopies(volume)) != 2 {
+	record := *volume
+	record.Copies = slices.DeleteFunc(slices.Clone(volume.Copies), func(c state.VolumeCopy) bool {
+		return c.Tiebreaker && !p.counts(c.Host)
+	})
+	p.fitTiebreaker(&record, nil)
+	if slices.Equal(record.Copies, volume.Copies) {
 		return state.Volume{}, false
 	}
-	index := slices.IndexFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Tiebreaker })
+	return record, true
+}
+
+// fitTiebreaker gives a volume's record the tiebreaker its copies with a
+// disk need, in the record of the change that needs it: two copies that
+// gain or lose their third vote in a command of its own lack DRBD's quorum
+// in between (one of two nodes), and the failover of the one with the
+// stack hangs should it fail then.
+//   - Two copies with a disk get one: a volume of replicas 2, and one of
+//     replicas 1 while it moves. It goes on the host of prefer if that host
+//     takes stacks: the copy it gives up there becomes the tiebreaker, so no
+//     node joins or leaves the resource (its host detaches the disk and
+//     removes the LV, which the copy's class still names). Else on a host
+//     without a copy that holds the fewest tiebreakers; none while fewer
+//     than minTiebreakerHosts hosts take stacks.
+//   - One copy with a disk loses it: with two nodes, the copy would lose
+//     its quorum with the tiebreaker.
+//
+// A tiebreaker that is there stays: with three copies (a move of replicas
+// 2) it does no harm, and it is in place once one of them goes.
+func (p *planner) fitTiebreaker(record *state.Volume, prefer *state.VolumeCopy) {
+	index := slices.IndexFunc(record.Copies, func(c state.VolumeCopy) bool { return c.Tiebreaker })
+	disks := len(diskCopies(record))
 	switch {
-	case index >= 0 && p.counts(volume.Copies[index].Host):
-		return state.Volume{}, false
-	case index < 0 && len(p.activeHosts(nil)) < minTiebreakerHosts:
-		return state.Volume{}, false
+	case disks < 2 && index >= 0:
+		record.Copies = slices.Delete(slices.Clone(record.Copies), index, index+1)
+		return
+	case disks != 2 || index >= 0 || record.Spec.Replicas > 2 || len(p.activeHosts(nil)) < minTiebreakerHosts:
+		return
+	}
+	if prefer != nil && p.takesStacks(prefer.Host) {
+		record.Copies = append(record.Copies, state.VolumeCopy{Host: prefer.Host, Class: prefer.Class, Tiebreaker: true})
+		return
 	}
 	var candidates []state.HostID
 	for _, host := range p.activeHosts(nil) {
-		if !slices.ContainsFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == host }) &&
-			!p.retiresHere(volume.ID(), volume.DataGeneration, host) {
+		if !slices.ContainsFunc(record.Copies, func(c state.VolumeCopy) bool { return c.Host == host }) &&
+			!p.retiresHere(record.ID(), record.DataGeneration, host) {
 			candidates = append(candidates, host)
 		}
 	}
-	record := *volume
-	record.Copies = slices.DeleteFunc(slices.Clone(volume.Copies), func(c state.VolumeCopy) bool { return c.Tiebreaker })
 	if len(candidates) == 0 {
-		if index < 0 {
-			return state.Volume{}, false
-		}
-		// the old one goes even so: a host that leaves must not keep it
-		p.tiebreakers[volume.Copies[index].Host]--
-		return record, true
+		return
 	}
 	host := slices.MinFunc(candidates, func(a, b state.HostID) int {
 		return cmp.Or(cmp.Compare(p.tiebreakers[a], p.tiebreakers[b]), cmp.Compare(a, b))
 	})
-	if index >= 0 {
-		p.tiebreakers[volume.Copies[index].Host]--
-	}
-	p.tiebreakers[host]++
 	record.Copies = append(record.Copies, state.VolumeCopy{Host: host, Tiebreaker: true})
-	return record, true
+}
+
+// countTiebreakers moves the plan's count of tiebreakers per host from a
+// volume's record in the state to its new record.
+func (p *planner) countTiebreakers(record state.Volume) {
+	if old := p.current.Volumes[record.ID()]; old != nil {
+		for _, volumeCopy := range old.Copies {
+			if volumeCopy.Tiebreaker {
+				p.tiebreakers[volumeCopy.Host]--
+			}
+		}
+	}
+	for _, volumeCopy := range record.Copies {
+		if volumeCopy.Tiebreaker {
+			p.tiebreakers[volumeCopy.Host]++
+		}
+	}
 }

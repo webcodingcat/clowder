@@ -62,8 +62,10 @@ type Volume struct {
 	// Resource is the DRBD resource; nil for a volume with replicas 0, which
 	// is a plain LV.
 	Resource *Resource
-	// Diskless is a tiebreaker: the resource without an LV, Pool empty. It
-	// gives a volume with two copies its third vote and holds no data.
+	// Diskless is a tiebreaker: the resource without an LV. It gives a volume
+	// with two copies its third vote and holds no data. Its Pool is empty,
+	// but for a copy that had a disk: Ensure removes that LV once DRBD let it
+	// go.
 	Diskless bool
 }
 
@@ -100,7 +102,10 @@ func (d Driver) resourceFile(resource *Resource) string {
 // can hold a copy that a stack elsewhere uses.
 func (d Driver) Ensure(ctx context.Context, volume Volume) error {
 	if volume.Diskless {
-		return d.ensureResource(ctx, volume)
+		if err := d.ensureResource(ctx, volume); err != nil {
+			return err
+		}
+		return d.removeDetachedLV(ctx, volume)
 	}
 	if err := d.ensureLV(ctx, volume); err != nil {
 		return err
@@ -109,6 +114,27 @@ func (d Driver) Ensure(ctx context.Context, volume Volume) error {
 		return nil
 	}
 	return d.ensureResource(ctx, volume)
+}
+
+// removeDetachedLV removes the LV of a copy that became the tiebreaker on
+// its host, once adjust detached DRBD from it, and the markers of its
+// metadata: should the host get a disk again, that is a new LV that needs
+// new metadata.
+func (d Driver) removeDetachedLV(ctx context.Context, volume Volume) error {
+	if volume.Pool == "" {
+		return nil
+	}
+	resources, err := d.resources(ctx)
+	if err != nil {
+		return err
+	}
+	if disk := resources[volume.Resource.Name].disk(); disk != DiskDiskless {
+		return fmt.Errorf("volume %s: the tiebreaker still has its disk (%s)", volume.ID, disk)
+	}
+	if err := d.removeLV(ctx, volume); err != nil {
+		return err
+	}
+	return removeFiles([]string{d.marker(volume.LV, "created"), d.marker(volume.Resource.Name, "metadata")}, volume.ID)
 }
 
 // The exit codes the driver reads. Any other failure of these tools (a
@@ -332,20 +358,25 @@ func (d Driver) Remove(ctx context.Context, volume Volume) error {
 		leftovers = append(leftovers, resourceFile, d.marker(name, "metadata"), d.marker(name, "forget"),
 			d.marker(name, "adjusted"))
 	}
-	if volume.Diskless {
-		return removeFiles(append(leftovers, d.MountPoint(volume)), volume.ID)
-	}
-	exists, err := d.lvExists(ctx, volume)
-	if err != nil {
-		return err
-	}
-	if exists {
-		path := volumeGroup(volume.Pool) + "/" + volume.LV
-		if _, err := d.Run(ctx, shortTimeout, "lvremove", "--yes", path); err != nil {
-			return fmt.Errorf("remove the LV of %s: %w", volume.ID, err)
+	if volume.Pool != "" {
+		if err := d.removeLV(ctx, volume); err != nil {
+			return err
 		}
 	}
 	return removeFiles(append(leftovers, d.MountPoint(volume)), volume.ID)
+}
+
+// removeLV removes the copy's LV, unless it is gone.
+func (d Driver) removeLV(ctx context.Context, volume Volume) error {
+	exists, err := d.lvExists(ctx, volume)
+	if err != nil || !exists {
+		return err
+	}
+	path := volumeGroup(volume.Pool) + "/" + volume.LV
+	if _, err := d.Run(ctx, shortTimeout, "lvremove", "--yes", path); err != nil {
+		return fmt.Errorf("remove the LV of %s: %w", volume.ID, err)
+	}
+	return nil
 }
 
 // removeFiles removes what is left of a copy; what is gone already is

@@ -93,9 +93,12 @@ func plan(facts copyFacts) ([]step, error) {
 	}
 	var steps []step
 	// a resource that is down or whose file changed needs ensure, which
-	// runs drbdadm adjust
+	// runs drbdadm adjust; so does a tiebreaker that still has the LV of
+	// the disk it had, which ensure removes
 	resourceBehind := !facts.plain && (seen.Role == storage.RoleDown || !seen.ResourceFileCurrent)
-	if !seen.LV && !facts.diskless || resourceBehind {
+	missingLV := !seen.LV && !facts.diskless
+	leftoverLV := seen.LV && facts.diskless
+	if missingLV || leftoverLV || resourceBehind {
 		steps = append(steps, stepEnsure)
 	}
 	primary := seen.Role == storage.RolePrimary

@@ -416,6 +416,7 @@ func (p *planner) reserve(host state.HostID, volumes []state.Volume) {
 		if volume.Minor != nil {
 			p.minors[*volume.Minor] = true
 		}
+		p.countTiebreakers(volume)
 	}
 }
 
@@ -436,8 +437,10 @@ func (p *planner) dataElsewhere(stack *state.Stack, host state.HostID) bool {
 // volumesOn works out what a stack's volumes need on host: volumes are
 // those that wait for their first stack (pending), each placed there with
 // its first copy; copies are placed volumes of replicas 1 and more that
-// get a copy there (a tiebreaker there gets a disk). A placed volume of
-// replicas 0 needs neither (dataElsewhere). Nothing is taken from the
+// get a copy there (a tiebreaker there gets a disk), with the tiebreaker
+// that needs (fitTiebreaker: a volume of replicas 1 keeps its quorum while
+// the new copy syncs, should a host fail). A placed volume of replicas 0
+// needs neither (dataElsewhere). Nothing is taken from the
 // planner yet (reserve). A reason says why host cannot take them.
 func (p *planner) volumesOn(stack *state.Stack, host state.HostID) (volumes, copies []state.Volume, reason string) {
 	var reserved []allocation
@@ -469,6 +472,7 @@ func (p *planner) volumesOn(stack *state.Stack, host state.HostID) (volumes, cop
 			volume := *current
 			volume.Copies = slices.DeleteFunc(slices.Clone(current.Copies), func(c state.VolumeCopy) bool { return c.Host == host })
 			volume.Copies = append(volume.Copies, state.VolumeCopy{Host: host, Class: class})
+			p.fitTiebreaker(&volume, nil)
 			copies = append(copies, volume)
 			continue
 		}

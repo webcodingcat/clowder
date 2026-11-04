@@ -27,6 +27,17 @@ func TestPlanBringsACopyFromWhatTheHostHasToItsTarget(t *testing.T) {
 		want    []step
 		wantErr error
 	}{
+		// a tiebreaker
+		{
+			name:  "a tiebreaker that still has the LV of its former disk",
+			facts: copyFacts{target: targetSecondary, diskless: true, seen: secondary},
+			want:  []step{stepEnsure},
+		},
+		{
+			name:  "a tiebreaker in place",
+			facts: copyFacts{target: targetSecondary, diskless: true, seen: storage.Observed{ResourceFileCurrent: true, Role: storage.RoleSecondary}},
+		},
+
 		// never initialized: the first copy becomes the volume's truth
 		{
 			name:  "missing, a stack here, never initialized",

@@ -58,12 +58,20 @@ func TestACopyKeepsItsSyncedWordWhileItStaysWhatItWas(t *testing.T) {
 	if !c.state.Volumes["default/data"].Copies[1].Synced {
 		t.Errorf("host 1 told its copy is synced: %+v", c.state.Volumes["default/data"].Copies)
 	}
+	// a copy that becomes the tiebreaker keeps the class of its LV, which
+	// its host removes, and is not synced
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: c.withCopies(
+		VolumeCopy{Host: 0, Class: "fast"}, VolumeCopy{Host: 1, Tiebreaker: true},
+	)}, "must keep its class \"fast\"")
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: c.withCopies(
 		VolumeCopy{Host: 0, Class: "fast"}, VolumeCopy{Host: 1, Class: "fast", Tiebreaker: true},
-	)}, "the copy on host 1 has a disk; it cannot become a tiebreaker")
+	)})
+	if copies := c.state.Volumes["default/data"].Copies; copies[1].Synced {
+		t.Errorf("a tiebreaker is synced: %+v", copies)
+	}
 }
 
-func TestAVolumeHasOneCopyMoreThanItsReplicasAtMostAndATiebreakerOnlyForTwo(t *testing.T) {
+func TestAVolumeHasOneCopyMoreThanItsReplicasAtMostAndATiebreakerOnlyForTwoCopies(t *testing.T) {
 	c := moveCluster(t)
 	c.activeHost(3)
 	tests := []struct {
@@ -96,6 +104,17 @@ func TestAVolumeHasOneCopyMoreThanItsReplicasAtMostAndATiebreakerOnlyForTwo(t *t
 	volume.Spec.Replicas = 3
 	if err := checkVolume(volume); err == nil || !strings.Contains(err.Error(), "1 tiebreakers for 3 replicas") {
 		t.Errorf("a tiebreaker for three copies: %v", err)
+	}
+	// replicas 1: a tiebreaker only while a move gives it two copies
+	volume.Spec.Replicas = 1
+	if err := checkVolume(volume); err == nil || !strings.Contains(err.Error(), "1 tiebreakers for 1 replicas") {
+		t.Errorf("a tiebreaker for one copy: %v", err)
+	}
+	volume = c.withCopies(VolumeCopy{Host: 0, Class: "fast"}, VolumeCopy{Host: 1, Class: "fast"},
+		VolumeCopy{Host: 2, Tiebreaker: true})
+	volume.Spec.Replicas = 1
+	if err := checkVolume(volume); err != nil {
+		t.Errorf("a tiebreaker while replicas 1 moves: %v", err)
 	}
 }
 
