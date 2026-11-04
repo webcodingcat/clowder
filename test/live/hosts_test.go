@@ -24,6 +24,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/buildinfo"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/jointoken"
 	"github.com/webcodingcat/clowder/internal/pki"
 )
@@ -240,6 +241,17 @@ func growToThreeHosts(t *testing.T) {
 		if !reaches(t, joined, "", tofu.PrivateAddress.Value+":"+apiPort) {
 			t.Errorf("%s does not reach the first host's API", name)
 		}
+	}
+	// every host a seed, as a user of three hosts would list them: a
+	// scenario that cuts off the first host, the leader after TestSetup,
+	// still reaches the cluster through the others
+	changeConfig(t, func(config *clusterspec.Config) {
+		for _, name := range []string{firstJoining, secondJoining} {
+			config.Seeds = append(config.Seeds, tofu.Hosts.Value[name].PublicAddress)
+		}
+	})
+	if err := os.WriteFile(filepath.Join(workDir, baselineConfigFile), clusterConfigJSON(t), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

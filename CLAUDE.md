@@ -24,11 +24,11 @@ are not needed on the host.
 | `bin/dev build` | `clowderd` for Linux, `clowder` for Linux, macOS and Windows into `dist/` |
 | `bin/dev package` | build, then the Debian packages into `dist/` |
 | `bin/dev all` | lint, test, test-tools, package – what CI runs |
-| `bin/dev live` | the live tests: a cluster of three hosts from `examples/hetzner` in an HLab lab of their own, driven by `test/live` (about two hours; `HLAB` points at HLab's `bin/hlab`, needs `/dev/kvm`): `live up` makes the hosts (from a prepared image, `live image`, made when missing or old), `live run [-run <test>]` runs the scenarios on them, `live down` removes them; `bin/dev live` does all three; `bin/dev live release <tag>` tests a published release (Shipping, Release checklist) |
+| `bin/dev live` | the live tests: clusters of three hosts from `examples/hetzner` in up to three HLab labs at once, each with a group of the scenarios of `test/live` (about 40 minutes with three labs and the image in place; `HLAB` points at HLab's `bin/hlab`, needs `/dev/kvm`): `live up [--lab <n>]` makes the hosts of one lab (from a prepared image, `live image`, made when missing or old), `live run [--lab <n>] [-run <test>]` runs scenarios on them, `live down [--lab <n>]` removes them; `bin/dev live` does all three in each lab; `bin/dev live release <tag>` tests a published release (Shipping, Release checklist) |
 
 Run the live tests only at the end of a piece of work, on its finished state. A lock keeps
-two runs apart; after a failure, `bin/dev live run -run <test>` runs one scenario again on
-the hosts that stay.
+two runs on a lab apart; after a failure, `bin/dev live run --lab <n> -run <test>` runs one
+scenario again on the hosts that stay.
 
 ## Rules that are easy to break
 

@@ -8,11 +8,13 @@ those tools and from where the tools reach the hosts. Point `HLAB` at its wrappe
 
 ```bash
 export HLAB=/path/to/hlab/bin/hlab
-bin/dev live                        # up, run, and down once it passes; about two hours
-bin/dev live up                     # package, image, make the first host, bootstrap, two more join
-bin/dev live run                    # every scenario on that cluster
+bin/dev live                        # every scenario in up to three labs at once, about 40 min
+bin/dev live up                     # package, image, lab 1: the first host, bootstrap, two more join
+bin/dev live run                    # every scenario on lab 1's cluster
 bin/dev live run -run TestIngress   # one scenario; the flags go to go test
-bin/dev live down                   # destroy the hosts, stop the lab
+bin/dev live run --lab 2 -run TestQuorum   # on lab 2, which a failed bin/dev live left
+bin/dev live down                   # destroy the hosts, stop every lab
+bin/dev live down --lab 2           # only lab 2
 bin/dev live image --rebuild        # make the hosts' image anew, even when current
 bin/dev live release v1.2.3-rc1     # on a checkout of the tag: the release, without the test hook
 ```
@@ -22,16 +24,35 @@ Run them only at the end of a piece of work, on its finished state. Without HLab
 against the real tools, the packages.
 
 `up`, `run` and `down` split the work so a fix costs only the scenario it touches: after
-`up` the host stays, and `run -run <test>` runs a scenario again on it as often as
-needed. After `up <tag>`, `run` refuses a checkout that is not the tag's, as the tests
-must match the release on the hosts. A lock in the volume (`flock` on `.lock`, held while `bin/dev` runs) refuses a
-second `bin/dev live` while one runs, since both would share the lab and the volume.
+`up` the hosts stay, and `run -run <test>` runs a scenario again on them as often as
+needed. They work on lab 1 unless `--lab <n>` names another; `down` without it removes
+every lab. After `up <tag>`, `run` refuses a checkout that is not the tag's, as the tests
+must match the release on the hosts. A lock in each lab's volume (`flock` on `.lock`,
+held while `bin/dev` works on the lab) refuses a second `bin/dev live` on a lab in use,
+since both would share the lab and the volume.
 
-## What `bin/dev live up` sets up
+## Several labs at once
+
+`bin/dev live` runs the scenarios in several labs at once, `clowder-live-1` to
+`clowder-live-3` (`test/live/clowder-live-<n>.yaml`, each with ports of its own): as many
+as `LIVE_LABS` says, else as many as the Docker host's free memory holds (`LAB_MEMORY_GB` in
+`bin/dev` a lab), from one to three. Each lab is a cluster of its own, with its registry, mail server and
+package server, and runs a group of the scenarios; its lines start with `[lab <n>]`.
+
+`test/live/scenarios` lists every scenario with its run time; `bin/dev live` splits them
+by it, the longest first to the lab with the least so far, and prints each lab's group.
+A unit test (`scenarios_test.go`) checks that every scenario of the package is in the
+file once, so none is left out. Measure the times anew when a scenario's time changes much
+(`go test -v` prints them).
+
+The packages and the image are made once, then every lab comes up, runs its group and is
+removed once it passed. A failed lab keeps its hosts for a look: `run --lab <n> -run
+<test>` runs a scenario again there, `down --lab <n>` removes it.
+
+## What `bin/dev live up` sets up in a lab
 
 - It builds the packages and makes the hosts' image unless it is current (below).
-- It starts the lab `clowder-live` (`test/live/clowder-live.yaml`, with
-  ports apart from other labs), unless it runs: `hlab up` would start it afresh.
+- It starts the lab `clowder-live-<n>` unless it runs: `hlab up` would start it afresh.
 - In the lab's network it serves the `clowderd` package over HTTP (not with a tag) and
   puts the CLI to test in `/work/cli`: the one from `dist/`, or with a tag the one from
   the release's archive.
@@ -51,11 +72,11 @@ The registry and the mail server run until `bin/dev live down`; `run` refuses to
 without them, since a new registry would not hold the test's image. `up` refuses while a
 host is left: `down` removes them first, with the hosts of `/work/hosts.tfvars`.
 
-Everything a run keeps is in the Docker volume `clowder-live`: the OpenTofu state and the
-joining hosts' variables (`hosts.tfvars`, with their tokens), a throw-away SSH key and
-`known_hosts`, the CLI, the registry's files, the cluster and stack directories, and the
-release's tag after `up <tag>`. A failed scenario leaves the host and what it made for a
-look.
+Everything a run keeps is in the lab's Docker volume `clowder-live-<n>`: the OpenTofu
+state and the joining hosts' variables (`hosts.tfvars`, with their tokens), a throw-away
+SSH key and `known_hosts`, the CLI, the registry's files, the cluster and stack
+directories, and the release's tag after `up <tag>`. A failed scenario leaves the hosts
+and what it made for a look.
 
 ## The hosts' image
 
@@ -131,8 +152,10 @@ reads within a step.
    test writes them into `/work/hosts.tfvars` and runs OpenTofu itself (the binary that
    `up` copies to `/work/bin`). The first waits `passive` without a vote; with the second,
    all three are active and vote. Each joined host has its `net.json` and reaches the
-   first host's API over the private network. The test drains both and keeps their
-   tokens for `TestJoin`.
+   first host's API over the private network. The test drains both, keeps their
+   tokens for `TestJoin` and lists all three hosts as seeds in `cluster.yaml`, so a
+   scenario that cuts off the first host, the leader after the setup, still reaches the
+   cluster.
 4. Each host is a server of its own, whether it started from the image or from Debian's:
    cloud-init ran for a new instance, and no two hosts share an instance ID, a machine-id
    or an SSH host key. DRBD's module fits the running kernel.

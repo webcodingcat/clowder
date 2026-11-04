@@ -380,9 +380,6 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	if strings.Contains(status, "leader none") {
 		t.Errorf("the cluster has no leader:\n%s", status)
 	}
-	if err := os.WriteFile(filepath.Join(workDir, baselineConfigFile), clusterConfigJSON(t), 0o600); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // checkNothingPersonal checks what the bootstrap leaves where a repository

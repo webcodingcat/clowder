@@ -13,21 +13,25 @@
 #             into dist/
 #   package   build, then the Debian packages of clowder and clowderd into dist/
 #   all       lint, test, test-tools, package (what CI runs)
-#   live      the live tests in an HLab lab of their own: live up, live run,
-#             and live down once they pass (about an hour; needs
-#             HLAB=<path to HLab's bin/hlab> and /dev/kvm). What a failed run
-#             leaves stays for a look.
-#   live up [<tag>]  package, make the hosts' image unless it is current
-#             (live image), start the lab unless it runs, make the first host
-#             with examples/hetzner from the image, bootstrap its cluster and
-#             have two more hosts join (test/live: TestSetup).
+#   live      the live tests in HLab labs of their own, up to three at once
+#             (LIVE_LABS=<n>, else as many as the free memory holds), each
+#             with a group of the scenarios of test/live/scenarios: live up,
+#             live run, and live down once they pass (needs
+#             HLAB=<path to HLab's bin/hlab> and /dev/kvm). A failed lab keeps
+#             its hosts for a look.
+#   live up [--lab <n>] [<tag>]  package, make the hosts' image unless it is
+#             current (live image), start lab n (default 1) unless it runs,
+#             make the first host with examples/hetzner from the image,
+#             bootstrap its cluster and have two more hosts join (test/live:
+#             TestSetup).
 #             With a tag, on a checkout of it, the release without the test
 #             hook: the image is made anew from the release, the host
 #             installs clowderd from the APT repository, the CLI comes from
 #             the GitHub release
-#   live run [<go test flags>]  the scenarios of test/live on the host that
-#             live up made, e.g. bin/dev live run -run TestIngress
-#   live down destroy what the live tests left and stop their lab
+#   live run [--lab <n>] [<go test flags>]  the scenarios of test/live on the
+#             hosts of lab n (default 1), e.g. bin/dev live run -run TestIngress
+#   live down [--lab <n>]  destroy what the live tests left and stop their
+#             labs, or lab n
 #   live image [--rebuild]  make the hosts' image in a lab of its own unless
 #             its inputs are unchanged and it is younger than a week
 #             (test/live: TestImage); it stays in the Docker volume
@@ -58,12 +62,17 @@ readonly DEBIAN_IMAGE=debian:trixie-slim
 # Go's module and build cache survive between runs.
 readonly CACHE_VOLUME=clowder-gocache
 readonly BUSYBOX_IMAGE=busybox:1.37.0
-# The live tests' lab and the lab that makes their hosts' image. Each keeps
-# its files in a Docker volume of its name, so bin/dev live run and down
-# find them: the OpenTofu state, the SSH key, the CLI, the cluster directory,
-# and the lock that keeps two runs apart (live_lock). The image's volume also
-# holds the image (host.qcow2) and the hash of its inputs (inputs).
-readonly LIVE_LAB=clowder-live
+# The live tests' labs, clowder-live-1 to clowder-live-<MAX_LABS>
+# (test/live/<lab>.yaml), and the lab that makes their hosts' image. Each
+# keeps its files in a Docker volume of its name, so bin/dev live run and
+# down find them: the OpenTofu state, the SSH key, the CLI, the cluster
+# directory, and the lock that keeps two runs apart (live_lock). The image's
+# volume also holds the image (host.qcow2) and the hash of its inputs.
+readonly MAX_LABS=3
+# What a lab takes of the Docker host's memory: at most five servers of 4 GB
+# at once (three hosts and those that TestReplace and TestRecover add) and
+# the lab itself.
+readonly LAB_MEMORY_GB=22
 readonly IMAGE_LAB=clowder-live-image
 readonly IMAGE_VOLUME="${IMAGE_LAB}"
 # An image older than this is made anew: the mirrors' kernel and DRBD move on.
@@ -84,9 +93,11 @@ readonly MAIL_API_PORT=8025
 # Where the releases' CLI archives are (bin/dev live release).
 readonly RELEASES_URL=https://github.com/webcodingcat/clowder/releases/download
 
-# The lab that the live commands work on (use_lab).
+# The lab that the live commands work on (use_lab), and its number for the
+# live tests' labs (use_test_lab).
 lab_config=""
 work_volume=""
+lab_number=""
 # its containers: the clowderd package for the hosts, the private registry
 # the test stack pulls from (test/live: registry), and the mail server of the
 # alerts' email channel (test/live: mailServer)
@@ -252,6 +263,14 @@ use_lab() {
   mail_container="$1-mail"
 }
 
+# use_test_lab <n>: use_lab for the live tests' lab n.
+# Globals:
+#   lab_number (set)
+use_test_lab() {
+  lab_number="$1"
+  use_lab "clowder-live-$1"
+}
+
 # lab <arguments>: HLab's wrapper with the lab of use_lab.
 # Globals:
 #   HLAB, lab_config (read)
@@ -357,17 +376,6 @@ live_host_left() {
       exit 1
       ;;
   esac
-}
-
-# live_refuse_left_host: Fail if an earlier run left a host in the lab.
-# Globals:
-#   work_volume (read)
-live_refuse_left_host() {
-  if live_host_left; then
-    echo "bin/dev live up: a host is left (its OpenTofu state is in the volume ${work_volume});" \
-      "bin/dev live run tests it, bin/dev live down removes it" >&2
-    exit 1
-  fi
 }
 
 # start_registry: A private registry in the lab's network, with TLS from a
@@ -543,41 +551,54 @@ make_image() {
   echo "bin/dev live: made the hosts' image (${inputs})"
 }
 
-# import_image: Import the hosts' image into the lab as a snapshot labeled
-# with its inputs; print its ID. hlab image import reads a file here: the
-# image is copied out of its volume into the temporary directory once.
-# Globals:
-#   live_temp_dir (read)
-import_image() {
-  local file="${live_temp_dir}/host.qcow2" inputs
-  if [[ ! -s "${file}" ]]; then
-    docker run --rm -v "${IMAGE_VOLUME}:/image:ro" "${BUSYBOX_IMAGE}" cat /image/host.qcow2 >"${file}.part"
-    mv "${file}.part" "${file}"
-  fi
-  inputs="$(docker run --rm -v "${IMAGE_VOLUME}:/image:ro" "${BUSYBOX_IMAGE}" cat /image/inputs)"
-  lab image import "${file}" --description "clowder live host" --label "clowder-live-image=${inputs}"
-}
-
-# cmd_live_up [<tag>]: Make the first host in the lab, started unless it runs,
-# from the hosts' image (ensure_image); TestSetup bootstraps its cluster and
-# has two more hosts join, with OpenTofu copied to /work/bin. The registry
-# and the mail server run on until bin/dev live down. With a tag, on that
-# release instead of dist/; the tests come from the checkout, so it must be
-# at the tag.
-cmd_live_up() {
-  local tag="${1:-}" package_variables public_key image_id
-  use_lab "${LIVE_LAB}"
-  # asked again under the lock below; this spares the build and the image
-  live_refuse_left_host
+# prepare_live [<tag>]: What every lab's up needs first: the packages (or,
+# with a tag, a checkout at it) and the hosts' image, copied out of its
+# volume for hlab image import.
+prepare_live() {
+  local tag="${1:-}"
   if [[ -n "${tag}" ]]; then
     at_release_checkout "${tag}"
   else
     cmd_package
   fi
   ensure_image "${tag}"
-  use_lab "${LIVE_LAB}"
+  copy_image_out
+  # the labs run tofu init at once; with the providers in the cache before,
+  # none of them writes to it
+  tofu_validate examples/hetzner
+}
+
+# copy_image_out: Copy the hosts' image out of its volume into the
+# temporary directory: hlab image import reads a file here.
+# Globals:
+#   live_temp_dir (read)
+copy_image_out() {
+  docker run --rm -v "${IMAGE_VOLUME}:/image:ro" "${BUSYBOX_IMAGE}" cat /image/host.qcow2 \
+    >"${live_temp_dir}/host.qcow2"
+}
+
+# import_image: Import the hosts' image of copy_image_out into the lab as a
+# snapshot labeled with its inputs; print its ID.
+# Globals:
+#   live_temp_dir (read)
+import_image() {
+  local inputs
+  inputs="$(docker run --rm -v "${IMAGE_VOLUME}:/image:ro" "${BUSYBOX_IMAGE}" cat /image/inputs)"
+  lab image import "${live_temp_dir}/host.qcow2" --description "clowder live host" \
+    --label "clowder-live-image=${inputs}"
+}
+
+# up_lab [<tag>]: Make the first host in the lab of use_test_lab, started
+# unless it runs, from the hosts' image (prepare_live made it); TestSetup
+# bootstraps its cluster and has two more hosts join, with OpenTofu copied
+# to /work/bin. The registry and the mail server run on until bin/dev live
+# down. With a tag, on that release instead of dist/.
+# Globals:
+#   lab_number (read)
+up_lab() {
+  local tag="${1:-}" package_variables public_key image_id
   live_lock
-  live_refuse_left_host
+  refuse_left_host
   live_lab
   in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/* \
     && ssh-keygen -q -t ed25519 -N "" -C clowder-live -f /work/id_ed25519' </dev/null
@@ -609,29 +630,31 @@ EOF
     -var-file=/work/live.tfvars && tofu output -json -state=/work/terraform.tfstate >/work/outputs.json \
     && mkdir -p /work/bin && cp /usr/local/bin/tofu /work/bin/tofu' \
     || ! live_go_test -run '^TestSetup$'; then
-    live_failed "bin/dev live down, then up, makes it anew"
+    live_failed "bin/dev live down --lab ${lab_number}, then up, makes it anew"
   fi
 }
 
-# cmd_live_run [<go test flags>]: Run the scenarios on the host that
-# bin/dev live up made; it stays, whatever the outcome.
-cmd_live_run() {
+# run_lab [<go test flags>]: Run the scenarios on the hosts of the lab of
+# use_test_lab; they stay, whatever the outcome.
+# Globals:
+#   lab_number, registry_container, mail_container (read)
+run_lab() {
   local tag
-  use_lab "${LIVE_LAB}"
   live_lock
   # not live_lab: a lab started now would have no host
   if ! lab_runs; then
-    echo "bin/dev live run: the lab is not up; bin/dev live up starts it" >&2
+    echo "bin/dev live run: lab ${lab_number} is not up; bin/dev live up --lab ${lab_number} starts it" >&2
     return 1
   fi
   eval "$(lab env)"
   if ! live_host_left; then
-    echo "bin/dev live run: there is no host; bin/dev live up makes one" >&2
+    echo "bin/dev live run: lab ${lab_number} has no host; bin/dev live up --lab ${lab_number} makes one" >&2
     return 1
   fi
   # a new registry would not have the image that TestSetup pushed
   if ! container_runs "${registry_container}" || ! container_runs "${mail_container}"; then
-    echo "bin/dev live run: the registry or the mail server stopped; bin/dev live down, then up" >&2
+    echo "bin/dev live run: the registry or the mail server of lab ${lab_number} stopped;" \
+      "bin/dev live down --lab ${lab_number}, then up" >&2
     return 1
   fi
   # after live up <tag> the hosts run that release, and the tests must match
@@ -640,7 +663,43 @@ cmd_live_run() {
     at_release_checkout "${tag}"
   fi
   live_go_test -skip '^Test(Setup|Image)$' "$@" \
-    || live_failed "bin/dev live run -run <test> runs a scenario again, bin/dev live down removes it all"
+    || live_failed "bin/dev live run --lab ${lab_number} -run <test> runs a scenario again," \
+      "bin/dev live down --lab ${lab_number} removes it all"
+}
+
+# down_lab: Destroy what the live tests left in the lab of use_lab and stop
+# it. A lab that never ran has no volume and is left alone.
+# Globals:
+#   work_volume, packages_container, registry_container, mail_container (read)
+down_lab() {
+  if ! docker volume inspect "${work_volume}" >/dev/null 2>&1; then
+    return 0
+  fi
+  live_lock
+  docker rm -f "${packages_container}" "${registry_container}" "${mail_container}" >/dev/null 2>&1 || true
+  if live_host_left; then
+    live_lab
+    # hosts.tfvars names the hosts that joined (test/live writes it)
+    live_tofu 'touch /work/hosts.tfvars && tofu destroy -input=false -auto-approve \
+      -state=/work/terraform.tfstate -var-file=/work/live.tfvars -var-file=/work/hosts.tfvars'
+  fi
+  # only after a destroy that worked (set -e): the state goes with the rest
+  docker run --rm -v "${work_volume}:/work" "${BUSYBOX_IMAGE}" sh -c 'rm -rf /work/*'
+  if lab_runs; then
+    lab down
+  fi
+}
+
+# refuse_left_host: Fail if an earlier run left a host in the lab.
+# Globals:
+#   work_volume, lab_number (read)
+refuse_left_host() {
+  if live_host_left; then
+    echo "bin/dev live up: lab ${lab_number} has a host left (its OpenTofu state is in the volume" \
+      "${work_volume}); bin/dev live run --lab ${lab_number} tests it, bin/dev live down" \
+      "--lab ${lab_number} removes it" >&2
+    exit 1
+  fi
 }
 
 # container_runs <name>: Tell whether the container runs.
@@ -649,30 +708,165 @@ container_runs() {
 }
 
 # live_go_test <go test flags>: Run test/live in the lab's network with the
-# CLI that bin/dev live up put in /work/cli; the first failure ends it.
+# CLI that bin/dev live up put in /work/cli; the first failure ends it. The
+# timeout leaves room for every scenario on one lab.
 # Globals:
 #   IMAGE_LABEL (read; TestImage's)
 live_go_test() {
   in_lab "${GO_IMAGE}" env LIVE_DIR=/work CLOWDER=/work/cli/clowder IMAGE_LABEL="${IMAGE_LABEL:-}" \
-    go test -tags live -count=1 -failfast -timeout 90m -v "$@" ./test/live </dev/null
+    go test -tags live -count=1 -failfast -timeout 150m -v "$@" ./test/live </dev/null
 }
 
-# live_failed <next>: Say that the host stays after a failure, and how to go
-# on; fail.
+# live_failed <next...>: Say that the hosts stay after a failure, and how to
+# go on; fail.
 # Globals:
 #   work_volume (read)
 live_failed() {
-  echo "bin/dev live: failed; the host stays for a look (ssh from the lab's network with" \
-    "/work/id_ed25519 in the volume ${work_volume}); $1" >&2
+  echo "bin/dev live: failed; the hosts stay for a look (ssh from the lab's network with" \
+    "/work/id_ed25519 in the volume ${work_volume}); $*" >&2
   return 1
 }
 
-# cmd_live [<tag>]: Make a host, run the scenarios on it and tear it down
-# once they pass; a failure ends bin/dev before (set -e), and the host stays.
+# lab_count: Print how many labs bin/dev live runs: LIVE_LABS, else as many
+# as the Docker host's free memory holds (LAB_MEMORY_GB each), from 1 to
+# MAX_LABS.
+lab_count() {
+  local count available_kb
+  if [[ -n "${LIVE_LABS:-}" ]]; then
+    if [[ ! "${LIVE_LABS}" =~ ^[1-9]$ ]] || ((LIVE_LABS > MAX_LABS)); then
+      echo "bin/dev live: LIVE_LABS is a number from 1 to ${MAX_LABS}" >&2
+      exit 2
+    fi
+    echo "${LIVE_LABS}"
+    return
+  fi
+  # the memory of Docker's host, which is a VM on Windows and macOS
+  available_kb="$(docker run --rm "${BUSYBOX_IMAGE}" awk '/^MemAvailable:/ {print $2}' /proc/meminfo)"
+  count=$((available_kb / (LAB_MEMORY_GB * 1024 * 1024)))
+  echo $((count < 1 ? 1 : count > MAX_LABS ? MAX_LABS : count))
+}
+
+# scenario_groups <count>: Print a -run pattern per lab, one per line: the
+# scenarios of test/live/scenarios split by their run time, the longest
+# first to the lab with the least so far.
+scenario_groups() {
+  grep -v -e '^#' -e '^[[:space:]]*$' "${ROOT}/test/live/scenarios" | sort -k 2,2 -g -r \
+    | awk -v labs="$1" '
+      {
+        least = 1
+        for (lab = 2; lab <= labs; lab++) {
+          if (minutes[lab] < minutes[least]) least = lab
+        }
+        minutes[least] += $2
+        names[least] = names[least] (names[least] == "" ? "" : "|") $1
+      }
+      END {
+        for (lab = 1; lab <= labs; lab++) printf "^(%s)$ %s\n", names[lab], minutes[lab]
+      }'
+}
+
+# cycle_lab <tag> <pattern>: up, run with the -run pattern, and down, in the
+# lab of use_test_lab; a failure ends it before down (set -e), and the hosts
+# stay.
+cycle_lab() {
+  up_lab "$1"
+  run_lab -run "$2"
+  down_lab
+}
+
+# cmd_live [<tag>]: Run every scenario in as many labs at once as
+# lab_count says, each lab a group of scenario_groups, and tear each lab
+# down once it passed. Each lab's lines start with its number; a failed lab
+# keeps its hosts.
 cmd_live() {
-  cmd_live_up "$@"
-  cmd_live_run
-  cmd_live_down
+  local tag="${1:-}" count lab pattern minutes failed=()
+  local -a patterns=() pids=()
+  count="$(lab_count)"
+  for ((lab = 1; lab <= count; lab++)); do
+    use_test_lab "${lab}"
+    # asked again under each lab's lock; this spares the build and the image
+    refuse_left_host
+  done
+  prepare_live "${tag}"
+  while read -r pattern minutes; do
+    patterns+=("${pattern}")
+    echo "bin/dev live: lab ${#patterns[@]} runs ${pattern} (about ${minutes} min)"
+  done < <(scenario_groups "${count}")
+  # an empty pattern would run every scenario in every lab
+  if ((${#patterns[@]} != count)) || [[ " ${patterns[*]} " == *" ^()$ "* ]]; then
+    echo "bin/dev live: cannot split test/live/scenarios among ${count} labs" >&2
+    return 1
+  fi
+  for ((lab = 1; lab <= count; lab++)); do
+    # sed -u: each lab's lines as they come. set -e ends the subshell at the
+    # first failure, and with pipefail wait gets its status, not sed's
+    (
+      use_test_lab "${lab}"
+      cycle_lab "${tag}" "${patterns[lab - 1]}"
+    ) 2>&1 | sed -u "s/^/[lab ${lab}] /" &
+    pids+=("$!")
+  done
+  for ((lab = 1; lab <= count; lab++)); do
+    if ! wait "${pids[lab - 1]}"; then
+      failed+=("${lab}")
+    fi
+  done
+  if ((${#failed[@]} > 0)); then
+    echo "bin/dev live: failed in lab ${failed[*]}; its hosts stay (bin/dev live run --lab <n>," \
+      "bin/dev live down)" >&2
+    return 1
+  fi
+  echo "bin/dev live: passed in ${count} labs"
+}
+
+# cmd_live_up [--lab <n>] [<tag>]: prepare_live, then up_lab in lab n
+# (default 1). With a tag, on that release; the tests come from the
+# checkout, so it must be at the tag.
+cmd_live_up() {
+  local lab=1
+  if [[ "${1:-}" == --lab ]]; then
+    lab="$(checked_lab "${2:-}")"
+    shift 2
+  fi
+  use_test_lab "${lab}"
+  # asked again under the lock in up_lab; this spares the build and the image
+  refuse_left_host
+  prepare_live "${1:-}"
+  up_lab "${1:-}"
+}
+
+# cmd_live_run [--lab <n>] [<go test flags>]: run_lab in lab n (default 1),
+# every scenario unless the flags choose.
+cmd_live_run() {
+  local lab=1
+  if [[ "${1:-}" == --lab ]]; then
+    lab="$(checked_lab "${2:-}")"
+    shift 2
+  fi
+  use_test_lab "${lab}"
+  run_lab "$@"
+}
+
+# cmd_live_down [--lab <n>]: down_lab in lab n, or in every lab, and
+# stop the image's lab that a failed image left running.
+cmd_live_down() {
+  local lab
+  if [[ "${1:-}" == --lab ]]; then
+    lab="$(checked_lab "${2:-}")"
+    use_test_lab "${lab}"
+    down_lab
+    return
+  fi
+  use_lab "${IMAGE_LAB}"
+  live_lock
+  docker rm -f "${packages_container}" >/dev/null 2>&1 || true
+  if lab_runs; then
+    lab down
+  fi
+  for ((lab = 1; lab <= MAX_LABS; lab++)); do
+    use_test_lab "${lab}"
+    down_lab
+  done
 }
 
 # cmd_live_image [--rebuild]: Make the hosts' image unless a current one is
@@ -686,27 +880,14 @@ cmd_live_image() {
   ensure_image "$@"
 }
 
-# cmd_live_down: Destroy what the live tests left and stop their lab, and
-# stop the image's lab that a failed image left running.
-cmd_live_down() {
-  use_lab "${IMAGE_LAB}"
-  live_lock
-  docker rm -f "${packages_container}" >/dev/null 2>&1 || true
-  if lab_runs; then
-    lab down
+# checked_lab <n>: Print the lab number of --lab; fail unless it names a
+# lab.
+checked_lab() {
+  if [[ ! "$1" =~ ^[1-9]$ ]] || (($1 > MAX_LABS)); then
+    echo "bin/dev live: --lab takes a lab from 1 to ${MAX_LABS}" >&2
+    exit 2
   fi
-  use_lab "${LIVE_LAB}"
-  live_lock
-  live_lab
-  docker rm -f "${packages_container}" "${registry_container}" "${mail_container}" >/dev/null 2>&1 || true
-  if live_host_left; then
-    # hosts.tfvars names the hosts that joined (test/live writes it)
-    live_tofu 'touch /work/hosts.tfvars && tofu destroy -input=false -auto-approve \
-      -state=/work/terraform.tfstate -var-file=/work/live.tfvars -var-file=/work/hosts.tfvars'
-  fi
-  # only after a destroy that worked (set -e): the state goes with the rest
-  in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/*' </dev/null
-  lab down
+  echo "$1"
 }
 
 # cmd_all: Everything CI runs.
@@ -738,14 +919,14 @@ main() {
       start_live
       case "${2:-}" in
         "") cmd_live ;;
-        up) cmd_live_up "${3:-}" ;;
+        up) cmd_live_up "${@:3}" ;;
         run) cmd_live_run "${@:3}" ;;
-        down) cmd_live_down ;;
+        down) cmd_live_down "${@:3}" ;;
         image) cmd_live_image "${@:3}" ;;
         release) cmd_live "${3:?bin/dev live release needs a tag}" ;;
         *)
-          echo "bin/dev live: unknown mode ${2} (up [<tag>], run [<go test flags>], down," \
-            "image [--rebuild], release <tag>)" >&2
+          echo "bin/dev live: unknown mode ${2} (up [--lab <n>] [<tag>]," \
+            "run [--lab <n>] [<go test flags>], down [--lab <n>], image [--rebuild], release <tag>)" >&2
           exit 2
           ;;
       esac
