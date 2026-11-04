@@ -25,9 +25,10 @@ import (
 // hostReporter tells the cluster about this host: its version, memory and
 // CPUs, its pools, whether Docker answers, how full the root file system
 // is, and the volumes whose copies here need a human (split brain) or
-// hang (no quorum). It has a loop of its own, so a Docker that hangs cannot hold up the
-// report that says so. Each probe ends by its driver's timeout (Docker's
-// ping, lvs), so a pass takes at most those timeouts added up.
+// hang (no quorum). It has a loop of its own, so a Docker that hangs
+// cannot hold up the report that says so. Each probe ends by its driver's
+// timeout (Docker's ping, lvs), so a pass takes at most those timeouts
+// added up.
 type hostReporter struct {
 	host    Host
 	version string

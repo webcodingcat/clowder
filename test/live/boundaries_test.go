@@ -112,6 +112,10 @@ func checkBoundaries(t *testing.T, server host, tofu outputs) {
 		}
 	}
 
+	// the HTTP hairpin: the local Traefik on the Floating IP answers a container
+	if hairpin := net.JoinHostPort(tofu.FloatingIP.Value, "443"); !reaches(t, server, proberPID, hairpin) {
+		t.Errorf("a container does not reach Traefik on the Floating IP (%s)", hairpin)
+	}
 	if !reaches(t, server, proberPID, registry) {
 		t.Errorf("a container does not reach the registry beyond the host (%s): the probe cannot get out", registry)
 	}
@@ -141,7 +145,8 @@ func nodeAddressOf(t *testing.T, server host) string {
 // checkDroppedBeyondTheHost probes what no answer of the host itself can
 // vouch for: the metadata service, which the host's own processes must not
 // reach either, an address of the private network that is no host, and a
-// packet with a source outside the container's network. Each must be
+// packet with a source outside the container's network, and a datagram to
+// another host's underlay. Each must be
 // dropped by its own rule of internal/network, whose counter shows it.
 func checkDroppedBeyondTheHost(t *testing.T, server host, tofu outputs, proberPID string) {
 	const metadata = "169.254.169.254:80"
@@ -172,10 +177,22 @@ func checkDroppedBeyondTheHost(t *testing.T, server host, tofu outputs, proberPI
 		}
 	})
 
+	inContainer := "nsenter --target " + proberPID + " --net"
+	// UDP, which gets no answer to vouch for it: a datagram to another
+	// host's WireGuard port on its underlay
+	for _, other := range tofu.Hosts.Value {
+		if other.PrivateAddress == tofu.PrivateAddress.Value {
+			continue
+		}
+		dropsProbe(t, server, "guard_fwd", "ip daddr @cluster_hosts", func() {
+			server.must(t, inContainer+" bash -c 'echo probe > /dev/udp/"+other.PrivateAddress+"/51800'; true")
+		})
+		break
+	}
+
 	// a source of TEST-NET-1 on the container's own interface, as a
 	// container with NET_RAW could send; the registry answers it unspoofed
 	const spoofed = "192.0.2.7"
-	inContainer := "nsenter --target " + proberPID + " --net"
 	server.must(t, inContainer+" ip address add "+spoofed+"/32 dev eth0")
 	defer server.must(t, inContainer+" ip address delete "+spoofed+"/32 dev eth0")
 	dropsProbe(t, server, "guard_fwd", "fib saddr . iif oif missing", func() {

@@ -188,7 +188,47 @@ func baseline(t *testing.T) (host, outputs) {
 		return nil
 	})
 	checkNoFaults(t)
+	syncClocks(t, scenarioHosts(server, tofu))
 	return server, tofu
+}
+
+// maxClockSkew is how far a host's clock may be off the test's. The hosts
+// follow NTP servers on the internet, the test and the lab's ACME CA the
+// clock of the Docker host, which may be off by a few seconds by itself.
+const maxClockSkew = 10 * time.Second
+
+// syncClocks brings the hosts' clocks back to the lab's: a VM that a
+// scenario paused lags behind by the pause, and systemd-timesyncd polls
+// only every half hour. A lagging clock takes a certificate the lab's ACME
+// CA just issued as not yet valid. A restart of timesyncd syncs at once and
+// steps the clock; it undoes what the lab's pause did, as a real host's NTP
+// would in time.
+func syncClocks(t *testing.T, hosts map[string]host) {
+	t.Helper()
+	skewOf := func(server host) (time.Duration, error) {
+		output, err := server.run("date +%s.%N")
+		if err != nil {
+			return 0, err
+		}
+		seconds, err := strconv.ParseFloat(strings.TrimSpace(output), 64)
+		if err != nil {
+			return 0, err
+		}
+		return time.Since(time.Unix(0, int64(seconds*float64(time.Second)))).Abs(), nil
+	}
+	for name, server := range hosts {
+		if skew, err := skewOf(server); err != nil || skew <= maxClockSkew {
+			continue // a host that is not there has no clock to sync
+		}
+		server.must(t, "systemctl restart systemd-timesyncd")
+		eventually(t, time.Minute, name+"'s clock in sync", func() error {
+			skew, err := skewOf(server)
+			if err == nil && skew > maxClockSkew {
+				err = fmt.Errorf("off by %s", skew.Round(time.Millisecond))
+			}
+			return err
+		})
+	}
 }
 
 // resourcesInAllNamespaces lists a kind's resources as namespace/name.

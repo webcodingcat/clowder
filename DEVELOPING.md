@@ -159,11 +159,12 @@ The package layout is planned for the whole of v1; packages appear as the phases
   the clock (`time.Now`, `time.Since`, `time.Until`).
 - **Decides**: `controller` (the leader's loops) writes Raft commands. It talks to external
   services that only the leader uses (hoster API, ACME, Git remotes, alert channels), but it
-  never changes the host. The clients of these services are separate packages: `hoster`
-  (with `hoster/hetzner`), `notify`, and `x/crypto/acme`. depguard keeps them out of the
-  CLI, the state and the scheduler. The agent starts the controller's loops, so `agent`
-  imports `controller` and never the other way round. The agent also uses
-  `controller.Propose` for the commands it writes itself.
+  never changes the host. One loop of it runs on every agent, not only on the leader:
+  `QuorumWatch`, which alerts while there is no leader, through the alerts' channels.
+  The clients of these services are separate packages: `hoster` (with `hoster/hetzner`),
+  `notify`, and `x/crypto/acme`. depguard keeps them out of the CLI, the state and the
+  scheduler. The agent starts the controller's loops, so `agent` imports `controller` and
+  never the other way round. The agent also uses `controller.Propose` for the commands it writes itself.
 - **Changes the host**: `agent`, `supervisor`, `raftnode` (Raft over mTLS), `datakey` (the
   key file), `command` (host tools with a timeout) and the drivers `network`, `storage`,
   `docker`, `ingress` (Traefik's files; it renders, the agent writes). Within the agent,

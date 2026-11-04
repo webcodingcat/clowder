@@ -9,7 +9,7 @@ import (
 
 // ErrNoSplitBrain says the copy has no peer that stands alone, so there is
 // nothing to resolve here.
-var ErrNoSplitBrain = errors.New("no peer of this copy stands alone")
+var ErrNoSplitBrain = errors.New("no peer of this copy is StandAlone")
 
 // ResolveSplitBrain connects the copy again to the peers it stands alone
 // from. With discard, this copy gives its changes since the split up and

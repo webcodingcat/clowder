@@ -56,12 +56,12 @@ func TestFailover(t *testing.T) {
 			createAndApply(t, "scratch", volumeDocument("scratch", "fast", failoverVolumeSize, 0)+simpleStack("scratch", "scratch"))
 			waitRunning(t, "keeper", 1)
 			waitRunning(t, "scratch", 1)
-			keeperSteady(t, hosts)
+			volumeSteady(t, hosts, "keeper")
 		}},
 		{"the leader's host freezes, and its stacks run elsewhere", func(t *testing.T) {
 			target = leaderName(t)
 			moveTo(t, "keeper", target)
-			keeperSteady(t, hosts)
+			volumeSteady(t, hosts, "keeper")
 			writeProof(t, hosts[target], "keeper", "first")
 			start := time.Now()
 			labControl(t, "/vm/"+target+"/pause", nil)
@@ -70,7 +70,7 @@ func TestFailover(t *testing.T) {
 		}},
 		{"the same host, cut off from every network, is fenced again", func(t *testing.T) {
 			moveTo(t, "keeper", target)
-			keeperSteady(t, hosts)
+			volumeSteady(t, hosts, "keeper")
 			writeProof(t, hosts[target], "keeper", "second")
 			isolate := map[string]string{"type": "isolate", "vm": target}
 			start := time.Now()
@@ -83,7 +83,7 @@ func TestFailover(t *testing.T) {
 		}},
 		{"without the hoster's API nothing fails over, until a user confirms the fence", func(t *testing.T) {
 			moveTo(t, "keeper", target)
-			keeperSteady(t, hosts)
+			volumeSteady(t, hosts, "keeper")
 			writeProof(t, hosts[target], "keeper", "third")
 			labControl(t, "/api-fault", map[string]int{"status": http.StatusServiceUnavailable, "count": 100000})
 			labControl(t, "/vm/"+target+"/pause", nil)
@@ -117,7 +117,7 @@ func TestFailover(t *testing.T) {
 		{"a host that is back before the leader acts is fenced or not, never both", func(t *testing.T) {
 			other := otherThan(slices.Sorted(maps.Keys(hosts)), target, leaderName(t))
 			moveTo(t, "keeper", other)
-			keeperSteady(t, hosts)
+			volumeSteady(t, hosts, "keeper")
 			writeProof(t, hosts[other], "keeper", "fourth")
 			boot := bootID(t, hosts[other])
 			isolate := map[string]string{"type": "isolate", "vm": other}
@@ -295,9 +295,26 @@ func TestMoveInterrupted(t *testing.T) {
 				}
 				return fmt.Errorf("copies %+v", volumeStatus(t, "mover").Copies)
 			})
+			// the new copy came with a tiebreaker, in one command: once the old
+			// host sees it, its quorum does not hang on the new host
+			eventually(t, placementDeadline, from+" sees the tiebreaker of mover", func() error {
+				for _, volumeCopy := range volumeStatus(t, "mover").Copies {
+					if volumeCopy.Tiebreaker {
+						seen := hosts[from].must(t, "drbdsetup status "+volumeLV(t, "mover"))
+						if !strings.Contains(seen, volumeCopy.Host+" role:") {
+							return fmt.Errorf("not connected:\n%s", seen)
+						}
+						return nil
+					}
+				}
+				return fmt.Errorf("no tiebreaker: %+v", volumeStatus(t, "mover").Copies)
+			})
 		}},
 		{"its new host fails, and it runs where it was", func(t *testing.T) {
 			labControl(t, "/vm/"+to+"/pause", nil)
+			// the stack keeps writing: its copy has its quorum with the tiebreaker
+			hosts[from].must(t, "timeout 30 docker exec "+stackContainer(t, hosts[from], "mover")+
+				" sh -c 'echo there > /data/proof && sync'")
 			eventually(t, failoverBudget, "the move of mover over", func() error {
 				stacks, err := listStacks()
 				if err != nil {
@@ -313,7 +330,7 @@ func TestMoveInterrupted(t *testing.T) {
 				}
 				return nil
 			})
-			runsOnce(t, hosts, "mover", "here")
+			runsOnce(t, hosts, "mover", "there")
 			// it had no stack to take over, so it is not fenced: it stays
 			// failed until it is heard again
 			if phase, err := phaseOf(to); err != nil || phase != "failed" {
@@ -634,14 +651,13 @@ func powerOff(t *testing.T, name string) {
 	})
 }
 
-// keeperSteady waits until keeper's volume (two replicas) has both copies synced
-// and its tiebreaker again, as after a move the placement gives up the old
-// copy and sets the tiebreaker in passes of their own: a host that fails
-// in between leaves the other copy without DRBD's quorum (roadmap).
-func keeperSteady(t *testing.T, hosts map[string]host) {
+// volumeSteady waits until a volume of two replicas has both copies synced and
+// its tiebreaker, and each host with a copy sees the others connected: a
+// scenario that fails a host starts from there.
+func volumeSteady(t *testing.T, hosts map[string]host, volume string) {
 	t.Helper()
-	eventually(t, placementDeadline, "volume keeper with two synced copies and a tiebreaker", func() error {
-		status := volumeStatus(t, "keeper")
+	eventually(t, placementDeadline, "volume "+volume+" with two synced copies and a tiebreaker", func() error {
+		status := volumeStatus(t, volume)
 		tiebreakers := 0
 		for _, volumeCopy := range status.Copies {
 			if volumeCopy.Tiebreaker {
@@ -653,7 +669,7 @@ func keeperSteady(t *testing.T, hosts map[string]host) {
 		}
 		// the state is ahead of DRBD: each host with a copy must see the
 		// others connected (a connected peer shows its role)
-		lv := volumeLV(t, "keeper")
+		lv := volumeLV(t, volume)
 		for _, volumeCopy := range status.Copies {
 			seen, err := hosts[volumeCopy.Host].run("drbdsetup status " + lv)
 			if err != nil {

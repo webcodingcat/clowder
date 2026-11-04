@@ -23,14 +23,21 @@ var dockerRule = []string{
 // others put in it.
 func (h Host) AllowForwards(ctx context.Context) error {
 	check := append([]string{"-w", "5", "-C", "DOCKER-USER"}, dockerRule...)
-	// iptables -C exits with 1 when the rule is missing
 	_, err := h.Run(ctx, toolTimeout, "", "iptables", check...)
-	if code, exited := command.ExitCode(err); err == nil || !exited || code != 1 {
-		return err
+	// iptables -C exits with 1 when the rule is missing
+	code, exited := command.ExitCode(err)
+	missing := err != nil && exited && code == 1
+	switch {
+	case err == nil:
+		return nil
+	case !missing:
+		return fmt.Errorf("look for the rule of the forwarded ports in DOCKER-USER: %w", err)
 	}
 	insert := append([]string{"-w", "5", "-I", "DOCKER-USER", "1"}, dockerRule...)
-	_, err = h.Run(ctx, toolTimeout, "", "iptables", insert...)
-	return err
+	if _, err := h.Run(ctx, toolTimeout, "", "iptables", insert...); err != nil {
+		return fmt.Errorf("put the rule of the forwarded ports into DOCKER-USER: %w", err)
+	}
+	return nil
 }
 
 // ForgetForwards forgets the connections to the Floating IP on the

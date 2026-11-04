@@ -199,6 +199,9 @@ type daemon struct {
 	heard      *controller.Heard
 	alerts     *controller.Alerts
 	server     *api.Server
+	// caughtUp closes once the state caught up after the start: the API
+	// holds users' calls until then (api.ServerConfig.CaughtUp)
+	caughtUp chan struct{}
 }
 
 // newDaemon makes the agent's parts; it starts nothing. Who calls whom:
@@ -233,7 +236,8 @@ func newDaemon(base shared) (*daemon, error) {
 	alerts := controller.NewAlerts(base.node, proposer.propose, base.credentials.dataKey.Open, conditions, base.logger)
 	joins := &joiner{cluster: base.node, propose: proposer.propose, dataKey: base.credentials.dataKey, connect: base.parts.Hoster}
 	heard := controller.NewHeard()
-	proposer.server = newAPIServer(base, runner, reconciler, alerts, heard, joins)
+	caughtUp := make(chan struct{})
+	proposer.server = newAPIServer(base, runner, reconciler, alerts, heard, joins, caughtUp)
 
 	return &daemon{
 		shared:     base,
@@ -248,6 +252,7 @@ func newDaemon(base shared) (*daemon, error) {
 		heard:      heard,
 		alerts:     alerts,
 		server:     proposer.server,
+		caughtUp:   caughtUp,
 	}, nil
 }
 
@@ -336,7 +341,7 @@ func newHostReporter(base shared, propose controller.Propose, seen func() map[st
 // newAPIServer makes the API server, which answers for the stack runner
 // (a stack's containers), the alerts, the hosts' beats and the joins.
 func newAPIServer(base shared, runner *stacks.Runner, volumes api.Volumes, alerts *controller.Alerts,
-	heard *controller.Heard, joins api.Joins,
+	heard *controller.Heard, joins api.Joins, caughtUp <-chan struct{},
 ) *api.Server {
 	return api.NewServer(api.ServerConfig{
 		Cluster: base.node, CA: base.credentials.ca, Certificate: base.credentials.certificate,
@@ -346,7 +351,7 @@ func newAPIServer(base shared, runner *stacks.Runner, volumes api.Volumes, alert
 		},
 		Keys: base.credentials.dataKey, Version: buildinfo.Version, Logger: base.logger,
 		HostID: base.host.ID, Containers: runner, Volumes: volumes, Alerts: alertsAPI{alerts}, Beats: heard,
-		Joins: joins,
+		Joins: joins, CaughtUp: caughtUp,
 	})
 }
 
@@ -403,6 +408,7 @@ func (d *daemon) runOnceCaughtUp(ctx context.Context, loops *sync.WaitGroup) {
 	if !waitForState(ctx, d.node, d.server, d.logger) {
 		return
 	}
+	close(d.caughtUp)
 	// this function runs as one of the loops, so loops.Wait cannot have
 	// returned yet: adding to it from here is allowed
 	loops.Go(func() { d.reporter.run(ctx) })

@@ -351,6 +351,14 @@ func (s *State) diskCopyOf(actor, volumeID string, generation int64) (*Volume, i
 	return volume, index, nil
 }
 
+// tiebreakerAllowed tells whether a volume may have a tiebreaker: it gives
+// two copies their third vote, and only them. A volume of replicas 2 keeps
+// it while a copy is missing or one more moves in; one of replicas 1 has it
+// only while a move gives it two copies.
+func tiebreakerAllowed(replicas, copies int) bool {
+	return replicas == 2 || replicas == 1 && copies == 2
+}
+
 // checkVolume holds what a volume's record must be on its own: the state is
 // the last place to catch a wrong one.
 func checkVolume(volume Volume) error {
@@ -379,9 +387,7 @@ func checkVolume(volume Volume) error {
 		// one more than replicas while a new copy takes an old one's
 		// place (a move); DRBD's metadata has room for it (max-peers)
 		return fmt.Errorf("volume %s: %d copies for %d replicas", id, copies, replicas)
-	case tiebreakers > 1 || tiebreakers > 0 && replicas != 2 && (replicas != 1 || copies != 2):
-		// a tiebreaker gives two copies their third vote, and only them: a
-		// volume of replicas 2, or one of replicas 1 while it moves
+	case tiebreakers > 1 || tiebreakers == 1 && !tiebreakerAllowed(replicas, copies):
 		return fmt.Errorf("volume %s: %d tiebreakers for %d replicas", id, tiebreakers, replicas)
 	case volume.Status == VolumePending && (len(volume.Copies) > 0 || volume.Minor != nil):
 		// the minor comes with the first copy, from the placement

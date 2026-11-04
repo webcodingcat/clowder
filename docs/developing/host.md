@@ -200,7 +200,8 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
 - **The host's report** (`hostReporter`, `report-host`): version, memory, CPUs, the pools'
   data and metadata use, whether Docker answers a ping (`DockerDown`) and how full the root
   file system is, and the volumes whose copy here stands alone from a peer (`SplitBrain`)
-  or is primary without DRBD's quorum (`NoQuorum`), from the reconciler's last pass (`Seen`): the inputs of the alerts. It runs in a loop of its own, after the state
+  or is primary without DRBD's quorum (`NoQuorum`), from the reconciler's last pass
+  (`Seen`): the inputs of the alerts. It runs in a loop of its own, after the state
   caught up, so a Docker that hangs cannot hold up the report that says so; each probe ends
   by its driver's timeout (Docker's ping, lvs). It probes every 30 s and when a new
   `cluster.yaml` may name a new pool, not at every change of the state: lvs on a host whose

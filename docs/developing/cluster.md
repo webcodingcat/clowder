@@ -379,7 +379,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   holds it (`WaitCommitted`): Raft's own entries never reach the state, so it waits for
   Raft to have applied the index and then for the last command up to it. The agent starts
   its stacks and volumes only after that (host.md, The agent): a host that was away must
-  not start a stack that moved meanwhile.
+  not start a stack that moved meanwhile. Until then the API holds users' calls too, for
+  `waitTimeout` at most (`ServerConfig.CaughtUp`): a state that has not caught up may
+  still be empty and answer that the cluster is not bootstrapped. The hosts' own routes do
+  not wait, as the catch-up, the beats and the joins use them.
 - `Propose` commits a command through the leader and returns its index, or the state's
   refusal. `Read` gives the current state under a lock; nothing may keep it, as `Apply`
   changes it in place. `WaitIndex` lets a read follow a write made through another member.
@@ -720,7 +723,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   quorum should one fail (one of two nodes). The copy a move gives up becomes the
   tiebreaker on its host, so no node leaves the resource: its host detaches the disk and
   removes the LV, whose pool the copy's class still names. A volume of replicas 1 has a
-  tiebreaker while a move gives it two copies. A copy on a host that leaves does not count, one on a draining host
+  tiebreaker while a move gives it two copies. A copy on a host that leaves does not count,
+  one on a draining host
   does. **The resync limit:** a new copy with a disk starts only while no other copy
   syncs, in the whole cluster, so each resyncs at `replication.resync_rate` and no link
   carries more. A move that has not got its copies synced counts as that one resync, though

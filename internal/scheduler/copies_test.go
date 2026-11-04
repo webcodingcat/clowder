@@ -317,3 +317,18 @@ func TestAMoveOfOneReplicaHasATiebreakerWhileItLasts(t *testing.T) {
 		t.Errorf("copies %+v", copies)
 	}
 }
+
+// Two records of one volume in a plan (a move's and the copies') count
+// its tiebreaker once.
+func TestAVolumesTiebreakerCountsOncePerPlan(t *testing.T) {
+	current := hosts(3)
+	data := runningShop(current, 2, state.VolumeCopy{Host: 0}, state.VolumeCopy{Host: 1}, state.VolumeCopy{Host: 2, Tiebreaker: true})
+	p := newPlanner(current)
+	moved := *data
+	moved.Copies = []state.VolumeCopy{{Host: 0}, {Host: 1}, {Host: 3, Tiebreaker: true}}
+	p.countTiebreakers(moved)
+	p.countTiebreakers(moved)
+	if p.tiebreakers[2] != 0 || p.tiebreakers[3] != 1 {
+		t.Errorf("tiebreakers %v", p.tiebreakers)
+	}
+}

@@ -10,7 +10,7 @@ clowder is built in phases; each ends with live tests on HLab
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done, passes the live tests |
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
-| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions, the leader's plans and the locks, the network for several hosts, the join, the placement over hosts and moves, failover with fencing |
+| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions, the leader's plans and the locks, the network for several hosts, the join, the placement over hosts and moves, failover with fencing, the ingress failover and DRBD's quorum |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -46,7 +46,7 @@ bridge's network is dropped before anything is accepted, and beyond what was red
 the hosts' addresses, the private network (`private_network` in `cluster.yaml`, which
 took the place of `network`) and the overlay stay closed. The host's own processes no
 longer reach the metadata service either. The DNAT to another host, and the conntrack
-cleanup when its target moves, come with the ingress failover.
+cleanup when its target moves, came with the ingress failover.
 
 Then the join:
 
@@ -132,6 +132,37 @@ Then failover:
 
 The state changed with it, so a cluster of an earlier build must be set up anew.
 
+Then the ingress failover and DRBD's quorum:
+
+- Every host routes every stack, as the Floating IP may move to any. A published port of a
+  stack on another host goes there by DNAT with the client's address, through WireGuard,
+  and Docker's FORWARD chain lets it pass (`DOCKER-USER`); a container's own connection
+  to it leaves from its host's node address (hairpin). HTTP goes from the ingress host's
+  Traefik to the stack host's, with the client in `X-Forwarded-For`. When a port's target
+  changes, every host forgets its connections, so a UDP flow follows the stack.
+- The Floating IP follows a drain or a failure of its host, and stays where it is when
+  that host is back.
+- A volume's copies and its tiebreaker change in one command: the copy a move gives up
+  becomes the tiebreaker on its host, so no node leaves the resource, and a volume of
+  replicas 1 has a tiebreaker while it moves. A host that fails in between no longer
+  takes the other copy's quorum.
+- Each host tells the state which of its copies stand alone from a peer (a split brain)
+  and which primaries lack DRBD's quorum: the alerts `split-brain` and `no-quorum`, and
+  `/metrics` has each copy's role, data, quorum and split brain. `clowder volume
+  resolve-splitbrain <volume> --keep <host>` connects the copies again, with the data of
+  the copy kept.
+- An agent that knows no leader for two minutes alerts by itself (`no-leader`).
+- An agent that just started holds users' calls until its state caught up with the
+  leader's; before, a call right after a restart could find the state empty.
+- The weekly trim skips a copy without quorum and tries again an hour later, as it does
+  after a failure.
+- The live tests serve a stack from another host than the ingress host, move it and the
+  Floating IP, fail a host right after a move, and take two hosts away
+  (`TestIngressFailover`, `TestQuorum`). A split brain could not be made by hand: a copy
+  promoted apart from the newer data has no quorum, and its writes hang.
+
+The state changed with it, so a cluster of an earlier build must be set up anew.
+
 Before it, the first release became installable and the commands honest: the APT
 repository keeps every version, `examples/hetzner` pins `0.1.0`, `bin/dev live release
 <tag>` tests a published release (the [release checklist](developing/shipping.md#release-checklist)),
@@ -153,25 +184,18 @@ They matter once there are several hosts; on one, they cost at most time.
 
 - A host that comes back after a fence resyncs all its copies at once, each at the
   resync limit's rate; the limit holds back only new copies meanwhile.
-- After a move or a failover, the published ports' DNAT and its conntrack entries follow
-  with the ingress failover.
 - A failed host that is not fenced (it needs none, or there is no hoster, a server ref not
   confirmed, the hoster's API down for good) keeps its copies counted: none is made anew elsewhere until a user
   runs `host fence-confirm`. The alert `fencing-blocked` says so.
 - A drained host that fails comes back active, not drained: its drain is lost; a user's
   remove is kept.
-- After a move, the placement gives up the old copy and sets the tiebreaker in passes of
-  their own. If the stack's host fails in between, the other copy has no DRBD quorum
-  (one of two nodes), and the failover's promote fails until the host is back. The DRBD
-  quorum step should change a volume's copies and tiebreaker in one command.
 - A disabled voter keeps its vote until it is removed: with more than three hosts, an
   active host that does not vote does not take its place.
-- An agent without quorum raises no alert of its own yet (two hosts of three down): it
-  comes with DRBD's quorum and `suspend-io`.
-- While a volume of replicas 1 moves, its resource has two copies and no tiebreaker: if
-  the new host goes away during the resync, the old one may lose DRBD's quorum and suspend
-  the stack's writes. The DRBD quorum step checks this and gives such a move a
-  tiebreaker if needed.
+- `volume resolve-splitbrain` never ran on real DRBD, only against unit tests: no fault of
+  the lab makes a split brain while the quorum holds.
+- A published port whose stack moved while the agent of the ingress host was down keeps
+  its connections to the old host until they end: the agent forgets connections only
+  when it sees a target change.
 - `replicas` cannot change yet: raising it (1 to 2 or 3) only needs the placement to
   allow it, as copies come online now.
 - Images are never pruned (no `image prune`), and every host now pulls those of the

@@ -147,15 +147,26 @@ type testCluster struct {
 	healths []*fakeHealth
 	// volumes are the servers' volume copies, by host
 	volumes []*fakeVolumes
+	// caughtUp closes once the agents caught up after their start
+	caughtUp chan struct{}
 }
 
 func newTestCluster(t *testing.T) *testCluster {
+	t.Helper()
+	c := newCatchingUpCluster(t)
+	close(c.caughtUp)
+	return c
+}
+
+// newCatchingUpCluster is newTestCluster with agents that have not caught
+// up after their start until caughtUp closes.
+func newCatchingUpCluster(t *testing.T) *testCluster {
 	t.Helper()
 	ca, err := pki.NewCA("test", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &testCluster{t: t, ca: ca, joins: &fakeJoins{}}
+	c := &testCluster{t: t, ca: ca, joins: &fakeJoins{}, caughtUp: make(chan struct{})}
 	// a real data key: the state reads the sealed length of secrets
 	keys, err := datakey.New()
 	if err != nil {
@@ -194,6 +205,7 @@ func newTestCluster(t *testing.T) *testCluster {
 			Joins:      c.joins,
 			Beats:      health,
 			Volumes:    volumes,
+			CaughtUp:   c.caughtUp,
 			Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		})
 		server.Config.Handler = api
@@ -565,4 +577,25 @@ func (f *fakeCluster) CommitIndex() uint64 {
 
 func (f *fakeCluster) WaitCommitted(ctx context.Context, index uint64) error {
 	return f.WaitIndex(ctx, index)
+}
+
+// A user's call waits until the agent caught up after its start: its state
+// may be empty until then. The hosts' own routes do not wait.
+func TestAUsersCallWaitsUntilTheAgentCaughtUp(t *testing.T) {
+	cluster := newCatchingUpCluster(t)
+	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	done := make(chan error, 1)
+	go func() {
+		var status Status
+		done <- client.Get(context.Background(), "/v1/status", &status)
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("answered before the catch-up: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(cluster.caughtUp)
+	if err := <-done; err != nil {
+		t.Errorf("after the catch-up: %v", err)
+	}
 }

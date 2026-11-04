@@ -178,8 +178,11 @@ type planner struct {
 	// syncing is true while a copy with a disk is not synced yet, in the
 	// state or by this plan: the resync limit (copies.go)
 	syncing bool
-	// tiebreakers counts the tiebreakers on each host, as planned
+	// tiebreakers counts the tiebreakers on each host, as planned, and
+	// planned is each volume's last record in this plan, by ID
+	// (countTiebreakers)
 	tiebreakers map[state.HostID]int
+	planned     map[string]state.Volume
 	// now is the leader's clock, for the cooldown of moves (makeRoom)
 	now time.Time
 	// operation is the one the plan is for (MoveVolumes): what it locks is
@@ -191,7 +194,7 @@ func newPlanner(current *state.State) *planner {
 	p := &planner{
 		current: current, classes: current.Config.Spec.StorageClasses,
 		allocated: map[state.HostID]map[string][]int64{}, minors: map[int]bool{}, room: newRoom(current),
-		tiebreakers: map[state.HostID]int{},
+		tiebreakers: map[state.HostID]int{}, planned: map[string]state.Volume{},
 	}
 	// a move that has not got its copies synced syncs them, all at once:
 	// it counts as the one resync of the limit

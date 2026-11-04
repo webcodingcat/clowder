@@ -439,7 +439,8 @@ func (r *Reconciler) Released(lv string) bool {
 
 // Progress is what each copy on this host, by volume ID, differed by from
 // a peer at the last pass: while it resyncs, what is left of the resync,
-// in bytes.
+// in bytes. It is the part of Seen that the API passes on to the leader's
+// moves; the API is portable and does not know storage's types.
 func (r *Reconciler) Progress() map[string]int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -461,7 +462,8 @@ func (r *Reconciler) Seen() map[string]storage.Observed {
 
 // ResolveSplitBrain connects this host's copy of a volume again to the
 // peers it stands alone from (storage.Driver.ResolveSplitBrain); with
-// discard, the copy takes their data. It runs while no job holds the
+// discard, the copy takes their data; connected is false when no peer was
+// StandAlone. It runs while no job holds the
 // volume, and holds it meanwhile: the command touches no data on the copy
 // to keep, and a copy that discards is secondary, so neither waits on a
 // write.
@@ -476,9 +478,11 @@ func (r *Reconciler) ResolveSplitBrain(ctx context.Context, volumeID string, dis
 		return false, fmt.Errorf("volume %s: a step runs on the copy here; try again", volumeID)
 	}
 	err = r.storage.ResolveSplitBrain(ctx, volume, discard)
-	r.release(ctx, volumeID, err != nil)
 	if errors.Is(err, storage.ErrNoSplitBrain) {
+		// nothing to do here, which is no failure
+		r.release(ctx, volumeID, false)
 		return false, nil
 	}
+	r.release(ctx, volumeID, err != nil)
 	return err == nil, err
 }

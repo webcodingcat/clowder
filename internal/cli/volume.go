@@ -45,7 +45,7 @@ func newResolveSplitBrain(g *globals) *cobra.Command {
 				return err
 			}
 			for _, resolved := range answer.Hosts {
-				what := "stood alone from no peer"
+				what := "nothing to resolve: no peer was StandAlone"
 				switch {
 				case resolved.Connected && resolved.Discarded:
 					what = "gave its changes up and connects again"

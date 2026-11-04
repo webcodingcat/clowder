@@ -82,9 +82,13 @@ type ServerConfig struct {
 	// Beats keeps the beats of the hosts (controller.Heard).
 	Beats Beats
 	// Joins adds joining hosts while this agent leads.
-	Joins   Joins
-	Version string
-	Logger  *slog.Logger
+	Joins Joins
+	// CaughtUp closes once this agent's state caught up with the leader's
+	// after its start; until then a user's call waits for it, as the state
+	// may still be empty. Nil: caught up (tests).
+	CaughtUp <-chan struct{}
+	Version  string
+	Logger   *slog.Logger
 }
 
 // Alerts is what the API asks of the agent's alerts loop.
@@ -236,6 +240,11 @@ func (s *Server) handle(pattern string, role pki.Role, handler http.HandlerFunc)
 		if !s.checkVersion(w, r) {
 			return
 		}
+		if role == pki.RoleUser && !s.waitForCatchUp(r) {
+			writeError(w, http.StatusServiceUnavailable,
+				errors.New("this agent has not caught up with the cluster's state since it started; try again"))
+			return
+		}
 		s.warnAboutDevelopment(r.Header.Get(VersionHeader))
 		if err := s.waitForMinIndex(r); err != nil {
 			writeError(w, http.StatusGatewayTimeout, err)
@@ -291,6 +300,23 @@ func (s *Server) revoked(serial string) bool {
 		_, revoked = current.Revoked[serial]
 	})
 	return revoked
+}
+
+// waitForCatchUp holds a user's request until this agent caught up after
+// its start (ServerConfig.CaughtUp), for waitTimeout at most. Host routes
+// do not wait: the catch-up itself, the beats and the joins use them.
+func (s *Server) waitForCatchUp(r *http.Request) bool {
+	if s.config.CaughtUp == nil {
+		return true
+	}
+	select {
+	case <-s.config.CaughtUp:
+		return true
+	case <-r.Context().Done():
+		return false
+	case <-time.After(waitTimeout):
+		return false
+	}
 }
 
 // waitForMinIndex holds a request until this agent has applied the index the

@@ -37,7 +37,8 @@ channels.
   stack on this host also gets a router on `internal`, and one on another host goes to that
   host's `internal` entrypoint (`Route.Forwarded`), from the public entrypoints only, so a
   request is forwarded once at most. TLS ends on the ingress host; the request goes on as
-  HTTP from its node address, with the client in `X-Forwarded-For`.
+  HTTP from its node address; `X-Forwarded-For` starts with the client, and the stack
+  host's Traefik adds the ingress host's node address after it.
 - **HTTPS.** A route whose domain has a certificate gets a router on `websecure` and one on
   `web` that redirects to it; before that only a plain router on `web`, so nobody sees
   Traefik's self-signed default certificate. The runner writes every certificate of the
@@ -248,9 +249,9 @@ all-clear.
 
 **Without a leader** the alerts above are silent: a majority of the voters is gone (two
 hosts of three), or this host is cut off. So every agent watches for itself
-(`QuorumWatch`): once it has known no Raft leader for `noLeaderFor` (2 min), it sends
-`no-leader/<host>` (critical) to the channels of its own last state, reminds every 6 h
-and gives the all-clear once a leader is back. What it told is in its memory, not the
+(`QuorumWatch`): once it has known no Raft leader for `noLeaderFor`, it sends
+`no-leader/<host>` (critical) to the channels of its own last state, reminds every
+`remindEvery` and gives the all-clear once a leader is back. What it told is in its memory, not the
 state: an agent that restarts without a leader tells again.
 
 ## Metrics (`internal/metrics`, `agent/metrics.go`)

@@ -53,6 +53,10 @@ func reconcileNetwork(ctx context.Context, cluster loop.Cluster, files Files, se
 	// first load, which forgets no connection: what moved while the agent
 	// was down keeps its connections until they end
 	var forwarded []network.Forward
+	// dockerAllowed says Docker's chain has the rule of the forwarded ports
+	// (AllowForwards); it is kept apart from the rules and the mesh, which
+	// must not wait for a Docker that is not up yet
+	dockerAllowed := false
 	loop.Run(ctx, cluster, nil, func() {
 		wanted, known := readWantedNetwork(cluster, self)
 		if !known {
@@ -62,6 +66,13 @@ func reconcileNetwork(ctx context.Context, cluster loop.Cluster, files Files, se
 			return
 		}
 		repairDue := time.Since(appliedAt) >= loop.Interval
+		if !dockerAllowed || repairDue {
+			err := hostNetwork.AllowForwards(ctx)
+			if err != nil {
+				logger.Error("let the forwarded ports pass Docker's rules", "error", err)
+			}
+			dockerAllowed = err == nil
+		}
 		// DeepEqual covers every field, a new one too; readWantedNetwork
 		// sorts the lists
 		if applied != nil && reflect.DeepEqual(*applied, wanted) && !repairDue {
@@ -88,11 +99,6 @@ func reconcileNetwork(ctx context.Context, cluster loop.Cluster, files Files, se
 		}
 		if err := files.writeMesh(wanted.mesh); err != nil {
 			logger.Error("keep the WireGuard mesh for the next start", "error", err)
-			return
-		}
-		// last: Docker may not be up yet, and the mesh must not wait for it
-		if err := hostNetwork.AllowForwards(ctx); err != nil {
-			logger.Error("let the forwarded ports pass Docker's rules", "error", err)
 			return
 		}
 		applied, appliedAt = &wanted, time.Now()

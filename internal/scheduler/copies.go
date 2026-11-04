@@ -302,13 +302,17 @@ func (p *planner) fitTiebreaker(record *state.Volume, prefer *state.VolumeCopy) 
 }
 
 // countTiebreakers moves the plan's count of tiebreakers per host from a
-// volume's record in the state to its new record.
+// volume's last record (planned earlier in this plan, else the state's) to
+// its new record.
 func (p *planner) countTiebreakers(record state.Volume) {
-	if old := p.current.Volumes[record.ID()]; old != nil {
-		for _, volumeCopy := range old.Copies {
-			if volumeCopy.Tiebreaker {
-				p.tiebreakers[volumeCopy.Host]--
-			}
+	last, planned := p.planned[record.ID()]
+	if old := p.current.Volumes[record.ID()]; !planned && old != nil {
+		last = *old
+	}
+	p.planned[record.ID()] = record
+	for _, volumeCopy := range last.Copies {
+		if volumeCopy.Tiebreaker {
+			p.tiebreakers[volumeCopy.Host]--
 		}
 	}
 	for _, volumeCopy := range record.Copies {

@@ -62,7 +62,9 @@ Every scenario but `TestSetup` starts from the same baseline and checks it first
 (`baseline`): the first host set up and its agent active, the cluster bootstrapped with a
 leader, `cluster.yaml` applied and with the settings `TestSetup` gave it, the first host
 active and the joined ones drained, three voters, no stack or volume in any namespace, no
-fault in the lab and no dead server (HLab's `/status`). The joined hosts are drained so
+fault in the lab and no dead server (HLab's `/status`); a host's clock that a paused VM left
+behind it brings back (`syncClocks`), as a lagging clock takes a certificate just issued
+as not yet valid. The joined hosts are drained so
 the scenarios' stacks start on the first host, where the test looks for them;
 `TestPlacement` takes them in and gives them back. A
 scenario puts back what it changed at its end, so the next finds the baseline again; one
@@ -222,14 +224,16 @@ The stack `echo` lives from step 2 to the last.
    node address (through WireGuard) and the API and SSH on its underlay. The other hosts'
    public addresses are not probed: the Cloud firewall closes them to the first host
    itself. It reaches the registry beyond the
-   host, and the resolver answers it. The probe runs on the host in the container's
+   host and Traefik on the Floating IP :443 (the HTTP hairpin), and the resolver answers it.
+   The probe runs on the host in the container's
    network namespace (`nsenter --net`), so its packets leave through the container's
    bridge.
 2. What no answer of the host can vouch for is dropped by its own rule, whose counter
    grows: the metadata service, from the host itself (`guard_out`) and from the
    container; an address of the private network that no host has; and a packet from the
    container with a source outside its network (an address of TEST-NET-1 added to its
-   interface, to the registry). The agent reloads the table every loop interval, which
+   interface, to the registry); and a UDP datagram to another host's WireGuard port on its
+   underlay (`@cluster_hosts`). The agent reloads the table every loop interval, which
    zeroes the counters, so each probe gets three tries.
 3. Both stacks go.
 
@@ -273,7 +277,48 @@ replicas) and `scratch` (replicas 0) run.
 
 ### `TestMoveInterrupted`
 
-1. `stack move` of `mover` (a volume of one replica) starts: a copy comes to the new host.
-2. The new host freezes during the resync: the move ends, `mover` runs where it was, once,
-   with its data, and the copy the move left goes. The new host had no stack, so it is
+1. `stack move` of `mover` (a volume of one replica) starts: a copy comes to the new host,
+   and with it a tiebreaker on the third, which the old host sees connected.
+2. The new host freezes during the resync: `mover` still writes to its volume, as its copy
+   keeps DRBD's quorum with the tiebreaker. The move ends, `mover` runs where it was, once,
+   with its data, and the copy the move left goes, the tiebreaker with it. The new host had
+   no stack, so it is
    not fenced: it stays `failed` until it goes on, and is `active` again.
+
+### `TestIngressFailover`
+
+The joined hosts take stacks; the stack `echo` (as in `TestIngress`, on the domain
+`relay.example.com`, which has no certificate) runs on a joined host, not on the ingress
+host.
+
+1. Through the Floating IP, HTTP and UDP see the test's own address, through the ingress
+   host to the stack's (DNAT for UDP, Traefik to Traefik for HTTP). A table of the test's
+   own on the stack's host counts the packets that leave it with the Floating IP as
+   source: none.
+2. A container on the third host reaches the stack through the Floating IP: over UDP,
+   the stack sees the third host's node address (the hairpin's SNAT); over HTTP, through
+   that host's own Traefik.
+3. A UDP flow that never pauses, from one socket, answers again after `echo` moved to
+   the third host: the ingress host forgot the connection's old target.
+4. `host drain` of the first host moves the Floating IP to a joined host; HTTP and UDP
+   answer through it. Undrained, the first host does not get the Floating IP back.
+5. The ingress host freezes (a host without stacks, so it is not fenced): the Floating IP
+   goes to another host within the failover budget, and HTTP and UDP answer through it.
+   Back and active, the host does not get it back.
+6. `echo` goes, the joined hosts are drained, and the Floating IP comes back to the first
+   host, the only one that takes stacks.
+
+### `TestQuorum`
+
+1. `shifter` (a volume of two replicas) moves to a joined host, which freezes at once,
+   before the placement settled: the copy a move gives up became the tiebreaker in the
+   same command, so the copy left keeps DRBD's quorum, and `shifter` fails over within
+   the budget, with the data written on the frozen host before it froze.
+2. Both joined hosts freeze, with an email channel set up: nothing is fenced, as there is
+   no leader, and the first host mails `no quorum as seen from clowder0` by itself
+   (`no-leader`), and the all-clear once they go on.
+
+A split brain has no scenario: with DRBD's quorum neither a fault of the lab nor a hand on
+the hosts makes one. A copy promoted (`--force`) apart from the newer data has no quorum,
+and its writes hang. Its detection, the alert and `volume resolve-splitbrain` are unit
+tests (`storage`, `controller`, `api`).

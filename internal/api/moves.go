@@ -16,7 +16,7 @@ type Volumes interface {
 	Progress() map[string]int64
 	// ResolveSplitBrain connects the copy here of a volume, by ID, again to
 	// the peers it stands alone from; with discard it takes their data.
-	// connected is false when it stood alone from none.
+	// connected is false when no peer of it was StandAlone.
 	ResolveSplitBrain(ctx context.Context, volumeID string, discard bool) (connected bool, err error)
 }
 

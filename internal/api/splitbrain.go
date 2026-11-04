@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
@@ -32,9 +33,10 @@ type ResolveAnswer struct {
 // ResolvedCopy is what one host did.
 type ResolvedCopy struct {
 	Host string `json:"host"`
-	// Discarded says the copy gave its changes since the split up
+	// Discarded says the copy gave its changes since the split up and
+	// connected again
 	Discarded bool `json:"discarded"`
-	// Connected is false when the copy stood alone from no peer: nothing
+	// Connected is false when no peer of the copy was StandAlone: nothing
 	// to do there
 	Connected bool `json:"connected"`
 }
@@ -72,7 +74,12 @@ func (s *Server) resolveSplitBrain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := names.ID(namespace, name)
-	copies, status, err := s.resolvingCopies(id, request.Keep)
+	var (
+		copies []resolvingCopy
+		status int
+		err    error
+	)
+	s.config.Cluster.Read(func(current *state.State) { copies, status, err = resolveOrder(current, id, request.Keep) })
 	if err != nil {
 		writeError(w, status, err)
 		return
@@ -81,64 +88,74 @@ func (s *Server) resolveSplitBrain(w http.ResponseWriter, r *http.Request) {
 	for _, resolving := range copies {
 		connected, err := s.resolveOn(r.Context(), resolving.host, id, resolving.discard)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, fmt.Errorf("resolve the copy on %s: %w", resolving.name, err))
+			writeError(w, http.StatusBadGateway, fmt.Errorf("resolve the copy on %s: %w (%s; running the command "+
+				"again is safe)", resolving.name, err, doneSoFar(answer.Hosts)))
 			return
 		}
-		answer.Hosts = append(answer.Hosts, ResolvedCopy{Host: resolving.name, Discarded: resolving.discard, Connected: connected})
+		answer.Hosts = append(answer.Hosts, ResolvedCopy{
+			Host: resolving.name, Discarded: resolving.discard && connected, Connected: connected,
+		})
 	}
 	if !slices.ContainsFunc(answer.Hosts, func(c ResolvedCopy) bool { return c.Connected }) {
-		writeError(w, http.StatusConflict, fmt.Errorf("volume %s: no copy stands alone from a peer", id))
+		writeError(w, http.StatusConflict, fmt.Errorf("volume %s: no copy is StandAlone toward a peer", id))
 		return
 	}
 	writeJSON(w, http.StatusOK, answer)
 }
 
-// resolvingCopies are the volume's copies in the order they are resolved,
-// or why the request is refused, with its HTTP status.
-func (s *Server) resolvingCopies(id, keep string) ([]resolvingCopy, int, error) {
-	var copies []resolvingCopy
-	status, err := http.StatusOK, error(nil)
-	s.config.Cluster.Read(func(current *state.State) {
-		volume, ok := current.Volumes[id]
-		if !ok {
-			status, err = http.StatusNotFound, fmt.Errorf("no volume %s", id)
-			return
+// doneSoFar says which hosts connected their copy again before one failed.
+func doneSoFar(resolved []ResolvedCopy) string {
+	var connected []string
+	for _, done := range resolved {
+		if done.Connected {
+			connected = append(connected, done.Host)
 		}
-		keepIndex := slices.IndexFunc(volume.Copies, func(c state.VolumeCopy) bool {
-			host := current.Hosts[c.Host]
-			return host != nil && host.Name == keep && !c.Tiebreaker
-		})
-		if volume.Minor == nil || keepIndex < 0 {
-			status, err = http.StatusBadRequest, fmt.Errorf("%q holds no copy of volume %s with DRBD and a disk", keep, id)
-			return
-		}
-		for _, stackID := range slices.Sorted(maps.Keys(current.Stacks)) {
-			stack := current.Stacks[stackID]
-			if stack.Namespace == volume.Namespace && stack.Host != nil && *stack.Host != volume.Copies[keepIndex].Host &&
-				slices.Contains(stack.Spec.VolumeNames(), volume.Name) {
-				status, err = http.StatusConflict, fmt.Errorf("stack %s runs on %s with the volume, whose copy there "+
-					"cannot give its data up; keep that copy, or move the stack to %s first",
-					stackID, current.Hosts[*stack.Host].Name, keep)
-				return
-			}
-		}
-		var kept []resolvingCopy
-		for _, volumeCopy := range volume.Copies {
-			resolving := resolvingCopy{host: volumeCopy.Host, name: current.Hosts[volumeCopy.Host].Name}
-			if volumeCopy.Host != volume.Copies[keepIndex].Host && !volumeCopy.Tiebreaker {
-				resolving.discard = true
-				copies = append(copies, resolving)
-			} else {
-				kept = append(kept, resolving)
-			}
-		}
-		copies = append(copies, kept...)
+	}
+	if len(connected) == 0 {
+		return "no copy is connected again yet"
+	}
+	return "connected again already: " + strings.Join(connected, ", ")
+}
+
+// resolveOrder is the volume's copies in the order they are resolved, or
+// why the request is refused, with its HTTP status. Every copy's host is
+// in the state: it refuses a copy on a host it does not know.
+func resolveOrder(current *state.State, id, keep string) ([]resolvingCopy, int, error) {
+	volume, ok := current.Volumes[id]
+	if !ok {
+		return nil, http.StatusNotFound, fmt.Errorf("no volume %s", id)
+	}
+	keepIndex := slices.IndexFunc(volume.Copies, func(c state.VolumeCopy) bool {
+		return current.Hosts[c.Host].Name == keep && !c.Tiebreaker
 	})
-	return copies, status, err
+	if volume.Minor == nil || keepIndex < 0 {
+		return nil, http.StatusBadRequest, fmt.Errorf("%q holds no copy of volume %s with DRBD and a disk", keep, id)
+	}
+	keptHost := volume.Copies[keepIndex].Host
+	for _, stackID := range slices.Sorted(maps.Keys(current.Stacks)) {
+		stack := current.Stacks[stackID]
+		if stack.Namespace == volume.Namespace && stack.Host != nil && *stack.Host != keptHost &&
+			slices.Contains(stack.Spec.VolumeNames(), volume.Name) {
+			return nil, http.StatusConflict, fmt.Errorf("stack %s runs on %s with the volume, whose copy there "+
+				"cannot give its data up; keep that copy, or move the stack to %s first",
+				stackID, current.Hosts[*stack.Host].Name, keep)
+		}
+	}
+	var discarding, keeping []resolvingCopy
+	for _, volumeCopy := range volume.Copies {
+		resolving := resolvingCopy{host: volumeCopy.Host, name: current.Hosts[volumeCopy.Host].Name}
+		if volumeCopy.Host != keptHost && !volumeCopy.Tiebreaker {
+			resolving.discard = true
+			discarding = append(discarding, resolving)
+		} else {
+			keeping = append(keeping, resolving)
+		}
+	}
+	return append(discarding, keeping...), http.StatusOK, nil
 }
 
 // resolveOn resolves the copy on a host, this one or another; connected is
-// false when it stood alone from no peer.
+// false when no peer of it was StandAlone.
 func (s *Server) resolveOn(ctx context.Context, host state.HostID, volumeID string, discard bool) (bool, error) {
 	if host == s.config.HostID {
 		return s.resolveHere(ctx, volumeID, discard)
@@ -180,8 +197,9 @@ func (s *Server) localResolve(w http.ResponseWriter, r *http.Request) {
 	}
 	connected, err := s.resolveHere(r.Context(), names.ID(r.PathValue("namespace"), r.PathValue("name")), request.Discard)
 	if err != nil {
-		writeError(w, http.StatusConflict, err)
+		// no copy here, a step that runs, a primary, or DRBD's own refusal
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, ResolvedCopy{Discarded: request.Discard, Connected: connected})
+	writeJSON(w, http.StatusOK, ResolvedCopy{Discarded: request.Discard && connected, Connected: connected})
 }
