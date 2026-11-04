@@ -1,7 +1,9 @@
-// Package hoster is the cloud the hosts run in, as the leader uses it: it
-// routes the Floating IP to the ingress host, tells which server a host
-// runs on, and powers servers off (fencing) and on. Servers are named by
-// their ServerRef, the hoster's own ID of the server.
+// Package hoster is the cloud the hosts run in: for the leader it routes
+// the Floating IP to the ingress host, tells which server a host runs on,
+// and powers servers off (fencing) and on; clowderd recover marks the
+// servers it takes out of the cluster, and an agent asks for the mark when
+// it starts. Each uses only its part. Servers are named by their ServerRef,
+// the hoster's own ID of the server.
 package hoster
 
 import (
@@ -30,6 +32,13 @@ type Hoster interface {
 	PowerOff(ctx context.Context, serverRef string) error
 	// PowerOn switches the server on.
 	PowerOn(ctx context.Context, serverRef string) error
+	// SetRetired marks the server as taken out of its cluster by clowderd
+	// recover (a label), with the serial of the retired host's certificate;
+	// RetiredSerial reads it, "" for none. The agent of a retired host starts
+	// nothing: with another retired one it would still have the old
+	// cluster's majority. A server set up anew has another certificate.
+	SetRetired(ctx context.Context, serverRef, serial string) error
+	RetiredSerial(ctx context.Context, serverRef string) (string, error)
 }
 
 // New is the plugin cluster.yaml names, with the token in clear.

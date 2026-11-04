@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/netip"
@@ -179,4 +180,14 @@ func TestTheIngressHostIsKeptThenPreferredThenTheLowestID(t *testing.T) {
 	if got, ok := ingressHost(current); !ok || got.ID != 2 {
 		t.Errorf("with a checked host: got %v", got)
 	}
+}
+
+// SetRetired and RetiredSerial are clowderd recover's and the agent's start;
+// the leader never uses them.
+func (f *fakeHoster) SetRetired(context.Context, string, string) error {
+	return errors.New("not the leader's")
+}
+
+func (f *fakeHoster) RetiredSerial(context.Context, string) (string, error) {
+	return "", errors.New("not the leader's")
 }

@@ -2,8 +2,10 @@ package hetzner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -28,6 +30,8 @@ type fakeAPI struct {
 	actionFails bool
 	// missingServers makes GET /v1/servers/404 the API's not found
 	missingServers bool
+	// labels are server 42's, which a PUT replaces
+	labels map[string]string
 	// failures are answered first, one per request, before the real ones:
 	// an HTTP status and the API's error code
 	failures []failure
@@ -71,10 +75,17 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case f.missingServers && r.Method == http.MethodGet && r.URL.Path == "/v1/servers/404":
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, `{"error": {"code": "not_found", "message": "server not found"}}`)
+	case r.Method == http.MethodPut && r.URL.Path == "/v1/servers/42":
+		var update struct {
+			Labels map[string]string `json:"labels"`
+		}
+		if err := json.Unmarshal(body, &update); err != nil {
+			f.t.Errorf("PUT body %s: %v", body, err)
+		}
+		f.labels = update.Labels
+		f.writeServer(w)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/42":
-		_, _ = io.WriteString(w, `{"server": {"id": 42, "name": "node0",
-			"public_net": {"ipv4": {"id": 7, "ip": "198.51.100.42", "blocked": false}, "ipv6": null},
-			"private_net": [{"network": 4711, "ip": "10.0.0.2", "alias_ips": [], "mac_address": "86:00:00:2a:7d:e0"}]}}`)
+		f.writeServer(w)
 	case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/actions/"):
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{"action": {"id": 13, "command": "assign_floating_ip", "status": "running", "error": null}}`)
@@ -90,6 +101,17 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, `{"error": {"code": "not_found", "message": "not found"}}`)
 	}
+}
+
+// writeServer answers with server 42 and its labels.
+func (f *fakeAPI) writeServer(w http.ResponseWriter) {
+	labels, err := json.Marshal(f.labels)
+	if err != nil || f.labels == nil {
+		labels = []byte("{}")
+	}
+	_, _ = io.WriteString(w, `{"server": {"id": 42, "name": "node0", "labels": `+string(labels)+`,
+		"public_net": {"ipv4": {"id": 7, "ip": "198.51.100.42", "blocked": false}, "ipv6": null},
+		"private_net": [{"network": 4711, "ip": "10.0.0.2", "alias_ips": [], "mac_address": "86:00:00:2a:7d:e0"}]}}`)
 }
 
 func newClient(t *testing.T, api *fakeAPI) *Client {
@@ -196,6 +218,30 @@ func TestAServersAddressesArePrivateAndPublic(t *testing.T) {
 	want := []netip.Addr{netip.MustParseAddr("10.0.0.2"), netip.MustParseAddr("198.51.100.42")}
 	if err != nil || !slices.Equal(addresses, want) {
 		t.Errorf("addresses %v, %v; want %v", addresses, err, want)
+	}
+}
+
+func TestARetiredServerKeepsItsOtherLabels(t *testing.T) {
+	api := &fakeAPI{t: t, labels: map[string]string{"role": "web"}}
+	client := newClient(t, api)
+	ctx := context.Background()
+	if serial, err := client.RetiredSerial(ctx, "42"); err != nil || serial != "" {
+		t.Fatalf("retired before: %q, %v", serial, err)
+	}
+	for range 2 {
+		if err := client.SetRetired(ctx, "42", "a1b2"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if serial, err := client.RetiredSerial(ctx, "42"); err != nil || serial != "a1b2" {
+		t.Errorf("retired after: %q, %v", serial, err)
+	}
+	if want := map[string]string{"role": "web", RetiredLabel: "a1b2"}; !maps.Equal(api.labels, want) {
+		t.Errorf("labels %v, want %v", api.labels, want)
+	}
+	// the second SetRetired found the label and changed nothing
+	if puts := slices.DeleteFunc(slices.Clone(api.requests), func(r string) bool { return !strings.HasPrefix(r, "PUT") }); len(puts) != 1 {
+		t.Errorf("PUT requests %v, want one", puts)
 	}
 }
 

@@ -39,16 +39,23 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   nothing, so it works while the agent is down; it does not know the users, so a mistyped
   name gives codes that fit nowhere.
 - **`clowderd run`** (the service) starts in this order:
-  1. `clowder0` with the node address: a dummy interface, so the address exists on a host
+  1. It asks the hoster whether `clowderd recover` retired this host (`checkRetired`: the
+     label `clowder-retired` of its server names its certificate), with the token
+     of the state its Raft log on disk holds (`raftnode.ReadState`). A retired server's
+     agent ends with `ErrRetired`, exit status 4, before Raft, the mesh or a stack: two
+     retired hosts would still have the old cluster's majority. A host without a server
+     ref or a hoster, or a hoster that does not answer within `retiredCheckTimeout`,
+     starts as before.
+  2. `clowder0` with the node address: a dummy interface, so the address exists on a host
      without peers. Then the WireGuard mesh of `net.json` (`restoreMesh`): Raft runs over
      the mesh, so after a reboot a host would learn its peers from a leader it cannot
      reach without them. The state's mesh replaces it once the state answers.
-  2. The Raft member. It waits up to `catchUpTimeout` for its state to catch up with the
+  3. The Raft member. It waits up to `catchUpTimeout` for its state to catch up with the
      Raft log. If the state met an entry or snapshot it cannot read by then, the agent
      ends here, before its loops start; a follower may meet it later, as it applies the
      leader's log.
-  3. The containers' DNS resolver.
-  4. `newDaemon` makes the parts, each from what they all share (`shared`: the files,
+  4. The containers' DNS resolver.
+  5. `newDaemon` makes the parts, each from what they all share (`shared`: the files,
      this host, its keys, the Raft member, the host's parts, the logger); then the API, once each on the underlay, the node
      address and the public address. It binds them with `IP_FREEBIND` (`freeBind`): at
      boot the public address may come up after the agent, which must neither fail nor
@@ -56,7 +63,7 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
      of them cannot listen, the agent ends before it started any container. Once they
      serve, only an API that fails ends the agent: without the other two the host still
      runs its stacks, so their failure is logged.
-  5. The loops (`startLoops`): this host's that start no container (the network,
+  6. The loops (`startLoops`): this host's that start no container (the network,
      supervisor, the beats to the voters), the leader's, which do nothing while it does
      not lead, and, once the state caught up with the leader's commit index
      (`runOnceCaughtUp`, `waitForState`; cluster.md, Raft), the report, Traefik, the volume
@@ -64,7 +71,7 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
      `storage.ForgetPeer`, then `report-peer-forgotten`), the prefetcher, the steps of moves
      (`moveSteps`), the report of a host back after a fence (`reportRecovery`), and the
      stack runner. A host that was away must not start a stack that moved meanwhile.
-  6. It tells systemd `READY=1` and feeds the watchdog as long as the state's lock answers.
+  7. It tells systemd `READY=1` and feeds the watchdog as long as the state's lock answers.
 
   When it stops, it ends its loops and waits for them, at most `loopsTimeout`: a host tool
   left behind on a suspended volume must not hold up the stop. Only once every loop ended do
@@ -74,7 +81,7 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
 
   The agent also stops when its Raft member halts at an entry it cannot read
   (`Node.Halted`, [Versions](cluster.md)). It then exits with status 3 (`exitUnreadable`
-  in `cmd/clowderd`), which systemd does not restart (Shipping).
+  in `cmd/clowderd`), which systemd does not restart (Shipping); so is status 4 of a retired server.
 - `HostParts` are what the agent changes on its host (the network, the storage driver and
   Docker) and the hoster's API. `clowderd run` passes the real ones, the tests fakes.
 - **Reconcilers** run after a change of the state and every `loop.Interval`, to repair

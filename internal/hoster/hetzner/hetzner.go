@@ -1,6 +1,7 @@
-// Package hetzner is the Hetzner Cloud API as clowder uses it: Floating IPs
-// and the power of servers. It is a small client of its own: the official
-// SDK would bring Prometheus' client and much more into clowderd.
+// Package hetzner is the Hetzner Cloud API as clowder uses it: Floating IPs,
+// the power of servers and the label of a retired one. It is a small client
+// of its own: the official SDK would bring Prometheus' client and much more
+// into clowderd.
 package hetzner
 
 import (
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"net/netip"
@@ -76,7 +78,7 @@ func (c *Client) FloatingIPTarget(ctx context.Context, ip netip.Addr) (string, e
 // AssignFloatingIP routes the Floating IP to the server and waits until
 // Hetzner has done it.
 func (c *Client) AssignFloatingIP(ctx context.Context, ip netip.Addr, serverRef string) error {
-	server, err := serverID(serverRef)
+	id, err := serverID(serverRef)
 	if err != nil {
 		return err
 	}
@@ -84,7 +86,7 @@ func (c *Client) AssignFloatingIP(ctx context.Context, ip netip.Addr, serverRef 
 	if err != nil {
 		return err
 	}
-	return c.act(ctx, fmt.Sprintf("/floating_ips/%d/actions/assign", found.ID), map[string]int64{"server": server},
+	return c.act(ctx, fmt.Sprintf("/floating_ips/%d/actions/assign", found.ID), map[string]int64{"server": id},
 		fmt.Sprintf("assign the Floating IP %s to server %s", ip, serverRef))
 }
 
@@ -102,43 +104,95 @@ func (c *Client) PowerOn(ctx context.Context, serverRef string) error {
 
 // power runs a power action on the server; what names it in the error.
 func (c *Client) power(ctx context.Context, serverRef, action, what string) error {
-	server, err := serverID(serverRef)
+	id, err := serverID(serverRef)
 	if err != nil {
 		return err
 	}
-	return c.act(ctx, fmt.Sprintf("/servers/%d/actions/%s", server, action), nil, fmt.Sprintf(what, serverRef))
+	return c.act(ctx, fmt.Sprintf("/servers/%d/actions/%s", id, action), nil, fmt.Sprintf(what, serverRef))
+}
+
+// server is the part of the API's server that clowder reads.
+type server struct {
+	ID        int64 `json:"id"`
+	PublicNet struct {
+		IPv4 *struct {
+			IP string `json:"ip"`
+		} `json:"ipv4"`
+	} `json:"public_net"`
+	PrivateNet []struct {
+		IP string `json:"ip"`
+	} `json:"private_net"`
+	Labels map[string]string `json:"labels"`
+}
+
+// readServer reads the server: ErrNoSuchServer for one the project does
+// not have.
+func (c *Client) readServer(ctx context.Context, serverRef string) (server, error) {
+	id, err := serverID(serverRef)
+	if err != nil {
+		return server{}, err
+	}
+	var answer struct {
+		Server server `json:"server"`
+	}
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/servers/%d", id), nil, &answer); err != nil {
+		if errors.Is(err, errNotFound) {
+			return server{}, fmt.Errorf("read server %s: %w", serverRef, ErrNoSuchServer)
+		}
+		return server{}, fmt.Errorf("read server %s: %w", serverRef, err)
+	}
+	return answer.Server, nil
+}
+
+// RetiredLabel marks a server that clowderd recover took out of its
+// cluster. Its value is the serial of the retired host's certificate, so a
+// server set up anew, with a certificate of its own, is not retired.
+const RetiredLabel = "clowder-retired"
+
+// SetRetired labels the server RetiredLabel with the host's certificate
+// serial and keeps its other labels: the API replaces all of them at once.
+func (c *Client) SetRetired(ctx context.Context, serverRef, serial string) error {
+	found, err := c.readServer(ctx, serverRef)
+	if err != nil {
+		return err
+	}
+	if found.Labels[RetiredLabel] == serial {
+		return nil
+	}
+	labels := maps.Clone(found.Labels)
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[RetiredLabel] = serial
+	body := map[string]map[string]string{"labels": labels}
+	if err := c.do(ctx, http.MethodPut, fmt.Sprintf("/servers/%d", found.ID), body, nil); err != nil {
+		return fmt.Errorf("label server %s %s: %w", serverRef, RetiredLabel, err)
+	}
+	return nil
+}
+
+// RetiredSerial is the serial of the host certificate whose host recover
+// retired on the server; "" for a server it did not.
+func (c *Client) RetiredSerial(ctx context.Context, serverRef string) (string, error) {
+	found, err := c.readServer(ctx, serverRef)
+	if err != nil {
+		return "", err
+	}
+	return found.Labels[RetiredLabel], nil
 }
 
 // ServerAddresses are the server's IPv4 addresses: in the project's
 // private networks, and its public one.
 func (c *Client) ServerAddresses(ctx context.Context, serverRef string) ([]netip.Addr, error) {
-	server, err := serverID(serverRef)
+	found, err := c.readServer(ctx, serverRef)
 	if err != nil {
 		return nil, err
 	}
-	var answer struct {
-		Server struct {
-			PublicNet struct {
-				IPv4 *struct {
-					IP string `json:"ip"`
-				} `json:"ipv4"`
-			} `json:"public_net"`
-			PrivateNet []struct {
-				IP string `json:"ip"`
-			} `json:"private_net"`
-		} `json:"server"`
-	}
-	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/servers/%d", server), nil, &answer); err != nil {
-		if errors.Is(err, errNotFound) {
-			return nil, fmt.Errorf("read server %s: %w", serverRef, ErrNoSuchServer)
-		}
-		return nil, fmt.Errorf("read server %s: %w", serverRef, err)
-	}
 	var texts []string
-	for _, network := range answer.Server.PrivateNet {
+	for _, network := range found.PrivateNet {
 		texts = append(texts, network.IP)
 	}
-	if public := answer.Server.PublicNet.IPv4; public != nil {
+	if public := found.PublicNet.IPv4; public != nil {
 		texts = append(texts, public.IP)
 	}
 	var addresses []netip.Addr
@@ -292,6 +346,9 @@ func (c *Client) send(ctx context.Context, method, path string, encoded []byte, 
 	if response.StatusCode >= http.StatusMultipleChoices {
 		return readError(response)
 	}
+	if out == nil {
+		return nil // an answer nobody reads
+	}
 	if err := json.NewDecoder(response.Body).Decode(out); err != nil {
 		return fmt.Errorf("read the answer: %w", err)
 	}
@@ -349,8 +406,8 @@ func (s statusCode) Error() string { return fmt.Sprintf("HTTP %d", int(s)) }
 // errNotFound is the API's 404.
 var errNotFound error = statusCode(http.StatusNotFound)
 
-// ErrNoSuchServer is ServerAddresses' answer for a server the project does
-// not have, or a server ref that is no server ID.
+// ErrNoSuchServer is the answer for a server the project does not have, or
+// a server ref that is no server ID.
 var ErrNoSuchServer = errors.New("the project has no such server")
 
 // serverID reads a ServerRef as Hetzner's server ID.

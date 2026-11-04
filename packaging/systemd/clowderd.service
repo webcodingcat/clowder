@@ -21,8 +21,9 @@ RestartSec=2
 # Except for an agent that stopped at a Raft entry it cannot read (exit
 # status 3, a version older than the leader's): it would stop at the same
 # entry again. It stays down until an upgrade starts it, and the other hosts
-# see it fail. Nothing reboots the host.
-RestartPreventExitStatus=3
+# see it fail. Nothing reboots the host. Nor an agent on a server that
+# clowderd recover retired (exit status 4): it must never start again.
+RestartPreventExitStatus=3 4
 # Only the agent itself is stopped. Its helpers (docker compose, drbdadm, a
 # volume copy) finish their step instead of being killed halfway; one that
 # hangs in state D could not be killed anyway. Containers belong to dockerd

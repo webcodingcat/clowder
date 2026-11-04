@@ -28,6 +28,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/hoster"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
+	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
@@ -52,6 +53,8 @@ type fakeHoster struct {
 	token   string
 	target  string
 	servers map[string][]netip.Addr
+	// retired is what RetiredSerial answers for every server
+	retired string
 }
 
 func (f *fakeHoster) ServerAddresses(_ context.Context, serverRef string) ([]netip.Addr, error) {
@@ -383,9 +386,12 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	hostHoster := &fakeHoster{servers: map[string][]netip.Addr{"1000001": {loopback, netip.MustParseAddr("127.0.0.2")}}}
 	parts := HostParts{Network: hostNetwork, Storage: hostStorage, Docker: hostDocker, Hoster: hostHoster.connect}
 	go func() { stopped <- Run(ctx, files, parts, logger) }()
-	defer func() {
+	stopAgent := sync.OnceValue(func() error {
 		stop()
-		if err := <-stopped; err != nil {
+		return <-stopped
+	})
+	defer func() {
+		if err := stopAgent(); err != nil {
 			t.Errorf("the agent stopped with %v", err)
 		}
 	}()
@@ -544,9 +550,46 @@ spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
 	if err != nil || !strings.Contains(out, "leader node0") || !strings.Contains(out, "revision 1") {
 		t.Errorf("status: %q, %v", out, err)
 	}
+
+	// a server clowderd recover retired: its agent starts nothing, not even
+	// the node's interface, which would fail here
+	if err := stopAgent(); err != nil {
+		t.Fatal(err)
+	}
+	credentials, err := files.readCredentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	setRetiredLabel := func(serial string) {
+		hostHoster.mu.Lock()
+		defer hostHoster.mu.Unlock()
+		hostHoster.retired = serial
+	}
+	setRetiredLabel(pki.Serial(credentials.certificate.Leaf))
+	parts.Network = &fakeNetwork{interfaceFails: true}
+	if err := Run(context.Background(), files, parts, logger); !errors.Is(err, ErrRetired) {
+		t.Errorf("the agent of a retired server: %v", err)
+	}
+	// the label names another host's certificate: the server was set up
+	// anew, and its agent starts (up to the interface that fails here)
+	setRetiredLabel("another")
+	if err := Run(context.Background(), files, parts, logger); err == nil || errors.Is(err, ErrRetired) {
+		t.Errorf("the agent of a server set up anew: %v", err)
+	}
 }
 
 // PowerOff and PowerOn are never needed here: one host is never fenced.
 func (f *fakeHoster) PowerOff(context.Context, string) error { return errors.New("not in this test") }
 
 func (f *fakeHoster) PowerOn(context.Context, string) error { return errors.New("not in this test") }
+
+// SetRetired is clowderd recover's, never needed here.
+func (f *fakeHoster) SetRetired(context.Context, string, string) error {
+	return errors.New("not in this test")
+}
+
+func (f *fakeHoster) RetiredSerial(context.Context, string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.retired, nil
+}

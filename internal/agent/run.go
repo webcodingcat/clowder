@@ -86,6 +86,9 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	if err != nil {
 		return err
 	}
+	if err := checkRetired(ctx, files, host, credentials, parts.Hoster, logger); err != nil {
+		return err
+	}
 	if err := parts.Network.SetUpInterface(ctx, host.NodeAddress); err != nil {
 		return err
 	}

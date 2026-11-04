@@ -19,7 +19,8 @@ with them.
   ([Versions](cluster.md)), and `RestartPreventExitStatus=3` keeps systemd from starting
   it again: it would stop at the same entry, and a Raft member that comes and goes every
   few seconds would hide from the other hosts that it failed. The unit stays `failed`,
-  with the reason in the journal; nothing reboots the host.
+  with the reason in the journal; nothing reboots the host. The same holds for status 4,
+  the agent of a server `clowderd recover` retired: it must never start again.
 - An upgrade restarts a running agent (`postinstall.sh`, `systemctl try-restart`), and
   starts one that failed, so an agent stopped at an entry it could not read goes on with
   the version that reads it. A helper of the old agent (`docker compose up`, `drbdadm`) may

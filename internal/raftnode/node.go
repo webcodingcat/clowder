@@ -33,6 +33,8 @@ const (
 	snapshotThreshold = 8192
 	// keptSnapshots is how many snapshots stay on disk.
 	keptSnapshots = 2
+	// storeFile is the log and stable store in Dir.
+	storeFile = "raft.db"
 	// proposeTimeout bounds how long a command waits to be committed.
 	proposeTimeout = 10 * time.Second
 )
@@ -88,7 +90,7 @@ func Open(cfg Config) (*Node, error) {
 		return nil, err
 	}
 	transport := raft.NewNetworkTransportWithLogger(stream, 3, 10*time.Second, logger)
-	store, err := raftboltdb.NewBoltStore(filepath.Join(cfg.Dir, "raft.db"))
+	store, err := raftboltdb.NewBoltStore(filepath.Join(cfg.Dir, storeFile))
 	if err != nil {
 		_ = transport.Close() // the store's error is the one to report
 		return nil, fmt.Errorf("open the Raft store: %w", err)

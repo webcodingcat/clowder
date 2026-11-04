@@ -67,7 +67,9 @@ channels.
   server is its `ServerRef`, the hoster's ID that `clowderd init` and `join --server-ref`
   record. A host names it itself, so `hoster.CheckServerRef` makes sure one of the
   server's private addresses is the host's underlay (`ErrOtherServer` if not): the join
-  checks it, the Floating IP's loop the first host's. `hoster.New` picks the plugin.
+  checks it, the Floating IP's loop the first host's. `SetRetired` and `RetiredSerial` are the
+  label `clowder-retired` of a server `clowderd recover` took out of the cluster, with the
+  serial of the retired host's certificate; the leader never uses them. `hoster.New` picks the plugin.
 - `hoster/hetzner` is a small client of the Hetzner Cloud API on `net/http`: the official
   SDK would bring Prometheus' client and more into clowderd. It finds the Floating IP among
   the project's (the API cannot look one up by its address) and waits for each action to
@@ -75,7 +77,8 @@ channels.
   while the API answers 429 (until `RateLimit-Reset`; Hetzner sends no `Retry-After`), 5xx
   or `locked`, or the network fails: one busy moment of the API must not hold up a fence.
   Every request clowder sends may go twice (a read, an assignment to the same server, a
-  power action on a server in that state). Its errors carry the API's message, never the
+  power action on a server in that state, the same labels). `SetRetired` reads the
+  server's labels and writes them back with its own, as the API replaces all at once. Its errors carry the API's message, never the
   token.
 - `controller.RunFloatingIP` (`floatingip.go`) acts only on the leader. The ingress host (`State.Ingress`,
   `set-ingress`) is the recorded one while it is active and has a server ref, so the
