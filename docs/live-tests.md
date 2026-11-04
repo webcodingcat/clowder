@@ -318,6 +318,21 @@ host.
    no leader, and the first host mails `no quorum as seen from clowder0` by itself
    (`no-leader`), and the all-clear once they go on.
 
+### `TestRecover`
+
+1. `keeper` (two replicas, on the first host) and `lost` (one replica, on a joined host)
+   run, each with data.
+2. The joined hosts freeze, and `clowderd recover --power-off --yes` runs on the first
+   host.
+3. The joined hosts' servers are off and labeled `clowder-retired`, the hosts removed; the
+   first host leads alone, holds the Floating IP, and the alert `no-ha` is open.
+4. `keeper` runs on the first host with its data and writes again; the volume `lost` is
+   `restore-pending`, and its stack waits for a restore.
+5. The retired servers, switched on, start neither Raft nor a container: their agent ended
+   with status 4 and says why.
+6. The stacks go, new servers under the same names join, three hosts vote, `no-ha` is
+   resolved, and the joined hosts are drained again.
+
 A split brain has no scenario: with DRBD's quorum neither a fault of the lab nor a hand on
 the hosts makes one. A copy promoted (`--force`) apart from the newer data has no quorum,
 and its writes hang. Its detection, the alert and `volume resolve-splitbrain` are unit

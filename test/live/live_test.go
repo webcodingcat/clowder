@@ -174,7 +174,7 @@ func baseline(t *testing.T) (host, outputs) {
 			t.Fatalf("host %s is %s, want %s: %+v", found.Name, found.Phase, want, hosts)
 		}
 	}
-	if err := checkVoters(hosts, 3); err != nil {
+	if err := checkThreeVoters(hosts); err != nil {
 		t.Fatal(err)
 	}
 	// a deleted volume is listed until its host removed its copy

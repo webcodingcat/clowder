@@ -219,7 +219,7 @@ func growToThreeHosts(t *testing.T) {
 	})
 	applyHosts(t, []string{firstJoining, secondJoining}, tokens)
 	waitForJoined(t, firstJoining, secondJoining)
-	eventually(t, time.Minute, "three voters", func() error { return checkVoters(clusterHosts(t), 3) })
+	eventually(t, time.Minute, "three voters", func() error { return checkThreeVoters(clusterHosts(t)) })
 	for _, name := range []string{firstJoining, secondJoining} {
 		mustClowder(t, "host", "drain", name)
 	}
@@ -243,16 +243,17 @@ func growToThreeHosts(t *testing.T) {
 	}
 }
 
-// checkVoters fails unless want of the hosts vote.
-func checkVoters(hosts []clusterHost, want int) error {
+// checkThreeVoters fails unless three of the hosts vote, as in every
+// cluster of three hosts or more up to five.
+func checkThreeVoters(hosts []clusterHost) error {
 	voting := 0
 	for _, host := range hosts {
 		if host.Voter {
 			voting++
 		}
 	}
-	if voting != want {
-		return fmt.Errorf("%d hosts vote, want %d: %+v", voting, want, hosts)
+	if voting != 3 {
+		return fmt.Errorf("%d hosts vote, want 3: %+v", voting, hosts)
 	}
 	return nil
 }
@@ -415,7 +416,7 @@ func TestReplace(t *testing.T) {
 				!strings.Contains(output, "join a replacement first") {
 				t.Errorf("a remove below three: %v\n%s", err, output)
 			}
-			eventually(t, time.Minute, "three voters", func() error { return checkVoters(clusterHosts(t), 3) })
+			eventually(t, time.Minute, "three voters", func() error { return checkThreeVoters(clusterHosts(t)) })
 		}},
 		{"the replacement takes the old host's ID", func(t *testing.T) {
 			applyHosts(t, []string{firstJoining, thirdJoining, replacement},

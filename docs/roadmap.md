@@ -10,7 +10,7 @@ clowder is built in phases; each ends with live tests on HLab
 | 1b | ingress (Traefik, ACME), priorities, alerts, metrics, still on one host | done, passes the live tests |
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
-| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions, the leader's plans and the locks, the network for several hosts, the join, the placement over hosts and moves, failover with fencing, the ingress failover and DRBD's quorum |
+| 2 | three hosts: replication, failover with fencing | started: the live tests, the volume reconciler, versions, the leader's plans and the locks, the network for several hosts, the join, the placement over hosts and moves, failover with fencing, the ingress failover and DRBD's quorum, recover when the majority is gone for good |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -163,6 +163,23 @@ Then the ingress failover and DRBD's quorum:
 
 The state changed with it, so a cluster of an earlier build must be set up anew.
 
+Then the way out when the majority is gone for good:
+
+- `clowderd recover --power-off`, as root on the host that is left, powers the other hosts
+  off through the hoster, labels their servers `clowder-retired` with their certificate's
+  serial, and makes this host the only voter. It refuses while another host knows a
+  leader or answers without saying, and asks for the cluster's name first.
+- The cluster keeps what that host holds: a volume with a synced copy there runs on, one
+  without waits for a restore (`restore-pending`), one of replicas 0 starts empty. The
+  other hosts are removed, and the cluster grows again as a new one does, with the alert
+  `no-ha` until three hosts run stacks.
+- A retired host's agent ends at its start (exit status 4), before Raft or a stack; a
+  server set up anew has another certificate and starts.
+- The live tests take two hosts away for good, recover, switch the retired servers on
+  again and grow back to three (`TestRecover`).
+
+The state changed with it, so a cluster of an earlier build must be set up anew.
+
 Before it, the first release became installable and the commands honest: the APT
 repository keeps every version, `examples/hetzner` pins `0.1.0`, `bin/dev live release
 <tag>` tests a published release (the [release checklist](developing/shipping.md#release-checklist)),
@@ -206,7 +223,18 @@ They matter once there are several hosts; on one, they cost at most time.
   index it wrote in its config directory and ask for it.
 - A cluster that had three hosts never goes below three, a dead host too: a
   replacement joins first. If none can (examples/hetzner joins through its first host),
-  the cluster stays at two until `clowderd recover --power-off` comes.
+  the cluster stays at two; `clowderd recover --power-off` is the way out only when two
+  are gone.
+- A retired host whose agent starts while the hoster's API does not answer starts as
+  before, and two such hosts would have the old cluster's majority. recover tells the
+  user to set retired servers up anew or delete them.
+- A volume that waits for a restore after a recover waits until phase 3 brings restores;
+  until then, deleting it and applying it anew gives an empty one. An unsynced copy left
+  on the host that recovered stays as it is, for a human.
+- recover on a host that rebooted since the others went is not live-tested: its DRBD
+  resources come up from the agent's files, with this host alone.
+- recover knows the hosts that this host's log knows. A host the others added after this
+  one fell behind is neither asked nor retired: power its server off by hand.
 - A removed host keeps the data key, and with it the CA's key and every `!secret`
   value: a host that kept its disk can still issue certificates the revocations do not
   name. Removing hosts is normal now; rotating the data key, the CA and the cluster's
