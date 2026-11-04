@@ -58,6 +58,12 @@ type lockCase struct {
 
 var lockCases = []lockCase{
 	{
+		// it ends every operation and frees its locks (endOperations)
+		name: "clowderd recover remaps the cluster", kind: KindRecoverRemap, actor: LeaderActor, lock: "host/1",
+		payload: func(*cluster, uint64) any { return RecoverRemap{Survivor: 0} },
+		free:    true,
+	},
+	{
 		name: "a user asks to move a stack", kind: KindRequestMove, actor: UserActor("alice"), lock: "stack/default/shop",
 		payload: func(*cluster, uint64) any { return RequestMove{Namespace: "default", Name: "shop", To: 1} },
 	},

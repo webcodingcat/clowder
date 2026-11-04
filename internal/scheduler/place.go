@@ -454,6 +454,9 @@ func (p *planner) volumesOn(stack *state.Stack, host state.HostID) (volumes, cop
 		switch {
 		case !ok:
 			return nil, nil, fmt.Sprintf("volume %s is gone", name) // the state refuses this; a guard
+		case current.Status == state.VolumeRestorePending:
+			return nil, nil, fmt.Sprintf("volume %s lost its data with the hosts clowderd recover retired; "+
+				"it waits for a restore", name)
 		case current.Status != state.VolumePending && current.Spec.Replicas == 0:
 			continue
 		case current.Status != state.VolumePending:

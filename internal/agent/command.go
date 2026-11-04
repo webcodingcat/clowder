@@ -1,6 +1,6 @@
 // Package agent is the clowderd process: the daemon (run) and the commands
-// that run on a host (check, init, join, user recovery-code; later
-// recover). Only clowderd imports it.
+// that run on a host (check, init, join, user recovery-code, recover).
+// Only clowderd imports it.
 package agent
 
 import (
@@ -33,7 +33,7 @@ func NewRoot() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newVersion(), newCheck(), newInit(), newJoin(), newRun(), newUser())
+	root.AddCommand(newVersion(), newCheck(), newInit(), newJoin(), newRun(), newUser(), newRecover())
 	return root
 }
 
@@ -169,19 +169,21 @@ func hostNetwork(files Files) network.Host {
 	}
 }
 
+// hostStorage is the host's real storage driver.
+func hostStorage(files Files) storage.Driver {
+	return storage.Driver{
+		VolumesDir: files.volumesDir(), StateDir: files.storageDir(), ResourceDir: "/etc/drbd.d", Run: command.Run,
+	}
+}
+
 // hostParts are the host's real network, storage and Docker, and the
 // hoster's real API.
 func hostParts(files Files) HostParts {
 	return HostParts{
 		Network: hostNetwork(files),
-		Storage: storage.Driver{
-			VolumesDir:  files.volumesDir(),
-			StateDir:    files.storageDir(),
-			ResourceDir: "/etc/drbd.d",
-			Run:         command.Run,
-		},
-		Docker: docker.NewClient(docker.Socket),
-		Hoster: hoster.New,
+		Storage: hostStorage(files),
+		Docker:  docker.NewClient(docker.Socket),
+		Hoster:  hoster.New,
 	}
 }
 

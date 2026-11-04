@@ -131,6 +131,13 @@ hoster's API cannot power the host off, nothing fails over and an alert says so;
 know the server is off, `clowder host fence-confirm <host>` lets the stacks start
 elsewhere.
 
+When two of three hosts are gone for good, the cluster has no majority and decides
+nothing. As root on the host that is left, `clowderd recover --power-off` powers the
+others off through the hoster and labels their servers `clowder-retired`, so their agents
+never start again, then goes on with this host alone. It runs the stacks with the data
+of its copies; a volume with no synced copy there waits for a restore. Join two new
+hosts as above, and set the retired servers up anew or delete them.
+
 ## Running a stack
 
 ```yaml

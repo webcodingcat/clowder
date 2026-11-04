@@ -170,6 +170,7 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/internal/volumes/progress", pki.RoleHost, server.localProgress)
 	server.handle("POST /v1/internal/volumes/{namespace}/{name}/resolve-splitbrain", pki.RoleHost, server.localResolve)
 	server.handle("GET /v1/internal/commit-index", pki.RoleHost, server.localCommitIndex)
+	server.handle("GET /v1/internal/leader", pki.RoleHost, server.knownLeader)
 	server.handle("POST /v1/internal/beats", pki.RoleHost, server.localBeat)
 	server.handle("GET /v1/internal/beats/{id}", pki.RoleHost, server.localSilence)
 	server.handleOpen("GET /v1/bootstrap", limited(&server.bootstraps, server.bootstrapOffer))

@@ -26,6 +26,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | Who | Commands |
   |---|---|
   | `clowderd init` | `bootstrap` |
+  | `clowderd recover` | `recover-remap` |
   | the user | `apply-config`, `add-user` (the bootstrap's user), `recover-user` and `set-recovery-recipient` (with a code from a host), `set-host-phase` (host actions), `add-join-token`, `put-resource` and `delete-resource` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack`, `request-move` |
   | the leader, for a joining host | `add-host` |
   | the members loop | `set-host-phase` (joining, passive, active; removed for a host that left), `set-host-voter` |
@@ -227,6 +228,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | `recovering` | `active` | the host | every copy of it with a disk is synced (`checkCaughtUp`) |
   | `fenced` | `disabled` | fencing loop | fenced `FlapLimit` times within `FlapWindow` (`Host.Flapping`) |
   | `disabled` | `fenced` | user | `host enable`: clears `FencedAt`; the leader powers it on |
+  | any | `removed` | `clowderd recover` | `recover-remap`: every host but the one that recovers (Recover below) |
 
   In words: a new host joins as `joining` (`add-host`); the members loop makes it
   `passive` (waiting) or `active` (running stacks), and a user drains it for maintenance
@@ -418,8 +420,70 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   leader takes one join at a time (`joiner.mu`), so two hosts never get the same ID.
 - The data key is an age identity in a file only root reads. `Seal` and `Open` turn secrets
   into `state.Sealed` and back; joining hosts get the key with their join answer.
+- `ReadState` reads the state from the log on disk without Raft (the last snapshot, then
+  the commands after it), and `Recover` makes the member its cluster's only voter
+  (`raft.RecoverCluster`): both for `clowderd recover`, while the agent is stopped.
 - The tests run real members on 127.0.0.1: a restart from disk, three hosts over mTLS,
-  strangers refused.
+  strangers refused, a member that recovers alone.
+
+## Recover (`clowderd recover`, `agent/recover.go`)
+
+A cluster that lost the majority of its voters for good decides nothing; the one host left
+still has current copies of its volumes. `clowderd recover --power-off` makes it go on
+alone, only on a human's word. The danger is the hosts that went: switched on again, two
+of them would still have the old Raft configuration's majority and their copies DRBD's
+quorum, elect a leader and fence the host that recovered. So `Recover` takes them out
+at the hoster, in this order, each step safe to run again after a failure:
+
+1. It stops `clowderd.service` and reads the state from the log on disk
+   (`raftnode.ReadState`): the hosts to retire are every one but this that is not removed.
+   A cluster of one host that never recovered has nothing to recover.
+2. It asks each of them over its underlay whether it knows a leader (`api.KnowsLeader`,
+   `/v1/internal/leader`: a leader once a majority confirmed it, a follower the one it
+   hears) and refuses if one does: that cluster is not lost, even when this host reaches
+   only a follower of it, and its hosts leave with `host remove`. It refuses too if one
+   answers without saying (a refused certificate: the others may have removed this host;
+   an answer that does not come in time); only a host that takes no connection at all
+   (`api.ErrNotReached`) counts as gone, and step 3 names it.
+3. It shows what the remap will do, worked out on a copy of the state, and asks for the
+   cluster's name (`--yes` for scripts). Until here nothing changed, and a refusal starts
+   the agent again.
+4. Per host: the label `clowder-retired` with the serial of the host's certificate
+   (`hoster.SetRetired`), then the power off, both confirmed by the hoster; the label
+   first, as a server that is off but not labeled could come back. A server ref the
+   leader never checked is checked first.
+5. Raft with this host as the only voter (`raftnode.Recover`); the member opens on its own
+   and commits `recover-remap` as the leader. The API forwards no such command.
+6. DRBD goes on without the other hosts (`storage.Driver.DropPeers`): `del-peer` for each,
+   then quorum off (DRBD refuses that while a peer is configured), then `resume-io` for a
+   resource whose writes were suspended. Phase 0 showed this order. Quorum is off only
+   until the agent adjusts the resource to its file, which now names this host alone.
+7. It starts the agent. Its loops do the rest: the mesh drops the removed hosts, the
+   Floating IP comes here, the placement places what waits, and `forgetPeers` runs
+   `forget-peer`.
+
+`recover-remap` (`state/recover.go`) makes every other host `removed` (its certificate
+revoked, its ID free once this host forgot it) and fits the rest to what this host holds:
+
+- A volume of replicas 1 and more keeps a synced copy with a disk here. One without waits
+  for a restore (`VolumeRestorePending`): the placement gives it no copy, and its stack
+  waits with the reason. A tiebreaker of it here is retired; an unsynced copy here stays a
+  copy, as the state never removes what may hold older data: `get volumes` shows it, and a
+  delete of the volume removes it. Until restores come (phase 3), deleting the volume and
+  applying it anew is the way out.
+- A volume of replicas 0 whose LV was on another host starts anew, empty, as after a
+  failover.
+- Every stack not on this host, or that names a volume without data, is placed anew;
+  every running operation ends as failed and frees its locks.
+- This host is active, the only voter and the ingress host. `HA` is false again, so the
+  cluster grows as a new one does (the second host is passive), and `RecoveredAt` raises
+  the alert `no-ha` until three hosts run stacks.
+
+A retired host's agent ends at its start (host.md, `checkRetired`): the label names its
+certificate. A server set up anew gets a certificate of its own and starts, label or
+not. Should the hoster's API not answer at the start, a retired host starts as before
+(a known risk, roadmap): recover tells the user to set such servers up anew or delete
+them.
 
 ## API (`internal/api`) and the CLI (`internal/cli`)
 

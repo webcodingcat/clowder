@@ -143,6 +143,8 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 	switch {
 	case volume.Spec != old.Spec:
 		return nil, fmt.Errorf("volume %s: its spec changes only with an apply", id)
+	case old.Status == VolumeRestorePending:
+		return nil, fmt.Errorf("volume %s lost its data and waits for a restore", id)
 	case old.Status != VolumePending && (volume.Status == VolumePending || len(volume.Copies) == 0):
 		return nil, fmt.Errorf("volume %s holds data: it keeps a copy until it is deleted", id)
 	}

@@ -220,3 +220,15 @@ func TestASplitBrainRaisesAnAlertAtOnceAndNoQuorumOnceItLasted(t *testing.T) {
 		t.Errorf("no alert once no quorum lasted %v", noQuorumFor)
 	}
 }
+
+func TestARecoveredClusterAlertsUntilItIsHighlyAvailable(t *testing.T) {
+	current := node0(state.Active, 0, 0, 0)
+	if _, ok := wantedAlerts(current, NewConditions(), time.Now())["no-ha"]; ok {
+		t.Error("an alert before any recover")
+	}
+	current.RecoveredAt = time.Now()
+	alert, ok := wantedAlerts(current, NewConditions(), time.Now())["no-ha"]
+	if !ok || alert.Severity != clusterspec.SeverityCritical || !strings.Contains(alert.Message, "Join two hosts") {
+		t.Errorf("alert %+v, %v", alert, ok)
+	}
+}

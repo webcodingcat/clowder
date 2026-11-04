@@ -332,3 +332,19 @@ func TestAVolumesTiebreakerCountsOncePerPlan(t *testing.T) {
 		t.Errorf("tiebreakers %v", p.tiebreakers)
 	}
 }
+
+func TestAVolumeThatWaitsForARestoreTakesNoCopyAndHoldsItsStack(t *testing.T) {
+	current := hosts(2)
+	data := runningShop(current, 2)
+	// as clowderd recover leaves it: no copy, and its stack placed anew
+	data.Status = state.VolumeRestorePending
+	shop := current.Stacks["default/shop"]
+	shop.Host, shop.Status = nil, state.StackPending
+	decisions := Plan(current, planTime)
+	if len(decisions.Copies) != 0 || len(decisions.Placements) != 0 {
+		t.Errorf("decisions %+v", decisions)
+	}
+	if len(decisions.Waiting) != 1 || !strings.Contains(decisions.Waiting[0].Reason, "waits for a restore") {
+		t.Errorf("waiting %+v", decisions.Waiting)
+	}
+}

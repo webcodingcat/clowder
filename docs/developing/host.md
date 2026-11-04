@@ -38,9 +38,13 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   a host, in [API and the CLI](cluster.md#api-internalapi-and-the-cli-internalcli)). It reads the data key only and changes
   nothing, so it works while the agent is down; it does not know the users, so a mistyped
   name gives codes that fit nowhere.
+- **`clowderd recover --power-off`** makes this host its cluster's only one when the others are
+  gone for good: it powers them off and labels their servers `clowder-retired`
+  ([Recover](cluster.md#recover-clowderd-recover-agentrecovergo)). It stops the agent while
+  it works on Raft's files and starts it again at its end.
 - **`clowderd run`** (the service) starts in this order:
   1. It asks the hoster whether `clowderd recover` retired this host (`checkRetired`: the
-     label `clowder-retired` of its server names its certificate), with the token
+     label `clowder-retired` of its server names its certificate; [Recover](cluster.md#recover-clowderd-recover-agentrecovergo)), with the token
      of the state its Raft log on disk holds (`raftnode.ReadState`). A retired server's
      agent ends with `ErrRetired`, exit status 4, before Raft, the mesh or a stack: two
      retired hosts would still have the old cluster's majority. A host without a server

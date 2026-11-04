@@ -162,6 +162,13 @@ func wantedAlerts(current *state.State, conditions *Conditions, now time.Time) m
 			fmt.Sprintf("For %v or more the leader could not route the Floating IP to a host that can hold it: "+
 				"no request reaches the stacks. The agents' logs say why.", ingressLostFor))
 	}
+	if !current.RecoveredAt.IsZero() {
+		add("no-ha", "no-ha", clusterspec.SeverityCritical, "the cluster is not highly available",
+			fmt.Sprintf("clowderd recover left the cluster with one host on %s. Its stacks run there, without a "+
+				"second copy of their volumes, and a failure of the host stops them. Join two hosts "+
+				"(clowder host join-token); the alert ends once %d hosts run stacks.",
+				current.RecoveredAt.Format(time.RFC3339), state.MinHAHosts))
+	}
 	addVolumeAlerts(current, held, add)
 	addCertificateAlerts(current, now, add)
 	for _, name := range slices.Sorted(maps.Keys(current.Stacks)) {

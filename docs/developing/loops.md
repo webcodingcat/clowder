@@ -244,6 +244,7 @@ start elsewhere: until then it is the only one that runs them, and it may still 
 | `host-disabled` | critical | `disabled` (flapping brake) | enabled |
 | `split-brain` | critical | a host reports a copy that stands alone from a peer (`Host.SplitBrain`) | connected again (`volume resolve-splitbrain`) |
 | `no-quorum` | critical | 2 min a primary copy without DRBD's quorum (`Host.NoQuorum`) | quorum back |
+| `no-ha` | critical | `clowderd recover` left one host (`RecoveredAt`) | three hosts run stacks |
 
 A value is resolved below its raise threshold, so one that hovers there does not raise and
 resolve at every report. Likewise an alert that gets better and then worse again, up to the

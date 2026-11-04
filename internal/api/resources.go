@@ -240,7 +240,8 @@ func volumeStatus(current *state.State, volume *state.Volume) VolumeStatus {
 			Host: host, Class: volumeCopy.Class, Tiebreaker: volumeCopy.Tiebreaker, Synced: volumeCopy.Synced,
 		})
 	}
-	if volume.Status != state.VolumePending {
+	// pending and restore-pending say it all
+	if volume.Status == state.VolumeOK {
 		status.Status = volumeHealth(volume)
 	}
 	return status

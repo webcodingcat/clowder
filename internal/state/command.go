@@ -67,6 +67,7 @@ const (
 	KindExtendOperation      = "extend-operation"
 	KindRollBackOperation    = "roll-back-operation"
 	KindRequestMove          = "request-move"
+	KindRecoverRemap         = "recover-remap"
 )
 
 // LeaderActor is the leader acting on its own (its control loops).
@@ -159,6 +160,7 @@ var commandKinds = map[string]commandKind{
 	KindExtendOperation:      {"0.2.0", decoded(applyExtendOperation)},
 	KindRollBackOperation:    {"0.2.0", decoded(applyRollBackOperation)},
 	KindRequestMove:          {"0.2.0", decoded(applyRequestMove)},
+	KindRecoverRemap:         {"0.2.0", decoded(applyRecoverRemap)},
 }
 
 // decoded turns a function of a typed payload into a handler. Unknown fields

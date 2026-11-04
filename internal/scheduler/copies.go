@@ -37,7 +37,8 @@ func (p *planner) keepCopies() []state.Volume {
 	for _, id := range slices.Sorted(maps.Keys(p.current.Volumes)) {
 		volume := p.current.Volumes[id]
 		switch {
-		case volume.Status == state.VolumePending || p.current.Locks[state.VolumeLock(id)] != 0:
+		case volume.Status == state.VolumePending || volume.Status == state.VolumeRestorePending ||
+			p.current.Locks[state.VolumeLock(id)] != 0:
 			continue
 		case volume.Spec.Replicas == 0:
 			if record, ok := p.leaveThrownAway(volume); ok {
@@ -88,11 +89,12 @@ func (p *planner) leaveThrownAway(volume *state.Volume) (state.Volume, bool) {
 
 // resyncs tells whether a copy with a disk catches up: it takes the resync
 // limit. Only a host that runs does: a copy on a host that is down waits
-// for it, and syncs nothing meanwhile.
+// for it, and syncs nothing meanwhile. A copy of a volume that waits for a
+// restore has nothing to sync from.
 func (p *planner) resyncs(volume *state.Volume, volumeCopy state.VolumeCopy) bool {
 	host, ok := p.current.Hosts[volumeCopy.Host]
 	up := ok && state.Up(host.Phase)
-	return volume.Status != state.VolumePending && volume.Spec.Replicas > 0 && !volumeCopy.Synced && up &&
+	return volume.Status == state.VolumeOK && volume.Spec.Replicas > 0 && !volumeCopy.Synced && up &&
 		p.counts(volumeCopy.Host)
 }
 

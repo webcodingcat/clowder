@@ -131,7 +131,7 @@ What follows from there:
 | Binary | Package | Runs on | Does |
 |---|---|---|---|
 | `clowder` | `cmd/clowder`, `internal/cli` | Linux, macOS, Windows | the user's CLI: reads the cluster directory, talks to an agent over mTLS |
-| `clowderd` | `cmd/clowderd`, `internal/agent` | Linux | the agent (`run`, systemd service `clowderd`) and the host commands `check`, `init`, `join`, `user recovery-code`; `recover` to come |
+| `clowderd` | `cmd/clowderd`, `internal/agent` | Linux | the agent (`run`, systemd service `clowderd`) and the host commands `check`, `init`, `join`, `user recovery-code`, `recover` |
 
 `cmd/clowderd` has the build constraint `linux`. Both get their version from
 `internal/buildinfo.Version`, which `bin/dev build` stamps from the Git tag, or

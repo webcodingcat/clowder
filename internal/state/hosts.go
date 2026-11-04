@@ -437,7 +437,7 @@ func (s *State) enterPhase(host *Host, payload SetHostPhase, at time.Time) {
 		s.forgetMovesTo(host.ID)
 	}
 	if s.hostsRunningStacks() >= MinHAHosts {
-		s.HA = true
+		s.HA, s.RecoveredAt = true, time.Time{}
 	}
 }
 

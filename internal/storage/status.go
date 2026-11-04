@@ -18,9 +18,12 @@ const (
 // shows it: a resource has one volume (device), and a connection per
 // configured peer.
 type drbdResource struct {
-	Name    string `json:"name"`
-	Role    Role   `json:"role"`
-	Devices []struct {
+	Name string `json:"name"`
+	Role Role   `json:"role"`
+	// Suspended is true while DRBD holds the writes back, such as those of
+	// a primary without quorum (on-no-quorum suspend-io)
+	Suspended bool `json:"suspended"`
+	Devices   []struct {
 		DiskState string `json:"disk-state"`
 		// Quorum is false while the copy here lacks DRBD's quorum: a
 		// primary then suspends its writes (on-no-quorum suspend-io)

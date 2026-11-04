@@ -599,3 +599,33 @@ func TestAUsersCallWaitsUntilTheAgentCaughtUp(t *testing.T) {
 		t.Errorf("after the catch-up: %v", err)
 	}
 }
+
+func TestKnowsLeaderTellsWhoKnowsALeaderAndWhoIsNotReached(t *testing.T) {
+	cluster := newTestCluster(t)
+	ctx := context.Background()
+	host := cluster.hostCertificate(1)
+	ask := func(server int, certificate tls.Certificate) (bool, error) {
+		return KnowsLeader(ctx, cluster.servers[server].Listener.Addr().String(), certificate, cluster.ca.Certificate, testVersion)
+	}
+	// the leader, and a follower that hears it
+	for server := range 2 {
+		if knows, err := ask(server, host); err != nil || !knows {
+			t.Errorf("host %d: %v, %v", server, knows, err)
+		}
+	}
+	cluster.clusters[1].mu.Lock()
+	cluster.clusters[1].noLeader = true
+	cluster.clusters[1].mu.Unlock()
+	if knows, err := ask(1, host); err != nil || knows {
+		t.Errorf("a follower without a leader: %v, %v", knows, err)
+	}
+	// an answer that is no word on the leader leaves it unknown
+	if _, err := ask(0, cluster.userCertificate("alice")); err == nil || errors.Is(err, ErrNotReached) {
+		t.Errorf("a user's certificate: %v", err)
+	}
+	gone := cluster.servers[1].Listener.Addr().String()
+	cluster.servers[1].Close()
+	if _, err := KnowsLeader(ctx, gone, host, cluster.ca.Certificate, testVersion); !errors.Is(err, ErrNotReached) {
+		t.Errorf("a host that is gone: %v", err)
+	}
+}

@@ -16,13 +16,14 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// storeLockTimeout is how long ReadState waits for the Raft store: a
-// running agent holds it.
+// storeLockTimeout is how long ReadState and Recover wait for the Raft
+// store: a running agent holds it.
 const storeLockTimeout = 5 * time.Second
 
 // ReadState reads the state as this member's log on disk has it, without
 // Raft: the last snapshot, then every command after it. That includes
-// commands the cluster may never have committed. The agent must not run (it holds the store). A member that never
+// commands the cluster may never have committed, as Recover takes them
+// too. The agent must not run (it holds the store). A member that never
 // started has an empty state.
 func ReadState(dir string) (*state.State, error) {
 	if _, err := os.Stat(filepath.Join(dir, storeFile)); errors.Is(err, os.ErrNotExist) {
@@ -79,6 +80,35 @@ func restoreLatest(machine *fsm, snapshots raft.SnapshotStore) (uint64, error) {
 		return 0, fmt.Errorf("read Raft snapshot %s: %w", listed[0].ID, err)
 	}
 	return listed[0].Index, nil
+}
+
+// Recover makes this member the only voter of its cluster, with the state
+// its log holds (raft.RecoverCluster): clowderd recover, after the other
+// hosts were powered off for good. Raft writes a snapshot of that state
+// with the new configuration and drops the log. The agent must not run.
+func Recover(cfg Config) error {
+	store, err := openStore(cfg.Dir, false)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }() // the result is in the snapshot
+	snapshots, err := raft.NewFileSnapshotStoreWithLogger(cfg.Dir, keptSnapshots, hclog.NewNullLogger())
+	if err != nil {
+		return fmt.Errorf("open the Raft snapshots: %w", err)
+	}
+	config := raft.DefaultConfig()
+	config.LocalID = serverID(cfg.ID)
+	config.Logger = hclog.NewNullLogger()
+	address, transport := raft.NewInmemTransport(raft.ServerAddress(cfg.Advertise))
+	defer func() { _ = transport.Close() }() // only encodes the configuration
+	configuration := raft.Configuration{Servers: []raft.Server{
+		{ID: config.LocalID, Address: address, Suffrage: raft.Voter},
+	}}
+	machine := newFSM()
+	if err := raft.RecoverCluster(config, machine, store, store, snapshots, transport, configuration); err != nil {
+		return fmt.Errorf("recover Raft with this host alone: %w", errors.Join(err, machine.haltError()))
+	}
+	return nil
 }
 
 // openStore opens the Raft store, read only or not, and gives up after

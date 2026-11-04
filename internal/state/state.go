@@ -53,6 +53,9 @@ type State struct {
 	// HA is set once MinHAHosts hosts ran stacks at the same time: from
 	// then on, the cluster stays highly available (checkRemoval).
 	HA bool `json:"ha,omitempty"`
+	// RecoveredAt is when clowderd recover left this cluster with one host
+	// (recover-remap); zero again once it is highly available.
+	RecoveredAt time.Time `json:"recovered_at,omitzero"`
 	// Forgetting are the removed hosts whose IDs are not free yet, each
 	// with the hosts that have still to forget it as a DRBD peer.
 	Forgetting map[HostID][]HostID `json:"forgetting,omitempty"`
@@ -399,6 +402,9 @@ const (
 	// first stack that names it.
 	VolumePending VolumeStatus = "pending"
 	VolumeOK      VolumeStatus = "ok"
+	// VolumeRestorePending lost every copy with its data (clowderd recover):
+	// it gets no new copy until a restore brings its data back.
+	VolumeRestorePending VolumeStatus = "restore-pending"
 )
 
 // AuditEntry records one applied command.
