@@ -13,6 +13,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/agent/agenttest"
 	"github.com/webcodingcat/clowder/internal/network"
+	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -44,6 +45,7 @@ func TestTheWantedNetworkHasEveryOtherHostAsAPeer(t *testing.T) {
 			},
 			PrivateNetwork: netip.MustParsePrefix("10.0.0.0/16"),
 			Peers:          []state.HostID{2},
+			NodeAddress:    netip.MustParseAddr("10.77.0.1"),
 		},
 	}
 	if !reflect.DeepEqual(wanted, want) {
@@ -91,4 +93,41 @@ func TestAJoinedHostKeepsItsMeshUntilTheStateKnowsIt(t *testing.T) {
 	if err != nil || !strings.Contains(string(content), `"public_key": "wg"`) {
 		t.Errorf("net.json lost its peers: %s, %v", content, err)
 	}
+}
+
+func TestThePortsOfStacksOnOtherHostsAreForwardedToThem(t *testing.T) {
+	cluster := agenttest.NewCluster(t)
+	here, there := state.HostID(0), state.HostID(2)
+	cluster.State.Stacks = map[string]*state.Stack{
+		"default/voice": {Host: &there, Spec: stackspec.Normalize(stackspec.Spec{Services: map[string]stackspec.Service{
+			"ts": {Image: "teamspeak", Ports: []stackspec.Port{{Port: 9987, Protocol: "udp"}, {Port: 30033}}},
+		}})},
+		"default/local": {Host: &here, Spec: stackspec.Normalize(stackspec.Spec{Services: map[string]stackspec.Service{
+			"web": {Image: "nginx", Ports: []stackspec.Port{{Port: 8080}}},
+		}})},
+		"default/waiting": {Spec: stackspec.Normalize(stackspec.Spec{Services: map[string]stackspec.Service{
+			"web": {Image: "nginx", Ports: []stackspec.Port{{Port: 8081}}},
+		}})},
+	}
+	wanted, _ := readWantedNetwork(cluster, here)
+	target := network.NodeAddress(there)
+	want := []network.Forward{forward("tcp", 30033, target), forward("udp", 9987, target)}
+	if !reflect.DeepEqual(wanted.ruleset.Forwards, want) {
+		t.Errorf("forwards %v, want %v", wanted.ruleset.Forwards, want)
+	}
+}
+
+func TestMovedForwardsAreThoseWhoseTargetChanged(t *testing.T) {
+	one, two := network.NodeAddress(1), network.NodeAddress(2)
+	old := []network.Forward{forward("tcp", 80, one), forward("udp", 9987, one), forward("udp", 9988, one)}
+	current := []network.Forward{forward("tcp", 80, one), forward("udp", 9987, two), forward("udp", 9989, two)}
+	want := []network.Forward{forward("udp", 9987, two), forward("udp", 9988, one), forward("udp", 9989, two)}
+	if moved := movedForwards(old, current); !reflect.DeepEqual(moved, want) {
+		t.Errorf("moved %v, want %v", moved, want)
+	}
+}
+
+// forward is a forward of the tests.
+func forward(protocol string, port uint16, target netip.Addr) network.Forward {
+	return network.Forward{Protocol: protocol, Port: port, Target: target}
 }

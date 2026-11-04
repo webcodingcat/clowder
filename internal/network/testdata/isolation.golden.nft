@@ -33,6 +33,15 @@ table inet clowder {
     type filter hook output priority filter; policy accept;
     ip daddr 169.254.169.254 counter drop
   }
+  chain forwards {
+    type nat hook prerouting priority dstnat - 10; policy accept;
+    ip daddr 203.0.113.11 tcp dport 9988 ct mark set ct mark & 0xfffff000 | 0x200 dnat ip to 10.77.0.3:9988
+    ip daddr 203.0.113.11 udp dport 9987 ct mark set ct mark & 0xfffff000 | 0x200 dnat ip to 10.77.0.3:9987
+  }
+  chain hairpin {
+    type nat hook postrouting priority srcnat - 10; policy accept;
+    iifname { "cbr-*", "docker0", "br-*" } ct mark & 0xfff == 0x200 snat ip to 10.77.0.1
+  }
   chain mss {
     type filter hook forward priority mangle; policy accept;
     oifname "clw-*" tcp flags syn / syn,rst tcp option maxseg size set rt mtu

@@ -71,6 +71,12 @@ func TestTheRoutesMatchTheGoldenFile(t *testing.T) {
 		},
 		// no container may take requests: an empty list, so Traefik answers 503
 		{Project: "default_blog", Service: "web", Host: "blog.example.com", Path: "/"},
+		// on another host: to its Traefik, with no router on the internal
+		// entrypoint
+		{
+			Project: "default_wiki", Service: "web", Host: "shop.example.com", Path: "/wiki",
+			Targets: []string{"10.77.0.3:7480"}, Forwarded: true,
+		},
 	}, []CertificateFiles{{Domain: "shop.example.com", Chain: "shop.example.com-1a2b.crt", Key: "shop.example.com-1a2b.key"}})
 	// blog.example.com has no certificate yet: plain HTTP
 	if err != nil {

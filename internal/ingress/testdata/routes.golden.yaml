@@ -7,6 +7,21 @@ http:
       rule: PathPrefix(`/.well-known/acme-challenge/`)
       priority: 1000000
       service: acme-challenge
+    internal.default_blog.web:
+      entryPoints:
+        - internal
+      rule: Host(`blog.example.com`)
+      service: default_blog.web
+    internal.default_shop.api:
+      entryPoints:
+        - internal
+      rule: Host(`shop.example.com`) && PathPrefix(`/api`)
+      service: default_shop.api
+    internal.default_shop.app:
+      entryPoints:
+        - internal
+      rule: Host(`shop.example.com`)
+      service: default_shop.app
     web.default_blog.web:
       entryPoints:
         - web
@@ -26,6 +41,13 @@ http:
       middlewares:
         - redirect-to-https
       service: default_shop.app
+    web.default_wiki.web:
+      entryPoints:
+        - web
+      rule: Host(`shop.example.com`) && PathPrefix(`/wiki`)
+      middlewares:
+        - redirect-to-https
+      service: default_wiki.web
     websecure.default_shop.api:
       entryPoints:
         - websecure
@@ -37,6 +59,12 @@ http:
         - websecure
       rule: Host(`shop.example.com`)
       service: default_shop.app
+      tls: {}
+    websecure.default_wiki.web:
+      entryPoints:
+        - websecure
+      rule: Host(`shop.example.com`) && PathPrefix(`/wiki`)
+      service: default_wiki.web
       tls: {}
   middlewares:
     redirect-to-https:
@@ -60,6 +88,10 @@ http:
         servers:
           - url: http://172.18.0.2:8080
           - url: http://172.18.0.3:8080
+    default_wiki.web:
+      loadBalancer:
+        servers:
+          - url: http://10.77.0.3:7480
 tls:
   certificates:
     - certFile: /etc/traefik-certificates/shop.example.com-1a2b.crt

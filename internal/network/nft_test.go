@@ -43,6 +43,11 @@ func TestTheRulesetMatchesTheGoldenFile(t *testing.T) {
 		},
 		PrivateNetwork: netip.MustParsePrefix("10.0.0.0/16"),
 		Peers:          []state.HostID{1, 2},
+		NodeAddress:    netip.MustParseAddr("10.77.0.1"),
+		Forwards: []Forward{
+			{Protocol: "tcp", Port: 9988, Target: netip.MustParseAddr("10.77.0.3")},
+			{Protocol: "udp", Port: 9987, Target: netip.MustParseAddr("10.77.0.3")},
+		},
 	}))
 }
 

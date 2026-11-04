@@ -134,6 +134,12 @@ func (f *fakeNetwork) ApplyMesh(_ context.Context, mesh network.Mesh) error {
 	return nil
 }
 
+func (f *fakeNetwork) AllowForwards(context.Context) error { return nil }
+
+func (f *fakeNetwork) ForgetForwards(context.Context, netip.Addr, []network.Forward) error {
+	return nil
+}
+
 func (f *fakeNetwork) StartResolver() (io.Closer, error) {
 	if f.resolverFails {
 		return nil, errors.New("address in use")

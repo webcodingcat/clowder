@@ -105,6 +105,7 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	routes = append(routes, input.forwarded...)
 	rendered, err := ingress.RenderDynamic(routes, certificates)
 	if err != nil {
 		return fmt.Errorf("render Traefik's routes: %w", err)
@@ -143,11 +144,16 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 }
 
 // traefikInput is what Traefik's files depend on: the Floating IP, the
-// HTTP routes of the stacks on this host and the certificates.
+// HTTP routes of the stacks and the certificates.
 type traefikInput struct {
 	floatingIP string
-	// routes are by project, then by service
-	routes       map[string]map[string]stackspec.HTTP
+	// routes are those of the stacks on this host, by project, then by
+	// service
+	routes map[string]map[string]stackspec.HTTP
+	// forwarded are those of the stacks on other hosts, to their Traefik:
+	// every host routes every stack, so the Floating IP may move to any
+	// of them
+	forwarded    []ingress.Route
 	certificates []state.Certificate
 }
 
@@ -159,11 +165,19 @@ func (t *traefikRunner) read() traefikInput {
 	t.cluster.Read(func(current *state.State) {
 		input.floatingIP = current.Config.Spec.Ingress.FloatingIP
 		for _, stack := range current.Stacks {
-			if stack.Host == nil || *stack.Host != t.host.ID {
+			if stack.Host == nil {
 				continue
 			}
 			for name, service := range stack.Spec.Services {
-				if service.HTTP != nil {
+				switch {
+				case service.HTTP == nil:
+				case *stack.Host != t.host.ID:
+					input.forwarded = append(input.forwarded, ingress.Route{
+						Project: stack.Project(), Service: name, Host: service.HTTP.Host, Path: service.HTTP.Path,
+						Targets:   []string{ingress.Target(network.NodeAddress(*stack.Host), ingress.InternalPort)},
+						Forwarded: true,
+					})
+				default:
 					if input.routes[stack.Project()] == nil {
 						input.routes[stack.Project()] = map[string]stackspec.HTTP{}
 					}

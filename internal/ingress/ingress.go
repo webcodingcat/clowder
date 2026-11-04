@@ -190,8 +190,13 @@ type Route struct {
 	Project, Service string
 	Host, Path       string
 	// Targets are "address:port" of the containers that may take requests:
-	// running, and healthy if they have a health check.
+	// running, and healthy if they have a health check. For a route of a
+	// stack on another host, that host's internal entrypoint.
 	Targets []string
+	// Forwarded says the stack runs on another host: the route sends its
+	// requests to that host's Traefik, and only from the public
+	// entrypoints, so a request is forwarded once at most.
+	Forwarded bool
 }
 
 // dynamicConfig is the file provider's configuration.
@@ -268,6 +273,9 @@ const challengePriority = 1_000_000
 // names never clash. A route whose domain has one of the certificates gets a router on
 // websecure and one on web that redirects to it; without one, only a plain
 // router on web, so nobody sees Traefik's self-signed default certificate.
+// A route of a stack on this host also has a router on the internal
+// entrypoint, where other hosts' Traefiks forward its requests to; TLS
+// ended there.
 // The ACME challenges go to the agent on every host, whatever the domain,
 // also on the internal entrypoint: the leader checks a challenge there on
 // the ingress host before the CA asks for it (controller.checkAddress).
@@ -309,6 +317,11 @@ func RenderDynamic(routes []Route, certificates []CertificateFiles) ([]byte, err
 			}
 		} else {
 			config.HTTP.Routers["web."+name] = router{EntryPoints: []string{"web"}, Rule: rule(route), Service: name}
+		}
+		if !route.Forwarded {
+			config.HTTP.Routers["internal."+name] = router{
+				EntryPoints: []string{"internal"}, Rule: rule(route), Service: name,
+			}
 		}
 		servers := []server{}
 		for _, target := range slices.Sorted(slices.Values(route.Targets)) {

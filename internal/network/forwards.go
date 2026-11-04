@@ -1,0 +1,50 @@
+package network
+
+import (
+	"context"
+	"fmt"
+	"net/netip"
+	"strconv"
+
+	"github.com/webcodingcat/clowder/internal/command"
+)
+
+// dockerRule lets the connections clowder sent to another host pass
+// Docker's FORWARD chain, whose policy drops what Docker did not publish
+// itself. conntrack's DNAT state and the mark hold for both ways, so the
+// rule lets the answers pass too.
+var dockerRule = []string{
+	"-m", "conntrack", "--ctstate", "DNAT",
+	"-m", "connmark", "--mark", fmt.Sprintf("%#x/%#x", forwardMark, markMask), "-j", "ACCEPT",
+}
+
+// AllowForwards puts dockerRule first in Docker's chain DOCKER-USER,
+// unless it is there. Docker makes the chain at its start and keeps what
+// others put in it.
+func (h Host) AllowForwards(ctx context.Context) error {
+	check := append([]string{"-w", "5", "-C", "DOCKER-USER"}, dockerRule...)
+	// iptables -C exits with 1 when the rule is missing
+	_, err := h.Run(ctx, toolTimeout, "", "iptables", check...)
+	if code, exited := command.ExitCode(err); err == nil || !exited || code != 1 {
+		return err
+	}
+	insert := append([]string{"-w", "5", "-I", "DOCKER-USER", "1"}, dockerRule...)
+	_, err = h.Run(ctx, toolTimeout, "", "iptables", insert...)
+	return err
+}
+
+// ForgetForwards forgets the connections to the Floating IP on the
+// forwards' ports. conntrack keeps a connection's target, so a UDP flow
+// that never pauses would go on to the old host after its stack moved;
+// forgotten, its next packet finds the rules anew.
+func (h Host) ForgetForwards(ctx context.Context, floatingIP netip.Addr, forwards []Forward) error {
+	for _, forward := range forwards {
+		// conntrack exits with 1 when no connection matched
+		_, err := h.Run(ctx, toolTimeout, "", "conntrack", "--delete", "--proto", forward.Protocol,
+			"--orig-dst", floatingIP.String(), "--orig-port-dst", strconv.Itoa(int(forward.Port)))
+		if code, exited := command.ExitCode(err); err != nil && (!exited || code != 1) {
+			return fmt.Errorf("forget the connections to %s/%d: %w", forward.Protocol, forward.Port, err)
+		}
+	}
+	return nil
+}

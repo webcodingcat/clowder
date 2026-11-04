@@ -27,6 +27,8 @@ type HostNetwork interface {
 	SetUpInterface(ctx context.Context, nodeAddress netip.Addr) error
 	ApplyMesh(ctx context.Context, mesh network.Mesh) error
 	ApplyRules(ctx context.Context, ruleset network.Ruleset) error
+	AllowForwards(ctx context.Context) error
+	ForgetForwards(ctx context.Context, floatingIP netip.Addr, forwards []network.Forward) error
 	StartResolver() (io.Closer, error)
 }
 
@@ -47,6 +49,10 @@ func reconcileNetwork(ctx context.Context, cluster loop.Cluster, files Files, se
 	// a failure
 	var applied *wantedNetwork
 	var appliedAt time.Time
+	// forwarded are the forwards of the rules last loaded; nil until the
+	// first load, which forgets no connection: what moved while the agent
+	// was down keeps its connections until they end
+	var forwarded []network.Forward
 	loop.Run(ctx, cluster, nil, func() {
 		wanted, known := readWantedNetwork(cluster, self)
 		if !known {
@@ -68,12 +74,25 @@ func reconcileNetwork(ctx context.Context, cluster loop.Cluster, files Files, se
 			logger.Error("apply the nft rules", "error", err)
 			return
 		}
+		if forwarded != nil {
+			moved := movedForwards(forwarded, wanted.ruleset.Forwards)
+			if err := hostNetwork.ForgetForwards(ctx, wanted.ruleset.FloatingIP, moved); err != nil {
+				logger.Error("forget the connections of moved ports", "error", err)
+				return
+			}
+		}
+		forwarded = append([]network.Forward{}, wanted.ruleset.Forwards...)
 		if err := hostNetwork.ApplyMesh(ctx, wanted.mesh); err != nil {
 			logger.Error("apply the WireGuard mesh", "error", err)
 			return
 		}
 		if err := files.writeMesh(wanted.mesh); err != nil {
 			logger.Error("keep the WireGuard mesh for the next start", "error", err)
+			return
+		}
+		// last: Docker may not be up yet, and the mesh must not wait for it
+		if err := hostNetwork.AllowForwards(ctx); err != nil {
+			logger.Error("let the forwarded ports pass Docker's rules", "error", err)
 			return
 		}
 		applied, appliedAt = &wanted, time.Now()
@@ -124,7 +143,7 @@ func restoreMesh(ctx context.Context, files Files, self state.HostID, hostNetwor
 // run, until the hoster's server is gone. known is false while the state
 // does not know this host yet: then it says nothing about the network.
 func readWantedNetwork(cluster loop.Cluster, self state.HostID) (wanted wantedNetwork, known bool) {
-	wanted = wantedNetwork{mesh: network.Mesh{Self: self}}
+	wanted = wantedNetwork{mesh: network.Mesh{Self: self}, ruleset: network.Ruleset{NodeAddress: network.NodeAddress(self)}}
 	ruleset := &wanted.ruleset
 	cluster.Read(func(current *state.State) {
 		if _, known = current.Hosts[self]; !known {
@@ -153,9 +172,62 @@ func readWantedNetwork(cluster loop.Cluster, self state.HostID) (wanted wantedNe
 				ruleset.Peers = append(ruleset.Peers, host.ID)
 			}
 		}
+		if ruleset.FloatingIP.IsValid() {
+			ruleset.Forwards = forwardsOf(current, self)
+		}
 	})
 	slices.SortFunc(ruleset.ClusterHosts, netip.Addr.Compare)
 	slices.SortFunc(wanted.mesh.Peers, func(a, b network.Peer) int { return cmp.Compare(a.ID, b.ID) })
 	slices.Sort(ruleset.Peers)
 	return wanted, known
+}
+
+// forwardsOf are the published ports of the stacks on other hosts, to the
+// node address of each stack's host, sorted. A stack without a host has
+// none: its ports lead nowhere until it is placed.
+func forwardsOf(current *state.State, self state.HostID) []network.Forward {
+	var forwards []network.Forward
+	for _, stack := range current.Stacks {
+		if stack.Host == nil || *stack.Host == self {
+			continue
+		}
+		for _, service := range stack.Spec.Services {
+			// the state's specs are normalized: protocol and published port
+			// are filled in
+			for _, port := range service.Ports {
+				forwards = append(forwards, network.Forward{
+					Protocol: port.Protocol, Port: port.Published, Target: network.NodeAddress(*stack.Host),
+				})
+			}
+		}
+	}
+	network.SortForwards(forwards)
+	return forwards
+}
+
+// movedForwards are the ports whose target changed between two lists of
+// forwards: forwarded elsewhere, newly or no longer (the stack came here, or
+// left it).
+func movedForwards(old, current []network.Forward) []network.Forward {
+	type port struct {
+		protocol string
+		number   uint16
+	}
+	targets := map[port]netip.Addr{}
+	for _, forward := range old {
+		targets[port{forward.Protocol, forward.Port}] = forward.Target
+	}
+	var moved []network.Forward
+	for _, forward := range current {
+		key := port{forward.Protocol, forward.Port}
+		if target, ok := targets[key]; !ok || target != forward.Target {
+			moved = append(moved, forward)
+		}
+		delete(targets, key)
+	}
+	for key, target := range targets {
+		moved = append(moved, network.Forward{Protocol: key.protocol, Port: key.number, Target: target})
+	}
+	network.SortForwards(moved)
+	return moved
 }

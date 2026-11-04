@@ -1,8 +1,10 @@
 package network
 
 import (
+	"cmp"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 
@@ -44,7 +46,34 @@ type Ruleset struct {
 	// Peers are the other hosts this one has a WireGuard interface to,
 	// sorted.
 	Peers []state.HostID
+	// NodeAddress is this host's: a container's connection to a forwarded
+	// port leaves from it (hairpin).
+	NodeAddress netip.Addr
+	// Forwards are the published ports whose stacks run on other hosts,
+	// sorted (SortForwards).
+	Forwards []Forward
 }
+
+// Forward is a published port whose stack runs on another host: the
+// connections to it on the Floating IP go to that host's node address,
+// where Docker publishes the port too.
+type Forward struct {
+	Protocol string // tcp or udp
+	Port     uint16
+	Target   netip.Addr
+}
+
+// SortForwards sorts forwards by protocol and port, the order Render
+// writes them in.
+func SortForwards(forwards []Forward) {
+	slices.SortFunc(forwards, func(a, b Forward) int {
+		return cmp.Or(strings.Compare(a.Protocol, b.Protocol), cmp.Compare(a.Port, b.Port))
+	})
+}
+
+// forwardMark marks a connection clowder sent to another host (Forwards);
+// Docker's FORWARD chain lets only those pass (dockerRule).
+const forwardMark = 0x200
 
 // Render writes the table inet clowder. It deletes and recreates the table
 // in one transaction, so nft -f replaces it atomically and nothing else's
@@ -70,6 +99,15 @@ type Ruleset struct {
 // from a peer comes from its node address, and the route to it leads back.
 // So a DNAT from another host that keeps the client's address must lead to
 // a container, never to a process in the host's network.
+//
+// A published port whose stack runs elsewhere goes there with the client's
+// address (forwards): to the node address of the stack's host, through its
+// WireGuard interface, where Docker publishes the port to the container. A
+// port of a stack on this host is Docker's alone. Every host has these
+// rules; the hoster sends the Floating IP to one, and the others need them
+// for their containers. Such a container's connection leaves from this
+// host's node address (hairpin): an answer to its bridge address would go
+// to a bridge of the same network on the stack's host.
 func Render(ruleset Ruleset) string {
 	lines := []string{
 		"table inet clowder",
@@ -129,6 +167,9 @@ func Render(ruleset Ruleset) string {
 		"    type filter hook output priority filter; policy accept;",
 		fmt.Sprintf("    ip daddr %s counter drop", metadataService),
 		"  }",
+	)
+	lines = append(lines, forwardChains(ruleset)...)
+	lines = append(lines,
 		// the WireGuard interfaces' MTU is smaller than the containers'; TCP
 		// through them learns it from the handshake (UDP must fit itself)
 		"  chain mss {",
@@ -138,6 +179,32 @@ func Render(ruleset Ruleset) string {
 		"}",
 	)
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// forwardChains are the chains of the forwards: the DNAT before Docker's
+// (dstnat - 10), with the mark that Docker's FORWARD chain lets pass, and
+// the SNAT of the containers' own connections. None without a Floating IP.
+func forwardChains(ruleset Ruleset) []string {
+	if !ruleset.FloatingIP.IsValid() || !ruleset.NodeAddress.IsValid() {
+		return nil
+	}
+	lines := []string{
+		"  chain forwards {",
+		"    type nat hook prerouting priority dstnat - 10; policy accept;",
+	}
+	for _, forward := range ruleset.Forwards {
+		lines = append(lines, fmt.Sprintf("    ip daddr %s %s dport %d ct mark set ct mark & %#x | %#x dnat ip to %s",
+			ruleset.FloatingIP, forward.Protocol, forward.Port, ^uint32(markMask), forwardMark,
+			netip.AddrPortFrom(forward.Target, forward.Port)))
+	}
+	return append(lines,
+		"  }",
+		"  chain hairpin {",
+		"    type nat hook postrouting priority srcnat - 10; policy accept;",
+		fmt.Sprintf("    iifname %s ct mark & %#x == %#x snat ip to %s",
+			containerBridges, markMask, forwardMark, ruleset.NodeAddress),
+		"  }",
+	)
 }
 
 // joinAddresses lists addresses for an nft set.

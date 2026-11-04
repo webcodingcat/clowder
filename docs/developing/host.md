@@ -302,9 +302,23 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
 - The resolver passes every question on to the host's resolvers (`/etc/resolv.conf`). Names
   of exported services come with exports.
 - Published ports are bound on every host's Floating IP and node address
-  ([Rendering](specs.md#rendering-internalcompose)). The DNAT that brings them to a stack
-  on another host, and the conntrack cleanup when its target moves, join the ruleset with
-  the ingress failover, where several hosts can test them.
+  ([Rendering](specs.md#rendering-internalcompose)). A port of a stack on another host is
+  forwarded (`Ruleset.Forwards`, the same on every host, as the Floating IP may move to any):
+  - `forwards` (nat, before Docker's): the Floating IP's port goes by DNAT to the node
+    address of the stack's host, with the mark `0x200`; it leaves through that peer's
+    WireGuard interface with the client's address, and Docker's publication there takes
+    it to the container. A port of a stack on this host is Docker's alone.
+  - Docker's FORWARD chain drops what Docker did not publish; `AllowForwards` keeps one
+    rule first in `DOCKER-USER` (iptables) that lets connections with DNAT and the mark
+    pass, both ways. No nft table can overrule another table's drop.
+  - `hairpin` (nat): a container's own connection to a forwarded port leaves from this
+    host's node address, as an answer to its bridge address would reach a bridge of the
+    same network on the stack's host.
+  - conntrack keeps a connection's target, so a UDP flow that never pauses would stay with
+    the old host: when a port's target changes, the agent forgets the connections to the
+    Floating IP on that port (`ForgetForwards`). Not at the agent's start, which does not
+    know the rules before: a port that moved while the agent was down keeps its
+    connections until they end.
 
 ## Storage (`internal/storage`)
 

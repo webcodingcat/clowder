@@ -15,7 +15,7 @@ channels.
   supervisor's rule (restart always, also when unhealthy) and the stack runner's clean-up
   of secrets.
 - `ingress.RenderStatic` writes `traefik.yml`: the entrypoints `web` and `websecure` on the
-  Floating IP :80 and :443, `internal` on the node address :7480 (phase 2) trusting
+  Floating IP :80 and :443, `internal` on the node address :7480 trusting
   `X-Forwarded-For` only from the node network, and `ping` on 127.0.0.1:7446 for the health
   check. The public entrypoints trust no `X-Forwarded-For`, so Traefik sets the client's
   address itself. `ingress.RenderCompose` writes the Compose file.
@@ -33,7 +33,11 @@ channels.
   (`docker.Inspect`; the address in the network whose name sorts first), and routers
   `<entrypoint>.<project>.<service>`. A route without such a container keeps its routers with
   no servers, so Traefik answers 503, not 404. Traefik watches the directory, so new routes
-  need no restart.
+  need no restart. Every host routes every stack, as the Floating IP may move to any: a
+  stack on this host also gets a router on `internal`, and one on another host goes to that
+  host's `internal` entrypoint (`Route.Forwarded`), from the public entrypoints only, so a
+  request is forwarded once at most. TLS ends on the ingress host; the request goes on as
+  HTTP from its node address, with the client in `X-Forwarded-For`.
 - **HTTPS.** A route whose domain has a certificate gets a router on `websecure` and one on
   `web` that redirects to it; before that only a plain router on `web`, so nobody sees
   Traefik's self-signed default certificate. The runner writes every certificate of the
