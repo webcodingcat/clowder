@@ -41,3 +41,8 @@ the others. How to use it is in the main [README](../../README.md#getting-starte
   `storage_classes` gets a volume but no thin pool on a host that exists.
 - `clowderd_package_url` and `clowderd_package_sha256` are a test hook: they install a
   `.deb` instead of the APT repository.
+- `image` is the hosts' image: `debian-13` by default, or the ID of a snapshot that
+  `setup.sh` prepared with `PREPARE_ONLY=yes` in its settings (the headers, DRBD's module,
+  Docker and the rest of what `clowderd` depends on). On such a snapshot the setup skips
+  what is there and installs `clowderd`; clowder's live tests start their hosts so. A
+  changed `image` is for hosts made later; it replaces no server.

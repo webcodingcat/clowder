@@ -256,6 +256,7 @@ func TestSetup(t *testing.T) {
 		{"the setup makes the first host", func(t *testing.T) { waitForSetup(t, server) }},
 		{"the user bootstraps and applies the cluster", func(t *testing.T) { bootstrap(t, server, tofu) }},
 		{"two hosts join with a token each", growToThreeHosts},
+		{"each host starts fresh, with a DRBD module for its kernel", hostsStartFresh},
 	})
 }
 
@@ -286,10 +287,32 @@ func TestStacks(t *testing.T) {
 	})
 }
 
+// hostsStartFresh checks that each host, made from Debian's image or from
+// the prepared one, is a server of its own: cloud-init ran as for a new
+// instance, and the machine-id and the SSH host key are its own. DRBD's
+// module, built when the image was prepared, fits the running kernel.
+func hostsStartFresh(t *testing.T) {
+	tofu := readOutputs(t)
+	seen := map[string]string{} // what a host has -> the host that has it
+	for name, server := range scenarioHosts(host{address: tofu.PublicAddress.Value}, tofu) {
+		identity := server.must(t, "cloud-init status --wait >/dev/null; cloud-init query instance_id; "+
+			"cat /etc/machine-id; ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub")
+		for _, line := range strings.Split(identity, "\n") {
+			if other, ok := seen[line]; ok {
+				t.Errorf("%s and %s share %q: the image was not cleaned for reuse", name, other, line)
+			}
+			seen[line] = name
+		}
+		if fits := server.must(t, `test "$(modinfo -F vermagic drbd | cut -d ' ' -f 1)" = "$(uname -r)" && echo yes || echo no`); fits != "yes" {
+			t.Errorf("%s: DRBD's module does not fit the running kernel %s", name, server.must(t, "uname -r"))
+		}
+	}
+}
+
 // waitForSetup waits until clowder-setup has made the host the first of a
 // cluster and the agent runs.
 func waitForSetup(t *testing.T, server host) {
-	eventually(t, setupDeadline, "clowder-setup done", server.setupDone)
+	eventually(t, setupDeadline, "clowder-setup done", server.setupReached(setupMarker))
 	server.must(t, "systemctl is-active clowderd")
 	if _, err := server.run("test -e /etc/clowder/bootstrap-key"); err == nil {
 		t.Error("the bootstrap key file is still on the host")

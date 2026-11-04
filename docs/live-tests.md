@@ -9,10 +9,11 @@ those tools and from where the tools reach the hosts. Point `HLAB` at its wrappe
 ```bash
 export HLAB=/path/to/hlab/bin/hlab
 bin/dev live                        # up, run, and down once it passes; about two hours
-bin/dev live up                     # package, make the first host, bootstrap, two more join
+bin/dev live up                     # package, image, make the first host, bootstrap, two more join
 bin/dev live run                    # every scenario on that cluster
 bin/dev live run -run TestIngress   # one scenario; the flags go to go test
 bin/dev live down                   # destroy the hosts, stop the lab
+bin/dev live image --rebuild        # make the hosts' image anew, even when current
 bin/dev live release v1.2.3-rc1     # on a checkout of the tag: the release, without the test hook
 ```
 
@@ -28,7 +29,8 @@ second `bin/dev live` while one runs, since both would share the lab and the vol
 
 ## What `bin/dev live up` sets up
 
-- It builds the packages and starts the lab `clowder-live` (`test/live/lab.yaml`, with
+- It builds the packages and makes the hosts' image unless it is current (below).
+- It starts the lab `clowder-live` (`test/live/clowder-live.yaml`, with
   ports apart from other labs), unless it runs: `hlab up` would start it afresh.
 - In the lab's network it serves the `clowderd` package over HTTP (not with a tag) and
   puts the CLI to test in `/work/cli`: the one from `dist/`, or with a tag the one from
@@ -41,6 +43,7 @@ second `bin/dev live` while one runs, since both would share the lab and the vol
   `bulk` at 30 GB (for the 20 GB volume of `TestNoFalseFailover`), a third storage class
   `small` of 10 GB, the published port `udp/9987`, and the test hook: the package's
   URL and SHA-256. With a tag there is no hook: `clowderd_version` names the release.
+  The hosts start from the image, imported into the lab.
 - It copies OpenTofu's binary to `/work/bin`, for the tests that add and remove hosts.
 - It runs `TestSetup`, which bootstraps the cluster and has two more hosts join.
 
@@ -54,13 +57,45 @@ joining hosts' variables (`hosts.tfvars`, with their tokens), a throw-away SSH k
 release's tag after `up <tag>`. A failed scenario leaves the host and what it made for a
 look.
 
+## The hosts' image
+
+Most of a host's setup is the same on every host and changes rarely: the kernel's
+headers, DRBD's module built for them, Docker. So the hosts start from an image that has
+it, and their setup installs only `clowderd` and goes on from there (about a minute
+instead of four and a half).
+
+`bin/dev live image` makes it, and `up` does when it is missing or old. In a lab of its
+own, `clowder-live-image` (`test/live/clowder-live-image.yaml`), `TestImage` makes a
+server of Debian 13 whose cloud-init runs `setup.sh` with `PREPARE_ONLY=yes`: the
+headers, the operator base and what `clowderd` depends on (the `Depends` of the package
+of `dist/`), but not `clowderd` and no cluster. Then it cleans the server for reuse:
+cloud-init's instance (with it the SSH host keys and the network), the machine-id,
+Docker's engine ID, the package lists and every file of the setup go. The server is
+powered off and snapshotted, `hlab image export` writes the snapshot into the Docker
+volume `clowder-live-image` (`host.qcow2`), and the lab stops; its own volume keeps
+Debian's image for the next time, and `hlab reset` clears it before. A failed image
+leaves its lab running for a look until the next image or `bin/dev live down`. The labs
+load only `debian-13`, the one OS image the hosts need.
+
+The image is made anew when its inputs change or it is a week old, as the mirrors' kernel
+and DRBD move on; `--rebuild` makes it anew at once. The inputs are Debian's image (its
+line in Debian's `SHA512SUMS`), `setup.sh` and its unit, `packaging/clowderd.yaml` and
+`test/live/image_test.go`; their hash is in the volume (`inputs`) and in the label
+`clowder-live-image` of each snapshot made from it. `up` imports the image into its lab
+with `hlab image import` and gives its ID to the module (`image`), for the first host and
+every host that joins later.
+
+`up <tag>` always makes the image anew, from the release: the setup reads the
+dependencies from the APT repository, so the release's setup runs from scratch once per
+run, and the hosts start from what it made.
+
 ## The scenarios
 
-`bin/dev live run` runs the Go tests of `test/live` but `TestSetup`, with `-failfast`. Each
-drives the host with the real CLI and SSH, in steps that build on each other; the first
-failure ends the scenario. Each step has a deadline (the constants in `live_test.go`). On
-a failure the test prints cloud-init's status and the journals of `clowder-setup` and
-`clowderd`.
+`bin/dev live run` runs the Go tests of `test/live` but `TestSetup` and `TestImage`, with
+`-failfast`. Each drives the host with the real CLI and SSH, in steps that build on each
+other; the first failure ends the scenario. Each step has a deadline (the constants in
+`live_test.go`). On a failure the test prints cloud-init's status and the journals of
+`clowder-setup` and `clowderd`.
 
 Every scenario but `TestSetup` starts from the same baseline and checks it first
 (`baseline`): the first host set up and its agent active, the cluster bootstrapped with a
@@ -98,6 +133,9 @@ reads within a step.
    all three are active and vote. Each joined host has its `net.json` and reaches the
    first host's API over the private network. The test drains both and keeps their
    tokens for `TestJoin`.
+4. Each host is a server of its own, whether it started from the image or from Debian's:
+   cloud-init ran for a new instance, and no two hosts share an instance ID, a machine-id
+   or an SSH host key. DRBD's module fits the running kernel.
 
 ### `TestJoin`
 

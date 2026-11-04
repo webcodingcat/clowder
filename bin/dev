@@ -17,15 +17,21 @@
 #             and live down once they pass (about an hour; needs
 #             HLAB=<path to HLab's bin/hlab> and /dev/kvm). What a failed run
 #             leaves stays for a look.
-#   live up [<tag>]  package, start the lab unless it runs, make the first host
-#             with examples/hetzner, bootstrap its cluster and have two more
-#             hosts join (test/live: TestSetup).
+#   live up [<tag>]  package, make the hosts' image unless it is current
+#             (live image), start the lab unless it runs, make the first host
+#             with examples/hetzner from the image, bootstrap its cluster and
+#             have two more hosts join (test/live: TestSetup).
 #             With a tag, on a checkout of it, the release without the test
-#             hook: the host installs clowderd from the APT repository, the CLI
-#             comes from the GitHub release
+#             hook: the image is made anew from the release, the host
+#             installs clowderd from the APT repository, the CLI comes from
+#             the GitHub release
 #   live run [<go test flags>]  the scenarios of test/live on the host that
 #             live up made, e.g. bin/dev live run -run TestIngress
 #   live down destroy what the live tests left and stop their lab
+#   live image [--rebuild]  make the hosts' image in a lab of its own unless
+#             its inputs are unchanged and it is younger than a week
+#             (test/live: TestImage); it stays in the Docker volume
+#             clowder-live-image
 #   live release <tag>  live up <tag>, live run, live down
 set -euo pipefail
 # Docker gets Windows paths from pwd -W; Git Bash must not rewrite them. Native
@@ -52,27 +58,46 @@ readonly DEBIAN_IMAGE=debian:trixie-slim
 # Go's module and build cache survive between runs.
 readonly CACHE_VOLUME=clowder-gocache
 readonly BUSYBOX_IMAGE=busybox:1.37.0
-# What the live tests keep between runs, so bin/dev live run and down find
-# it: the OpenTofu state, the SSH key, the CLI, the cluster directory, and
-# the lock that keeps two runs apart (live_lock).
-readonly LIVE_VOLUME=clowder-live
-# The container that serves the clowderd package to the host.
-readonly LIVE_PACKAGES=clowder-live-packages
-# The private registry the test stack pulls from (test/live: registry).
-readonly LIVE_REGISTRY=clowder-live-registry
+# The live tests' lab and the lab that makes their hosts' image. Each keeps
+# its files in a Docker volume of its name, so bin/dev live run and down
+# find them: the OpenTofu state, the SSH key, the CLI, the cluster directory,
+# and the lock that keeps two runs apart (live_lock). The image's volume also
+# holds the image (host.qcow2) and the hash of its inputs (inputs).
+readonly LIVE_LAB=clowder-live
+readonly IMAGE_LAB=clowder-live-image
+readonly IMAGE_VOLUME="${IMAGE_LAB}"
+# An image older than this is made anew: the mirrors' kernel and DRBD move on.
+readonly IMAGE_MAX_AGE_DAYS=7
+# Debian's image that HLab starts debian-13 from, and the checksums that say
+# when it changed.
+readonly DEBIAN_SUMS_URL=https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS
+readonly DEBIAN_IMAGE_FILE=debian-13-generic-amd64.qcow2
 readonly REGISTRY_IMAGE=registry:3.0.0
-# The mail server of the alerts' email channel (test/live: mailServer):
-# STARTTLS with the registry's certificate, any login.
-readonly LIVE_MAIL=clowder-live-mail
 readonly MAILPIT_IMAGE=axllent/mailpit:v1.27.4
 # HLab gives tools in the lab's network this address, and the hosts reach it.
 readonly LAB_ADDRESS=192.0.2.2
 readonly PACKAGE_PORT=8099
+readonly PACKAGE_URL="http://${LAB_ADDRESS}:${PACKAGE_PORT}/clowderd.deb"
 readonly REGISTRY_PORT=5000
 readonly SMTP_PORT=1025
 readonly MAIL_API_PORT=8025
 # Where the releases' CLI archives are (bin/dev live release).
 readonly RELEASES_URL=https://github.com/webcodingcat/clowder/releases/download
+
+# The lab that the live commands work on (use_lab).
+lab_config=""
+work_volume=""
+# its containers: the clowderd package for the hosts, the private registry
+# the test stack pulls from (test/live: registry), and the mail server of the
+# alerts' email channel (test/live: mailServer)
+packages_container=""
+registry_container=""
+mail_container=""
+# The volume whose lock bin/dev holds (live_lock).
+locked_volume=""
+# A directory of the live commands' files on this host (hlab image import
+# and export read and write files here), removed when bin/dev ends.
+live_temp_dir=""
 
 # in_image <image> <command...>: Run a command in an image with the repository
 # mounted at /src as the working directory.
@@ -213,57 +238,88 @@ cmd_package() {
   ls -1 "${ROOT}/dist"/*.deb
 }
 
-# lab <arguments>: HLab's wrapper with the live tests' lab.
+# use_lab <name>: Point the live commands at a lab: its HLab configuration
+# in test/live, the Docker volume of its files and its containers, each
+# named after it.
 # Globals:
-#   HLAB (read)
+#   lab_config, work_volume, packages_container, registry_container,
+#   mail_container (set)
+use_lab() {
+  lab_config="${ROOT}/test/live/$1.yaml"
+  work_volume="$1"
+  packages_container="$1-packages"
+  registry_container="$1-registry"
+  mail_container="$1-mail"
+}
+
+# lab <arguments>: HLab's wrapper with the lab of use_lab.
+# Globals:
+#   HLAB, lab_config (read)
 lab() {
-  "${HLAB:?set HLAB to the path of bin/hlab in HLab}" -c "${ROOT}/test/live/lab.yaml" "$@"
+  "${HLAB:?set HLAB to the path of bin/hlab in HLab}" -c "${lab_config}" "$@"
 }
 
 # in_lab <image> <command...>: Run a command in the lab's network with the
 # repository at /src as the working directory, Go's caches at /go and the
-# live tests' files at /work.
+# lab's files at /work.
 # Globals:
-#   HLAB_NETWORK, HCLOUD_ENDPOINT, HCLOUD_TOKEN (read)
+#   HLAB_NETWORK, HCLOUD_ENDPOINT, HCLOUD_TOKEN, work_volume (read)
 in_lab() {
   local image="$1"
   shift
   docker run --rm -i --network "${HLAB_NETWORK}" -v "${DOCKER_ROOT}:/src" -w /src \
-    -v "${CACHE_VOLUME}:/go" -v "${LIVE_VOLUME}:/work" -e HCLOUD_ENDPOINT -e HCLOUD_TOKEN \
+    -v "${CACHE_VOLUME}:/go" -v "${work_volume}:/work" -e HCLOUD_ENDPOINT -e HCLOUD_TOKEN \
     -e HLAB_CONTROL -e HLAB_ACME_DIRECTORY -e HLAB_ACME_CA -e GOFLAGS=-buildvcs=false "${image}" "$@"
 }
 
-# live_lock: Take the live tests' lock, held until bin/dev ends, or fail if
-# another bin/dev holds it: two runs would share the lab and the volume.
-# flock in a container holds it while the container's stdin is open; that is
-# a pipe from this shell, which closes however bin/dev ends. The lock file is
-# a dot file, which rm -rf /work/* keeps.
+# live_lock: Take the lock of the lab's volume, held until bin/dev ends or
+# live_unlock, or fail if another bin/dev holds it: two runs would share the
+# lab and the volume. flock in a container holds it while the container's
+# stdin is open; that is a pipe from this shell, which closes however
+# bin/dev ends. The lock file is a dot file, which rm -rf /work/* keeps.
+# Bash runs one coproc at a time, so bin/dev holds one lock at a time.
 # Globals:
-#   LIVE_LOCK, LIVE_LOCK_PID (set by coproc)
+#   work_volume (read)
+#   LIVE_LOCK, LIVE_LOCK_PID (set by coproc), locked_volume (set)
 live_lock() {
   local answer=""
-  if [[ -n "${LIVE_LOCK_PID:-}" ]]; then
+  if [[ "${locked_volume}" == "${work_volume}" ]]; then
     return 0
   fi
+  if [[ -n "${locked_volume}" ]]; then
+    live_unlock
+  fi
   coproc LIVE_LOCK {
-    docker run --rm -i -v "${LIVE_VOLUME}:/work" "${BUSYBOX_IMAGE}" \
+    docker run --rm -i -v "${work_volume}:/work" "${BUSYBOX_IMAGE}" \
       flock -n /work/.lock sh -c 'echo locked && exec cat >/dev/null'
   }
   read -r answer <&"${LIVE_LOCK[0]}" || true
   if [[ "${answer}" != locked ]]; then
-    echo "bin/dev live: another run holds the lab ${LIVE_VOLUME}, or its lock failed" >&2
+    echo "bin/dev live: another run holds ${work_volume}, or its lock failed" >&2
     exit 1
   fi
+  locked_volume="${work_volume}"
 }
 
-# lab_runs: Tell whether the live tests' lab runs: hlab status asks the
-# lab's control and fails without a running lab.
+# live_unlock: Give the lock of live_lock back: the container's stdin closes.
+# Globals:
+#   LIVE_LOCK, LIVE_LOCK_PID (read)
+#   locked_volume (set)
+live_unlock() {
+  local pid="${LIVE_LOCK_PID}" to_lock="${LIVE_LOCK[1]}" from_lock="${LIVE_LOCK[0]}"
+  exec {to_lock}>&- {from_lock}<&-
+  wait "${pid}" || true
+  locked_volume=""
+}
+
+# lab_runs: Tell whether the lab runs: hlab status asks the lab's control
+# and fails without a running lab.
 lab_runs() {
   lab status >/dev/null 2>&1
 }
 
-# live_lab: Start the live tests' lab unless it runs (hlab up would start a
-# running lab afresh and shut its servers down), and set its variables.
+# live_lab: Start the lab unless it runs (hlab up would start a running lab
+# afresh and shut its servers down), and set its variables.
 live_lab() {
   if ! lab_runs; then
     lab up
@@ -274,10 +330,10 @@ live_lab() {
 # live_tofu <command>: A shell command with OpenTofu on examples/hetzner in
 # the lab's network; the state and OpenTofu's data stay in /work.
 # Globals:
-#   HLAB_NETWORK, HCLOUD_ENDPOINT, HCLOUD_TOKEN (read)
+#   HLAB_NETWORK, HCLOUD_ENDPOINT, HCLOUD_TOKEN, work_volume (read)
 live_tofu() {
   docker run --rm --network "${HLAB_NETWORK}" -v "${DOCKER_ROOT}:/src" -w /src/examples/hetzner \
-    -v "${CACHE_VOLUME}:/go" -v "${LIVE_VOLUME}:/work" -e HCLOUD_ENDPOINT -e HCLOUD_TOKEN \
+    -v "${CACHE_VOLUME}:/go" -v "${work_volume}:/work" -e HCLOUD_ENDPOINT -e HCLOUD_TOKEN \
     -e TF_DATA_DIR=/work/tofu -e TF_PLUGIN_CACHE_DIR=/go/tofu-plugins -e TF_IN_AUTOMATION=1 \
     --entrypoint sh "${TOFU_IMAGE}" -c "mkdir -p \"\${TF_PLUGIN_CACHE_DIR}\" \
       && tofu init -input=false -lockfile=readonly >/dev/null && $1"
@@ -286,10 +342,12 @@ live_tofu() {
 # live_host_left: Tell whether an earlier run left OpenTofu state, that is a
 # host. A failure to look is an error, not a "no": the state is the only way
 # to destroy the host.
+# Globals:
+#   work_volume (read)
 live_host_left() {
   local answer
   # outside the lab's network: bin/dev live up asks before the lab runs
-  answer="$(docker run --rm -v "${LIVE_VOLUME}:/work" "${BUSYBOX_IMAGE}" \
+  answer="$(docker run --rm -v "${work_volume}:/work" "${BUSYBOX_IMAGE}" \
     sh -c 'if test -e /work/terraform.tfstate; then echo yes; else echo no; fi')"
   case "${answer}" in
     yes) return 0 ;;
@@ -301,16 +359,27 @@ live_host_left() {
   esac
 }
 
+# live_refuse_left_host: Fail if an earlier run left a host in the lab.
+# Globals:
+#   work_volume (read)
+live_refuse_left_host() {
+  if live_host_left; then
+    echo "bin/dev live up: a host is left (its OpenTofu state is in the volume ${work_volume});" \
+      "bin/dev live run tests it, bin/dev live down removes it" >&2
+    exit 1
+  fi
+}
+
 # start_registry: A private registry in the lab's network, with TLS from a
 # throw-away CA and a password, as test/live expects them in
 # /work/registry (ca.crt, password; the user is tester).
 # Globals:
-#   HLAB_NETWORK (read)
+#   HLAB_NETWORK, work_volume, registry_container (read)
 start_registry() {
   # Debian's openssl and htpasswd (bcrypt, which the registry wants), in the
   # Debian image the tools already use, rather than one more image; outside
   # the lab's network, where apt reaches Debian's mirror
-  docker run --rm -v "${LIVE_VOLUME}:/work" -e "ADDRESS=${LAB_ADDRESS}" "${DEBIAN_IMAGE}" sh -c '
+  docker run --rm -v "${work_volume}:/work" -e "ADDRESS=${LAB_ADDRESS}" "${DEBIAN_IMAGE}" sh -c '
     set -e
     apt-get -qq update && apt-get -qq install -y --no-install-recommends openssl apache2-utils >/dev/null
     mkdir /work/registry && cd /work/registry
@@ -323,9 +392,9 @@ start_registry() {
       -extfile server.ext -out server.crt 2>/dev/null
     openssl rand -hex 16 >password
     htpasswd -Bbn tester "$(cat password)" >htpasswd'
-  docker rm -f "${LIVE_REGISTRY}" >/dev/null 2>&1 || true
-  docker run -d --rm --name "${LIVE_REGISTRY}" --network "${HLAB_NETWORK}" \
-    -v "${LIVE_VOLUME}:/work:ro" -e "REGISTRY_HTTP_ADDR=${LAB_ADDRESS}:${REGISTRY_PORT}" \
+  docker rm -f "${registry_container}" >/dev/null 2>&1 || true
+  docker run -d --rm --name "${registry_container}" --network "${HLAB_NETWORK}" \
+    -v "${work_volume}:/work:ro" -e "REGISTRY_HTTP_ADDR=${LAB_ADDRESS}:${REGISTRY_PORT}" \
     -e REGISTRY_HTTP_TLS_CERTIFICATE=/work/registry/server.crt \
     -e REGISTRY_HTTP_TLS_KEY=/work/registry/server.key \
     -e REGISTRY_AUTH=htpasswd -e REGISTRY_AUTH_HTPASSWD_REALM=clowder-live \
@@ -336,41 +405,40 @@ start_registry() {
 # network: STARTTLS required, with the registry's certificate (its CA is in
 # /work/registry/ca.crt), any login; its API lets the test read the mail.
 # Globals:
-#   HLAB_NETWORK (read)
+#   HLAB_NETWORK, work_volume, mail_container (read)
 start_mail() {
-  docker rm -f "${LIVE_MAIL}" >/dev/null 2>&1 || true
-  docker run -d --rm --name "${LIVE_MAIL}" --network "${HLAB_NETWORK}" -v "${LIVE_VOLUME}:/work:ro" \
+  docker rm -f "${mail_container}" >/dev/null 2>&1 || true
+  docker run -d --rm --name "${mail_container}" --network "${HLAB_NETWORK}" -v "${work_volume}:/work:ro" \
     "${MAILPIT_IMAGE}" --smtp "${LAB_ADDRESS}:${SMTP_PORT}" --listen "${LAB_ADDRESS}:${MAIL_API_PORT}" \
     --smtp-tls-cert /work/registry/server.crt --smtp-tls-key /work/registry/server.key \
     --smtp-require-starttls --smtp-auth-accept-any >/dev/null
 }
 
-# serve_package: Serve the clowderd package of dist/ in the lab's network;
-# print the test hook's variables for examples/hetzner.
+# serve_package: Serve the clowderd package of dist/ in the lab's network at
+# PACKAGE_URL; print its SHA-256.
 # Globals:
-#   HLAB_NETWORK (read)
+#   HLAB_NETWORK, work_volume, packages_container (read)
 serve_package() {
   local sha256
   sha256="$(in_lab "${GO_IMAGE}" sh -c 'mkdir /work/www && cp dist/clowderd_*_amd64.deb /work/www/clowderd.deb \
-    && sha256sum /work/www/clowderd.deb' | cut -d ' ' -f 1)"
-  docker rm -f "${LIVE_PACKAGES}" >/dev/null 2>&1 || true
-  docker run -d --rm --name "${LIVE_PACKAGES}" --network "${HLAB_NETWORK}" \
-    -v "${LIVE_VOLUME}:/work:ro" "${BUSYBOX_IMAGE}" \
+    && sha256sum /work/www/clowderd.deb' </dev/null | cut -d ' ' -f 1)"
+  docker rm -f "${packages_container}" >/dev/null 2>&1 || true
+  docker run -d --rm --name "${packages_container}" --network "${HLAB_NETWORK}" \
+    -v "${work_volume}:/work:ro" "${BUSYBOX_IMAGE}" \
     httpd -f -p "${LAB_ADDRESS}:${PACKAGE_PORT}" -h /work/www >/dev/null
-  echo "clowderd_package_url    = \"http://${LAB_ADDRESS}:${PACKAGE_PORT}/clowderd.deb\""
-  echo "clowderd_package_sha256 = \"${sha256}\""
+  echo "${sha256}"
 }
 
 # fetch_release_cli <tag>: Download the release's CLI for Linux into
-# /work/cli; print the variable that pins the release's clowderd for
-# examples/hetzner.
+# /work/cli.
+# Globals:
+#   work_volume (read)
 fetch_release_cli() {
   local tag="$1"
   # outside the lab's network, where GitHub is reachable
-  docker run --rm -v "${LIVE_VOLUME}:/work" "${GO_IMAGE}" sh -c \
+  docker run --rm -v "${work_volume}:/work" "${GO_IMAGE}" sh -c \
     'mkdir /work/cli && curl -fsSL "$1" | tar -xz -C /work/cli clowder' \
     sh "${RELEASES_URL}/${tag}/clowder_${tag}_linux-amd64.tar.gz"
-  echo "clowderd_version = \"$(package_version "${tag}")\""
 }
 
 # at_release_checkout <tag>: Fail unless the checkout is the tag's commit,
@@ -387,36 +455,143 @@ at_release_checkout() {
   fi
 }
 
-# cmd_live_up [<tag>]: Make the first host in the lab, started unless it runs;
-# TestSetup bootstraps its cluster and has two more hosts join, with
-# OpenTofu copied to /work/bin. The registry and the mail server run on
-# until bin/dev live down. With a tag, on that release instead of dist/; the
-# tests come from the checkout, so it must be at the tag.
-cmd_live_up() {
-  local tag="${1:-}" package_variables public_key
+# image_inputs: Print the hash of what the hosts' image is made of: Debian's
+# image, the setup and its unit, clowderd's dependencies (its package's
+# configuration) and how TestImage prepares and cleans the server.
+image_inputs() {
+  # $1 and $2 are the shell's in the container
+  # shellcheck disable=SC2016
+  in_image "${GO_IMAGE}" sh -c 'set -e
+    { curl -fsSL "$1" | grep " $2\$"
+      sha256sum examples/hetzner/setup.sh examples/hetzner/clowder-setup.service \
+        packaging/clowderd.yaml test/live/image_test.go
+    } | sha256sum | cut -c 1-16' sh "${DEBIAN_SUMS_URL}" "${DEBIAN_IMAGE_FILE}"
+}
+
+# image_current <inputs>: Tell whether the image's volume holds an image of
+# these inputs, younger than IMAGE_MAX_AGE_DAYS.
+image_current() {
+  docker run --rm -v "${IMAGE_VOLUME}:/image:ro" "${BUSYBOX_IMAGE}" sh -c \
+    'test -s /image/host.qcow2 && test "$(cat /image/inputs 2>/dev/null)" = "$1" \
+      && test -n "$(find /image/host.qcow2 -mtime -"$2")"' sh "$1" "${IMAGE_MAX_AGE_DAYS}"
+}
+
+# ensure_image [--rebuild] [<tag>]: Make the hosts' image unless the
+# image's volume holds a current one (image_current) or --rebuild says to.
+# For a release (with its tag) always anew, from the release's packages: the
+# release's setup runs from scratch once per run. Its inputs name the
+# release, so the next run of a checkout makes its own image again.
+# make_image runs in a subshell: it points the live commands at the image's
+# lab, which the caller's lab must not become, and its lock ends with it.
+ensure_image() {
+  local rebuild="" tag inputs
+  if [[ "${1:-}" == --rebuild ]]; then
+    rebuild=yes
+    shift
+  fi
+  tag="${1:-}"
+  if [[ -n "${tag}" ]]; then
+    (make_image "release-${tag}" "${tag}")
+    return
+  fi
+  inputs="$(image_inputs)"
+  if [[ -z "${rebuild}" ]] && image_current "${inputs}"; then
+    echo "bin/dev live: the hosts' image is current (${inputs})"
+    return
+  fi
+  (make_image "${inputs}" "")
+}
+
+# make_image <inputs> <tag>: Make the hosts' image in a lab of its own:
+# TestImage prepares a server with setup.sh and snapshots it; the snapshot
+# goes into the image's volume as host.qcow2, with its inputs. Without a
+# tag, the setup reads clowderd's dependencies from the package of dist/
+# (cmd_package made it); with one, from the release in the APT repository.
+# The lab stops once the image is in the volume and keeps its own volume,
+# with Debian's image loaded; a failure leaves it running for a look.
+make_image() {
+  local inputs="$1" tag="$2" settings image_id file
+  use_lab "${IMAGE_LAB}"
   live_lock
-  if live_host_left; then
-    echo "bin/dev live up: a host is left (its OpenTofu state is in the volume ${LIVE_VOLUME});" \
-      "bin/dev live run tests it, bin/dev live down removes it" >&2
+  live_lab
+  # a failed image leaves its server; the snapshots of the image before go too
+  lab reset
+  in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/www /work/id_ed25519* /work/known_hosts /work/image.env \
+    /work/image-id && ssh-keygen -q -t ed25519 -N "" -C clowder-live -f /work/id_ed25519' </dev/null
+  if [[ -n "${tag}" ]]; then
+    settings="CLOWDERD_VERSION='$(package_version "${tag}")'"$'\n'"PACKAGE_URL=''"$'\n'"PACKAGE_SHA256=''"
+  else
+    settings="CLOWDERD_VERSION=''"$'\n'"PACKAGE_URL='${PACKAGE_URL}'"$'\n'"PACKAGE_SHA256='$(serve_package)'"
+  fi
+  printf '%s\n' "${settings}" | in_lab "${GO_IMAGE}" sh -c 'cat >/work/image.env'
+  if ! IMAGE_LABEL="${inputs}" live_go_test -run '^TestImage$'; then
+    echo "bin/dev live: the image failed; its lab ${IMAGE_LAB} stays for a look" \
+      "(ssh from the lab's network with /work/id_ed25519 in the volume ${IMAGE_VOLUME});" \
+      "the next bin/dev live image makes it anew" >&2
     return 1
   fi
+  image_id="$(in_lab "${GO_IMAGE}" cat /work/image-id </dev/null)"
+  file="${live_temp_dir}/export.qcow2"
+  lab image export "${image_id}" "${file}"
+  # the inputs only beside a whole image: image_current reads them
+  docker run --rm -i -v "${IMAGE_VOLUME}:/image" "${BUSYBOX_IMAGE}" sh -c \
+    'rm -f /image/inputs && cat >/image/host.qcow2.new && mv /image/host.qcow2.new /image/host.qcow2 \
+      && echo "$1" >/image/inputs' sh "${inputs}" <"${file}"
+  rm -f "${file}"
+  docker rm -f "${packages_container}" >/dev/null 2>&1 || true
+  lab down
+  echo "bin/dev live: made the hosts' image (${inputs})"
+}
+
+# import_image: Import the hosts' image into the lab as a snapshot labeled
+# with its inputs; print its ID. hlab image import reads a file here: the
+# image is copied out of its volume into the temporary directory once.
+# Globals:
+#   live_temp_dir (read)
+import_image() {
+  local file="${live_temp_dir}/host.qcow2" inputs
+  if [[ ! -s "${file}" ]]; then
+    docker run --rm -v "${IMAGE_VOLUME}:/image:ro" "${BUSYBOX_IMAGE}" cat /image/host.qcow2 >"${file}.part"
+    mv "${file}.part" "${file}"
+  fi
+  inputs="$(docker run --rm -v "${IMAGE_VOLUME}:/image:ro" "${BUSYBOX_IMAGE}" cat /image/inputs)"
+  lab image import "${file}" --description "clowder live host" --label "clowder-live-image=${inputs}"
+}
+
+# cmd_live_up [<tag>]: Make the first host in the lab, started unless it runs,
+# from the hosts' image (ensure_image); TestSetup bootstraps its cluster and
+# has two more hosts join, with OpenTofu copied to /work/bin. The registry
+# and the mail server run on until bin/dev live down. With a tag, on that
+# release instead of dist/; the tests come from the checkout, so it must be
+# at the tag.
+cmd_live_up() {
+  local tag="${1:-}" package_variables public_key image_id
+  use_lab "${LIVE_LAB}"
+  # asked again under the lock below; this spares the build and the image
+  live_refuse_left_host
   if [[ -n "${tag}" ]]; then
     at_release_checkout "${tag}"
   else
     cmd_package
   fi
+  ensure_image "${tag}"
+  use_lab "${LIVE_LAB}"
+  live_lock
+  live_refuse_left_host
   live_lab
   in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/* \
-    && ssh-keygen -q -t ed25519 -N "" -C clowder-live -f /work/id_ed25519'
+    && ssh-keygen -q -t ed25519 -N "" -C clowder-live -f /work/id_ed25519' </dev/null
   # live run checks again that the checkout is at this tag
   printf '%s' "${tag}" | in_lab "${GO_IMAGE}" sh -c 'cat >/work/release-tag'
   if [[ -n "${tag}" ]]; then
-    package_variables="$(fetch_release_cli "${tag}")"
+    fetch_release_cli "${tag}"
+    package_variables="clowderd_version = \"$(package_version "${tag}")\""
   else
-    package_variables="$(serve_package)"
-    in_lab "${GO_IMAGE}" sh -c 'mkdir /work/cli && cp dist/linux-amd64/clowder /work/cli/'
+    package_variables="clowderd_package_url    = \"${PACKAGE_URL}\""$'\n'"clowderd_package_sha256 = \"$(serve_package)\""
+    in_lab "${GO_IMAGE}" sh -c 'mkdir /work/cli && cp dist/linux-amd64/clowder /work/cli/' </dev/null
   fi
-  public_key="$(in_lab "${GO_IMAGE}" cat /work/id_ed25519.pub)"
+  image_id="$(import_image)"
+  public_key="$(in_lab "${GO_IMAGE}" cat /work/id_ed25519.pub </dev/null)"
   # bulk holds the 20 GB volume of TestNoFalseFailover (resyncVolumeSize): its
   # pool is 90 % of the disk, and the placement keeps 20 % of that free
   in_lab "${GO_IMAGE}" sh -c 'cat >/work/live.tfvars' <<EOF
@@ -424,6 +599,7 @@ ssh_public_key  = "${public_key}"
 admin_cidrs     = ["${LAB_ADDRESS}/32"]
 storage_classes = { fast = 20, bulk = 30, small = 10 }
 published_ports = ["udp/9987"]
+image           = "${image_id}"
 ${package_variables}
 EOF
   start_registry
@@ -441,6 +617,7 @@ EOF
 # bin/dev live up made; it stays, whatever the outcome.
 cmd_live_run() {
   local tag
+  use_lab "${LIVE_LAB}"
   live_lock
   # not live_lab: a lab started now would have no host
   if ! lab_runs; then
@@ -453,7 +630,7 @@ cmd_live_run() {
     return 1
   fi
   # a new registry would not have the image that TestSetup pushed
-  if ! container_runs "${LIVE_REGISTRY}" || ! container_runs "${LIVE_MAIL}"; then
+  if ! container_runs "${registry_container}" || ! container_runs "${mail_container}"; then
     echo "bin/dev live run: the registry or the mail server stopped; bin/dev live down, then up" >&2
     return 1
   fi
@@ -462,7 +639,7 @@ cmd_live_run() {
   if [[ -n "${tag}" ]]; then
     at_release_checkout "${tag}"
   fi
-  live_go_test -skip '^TestSetup$' "$@" \
+  live_go_test -skip '^Test(Setup|Image)$' "$@" \
     || live_failed "bin/dev live run -run <test> runs a scenario again, bin/dev live down removes it all"
 }
 
@@ -473,16 +650,20 @@ container_runs() {
 
 # live_go_test <go test flags>: Run test/live in the lab's network with the
 # CLI that bin/dev live up put in /work/cli; the first failure ends it.
+# Globals:
+#   IMAGE_LABEL (read; TestImage's)
 live_go_test() {
-  in_lab "${GO_IMAGE}" env LIVE_DIR=/work CLOWDER=/work/cli/clowder \
-    go test -tags live -count=1 -failfast -timeout 90m -v "$@" ./test/live
+  in_lab "${GO_IMAGE}" env LIVE_DIR=/work CLOWDER=/work/cli/clowder IMAGE_LABEL="${IMAGE_LABEL:-}" \
+    go test -tags live -count=1 -failfast -timeout 90m -v "$@" ./test/live </dev/null
 }
 
 # live_failed <next>: Say that the host stays after a failure, and how to go
 # on; fail.
+# Globals:
+#   work_volume (read)
 live_failed() {
   echo "bin/dev live: failed; the host stays for a look (ssh from the lab's network with" \
-    "/work/id_ed25519 in the volume ${LIVE_VOLUME}); $1" >&2
+    "/work/id_ed25519 in the volume ${work_volume}); $1" >&2
   return 1
 }
 
@@ -494,18 +675,37 @@ cmd_live() {
   cmd_live_down
 }
 
-# cmd_live_down: Destroy what the live tests left and stop their lab.
+# cmd_live_image [--rebuild]: Make the hosts' image unless a current one is
+# there, as bin/dev live up does.
+cmd_live_image() {
+  if (($# > 1)) || [[ $# == 1 && "$1" != --rebuild ]]; then
+    echo "bin/dev live image: takes only --rebuild" >&2
+    exit 2
+  fi
+  cmd_package
+  ensure_image "$@"
+}
+
+# cmd_live_down: Destroy what the live tests left and stop their lab, and
+# stop the image's lab that a failed image left running.
 cmd_live_down() {
+  use_lab "${IMAGE_LAB}"
+  live_lock
+  docker rm -f "${packages_container}" >/dev/null 2>&1 || true
+  if lab_runs; then
+    lab down
+  fi
+  use_lab "${LIVE_LAB}"
   live_lock
   live_lab
-  docker rm -f "${LIVE_PACKAGES}" "${LIVE_REGISTRY}" "${LIVE_MAIL}" >/dev/null 2>&1 || true
+  docker rm -f "${packages_container}" "${registry_container}" "${mail_container}" >/dev/null 2>&1 || true
   if live_host_left; then
     # hosts.tfvars names the hosts that joined (test/live writes it)
     live_tofu 'touch /work/hosts.tfvars && tofu destroy -input=false -auto-approve \
       -state=/work/terraform.tfstate -var-file=/work/live.tfvars -var-file=/work/hosts.tfvars'
   fi
   # only after a destroy that worked (set -e): the state goes with the rest
-  in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/*'
+  in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/*' </dev/null
   lab down
 }
 
@@ -517,6 +717,17 @@ cmd_all() {
   cmd_package
 }
 
+# start_live: Make the live commands' temporary directory, removed when
+# bin/dev ends.
+# Globals:
+#   live_temp_dir (set)
+start_live() {
+  live_temp_dir="$(mktemp -d)"
+  # expanded now: the trap runs after the function returned
+  # shellcheck disable=SC2064
+  trap "rm -rf '${live_temp_dir}'" EXIT
+}
+
 # main: Dispatch to the command named in the first argument.
 main() {
   case "${1:-}" in
@@ -524,14 +735,17 @@ main() {
     test) cmd_test "${@:2}" ;;
     test-tools) cmd_test_tools ;;
     live)
+      start_live
       case "${2:-}" in
         "") cmd_live ;;
         up) cmd_live_up "${3:-}" ;;
         run) cmd_live_run "${@:3}" ;;
         down) cmd_live_down ;;
+        image) cmd_live_image "${@:3}" ;;
         release) cmd_live "${3:?bin/dev live release needs a tag}" ;;
         *)
-          echo "bin/dev live: unknown mode ${2} (up [<tag>], run [<go test flags>], down, release <tag>)" >&2
+          echo "bin/dev live: unknown mode ${2} (up [<tag>], run [<go test flags>], down," \
+            "image [--rebuild], release <tag>)" >&2
           exit 2
           ;;
       esac

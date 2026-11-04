@@ -91,18 +91,21 @@ func (h host) runWithInput(command string, input io.Reader) (string, error) {
 	return trimmed, nil
 }
 
-// setupDone tells whether clowder-setup has finished on the host. While it
-// has not, the error says what the setup does now, its journal's last
-// line, for the log of a long wait (eventually).
-func (h host) setupDone() error {
-	if _, err := h.run("test -e " + setupMarker); err == nil {
-		return nil
+// setupReached tells whether clowder-setup has left its marker on the host:
+// done for a host, prepared for an image (TestImage). While it has not,
+// the error says what the setup does now, its journal's last line, for the
+// log of a long wait (eventually).
+func (h host) setupReached(marker string) func() error {
+	return func() error {
+		if _, err := h.run("test -e " + marker); err == nil {
+			return nil
+		}
+		last, err := h.run("journalctl -u clowder-setup -n 1 --no-pager -o cat")
+		if err != nil {
+			return fmt.Errorf("the host does not answer yet: %w", err)
+		}
+		return fmt.Errorf("the setup is at: %s", last)
 	}
-	last, err := h.run("journalctl -u clowder-setup -n 1 --no-pager -o cat")
-	if err != nil {
-		return fmt.Errorf("the host does not answer yet: %w", err)
-	}
-	return fmt.Errorf("the setup is at: %s", last)
 }
 
 // must runs a shell command on the host and fails the test if it fails.

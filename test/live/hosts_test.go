@@ -191,7 +191,7 @@ func waitForJoined(t *testing.T, names ...string) {
 	tofu := readOutputs(t)
 	for _, name := range names {
 		joined := host{address: tofu.Hosts.Value[name].PublicAddress}
-		eventually(t, joinDeadline, name+"'s setup done", joined.setupDone)
+		eventually(t, joinDeadline, name+"'s setup done", joined.setupReached(setupMarker))
 	}
 	eventually(t, 5*time.Minute, strings.Join(names, ", ")+" active", func() error {
 		hosts := clusterHosts(t)

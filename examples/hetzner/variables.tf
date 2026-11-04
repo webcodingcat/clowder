@@ -118,3 +118,9 @@ variable "clowderd_package_sha256" {
     error_message = "A SHA-256 in lowercase hex."
   }
 }
+
+variable "image" {
+  type        = string
+  description = "The hosts' image: debian-13, or the ID of a snapshot prepared from it (setup.sh with PREPARE_ONLY), which spares the setup the packages and DRBD's module."
+  default     = "debian-13"
+}

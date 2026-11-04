@@ -91,7 +91,8 @@ release path (APT repository, pin, CLI archive) is tested only on a release cand
 2. `clowderd_version` in `examples/hetzner/variables.tf` names the new version, so the
    module at the tag installs its own release.
 3. Tag `v1.2.3-rc1` and push it; the workflow publishes the candidate.
-4. On a checkout of the tag, `bin/dev live release v1.2.3-rc1`: the host installs
+4. On a checkout of the tag, `bin/dev live release v1.2.3-rc1`: the hosts' image is made
+   from scratch with the release's setup and dependencies, the hosts install
    `1.2.3~rc1` from the APT repository, the tests use the CLI from the release's archive.
 5. If it is green, tag `v1.2.3` on the same commit.
 

@@ -107,7 +107,7 @@ resource "hcloud_volume" "class" {
 resource "hcloud_server" "host" {
   name         = var.name
   server_type  = var.server_type
-  image        = "debian-13"
+  image        = var.image
   location     = var.location
   ssh_keys     = [hcloud_ssh_key.admin.id]
   firewall_ids = [hcloud_firewall.host.id]
@@ -119,14 +119,15 @@ resource "hcloud_server" "host" {
   }
 
   lifecycle {
-    # either change would replace the server and its data; a storage class
+    # a change of the user data, the keys or the image would replace the server
+    # and its data (a new image is for hosts made later); a storage class
     # added later therefore never reaches this host by itself. Hetzner's
     # provider keeps no power state, so clowder powering hosts off and on
     # (fencing) does not fight OpenTofu. The network stays as it was made:
     # the provider detaches and attaches it again at a later apply, which
     # gives the server another private address, and a host's underlay must
     # never change under the cluster.
-    ignore_changes = [user_data, ssh_keys, network]
+    ignore_changes = [user_data, ssh_keys, network, image]
   }
 
   depends_on = [hcloud_network_subnet.hosts]
@@ -166,7 +167,7 @@ resource "hcloud_server" "joining" {
 
   name         = each.key
   server_type  = var.server_type
-  image        = "debian-13"
+  image        = var.image
   location     = var.location
   ssh_keys     = [hcloud_ssh_key.admin.id]
   firewall_ids = [hcloud_firewall.host.id]
@@ -179,8 +180,9 @@ resource "hcloud_server" "joining" {
 
   lifecycle {
     # the token in the user data opens once; a new one must not replace the
-    # server. The network stays as it was made, as the first host's does.
-    ignore_changes = [user_data, ssh_keys, network]
+    # server. The network and the image stay as they were made, as the first
+    # host's do.
+    ignore_changes = [user_data, ssh_keys, network, image]
   }
 
   depends_on = [hcloud_network_subnet.hosts]

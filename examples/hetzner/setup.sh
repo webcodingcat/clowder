@@ -6,12 +6,20 @@
 # clowderd join (the others).
 #
 # clowder-setup.service runs it at every boot until it has finished (the
-# marker), so it may reboot in between; every step can run again. Its settings
-# come from /etc/clowder-setup.env, the bootstrap key (the first host) or the
-# join token (the others) from a root-only file; cloud-init writes them
+# marker), so it may reboot in between; every step can run again, and what a
+# prepared image holds already is skipped. Its settings come from
+# /etc/clowder-setup.env, the bootstrap key (the first host) or the join token
+# (the others) from a root-only file; cloud-init writes them
 # (examples/hetzner).
+#
+# With PREPARE_ONLY=yes in the settings it prepares an image instead: the
+# kernel's headers, the operator base and what clowderd depends on (DRBD's
+# module, Docker), without clowderd and without a cluster; then it leaves the
+# marker PREPARED. clowder's live tests make their hosts' image so.
 # Usage: setup.sh
 set -euo pipefail
+# a failure in $(...) fails the assignment too (fetch_clowderd)
+shopt -s inherit_errexit
 export DEBIAN_FRONTEND=noninteractive
 
 readonly SETTINGS=/etc/clowder-setup.env
@@ -19,6 +27,8 @@ readonly KEY_FILE=/etc/clowder/bootstrap-key
 readonly TOKEN_FILE=/etc/clowder/join-token
 readonly STATE_DIR=/var/lib/clowder-setup
 readonly MARKER="${STATE_DIR}/done"
+readonly PREPARED="${STATE_DIR}/prepared"
+readonly PACKAGE_FILE=/var/cache/clowderd.deb
 readonly REBOOTS="${STATE_DIR}/reboots"
 readonly MAX_REBOOTS=2
 readonly METADATA=http://169.254.169.254/hetzner/v1/metadata
@@ -98,10 +108,14 @@ private_address() {
 
 # install_headers: Install the headers of the running kernel for the DRBD
 # module. When the mirror no longer has them (the image's kernel is old),
-# upgrade and reboot into the current kernel, at most MAX_REBOOTS times.
+# upgrade and reboot into the current kernel, at most MAX_REBOOTS times. A
+# prepared image has them already, with DRBD's module built for them.
 install_headers() {
   local reboots=0 headers
   headers="linux-headers-$(uname -r)"
+  if dpkg-query -W -f '${db:Status-Status}' "${headers}" 2>/dev/null | grep -qx installed; then
+    return
+  fi
   # the image ships empty index files for trixie-security, which hides the
   # headers of the running kernel; fetch the lists anew
   rm -rf /var/lib/apt/lists/*
@@ -172,24 +186,64 @@ trust_key() {
   rm -rf "${home}"
 }
 
-# install_packages: LINBIT's DRBD 9 and clowderd with what it depends on, from
-# clowder's APT repository or, with the test hook, from a checked .deb.
-install_packages() {
-  local package=clowderd
+# add_sources: LINBIT's repository for DRBD 9 and, without the test hook,
+# clowder's; then the package lists.
+add_sources() {
   "${APT[@]}" install -y --no-install-recommends gnupg curl
   trust_key "${LINBIT_KEY_URL}" "${LINBIT_FINGERPRINT}" /usr/share/keyrings/linbit.gpg
   echo "deb [signed-by=/usr/share/keyrings/linbit.gpg] ${LINBIT_SOURCE}" >/etc/apt/sources.list.d/linbit.list
-  if [[ -n "${PACKAGE_URL}" ]]; then
-    package=/var/cache/clowderd.deb
-    curl -fsSL "${PACKAGE_URL}" -o "${package}"
-    echo "${PACKAGE_SHA256}  ${package}" | sha256sum --check --quiet
-  else
+  if [[ -z "${PACKAGE_URL}" ]]; then
     trust_key "${CLOWDER_KEY_URL}" "${CLOWDER_FINGERPRINT}" /usr/share/keyrings/clowder.gpg
     echo "deb [signed-by=/usr/share/keyrings/clowder.gpg] ${CLOWDER_SOURCE}" >/etc/apt/sources.list.d/clowder.list
-    [[ -n "${CLOWDERD_VERSION}" ]] && package="clowderd=${CLOWDERD_VERSION}"
   fi
   "${APT[@]}" update
+}
+
+# fetch_clowderd: With the test hook, download the .deb and check it; print
+# what apt installs as clowderd: that file, else the pinned version from
+# clowder's repository.
+fetch_clowderd() {
+  if [[ -n "${PACKAGE_URL}" ]]; then
+    curl -fsSL "${PACKAGE_URL}" -o "${PACKAGE_FILE}"
+    echo "${PACKAGE_SHA256}  ${PACKAGE_FILE}" | sha256sum --check --quiet
+    echo "${PACKAGE_FILE}"
+  elif [[ -n "${CLOWDERD_VERSION}" ]]; then
+    echo "clowderd=${CLOWDERD_VERSION}"
+  else
+    echo clowderd
+  fi
+}
+
+# install_packages: DRBD 9 and clowderd with what it depends on; what a
+# prepared image holds is there already.
+install_packages() {
+  local package
+  add_sources
+  package="$(fetch_clowderd)"
   "${APT[@]}" install -y --no-install-recommends "${package}"
+}
+
+# install_dependencies: What clowderd depends on, without clowderd, for a
+# prepared image: its package changes with every build, its dependencies
+# (DRBD's module above all) rarely. Of each alternative the first, without
+# its version: the newest the mirror has. Should that be too old, the
+# install of clowderd on the host says so.
+install_dependencies() {
+  local package depends dependencies
+  add_sources
+  package="$(fetch_clowderd)"
+  if [[ -f "${package}" ]]; then
+    depends="$(dpkg-deb --field "${package}" Depends)"
+  else
+    depends="$(apt-cache show --no-all-versions "${package}" | awk -F ': ' '/^Depends:/ {print $2; exit}')"
+  fi
+  mapfile -t dependencies < <(tr ',' '\n' <<<"${depends}" | sed -E 's/\|.*//; s/\(.*\)//; s/[[:space:]]//g' | grep -v '^$')
+  if ((${#dependencies[@]} == 0)); then
+    log "found no dependencies of ${package}"
+    return 1
+  fi
+  "${APT[@]}" install -y --no-install-recommends "${dependencies[@]}"
+  rm -f "${PACKAGE_FILE}"
 }
 
 # configure_storage: LVM leaves DRBD's devices alone, DRBD resources start
@@ -298,6 +352,14 @@ main() {
   # shellcheck source=/dev/null
   source "${SETTINGS}"
   mkdir -p "${STATE_DIR}"
+  if [[ "${PREPARE_ONLY:-}" == yes ]]; then
+    install_headers
+    configure_base
+    install_dependencies
+    touch "${PREPARED}"
+    log "prepared"
+    return
+  fi
   wait_for_hardware
   install_headers
   configure_base
