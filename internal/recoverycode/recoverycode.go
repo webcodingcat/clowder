@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/webcodingcat/clowder/internal/digest"
 )
 
 // Purpose names the key, derived from the data key, that codes are made
@@ -131,12 +133,12 @@ func startOf(window int64) time.Time {
 	return time.Unix(window*int64(Window/time.Second), 0).UTC()
 }
 
-// forWindow is the HMAC over fields in a fixed order, one per line; no
-// field holds a line end (uses are constants, user names may not, the
-// window is a number), so "a1"+"23" and "a12"+"3" stay apart.
+// forWindow is the HMAC over fields in a fixed order, each after its
+// length, so no other fields give it the same input, whatever a user's
+// name may hold.
 func forWindow(key []byte, use Use, user string, window int64) Code {
 	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte("code\n" + string(use) + "\n" + user + "\n" + strconv.FormatInt(window, 10)))
+	digest.WriteParts(mac, []byte("code"), []byte(use), []byte(user), []byte(strconv.FormatInt(window, 10)))
 	var code Code
 	copy(code[:], mac.Sum(nil))
 	return code

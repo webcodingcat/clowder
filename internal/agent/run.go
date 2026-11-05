@@ -16,6 +16,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/agent/stacks"
 	"github.com/webcodingcat/clowder/internal/agent/volumes"
 	"github.com/webcodingcat/clowder/internal/api"
+	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/controller"
@@ -72,6 +73,12 @@ type Storage interface {
 func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger) (err error) {
 	if files.SecretsDir == "" {
 		return errors.New("run needs a directory for the stacks' secrets")
+	}
+	// SecretsDir may be left from before or changed by hand, so its owner
+	// and mode are set at each start. The runners do the same for the
+	// directories inside it: Traefik's and each stack's.
+	if err := atomicfile.EnsureDir(files.SecretsDir, 0o700); err != nil {
+		return err
 	}
 	host, err := files.readHost()
 	if err != nil {

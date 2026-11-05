@@ -77,7 +77,9 @@ func (t Token) Hash() string {
 }
 
 // ProofKey is the key of the trust proof for a token with this hash: the
-// agent has the hash, the joining host makes it from the token.
+// agent has the hash, the joining host makes it from the token. It is a
+// key, not a list of fields to MAC, and the hash always has 64 hexadecimal
+// digits, so the line end needs no length before it (digest.WriteParts).
 func ProofKey(hash string) []byte {
 	return []byte("clowder join\n" + hash)
 }

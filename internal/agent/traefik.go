@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -112,16 +111,16 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	}
 	// each file is compared with what is on disk, so one removed or changed
 	// by hand comes back at the next pass
-	if err := writeChanged(filepath.Join(t.files.traefikDynamicDir(), "routes.yaml"), rendered, 0o644); err != nil {
+	if err := atomicfile.WriteChanged(filepath.Join(t.files.traefikDynamicDir(), "routes.yaml"), rendered, 0o644); err != nil {
 		return err
 	}
 	if err := t.removeOtherCertificates(certificates); err != nil {
 		return err
 	}
-	if err := writeChanged(filepath.Join(t.files.traefikStaticDir(), "traefik.yml"), static, 0o644); err != nil {
+	if err := atomicfile.WriteChanged(filepath.Join(t.files.traefikStaticDir(), "traefik.yml"), static, 0o644); err != nil {
 		return err
 	}
-	if err := writeChanged(t.files.traefikCompose(), file, 0o600); err != nil {
+	if err := atomicfile.WriteChanged(t.files.traefikCompose(), file, 0o600); err != nil {
 		return err
 	}
 	sum := sha256.New()
@@ -201,10 +200,12 @@ func (t *traefikRunner) read() traefikInput {
 // its domain on plain HTTP; the others keep theirs.
 func (t *traefikRunner) writeCertificates(certificates []state.Certificate) ([]ingress.CertificateFiles, error) {
 	// also without certificates: Traefik's Compose file mounts it, and
-	// Docker would make a missing one readable by all
+	// Docker would make a missing one readable by all. Root's only each
+	// time, also when it was there already with other rights; it lies in
+	// SecretsDir, which the agent guards at its start (Run).
 	dir := t.files.traefikCertificatesDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("make the certificates' directory: %w", err)
+	if err := atomicfile.EnsureDir(dir, 0o700); err != nil {
+		return nil, err
 	}
 	var written []ingress.CertificateFiles
 	for _, certificate := range certificates {
@@ -221,10 +222,10 @@ func (t *traefikRunner) writeCertificates(certificates []state.Certificate) ([]i
 		sum := sha256.Sum256(certificate.Chain)
 		name := certificate.Domain + "-" + hex.EncodeToString(sum[:8])
 		files := ingress.CertificateFiles{Domain: certificate.Domain, Chain: name + ".crt", Key: name + ".key"}
-		if err := writeChanged(filepath.Join(dir, files.Key), key, 0o600); err != nil {
+		if err := atomicfile.WriteChanged(filepath.Join(dir, files.Key), key, 0o600); err != nil {
 			return nil, err
 		}
-		if err := writeChanged(filepath.Join(dir, files.Chain), certificate.Chain, 0o600); err != nil {
+		if err := atomicfile.WriteChanged(filepath.Join(dir, files.Chain), certificate.Chain, 0o600); err != nil {
 			return nil, err
 		}
 		written = append(written, files)
@@ -255,14 +256,6 @@ func (t *traefikRunner) removeOtherCertificates(certificates []ingress.Certifica
 		}
 	}
 	return nil
-}
-
-// writeChanged writes a file unless it holds content already.
-func writeChanged(path string, content []byte, mode os.FileMode) error {
-	if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, content) {
-		return nil
-	}
-	return atomicfile.Write(path, content, mode)
 }
 
 // routes are the HTTP routes of the stacks on this host, each with the

@@ -53,6 +53,11 @@ func TestACodeIsOneUsersForOneUseWithOneKey(t *testing.T) {
 	if Make(testKey, ForRecover, "a1", windowStart) == Make(testKey, ForRecover, "a12", windowStart) {
 		t.Error("two users share a code")
 	}
+	// with fields joined by line ends, these two met in one input
+	window := windowOf(windowStart)
+	if forWindow(testKey, ForRecover, "alice\nbob", window) == forWindow(testKey, Use("recover\nalice"), "bob", window) {
+		t.Error("a line end in a field passes for the end of the field before")
+	}
 }
 
 func TestADigestNamesOneCode(t *testing.T) {

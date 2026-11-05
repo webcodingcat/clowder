@@ -1,7 +1,6 @@
 package stacks
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"maps"
@@ -81,22 +80,32 @@ func (r *Runner) openSecrets(desired desiredState, stack *state.Stack) (stackSec
 }
 
 // writeSecrets writes the new and changed secret files and the secret
-// variables before compose up. A file is replaced by a rename, so a running
-// container keeps the old value until compose up recreates it.
+// variables, at every pass of a stack that runs here. A file is replaced by
+// a rename, so a running container keeps the old value until compose up
+// recreates it. An unchanged file stays, with its owner and mode set again,
+// and so do the stack's directories. A stack without secrets has nothing to
+// guard; removeStaleSecrets empties what it had.
 func (r *Runner) writeSecrets(project string, secrets stackSecrets) error {
-	for _, name := range slices.Sorted(maps.Keys(secrets.files)) {
-		path, value := r.files.secretFile(project, name), secrets.files[name]
-		if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, value) {
-			continue
+	if len(secrets.files) == 0 && secrets.env == nil {
+		return nil
+	}
+	// root's only each time, also a directory that was there already with
+	// other rights: the files below are readable by all. The agent guards
+	// SecretsDir itself at its start (agent.Run).
+	for _, dir := range []string{r.files.secretsDir(project), r.files.secretFilesDir(project)} {
+		if err := atomicfile.EnsureDir(dir, 0o700); err != nil {
+			return err
 		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(secrets.files)) {
 		// readable by all: dockerd bind-mounts it as root, and the container
-		// reads it with its own user; the directories above are root's only
-		if err := atomicfile.Write(path, value, 0o444); err != nil {
+		// reads it with its own user
+		if err := atomicfile.WriteChanged(r.files.secretFile(project, name), secrets.files[name], 0o444); err != nil {
 			return err
 		}
 	}
 	if secrets.env != nil {
-		return atomicfile.Write(r.files.secretEnvFile(project), secrets.env, 0o600)
+		return atomicfile.WriteChanged(r.files.secretEnvFile(project), secrets.env, 0o600)
 	}
 	return nil
 }

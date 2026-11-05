@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/webcodingcat/clowder/internal/digest"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -70,10 +70,13 @@ func (r *BootstrapRequest) SignedWith(bootstrapKey []byte) bool {
 	return hmac.Equal(r.mac(bootstrapKey), r.MAC)
 }
 
+// mac is an HMAC over the request's fields, each after its length, so no
+// other fields give it the same input (a line end in the user's name
+// cannot pass for the end of a field).
 func (r *BootstrapRequest) mac(bootstrapKey []byte) []byte {
 	mac := hmac.New(sha256.New, bootstrapKey)
-	mac.Write([]byte("clowder bootstrap\n" + r.User + "\n" + base64.StdEncoding.EncodeToString(r.PublicKey) + "\n" +
-		r.RecoveryRecipient + "\n" + r.Time.UTC().Format(time.RFC3339)))
+	digest.WriteParts(mac, []byte("clowder bootstrap"), []byte(r.User), r.PublicKey,
+		[]byte(r.RecoveryRecipient), []byte(r.Time.UTC().Format(time.RFC3339)))
 	return mac.Sum(nil)
 }
 

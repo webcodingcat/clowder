@@ -119,6 +119,11 @@ func (r *Runner) up(ctx context.Context, stack *state.Stack, rendered []byte, se
 	// read before compose up: a restart of Docker during it makes the
 	// stack come up again at the next pass
 	upNow := loop.BroughtUp{Hash: hash, DockerRestarts: r.signal.Restarts()}
+	// at every pass, not only before compose up: what is unchanged gets its
+	// owner and mode back
+	if err := r.writeSecrets(project, secrets); err != nil {
+		return err
+	}
 	if r.appliedWith(project) == upNow {
 		return nil
 	}
@@ -146,9 +151,10 @@ func (r *Runner) up(ctx context.Context, stack *state.Stack, rendered []byte, se
 	return r.removeStaleSecrets(project, secrets)
 }
 
-// writeStackFiles writes what compose up reads: the LVs the stack mounts
-// (addMountedLVs), its Compose file and its secrets. It returns the
-// Compose files, the stack's and, if it has secret variables, theirs.
+// writeStackFiles writes what compose up reads besides the secrets
+// (writeSecrets): the LVs the stack mounts (addMountedLVs) and its Compose
+// file. It returns the Compose files, the stack's and, if it has secret
+// variables, theirs.
 func (r *Runner) writeStackFiles(project string, rendered []byte, secrets stackSecrets,
 	volumes map[string]compose.MountedVolume,
 ) ([]string, error) {
@@ -159,9 +165,6 @@ func (r *Runner) writeStackFiles(project string, rendered []byte, secrets stackS
 	file := r.files.stackFile(project)
 	if err := atomicfile.Write(file, rendered, 0o600); err != nil {
 		return nil, err // it names the file
-	}
-	if err := r.writeSecrets(project, secrets); err != nil {
-		return nil, err
 	}
 	files := []string{file}
 	if secrets.env != nil {

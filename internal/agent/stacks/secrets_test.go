@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -106,6 +107,50 @@ func TestOnlyChangedSecretFilesAreReplaced(t *testing.T) {
 	if os.SameFile(key, stat("api-key")) {
 		t.Error("the changed secret file was not replaced")
 	}
+}
+
+func TestTheSecretsGetTheirRightsBackAtEachPass(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("modes work otherwise on Windows")
+	}
+	runner, cluster, _, _ := newTestRunner(t)
+	cluster.PutSecret("db-password", "password")
+	cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{Secrets: []string{"db-password"}}))
+	dirs := []string{runner.files.secretsDir(shopProject), runner.files.secretFilesDir(shopProject)}
+	file := runner.files.secretFile(shopProject, "db-password")
+	// a directory that was there before the agent, with other rights
+	if err := os.Mkdir(dirs[0], 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dirs[0], 0o777); err != nil {
+		t.Fatal(err)
+	}
+	runner.passAndWait(context.Background())
+	assertMode := func(path string, want os.FileMode) {
+		t.Helper()
+		if info, err := os.Stat(path); err != nil {
+			t.Error(err)
+		} else if info.Mode().Perm() != want {
+			t.Errorf("%s has mode %v, want %v", path, info.Mode().Perm(), want)
+		}
+	}
+	assertModes := func() {
+		t.Helper()
+		for _, dir := range dirs {
+			assertMode(dir, 0o700)
+		}
+		assertMode(file, 0o444)
+	}
+	assertModes()
+
+	// the secrets are unchanged, so nothing is written, but the rights come back
+	for _, path := range []string{dirs[0], dirs[1], file} {
+		if err := os.Chmod(path, 0o777); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner.passAndWait(context.Background())
+	assertModes()
 }
 
 func TestASecretFileTheStackNoLongerAsksForGoes(t *testing.T) {

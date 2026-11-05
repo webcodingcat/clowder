@@ -184,12 +184,15 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
     env.yaml                   root only: the secret variables, a second Compose file
   ```
 
-  Before `compose up` the runner opens the sealed values and writes what is new or changed,
-  by rename, so a running container keeps the old file until it is recreated. After a
-  successful `compose up` it removes what the stack no longer asks for. The hash that decides
-  about `compose up` covers the rendered file, `env.yaml` and the secret files; a changed
-  secret file changes its services' digest label, which recreates them
-  ([Rendering](specs.md#rendering-internalcompose), Labels).
+  At every pass the runner opens the sealed values and writes what is new or changed, by
+  rename, so a running container keeps the old file until it is recreated. What is
+  unchanged, files and directories, gets its owner and mode back (`atomicfile.EnsureDir`,
+  `atomicfile.WriteChanged`), so rights changed by hand or left from before do not stay;
+  the agent does the same for `SecretsDir` at its start. A stack without secrets has
+  nothing there to guard. After a successful `compose up` it removes what the stack no
+  longer asks for. The hash that decides about `compose up` covers the rendered file,
+  `env.yaml` and the secret files; a changed secret file changes its services' digest
+  label, which recreates them ([Rendering](specs.md#rendering-internalcompose), Labels).
 - **After a boot no container runs** (`restart: "no"`). The runner remembers only in memory
   what each stack came up with, so its first pass runs `compose up` for every stack. A
   restart of Docker leaves the containers running (`live-restore` in `daemon.json`), but
@@ -240,16 +243,16 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   fails, while the leavers cannot be listed, and while a failed `compose up` leaves old
   containers on old volumes. `containers_test.go`: registry logins, `compose ps`.
   `secrets_test.go` runs the same way: a secret that does not open keeps its stack down,
-  only changed secret files are replaced, and a stack's secrets go only once its
-  containers stopped. In `agent/volumes`, `plan_test.go` is the table of target and
-  observation (missing, down after a boot, secondary, primary, mounted, never initialized,
-  held by a leaver, another device); `reconciler_test.go` runs passes and waits for their
-  jobs against the cluster and the fake driver: a copy formatted once and then left
-  alone, a copy without a stack secondary and unmounted and found again by the next stack
-  without `--force`, a held copy left alone, a hanging job that holds up no other volume,
-  an error that reaches the stack, a plain copy of data never made anew, a new data
-  generation, a copy the state lost, removal once no stack holds it, the records, the
-  weekly trim of mounted copies across restarts. That docker
+  only changed secret files are replaced, the rights come back at every pass, and a
+  stack's secrets go only once its containers stopped. In `agent/volumes`, `plan_test.go`
+  is the table of target and observation (missing, down after a boot, secondary, primary,
+  mounted, never initialized, held by a leaver, another device); `reconciler_test.go` runs
+  passes and waits for their jobs against the cluster and the fake driver: a copy
+  formatted once and then left alone, a copy without a stack secondary and unmounted and
+  found again by the next stack without `--force`, a held copy left alone, a hanging job
+  that holds up no other volume, an error that reaches the stack, a plain copy of data
+  never made anew, a new data generation, a copy the state lost, removal once no stack
+  holds it, the records, the weekly trim of mounted copies across restarts. That docker
   compose fails on a missing secret file and recreates exactly the containers that changed
   is for the live tests: CI has no Docker daemon.
 

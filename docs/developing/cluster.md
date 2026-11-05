@@ -721,9 +721,9 @@ them.
   into a new file (`--recovery-out`, for scripts); nothing has reached the cluster yet.
   `POST /v1/bootstrap`, over TLS checked against that CA, carries the user's public key
   and the recovery key's recipient with an HMAC of the bootstrap key and a time
-  (`bootstrapMaxAge`); the state keeps the recipient with the user (`add-user`). It
-  works once: a cluster has one user, and further certificates come only through
-  `user recover`. The CLI then writes the
+  (`bootstrapMaxAge`), each field after its length (`digest.WriteParts`); the state keeps
+  the recipient with the user (`add-user`). It works once: a cluster has one user, and
+  further certificates come only through `user recover`. The CLI then writes the
   credentials (`clusterdir.WriteCredentials`), checks that the cluster's recovery
   recipient is the key it made, and writes `cluster.yaml` to fill in (`clusterdir.Create`).
 - **A host joins** with a token a user made (`clowder host join-token`, `api/join.go`,
