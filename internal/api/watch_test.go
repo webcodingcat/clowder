@@ -26,7 +26,7 @@ func nextEvent(t *testing.T, events <-chan WatchEvent) WatchEvent {
 
 func TestAWatchStreamsTheChangesAfterItsList(t *testing.T) {
 	cluster := newTestCluster(t)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var list ResourceList
@@ -87,7 +87,7 @@ func TestAWatchStreamsTheChangesAfterItsList(t *testing.T) {
 
 func TestAWatchFromTooFarBackOrAheadIsRefused(t *testing.T) {
 	cluster := newTestCluster(t)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	ctx := context.Background()
 	if _, err := client.ApplyResources(ctx, ApplyRequest{Resources: []resource.Object{
 		object(resource.KindNamespace, "", "shop", ""),

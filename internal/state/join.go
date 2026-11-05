@@ -44,8 +44,8 @@ type AddJoinToken struct {
 
 func applyAddJoinToken(s *State, cmd Command, payload AddJoinToken) (func(), error) {
 	switch {
-	case !IsUserActor(cmd.Actor):
-		return nil, fmt.Errorf("%s cannot make a join token; only a user does", cmd.Actor)
+	case cmd.Actor != CLIActor:
+		return nil, fmt.Errorf("%s cannot make a join token; only the CLI does", cmd.Actor)
 	case payload.ID == "":
 		return nil, errors.New("the join token has no ID")
 	case len(payload.Hash) != 64:

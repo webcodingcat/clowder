@@ -75,7 +75,7 @@ func TestAWriteWaitsForALeaderDuringAnElection(t *testing.T) {
 		follower.noLeader = false
 		follower.mu.Unlock()
 	}()
-	cmd, err := state.NewCommand(state.KindAddJoinToken, time.Time{}, state.UserActor("alice"),
+	cmd, err := state.NewCommand(state.KindAddJoinToken, time.Time{}, state.CLIActor,
 		state.AddJoinToken{ID: "token", Hash: strings.Repeat("ab", 32), TTL: time.Hour})
 	if err != nil {
 		t.Fatal(err)

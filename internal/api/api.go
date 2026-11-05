@@ -1,6 +1,6 @@
 // Package api is the agents' HTTP API (v1): the types both sides use, the
 // server every agent runs and the client of the CLI. Every call is mutual
-// TLS: users present their certificate, agents their host certificate.
+// TLS: the CLI presents its certificate, agents their host certificate.
 // Any agent answers; writes go on to the leader, reads come from the agent's
 // own copy of the state.
 package api
@@ -97,15 +97,9 @@ type HostInfo struct {
 	Phase    string `json:"phase"`
 	Voter    bool   `json:"voter"`
 	Underlay string `json:"underlay"`
-	// PublicAddress is where users reach the host's API.
+	// PublicAddress is where the CLI reaches the host's API.
 	PublicAddress string `json:"public_address"`
 	Version       string `json:"version,omitempty"`
-}
-
-// UserInfo is one user.
-type UserInfo struct {
-	Name         string `json:"name"`
-	Certificates int    `json:"certificates"`
 }
 
 // AuditEntry is one applied command.

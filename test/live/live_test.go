@@ -268,8 +268,8 @@ func TestStacks(t *testing.T) {
 		{"a stack runs from a private registry with volumes and secrets", func(t *testing.T) { runStack(t, server) }},
 		{"the same files again change nothing", func(t *testing.T) { applyAgainChangesNothing(t, server) }},
 		{"a dry run makes nothing", func(t *testing.T) { dryRunMakesNothing(t, server) }},
-		{"lost credentials come back with a code from the host", func(t *testing.T) { recoverAccess(t, server) }},
-		{"the recovery key changes only with a code", func(t *testing.T) { rotateRecoveryKey(t, server) }},
+		{"lost credentials come back from root on the host", func(t *testing.T) { recoverAccess(t, server) }},
+		{"the recovery key changes", func(t *testing.T) { rotateRecoveryKey(t, server) }},
 		{"a restart recreates the stack, and the watch sees it", func(t *testing.T) {
 			restartRecreatesAndTheWatchSeesIt(t, server)
 		}},
@@ -320,7 +320,7 @@ func waitForSetup(t *testing.T, server host) {
 	checkMemory(t, server, "idle")
 }
 
-// bootstrap makes the test the user, its recovery key in a file, and
+// bootstrap gives the test the CLI's first credentials, its recovery key in a file, and
 // fills in cluster.yaml from the module's outputs, with the Hetzner token
 // and the registry's login encrypted, then applies it.
 func bootstrap(t *testing.T, server host, tofu outputs) {
@@ -328,7 +328,7 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	if err := os.WriteFile(keyFile, []byte(tofu.BootstrapKey.Value), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	mustClowder(t, "cluster", "bootstrap", "tester", "--name", "live", "--endpoint", tofu.PublicAddress.Value,
+	mustClowder(t, "cluster", "bootstrap", "--name", "live", "--endpoint", tofu.PublicAddress.Value,
 		"--key-file", keyFile, "--recovery-out", filepath.Join(workDir, "recovery-key"))
 	bootstrapped, err := clusterdir.Load(clusterDir())
 	if err != nil {
@@ -360,14 +360,17 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	writeConfig(t, config, bootstrapped.Encrypted)
 	checkNothingPersonal(t, tofu.BootstrapKey.Value, os.Getenv("HCLOUD_TOKEN"), password)
 
-	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "never applied") {
+	// HLab's API is plain http: the CLI warns about it, on stderr before the diff
+	httpWarning := "warning: hetzner.api is set: clowder uses " + os.Getenv("HCLOUD_ENDPOINT") +
+		" instead of Hetzner's own API, which is meant for test labs; over http the Hetzner token crosses the network unencrypted\n"
+	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "never applied") || !strings.HasPrefix(diff, httpWarning) {
 		t.Errorf("diff before the first apply:\n%s", diff)
 	}
 	mustClowder(t, "cluster", "apply")
 	// another token is named, its value not
 	setClusterSecrets(t, map[string]string{"hetzner.token": "another token"})
 	writeConfig(t, config, bootstrapped.Encrypted)
-	if diff := mustClowder(t, "cluster", "diff"); diff != "the secret hetzner.token differs\n" {
+	if diff := mustClowder(t, "cluster", "diff"); diff != httpWarning+"the secret hetzner.token differs\n" {
 		t.Errorf("diff after the token changed:\n%s", diff)
 	}
 	// encrypted anew, the same token is no change

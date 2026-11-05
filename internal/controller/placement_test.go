@@ -88,7 +88,7 @@ func newLeader(t *testing.T, poolSize int64) *leader {
 			CertificateSerial: "s0", CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
-	l.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
+	l.apply(state.KindApplyConfig, state.CLIActor, state.ApplyConfig{
 		Spec: clusterspec.Config{
 			Name: "prod", Endpoints: []string{"198.51.100.2"},
 			Hetzner:        clusterspec.Hetzner{Token: "hetzner.token"},
@@ -117,7 +117,7 @@ func putResource(l *leader, kind, name string, spec any) {
 	if err != nil {
 		l.t.Fatal(err)
 	}
-	l.apply(state.KindPutResource, state.UserActor("alice"), state.PutResource{
+	l.apply(state.KindPutResource, state.CLIActor, state.PutResource{
 		Kind: kind, Namespace: "default", Name: name, Owner: state.OwnerCLI, Spec: encoded,
 	})
 }
@@ -125,7 +125,7 @@ func putResource(l *leader, kind, name string, spec any) {
 // deleteResource deletes a resource of the namespace default.
 func deleteResource(l *leader, kind, name string) {
 	l.t.Helper()
-	l.apply(state.KindDeleteResource, state.UserActor("alice"), state.DeleteResource{
+	l.apply(state.KindDeleteResource, state.CLIActor, state.DeleteResource{
 		Kind: kind, Namespace: "default", Name: name, Owner: state.OwnerCLI,
 	})
 }

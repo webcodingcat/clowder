@@ -181,22 +181,15 @@ func startCluster(t *testing.T) string {
 	}
 	writeYAML(t, filepath.Join(dir, clusterdir.ConfigFile), config)
 
-	userCertificate, userKey := issue(func(public ed25519.PublicKey) ([]byte, error) {
-		return ca.IssueUser(public, "alice", time.Now())
+	cliCertificate, cliKey := issue(func(public ed25519.PublicKey) ([]byte, error) {
+		return ca.IssueCLI(public, time.Now())
 	})
-	parsed, err := pki.ParseCertificate(userCertificate)
+	finish, err := state.NewCommand(state.KindFinishBootstrap, time.Now(), state.CLIActor,
+		state.FinishBootstrap{RecoveryRecipient: recovery.Recipient().String()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	addAlice, err := state.NewCommand(state.KindAddUser, time.Now(), state.LeaderActor,
-		state.AddUser{
-			Name: "alice", Serial: pki.Serial(parsed), NotAfter: parsed.NotAfter,
-			RecoveryRecipient: recovery.Recipient().String(),
-		})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := host.Propose(context.Background(), addAlice); err != nil {
+	if _, err := host.Propose(context.Background(), finish); err != nil {
 		t.Fatal(err)
 	}
 	home := t.TempDir() // no credentials of the developer join in
@@ -208,7 +201,7 @@ func startCluster(t *testing.T) string {
 		t.Fatal(err)
 	}
 	err = clusterdir.WriteCredentials(config.Name, clusterdir.Credentials{
-		User: "alice", CA: string(ca.CertificatePEM()), Certificate: string(userCertificate), Key: string(userKey),
+		CA: string(ca.CertificatePEM()), Certificate: string(cliCertificate), Key: string(cliKey),
 	})
 	if err != nil {
 		t.Fatal(err)

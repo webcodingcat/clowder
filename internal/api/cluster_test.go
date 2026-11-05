@@ -46,7 +46,7 @@ func (c *testCluster) testApply(token string) ClusterApply {
 
 func TestTheClusterOpensAndSealsTheValuesOfClusterYAML(t *testing.T) {
 	cluster := newTestCluster(t)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	if _, err := client.Put(context.Background(), "/v1/cluster", cluster.testApply("the token")); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestTheClusterOpensAndSealsTheValuesOfClusterYAML(t *testing.T) {
 
 func TestAValueForAnotherPlaceOrClusterIsRefused(t *testing.T) {
 	cluster := newTestCluster(t)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	elsewhere := cluster.testApply("the token")
 	elsewhere.Encrypted["hetzner.token"] = encrypt(t, cluster.recipients, "shop/token", "the token")
 	_, err := client.Put(context.Background(), "/v1/cluster", elsewhere)
@@ -96,7 +96,7 @@ func TestAValueForAnotherPlaceOrClusterIsRefused(t *testing.T) {
 
 func TestADiffNamesWhatAnApplyWouldChange(t *testing.T) {
 	cluster := newTestCluster(t)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	ctx := context.Background()
 	first, err := client.DiffCluster(ctx, cluster.testApply("the token"))
 	if err != nil || first.Revision != 0 || !slices.Contains(first.Fields, "hetzner") ||
@@ -132,7 +132,7 @@ func TestADiffNamesWhatAnApplyWouldChange(t *testing.T) {
 
 func TestRekeyKeepsEachValueAndItsPlace(t *testing.T) {
 	cluster := newTestCluster(t)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	values := []PlacedValue{
 		{For: "shop/token", Encrypted: encrypt(t, cluster.recipients, "shop/token", "s3cret")},
 		{For: secretvalue.Cluster, Encrypted: encrypt(t, cluster.recipients, secretvalue.Cluster, "the Hetzner token")},

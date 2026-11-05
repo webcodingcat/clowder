@@ -64,7 +64,7 @@ export HCLOUD_TOKEN=...
 tofu init
 tofu apply -var 'ssh_public_key=ssh-ed25519 AAAA...' -var 'admin_cidrs=["203.0.113.7/32"]'
 mkdir ~/prod && cd ~/prod      # the cluster directory
-clowder cluster bootstrap me --name prod \
+clowder cluster bootstrap --name prod \
   --endpoint "$(tofu -chdir=<module directory> output -raw public_address)" \
   --key-file <(tofu -chdir=<module directory> output -raw bootstrap_key)
 ```
@@ -78,17 +78,19 @@ characters (`--recovery-out <file>` writes it to a file instead). Keep it in you
 manager and offline. If the cluster is lost, the recovery key still opens the values in
 your files (`secret decrypt`) and moves them to a new cluster (`secret rekey --identity`).
 
-A cluster has **one user**, the one the bootstrap makes. Do not share its credentials;
-more users come later.
+A cluster has **no users**, as with kubeadm's `admin.conf`: whoever holds the credentials
+(in your config directory, `clowder/clusters/<name>/credentials.yaml`) and `cluster.yaml`
+controls the cluster.
 
-Lost your credentials, or your laptop? Get a code as root on a host (the Hetzner console
-works without SSH): `clowderd user recovery-code me`. Then
-`clowder user recover me --code <code>` gives you new credentials (outside the cluster
-directory, add `--name prod --endpoint <address>`) and locks every other certificate of yours
-out. With your credentials and the second code, `clowder recovery rotate --code <code>`
-replaces the recovery key; then encrypt your files for it with
-`clowder secret rekey -f <directory>`. Each code is valid for 15 to 30 minutes and works
-once.
+More credentials, or new ones after a lost laptop, come from root on a host (the Hetzner
+console works without SSH): `clowderd credentials > credentials.yaml` prints them; put the
+file where the CLI looks for it. `clowderd credentials --revoke-older` also locks out every
+CLI certificate issued before the new one. `clowder recovery rotate` replaces the recovery
+key; then encrypt your files for it with `clowder secret rekey -f <directory>`.
+
+`hetzner.api` and `acme.directory` in `cluster.yaml` are for test labs: unset, clowder
+talks to Hetzner's API and Let's Encrypt over https. Set, they may be `http://`, and
+`cluster apply` and the leader's log warn about it.
 
 The bootstrap writes `cluster.yaml` into the cluster directory. Fill it in from
 `tofu output cluster_yaml` in the module's directory (it brings `private_network`, the

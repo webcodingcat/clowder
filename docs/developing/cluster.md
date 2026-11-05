@@ -16,9 +16,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   it at every command (see `Copy`). The state's `Index` follows the log either way. The
   tests check what the types cannot, that the checks change nothing: every command a test
   may see refused (`apply`, `changes`, `refuse`) is compared with the state before it.
-- **Commands.** A command has a kind, a payload of the type with the same name (`AddUser`,
-  `PutResource`, ...) and an actor (`leader`, `host/<id>`, `user/<name>`) that the API takes from
-  the caller's certificate. Which actor may send which kind is the API's check. The state
+- **Commands.** A command has a kind, a payload of the type with the same name
+  (`FinishBootstrap`, `PutResource`, ...) and an actor (`leader`, `host/<id>`, `cli`) that
+  the API takes from the caller's certificate. The cluster has no users: whoever holds a
+  CLI certificate controls it, as with kubeadm's `admin.conf`. Which actor may send which kind is the API's check. The state
   checks only what it alone can tell: a host reports only about itself and never moves
   another host, and about a stack only while it runs there, without moving it.
 - **The commands in use so far,** by who sends them:
@@ -27,7 +28,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   |---|---|
   | `clowderd init` | `bootstrap` |
   | `clowderd recover` | `recover-remap` |
-  | the user | `apply-config`, `add-user` (the bootstrap's user), `recover-user` and `set-recovery-recipient` (with a code from a host), `set-host-phase` (host actions), `add-join-token`, `put-resource` and `delete-resource` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack`, `request-move` |
+  | the CLI | `apply-config`, `finish-bootstrap` (the bootstrap's end), `set-recovery-recipient`, `set-host-phase` (host actions), `add-join-token`, `put-resource` and `delete-resource` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack`, `request-move` |
+  | root on a host | `set-cli-cutoff` (`clowderd credentials --revoke-older`, as that host) |
   | the leader, for a joining host | `add-host` |
   | the members loop | `set-host-phase` (joining, passive, active; removed for a host that left), `set-host-voter` |
   | the placement, the stack's host | `put-volume`, `set-stack-status`, `set-stack-wait-reason`, `set-pushed-out`, `start-operation` (a move) |
@@ -54,12 +56,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   - `put-resource` and `delete-resource` carry the kind; `resourceKinds` holds each kind's
     `find`, `put` and `remove`, where `put` and `remove` return their change like a
     handler. A handler checks in a fixed order:
-    1. `Authorize`: may this actor do this to this kind in this namespace? It allows
-       everything until users get permissions. It sits in the state so that the leader
-       decides, not the agent that took the request.
-    2. The owner: a resource of another channel is refused, even when the spec would not
+    1. The owner: a resource of another channel is refused, even when the spec would not
        change.
-    3. Whether anything changes at all.
+    2. Whether anything changes at all.
     4. Everything else.
   - **Unchanged is not a change.** When a spec equals the stored one, nothing changes:
     neither `Generation` nor `ResourceVersion`, and no audit entry is written. So a GitOps
@@ -114,7 +113,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
     (`stackspec.Spec.WithDependents`), since a dependency holds only when a container
     starts. It changes no spec, so the generation stays; a running stack is `starting`
     again. Any channel may restart a stack, whoever owns it, so an operator can restart one
-    that GitOps applies. Who may is `Authorize`'s (verb `restart`).
+    that GitOps applies.
   - **`set-stack-wait-reason`** records why the placement finds no place for a stack or a
     volume it names (`WaitReason`). It changes nothing else, so it never unplaces a stack
     that runs. The state is the placement's memory of the reason: it writes a change once,
@@ -211,8 +210,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   any phase ─L→ removed
   ```
 
-  O is the fence-host operation (`OperationFenceHost`, `HostFence`), U a user (the state
-  allows the leader these too, `byLeaderOrUser`; the API lets a user make only these).
+  O is the fence-host operation (`OperationFenceHost`, `HostFence`), U the CLI (the state
+  allows the leader these too, `byLeaderOrCLI`; the API lets the CLI make only these).
   Each move checks the phase it starts from (`From`), so of two that race only the first
   passes.
 
@@ -309,20 +308,25 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
     before drops a new field from its state; a field that later commands depend on
     therefore needs a gate of its own on `MinVersion`.
   - The json tags of `clusterspec.Config` are part of this format.
-- **Invariants** the state holds itself, as the last place to catch a wrong command: one
-  user, valid names (`internal/names`), volumes with 0 to 3 replicas and a DRBD minor
+- **Invariants** the state holds itself, as the last place to catch a wrong command: valid
+  names (`internal/names`), volumes with 0 to 3 replicas and a DRBD minor
   exactly when replicated (a pending volume has neither copy nor minor), one copy per host,
   one stack per volume, nothing deleted that a stack names, a removed host's certificate
   revoked, no name, underlay, server or certificate of a host twice among the hosts
   that are not removed (`CheckJoiningHost`), every host with a server ID and an IPv4
   underlay and public address, each underlay in `private_network` once `cluster.yaml`
   names it, and every joined host's server checked with Hetzner.
-- **Revocations.** `Revoked` holds each revoked certificate with when it expires, which the
-  state knows from the command that recorded the certificate (`AddUser`, `RecoverUser`,
-  the host's `CertificateNotAfter`); `revoke` puts it there. The list grows only there, so
-  `revoke` also drops the certificates that expired more than `revokedKept` before the
-  command: no handshake takes them any more, and the margin covers a host whose clock runs
-  behind. It goes by the command's `At`, so every agent drops the same.
+- **Revocations.** `Revoked` holds each revoked host certificate with when it expires
+  (the host's `CertificateNotAfter`); removing the host puts it there (`revoke`). The list
+  grows only there, so `revoke` also drops the certificates that expired more than
+  `revokedKept` before the command: no handshake takes them any more, and the margin covers
+  a host whose clock runs behind. It goes by the command's `At`, so every agent drops the
+  same.
+- **The CLI's certificates** are not listed, as kubeadm lists none: whoever holds one
+  controls the cluster. `CLICutoff` (`set-cli-cutoff`, from `clowderd credentials
+  --revoke-older`) refuses every CLI certificate that starts before it; it only moves
+  forward, so a revoked laptop never gets back in. A host sets it, as root there issued the
+  new certificate.
 - **Secrets** arrive sealed (`Sealed`, age for the data key); `state` never sees them in
   clear. Those of `cluster.yaml` are `ClusterSecrets`, by name (`clusterspec.SecretPlaces`),
   each with a digest; the namespaces' are `Secrets`. Readers find a value through the
@@ -330,7 +334,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   `RegistryLogins` (the user from the spec, the password sealed). Until the first
   `apply-config` the config is revision 0 with an empty spec; the loops that need the
   Hetzner token or a Floating IP find none and wait. init's bootstrap key is `BootstrapKey`, sealed,
-  until `add-user` drops it. A stack names at most `MaxStackSecrets`. Who can read a
+  until `finish-bootstrap` drops it. A stack names at most `MaxStackSecrets`. Who can read a
   secret: API, below.
 - **Join tokens** (`internal/jointoken`): an ID and a 256-bit secret. `add-join-token`
   keeps only the secret's hash under the ID, with when it expires: the command's `At` plus
@@ -349,17 +353,21 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 ## Certificates (`internal/pki`)
 
 - The cluster CA issues host certificates (server and client, valid for the host's addresses)
-  and user certificates (client). The role is the certificate's organizational unit, the
-  name its common name (`host-<id>` or the user's name).
-- Keys are Ed25519 and never leave the machine that made them: the CA signs public keys.
-- Certificates end by revocation, not expiry: hosts may stay off for months. `Verify` takes
-  the revoked serials from the state, which keeps each until a while after it expired.
+  and CLI certificates (client). The role is the certificate's organizational unit, the
+  name its common name (`host-<id>` or `cli`).
+- Keys are Ed25519 and the CA signs public keys. Hosts' keys and the bootstrap's CLI key
+  never leave the machine that made them; `clowderd credentials` makes the CLI's key on a
+  host and hands it over in `credentials.yaml`, as kubeadm does with `admin.conf`.
+- Certificates end by revocation or the CLI's cutoff, not expiry: hosts may stay off for
+  months. `Verify` takes the revoked serials from the state, which keeps each until a while
+  after it expired; the API holds a CLI certificate's start (`Identity.NotBefore`) against
+  `State.CLICutoff`.
 - `TrustProof` (HMAC-SHA256 over the CA certificate) is how a CLI or a joining host trusts
-  the CA on first contact: with the bootstrap key, a recovery code, or a join token's hash
-  (`jointoken.ProofKey`). A bootstrap key a user chose has at least
+  the CA on first contact: with the bootstrap key or a join token's hash
+  (`jointoken.ProofKey`). A bootstrap key chosen by hand has at least
   `MinBootstrapKeyLength` characters, as the offer lets anyone try keys offline until the
   bootstrap.
-- `tls_test.go` puts both TLS configs before every peer they must refuse: none, a user, a
+- `tls_test.go` puts both TLS configs before every peer they must refuse: none, the CLI, a
   host of another CA, a stranger showing a host's certificate behind its own, a revoked, an
   expired and a not yet valid host; and runs handshakes on 127.0.0.1.
 
@@ -369,7 +377,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   `snapshotThreshold` entries, the state of `internal/state` as the replicated machine.
   Raft's own log lines go through `log/slog`.
 - Raft speaks mutual TLS on the node address: both sides show a host certificate of the
-  cluster CA that is not revoked. Users' certificates and other clusters' hosts fail the
+  cluster CA that is not revoked. CLI certificates and other clusters' hosts fail the
   handshake, and removing a host revokes its certificate, so it leaves Raft and the API at
   once. `pki.ClientTLSToHosts` and `pki.ServerTLSForHosts` are the one way hosts are checked,
   by Raft and by the API alike: the chain and the role, not the name.
@@ -494,9 +502,9 @@ them.
 ### Requests and the leader
 
 - **Every call is checked.** Every agent serves `/v1` with mutual TLS (`agent.APIPort`), and
-  each call is checked against the CA and the state's revocation list, so a revoked
-  certificate is refused at once on every agent. User routes take user certificates,
-  `/v1/internal/*` only host certificates. Every request body is limited
+  each call is checked against the CA, the state's revocation list and, for the CLI,
+  `CLICutoff`, so a revoked certificate is refused at once on every agent. The CLI's
+  routes take CLI certificates, `/v1/internal/*` only host certificates. Every request body is limited
   (`MaxRequestBytes`, its comment works out why 16 MiB); a larger one answers 413, and
   `apply` then advises to apply the namespaces' directories one at a time.
 - **Any agent answers.** Reads come from its own copy of the state; writes it commits as the
@@ -507,20 +515,21 @@ them.
   batch of an apply, a join, the catch-up) waits up to `leaderWait` for one
   (`waitForLeader`) instead of failing at once.
 - **Who speaks.** The actor of a command is the caller of the first agent; its time (`At`) is
-  the leader's clock. `/v1/internal/propose` takes two things only: a user's command that a
-  follower forwards (`userKinds`, exactly the kinds the user routes, the bootstrap and the
-  recovery make),
-  and a host's report about itself (`hostKinds`); `/v1/internal/changes` takes a user's
-  resource commands only (Resources, below). The leader's own commands
-  (placements, the ingress) are made on the leader and never come in from outside; a host never
-  speaks for another host or for the leader.
-- **A host certificate may speak for any user.** The user's certificate ends at the first
-  agent, so the leader cannot check that a forwarded command really came from the user it
-  names: any host certificate may send a user's command with any user as its actor. This
-  is on purpose. A host holds the data key and the whole Raft state, and root on a host can
-  make a recovery code for any user anyway, so a host is trusted with everything. The checks
-  on the internal routes catch an agent's bug, not a host that lies; what keeps strangers
-  out is the CA, and removing a host revokes its certificate.
+  the leader's clock. `/v1/internal/propose` takes two things only: the CLI's command that a
+  follower forwards (`cliKinds`, exactly the kinds the CLI's routes and the bootstrap
+  make), and what a host commits as itself (`hostKinds`: its reports, and the cutoff of
+  `clowderd credentials --revoke-older`); `/v1/internal/changes` takes the CLI's resource
+  commands only (Resources, below). The leader's own commands (placements, the ingress)
+  are made on the leader and never come in from outside; a host never speaks for another
+  host or for the leader.
+- **A host certificate may speak for the CLI.** The CLI's certificate ends at the first
+  agent, so the leader cannot check that a forwarded command really came from the CLI. This
+  is on purpose, as kubeadm's control plane trusts its own nodes: a host holds the data key,
+  the CA's key and the whole Raft state, and root on a host can print credentials anyway
+  (`clowderd credentials`), so a host is trusted with everything. There are no users, so
+  there is no name a host could forge. The checks on the internal routes catch an agent's
+  bug, not a host that lies; what keeps strangers out is the CA, and removing a host
+  revokes its certificate.
 - A refusal of the state is HTTP 409 with its reason; a write that did not commit is 503.
 - **JSON names.** What users write and read as resources (`resource.Object`, the specs and
   the statuses `get` shows) is camelCase, as in the files users apply; everything else
@@ -675,9 +684,9 @@ them.
 - **Who can read a secret:**
   - whoever holds the recovery key: every value in the files is encrypted for it too;
   - every host, as a stack must be able to start anywhere;
-  - until there are permissions, every user of the cluster: through a stack that names
-    the secret, or through a stack in `stacks.privileged`, whose containers reach the
-    secrets and the data key on their host.
+  - whoever holds the CLI's credentials: through a stack that names the secret, or
+    through a stack in `stacks.privileged`, whose containers reach the secrets and the
+    data key on their host.
 - **`cluster apply`** (`PUT /v1/cluster`, `ClusterApply`) sends the spec with the
   secrets' names, the values still encrypted by name, and the files. The agent opens each
   value with the cluster's age key (`clusterIdentity`, sealed in the state), refuses one
@@ -710,24 +719,24 @@ them.
   or is meant for another place shows as `error:` with the reason, and the command fails
   after printing every line.
 
-### The first user and joining hosts
+### The bootstrap and joining hosts
 
-- **The user** has no certificate yet (`cluster bootstrap`). `GET /v1/bootstrap` gives
+- **The CLI** has no certificate yet (`cluster bootstrap`). `GET /v1/bootstrap` gives
   the CA certificate with a `pki.TrustProof` made with the bootstrap key, and the CLI
   trusts the CA only if it matches its key (`api.FindCluster`). The offer also says
-  whether the cluster has a user already (`bootstrapped`): then it has no proof, as the
-  key opens nothing any more, and the CLI stops (`api.ErrBootstrapped`) before it makes a
-  recovery key, so nobody holds two and does not know which counts. Else it makes the
-  recovery key and hands it over: shown once with its last 8 characters typed back, or
-  into a new file (`--recovery-out`, for scripts); nothing has reached the cluster yet.
-  `POST /v1/bootstrap`, over TLS checked against that CA, carries the user's public key
-  and the recovery key's recipient with an HMAC of the bootstrap key and a time
+  whether the bootstrap is over (`bootstrapped`): then it has no proof, as the key opens
+  nothing any more, and the CLI stops (`api.ErrBootstrapped`) before it makes a recovery
+  key, so nobody holds two and does not know which counts. Else it makes the recovery key
+  and hands it over: shown once with its last 8 characters typed back, or into a new file
+  (`--recovery-out`, for scripts); nothing has reached the cluster yet.
+  `POST /v1/bootstrap`, over TLS checked against that CA, carries the CLI's public key and
+  the recovery key's recipient with an HMAC of the bootstrap key and a time
   (`bootstrapMaxAge`), each field after its length (`digest.WriteParts`); the state keeps
-  the recipient with the user (`add-user`). It works once: a cluster has one user, and
-  further certificates come only through `user recover`. The CLI then writes the
-  credentials (`clusterdir.WriteCredentials`), checks that the cluster's recovery
-  recipient is the key it made, and writes `cluster.yaml` to fill in (`clusterdir.Create`).
-- **A host joins** with a token a user made (`clowder host join-token`, `api/join.go`,
+  the recipient and drops the bootstrap key (`finish-bootstrap`). It works once; further
+  credentials come from root on a host (below). The CLI then writes the credentials
+  (`clusterdir.WriteCredentials`), checks that the cluster's recovery recipient is the key
+  it made, and writes `cluster.yaml` to fill in (`clusterdir.Create`).
+- **A host joins** with a token the CLI made (`clowder host join-token`, `api/join.go`,
   `agent/join.go`). `GET /v1/join?token=<id>` gives the CA certificate with a
   `pki.TrustProof` made with the token's hash while the token is open, and the host trusts
   the CA only if it matches its token (`api.FindClusterByToken`). `POST /v1/join`, over TLS
@@ -756,50 +765,31 @@ them.
   (`confirm-server`). Only a host with a checked server holds the Floating IP
   (`set-ingress`).
 
-### Codes from a host
+### Credentials from a host
 
-- **A code from a host** gives access back (`internal/recoverycode`, `api/recover.go`): root
-  on a host runs `clowderd user recovery-code <user>`, which reads only the data key, so it
-  works while the agent is down. A code is the first 80 bits of an HMAC over its use
-  (`recoverycode.ForRecover`, `ForRotate`), the user and the quarter of an hour, with a key
-  derived from the data key (`recoverycode.Purpose`), in Crockford's base32: case,
-  `O`/`0`, `I`/`L`/`1` and hyphens do not matter. Every agent checks it alone, against the
-  windows of the last 15 minutes and, in the last minute of one, the next (a host's clock a
-  little ahead).
-- **A code opens once.** A code seen on a console or in a log would otherwise let whoever
-  saw it recover after the user, revoke the user's new certificate and take over. So
-  `recover-user` and `set-recovery-recipient` carry the code's digest
-  (`recoverycode.Code.Digest`, never the code: the log and the audit show the commands)
-  and when it expires, the end of the window after its own. The handler refuses a digest
-  that `State.UsedCodes` holds and records it otherwise. `useCode` drops the codes that
-  expired more than `usedCodeKept` before the command, by the command's `At`, as `revoke`
-  does. The agent looks in its own state first, so a used code gets the same 401 as a
-  wrong one; through a follower that has not seen the use yet, the leader's state refuses
-  it (409). Each use has its own code, so a user can recover and rotate the recovery key
-  in the same quarter of an hour, and a code seen while rotating gives no recovery. A
-  second recovery in the same window needs the next window's code.
-- **`user recover <user> --code`** (`cli/recover.go`) makes a key pair, then asks
-  `GET /v1/recover/offer?user=` for the CA with a `pki.TrustProof` made with each code the
-  agent takes, and trusts the CA only if one matches the code typed in
-  (`api.FindClusterByCode`). `POST /v1/recover`, over TLS checked against that CA, brings
-  the user, the public key and the code; the agent checks the code, issues the certificate
-  and commits `recover-user`, which revokes every other certificate of the user: a stolen
-  laptop is locked out. As with the bootstrap, the agent sets the actor to the recovered
-  user (`user/<name>`), so the audit shows a recovery as `recover-user` by that user. A
-  user that does not exist gets the same offer and the same refusal as a wrong code, so the
-  routes tell nobody which users there are. Name and endpoints come from the cluster directory,
-  or from `--name` and `--endpoint` without one.
-- **Both routes come without a certificate,** so each agent takes at most `triesPerSender`
-  tries a minute per sender and `triesInAll` in all, in memory (`api/limit.go`); then 429.
-  A sender is its IPv4 address, or for IPv6 its /64. The bootstrap's two routes are limited
-  the same way, with a count of their own: they too work with the data key for anyone who
-  asks, and strangers at the bootstrap must not block a recovery.
-- **`recovery rotate --code`** needs the user's credentials and their own code to rotate: stolen
-  credentials alone cannot swap the recovery key. The CLI makes the new key and hands it
-  over as the bootstrap does, then `POST /v1/recovery/rotate` commits
-  `set-recovery-recipient`. Values encrypted afterwards are for the new key; `secret rekey`
-  brings the files to it. Old ciphertext, in the Git history say, stays readable with the
-  old key.
+- **The cluster has no users,** as kubeadm's has none: whoever holds a CLI certificate and
+  `cluster.yaml` controls it. More credentials, or new ones after a lost laptop, come from
+  root on a host, as `kubeadm kubeconfig user` makes them.
+- **`clowderd credentials`** (`agent/credentials.go`) makes the CLI's key on the host and
+  asks its own agent, with the host's certificate, for a certificate
+  (`POST /v1/internal/credentials`, `api/credentials.go`): the agent opens the CA's key
+  from the state with the data key and issues it. The command prints `credentials.yaml`;
+  the key crosses SSH as kubeadm's `admin.conf` does.
+- **`--revoke-older`** also commits `set-cli-cutoff` as that host, with the new
+  certificate's start: from then on every agent refuses the CLI certificates that start
+  before it (`Server.cliCutoffPassed`), a stolen laptop's included. It needs the leader;
+  the certificate comes back only once the cutoff is committed and the host's own agent
+  applied it; the other agents follow within moments. Certificates count in
+  seconds, so one issued in the same second as the new one stays valid.
+- **The bootstrap's routes come without a certificate,** so each agent takes at most
+  `triesPerSender` tries a minute per sender and `triesInAll` in all, in memory
+  (`api/limit.go`); then 429. A sender is its IPv4 address, or for IPv6 its /64. The
+  join's routes are limited the same way, with a count of their own.
+- **`recovery rotate`** makes a new recovery key with the CLI's credentials alone: they
+  control the cluster anyway. The CLI makes the new key and hands it over as the bootstrap
+  does, then `POST /v1/recovery/rotate` commits `set-recovery-recipient`. Values encrypted
+  afterwards are for the new key; `secret rekey` brings the files to it. Old ciphertext,
+  in the Git history say, stays readable with the old key.
 
 ### Tests
 

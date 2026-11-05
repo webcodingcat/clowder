@@ -92,7 +92,7 @@ type batchChange struct {
 	Error string `json:"error,omitempty"`
 }
 
-// changeKinds are the commands a batch may carry, each a user's.
+// changeKinds are the commands a batch may carry, each the CLI's.
 var changeKinds = map[string]bool{state.KindPutResource: true, state.KindDeleteResource: true}
 
 // decodeStrict reads a request body; a field the request does not have is
@@ -287,8 +287,8 @@ func (s *Server) forwardChanges(ctx context.Context, leader state.HostID, batch 
 	return answer, nil
 }
 
-// internalChanges runs a batch a follower forwards for a user; like
-// internalPropose it takes a user's commands of the allowed kinds only, and
+// internalChanges runs a batch a follower forwards for the CLI; like
+// internalPropose it takes the CLI's commands of the allowed kinds only, and
 // does not forward again: if the lead moved meanwhile, the caller asks
 // again.
 func (s *Server) internalChanges(w http.ResponseWriter, r *http.Request) {
@@ -300,8 +300,8 @@ func (s *Server) internalChanges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, each := range batch.Changes {
-		if each.Command != nil && (!state.IsUserActor(each.Command.Actor) || !changeKinds[each.Command.Kind]) {
-			writeError(w, http.StatusForbidden, fmt.Errorf("a batch carries only users' %v, not %s as %s",
+		if each.Command != nil && (each.Command.Actor != state.CLIActor || !changeKinds[each.Command.Kind]) {
+			writeError(w, http.StatusForbidden, fmt.Errorf("a batch carries only the CLI's %v, not %s as %s",
 				slices.Sorted(maps.Keys(changeKinds)), each.Command.Kind, each.Command.Actor))
 			return
 		}

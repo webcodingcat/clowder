@@ -10,6 +10,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/hetzner"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -27,8 +28,13 @@ func RunFloatingIP(ctx context.Context, cluster Cluster, propose Propose, open O
 	logger *slog.Logger,
 ) {
 	var next time.Time // when the API may be read again
+	var warned []string
 	for {
 		changed := cluster.Changed()
+		if cluster.IsLeader() {
+			// here, as the leader is who talks to Hetzner's API and the ACME CA
+			warned = warnEndpoints(cluster, warned, logger)
+		}
 		if cluster.IsLeader() && !time.Now().Before(next) {
 			asked, err := holdFloatingIP(ctx, cluster, propose, open, logger)
 			if asked {
@@ -54,6 +60,20 @@ func RunFloatingIP(ctx context.Context, cluster Cluster, propose Propose, open O
 		case <-time.After(wait):
 		}
 	}
+}
+
+// warnEndpoints logs clusterspec.EndpointWarnings when they differ from
+// those it logged before, and returns them: once for each cluster.yaml
+// that has them, not at every pass.
+func warnEndpoints(cluster Cluster, logged []string, logger *slog.Logger) []string {
+	var warnings []string
+	cluster.Read(func(current *state.State) { warnings = clusterspec.EndpointWarnings(current.Config.Spec) })
+	if !slices.Equal(warnings, logged) {
+		for _, warning := range warnings {
+			logger.Warn(warning)
+		}
+	}
+	return warnings
 }
 
 // holdFloatingIP records the ingress host when it changes, then routes the

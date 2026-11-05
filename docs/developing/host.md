@@ -34,11 +34,11 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   token used: `clowder host remove` it, and it joins anew with a new token. The leader
   adds the host to Raft as a non-voter at once, and moves it on once its agent runs and
   reports (The cluster, Raft). It refuses a host that has a `raft/` directory or `host.json`.
-- **`clowderd user recovery-code <user>`** prints the codes that give the user access back,
-  one for `user recover` and one for `recovery rotate`, each in its command (the code from
-  a host, in [API and the CLI](cluster.md#codes-from-a-host)). It
-  reads the data key only and changes nothing, so it works while the agent is down; it
-  does not know the users, so a mistyped name gives codes that fit nowhere.
+- **`clowderd credentials [--revoke-older]`** (`agent/credentials.go`) prints a
+  `credentials.yaml` for the CLI, as `kubeadm kubeconfig user` does: it makes the key here
+  and asks its own agent, with the host's certificate, for the certificate
+  (`/v1/internal/credentials`, in [API and the CLI](cluster.md#credentials-from-a-host)).
+  The agent must run; `--revoke-older` also needs the cluster's leader.
 - **`clowderd recover --power-off`** makes this host its cluster's only one when the others are
   gone for good: it powers them off and labels their servers `clowder-retired`
   ([Recover](cluster.md#recover-clowderd-recover-agentrecovergo)). It stops the agent while

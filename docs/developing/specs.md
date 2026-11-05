@@ -116,6 +116,10 @@ on a host (`compose.Render`).
 - `clusterspec` is `cluster.yaml` without files: its types (`Config`), their defaults
   (`WithDefaults`) and `Check`, which lists every problem. The state reads it, so it does
   no I/O.
+- **`hetzner.api` and `acme.directory`** are for test labs: unset, clowder talks to
+  Hetzner's API and Let's Encrypt over https. Set, they may also be `http://`, and
+  `EndpointWarnings` says so: `cluster apply` and `diff` print it, the leader logs it once
+  per `cluster.yaml` (`controller.warnEndpoints`).
 - **Secrets in `cluster.yaml`** stand at their places, encrypted and tagged `!secret`
   (Encrypted values, below): the Hetzner token, the registries' passwords, the alert
   channels' URLs and passwords, the heartbeat's URL.
@@ -138,17 +142,18 @@ on a host (`compose.Render`).
   the yaml-language-server need `customTags: ["!secret scalar"]`.
 - `Create` writes the `cluster.yaml` of `cluster bootstrap`: name, endpoint, the bootstrap
   key encrypted, and as comments what the first `cluster apply` still needs.
-- **The user's credentials** (`credentials.go`) are not in the cluster directory, which a
-  team shares in a repository, but in the user's config directory
+- **The credentials** (`credentials.go`) are not in the cluster directory, which a team
+  shares in a repository, but in the user's config directory
   (`os.UserConfigDir()/clowder/clusters/<name>/credentials.yaml`, `CredentialsPath`): the
-  user's name, key and certificate, and the cluster's CA, which the CLI trusts. Plain YAML,
-  0600 in a directory of 0700, as SSH keeps its keys. `<name>` is `cluster.yaml`'s `name`,
-  so `clusterspec.Check` holds it to `names.Valid`: it becomes a directory. One file per
-  cluster, one user per file. The tests point `XDG_CONFIG_HOME` (and `HOME`, `AppData`) at
-  a temporary directory.
+  CLI's key and certificate, and the cluster's CA, which the CLI trusts. Whoever holds them
+  controls the cluster, as with kubeadm's `admin.conf`. Plain YAML, read strictly (the
+  `user` of an earlier build is refused), 0600 in a directory of 0700, as SSH keeps its
+  keys. `<name>` is `cluster.yaml`'s `name`, so `clusterspec.Check` holds it to
+  `names.Valid`: it becomes a directory. One file per cluster. The tests point
+  `XDG_CONFIG_HOME` (and `HOME`, `AppData`) at a temporary directory.
 - **`cluster bootstrap`** checks first (`CheckBootstrap`) that it writes over neither a
   `cluster.yaml` nor credentials of a cluster of the same name (`--force` replaces those),
-  since once the cluster has its user a bootstrap cannot be repeated. It writes the
+  since once the CLI has its first certificate a bootstrap cannot be repeated. It writes the
   credentials before the cluster directory: `cluster.yaml` can be written by hand, the
   user's key cannot be had again.
 - **Files next to `cluster.yaml`** (`acme.ca`): `clusterspec.FileNames` lists those it

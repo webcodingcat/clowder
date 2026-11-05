@@ -16,7 +16,7 @@ the others. How to use it is in the main [README](../../README.md#getting-starte
   `admin_cidrs` names who reaches them. It takes no `0.0.0.0/0`. HTTP and HTTPS are open to
   everyone (Traefik, and the ACME CA's checks); a port your stacks publish opens with
   `published_ports` (`["udp/9987"]`).
-- **The bootstrap key** lets the first user in, once (`clowder cluster bootstrap`); after
+- **The bootstrap key** gives the CLI its first credentials, once (`clowder cluster bootstrap`); after
   that it opens nothing. It is in the OpenTofu state and the first server's user data,
   which root reads from cloud-init's cache and the metadata service hands to any process
   that reaches it. Once `clowderd` runs, its rules close the service to the host and its

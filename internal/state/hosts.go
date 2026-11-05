@@ -22,7 +22,7 @@ type Bootstrap struct {
 }
 
 // applyBootstrap makes the first host the cluster. The bootstrap key lets
-// the user in, once (applyAddUser drops it); hosts join with tokens.
+// the CLI in, once (applyFinishBootstrap drops it); hosts join with tokens.
 func applyBootstrap(s *State, _ Command, payload Bootstrap) (func(), error) {
 	switch {
 	case s.Keys != nil:
@@ -105,20 +105,20 @@ type SetHostPhase struct {
 	Leaving bool `json:"leaving,omitempty"`
 }
 
-// mover says who may make a phase change: the leader (on its own or for a
-// user), or the host itself when it reports what only it can see. A host
+// mover says who may make a phase change: the leader (on its own or for the
+// CLI), or the host itself when it reports what only it can see. A host
 // never moves another host. The API checks which actor may send which kind
 // of command at all. The state checks only what needs the state: whether
 // the reporting host is the host the report is about.
 type mover int
 
 const (
-	byLeaderOrUser mover = iota
+	byLeaderOrCLI mover = iota
 	byTheHost
 )
 
 // phaseChanges are the allowed moves; any phase may also go to Removed, by
-// the leader or a user, unless checkRemoval refuses. A host joins as
+// the leader or the CLI, unless checkRemoval refuses. A host joins as
 // joining (add-host), and becomes fencing only as a fence-host operation
 // starts (StartOperation.Fence), which holds the host's lock: only that
 // operation moves it on, to fenced once its server is off, or back to
@@ -129,15 +129,15 @@ const (
 // cannot tell whether the leader is about to fence it. Once it is fencing,
 // nothing stops the operation, a late beat neither.
 var phaseChanges = map[HostPhase]map[HostPhase]mover{
-	Joining:    {Passive: byLeaderOrUser, Active: byLeaderOrUser},
-	Passive:    {Active: byLeaderOrUser},
-	Active:     {Draining: byLeaderOrUser, Failed: byLeaderOrUser},
-	Draining:   {Active: byLeaderOrUser, Failed: byLeaderOrUser},
-	Failed:     {Active: byLeaderOrUser, Fenced: byLeaderOrUser}, // fenced: a user's fence-confirm
-	Fencing:    {Fenced: byLeaderOrUser, Failed: byLeaderOrUser},
-	Fenced:     {Recovering: byTheHost, Disabled: byLeaderOrUser},
-	Recovering: {Active: byTheHost, Failed: byLeaderOrUser},
-	Disabled:   {Fenced: byLeaderOrUser}, // a user's host enable
+	Joining:    {Passive: byLeaderOrCLI, Active: byLeaderOrCLI},
+	Passive:    {Active: byLeaderOrCLI},
+	Active:     {Draining: byLeaderOrCLI, Failed: byLeaderOrCLI},
+	Draining:   {Active: byLeaderOrCLI, Failed: byLeaderOrCLI},
+	Failed:     {Active: byLeaderOrCLI, Fenced: byLeaderOrCLI}, // fenced: a user's fence-confirm
+	Fencing:    {Fenced: byLeaderOrCLI, Failed: byLeaderOrCLI},
+	Fenced:     {Recovering: byTheHost, Disabled: byLeaderOrCLI},
+	Recovering: {Active: byTheHost, Failed: byLeaderOrCLI},
+	Disabled:   {Fenced: byLeaderOrCLI}, // a user's host enable
 }
 
 // FlapWindow and FlapLimit are the flapping brake: a host fenced FlapLimit
@@ -403,7 +403,7 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), err
 		if err := s.checkRemoval(host); err != nil {
 			return nil, err
 		}
-		who, allowed = byLeaderOrUser, true
+		who, allowed = byLeaderOrCLI, true
 	}
 	if !allowed {
 		return nil, fmt.Errorf("host %s cannot go from %s to %s", host.Name, host.Phase, payload.Phase)
@@ -412,8 +412,8 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), err
 	switch {
 	case who == byTheHost && cmd.Actor != HostActor(host.ID):
 		return nil, fmt.Errorf("only host %s itself reports %s", host.Name, payload.Phase)
-	case who == byLeaderOrUser && fromHost:
-		return nil, fmt.Errorf("%s cannot move host %s to %s; only the leader or a user does", cmd.Actor, host.Name, payload.Phase)
+	case who == byLeaderOrCLI && fromHost:
+		return nil, fmt.Errorf("%s cannot move host %s to %s; only the leader or the CLI does", cmd.Actor, host.Name, payload.Phase)
 	case host.Phase == Recovering && payload.Phase == Active:
 		if err := s.checkCaughtUp(host); err != nil {
 			return nil, err

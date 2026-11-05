@@ -142,12 +142,12 @@ reads within a step.
 ### `TestSetup` (run by `up`)
 
 1. The setup makes the first host and deletes its key file.
-2. The user bootstraps (its credentials go to `/work/config`, mode 600, not to the
+2. The test bootstraps (the credentials go to `/work/config`, mode 600, not to the
    developer's config directory), fills in `cluster.yaml` from the module's outputs and
    applies it, with the Hetzner token and the registry's password encrypted (`secret
    encrypt --cluster-yaml`). The cluster directory holds `cluster.yaml` alone, with no
-   value in clear. `cluster diff` names a changed token, by name only, and nothing for the
-   same token encrypted anew. The recovery key goes to `/work/recovery-key`. The host
+   value in clear. `cluster diff` warns about HLab's `http` API and names a changed token,
+   by name only, and nothing for the same token encrypted anew. The recovery key goes to `/work/recovery-key`. The host
    trusts the registry's CA (`/etc/docker/certs.d`), and the test pushes its image there,
    then logs out, so only the agent's login pulls it.
 3. Two hosts join, `clowder1` and `clowder2`, each with a token of `host join-token`: the
@@ -165,7 +165,7 @@ reads within a step.
 ### `TestJoin`
 
 1. The bootstrap key proves nothing any more: the offer has no proof, and the CLI stops
-   with "has a user already".
+   with "bootstrapped already".
 2. An unknown token, the token a host joined with and a token of a minute after its
    minute get no proof of the CA (403, each with why).
 3. With an open token and the CA it proved, a join is refused that names a server of the
@@ -218,11 +218,10 @@ The stack `shop` lives from the first step to the last.
    back with the recovery key.
 2. The same files applied again answer `unchanged` and recreate nothing.
 3. A dry run of a new namespace with its stack answers as a real apply and makes nothing.
-4. Access back: with the credentials deleted, the CLI reaches nothing; a code from
-   `clowderd user recovery-code` on the host and `user recover` give new credentials; the
-   same code a second time and the old certificate are refused.
-5. `recovery rotate` with valid credentials but a code for another user is refused; with
-   the user's own code it makes a new recovery key. After `secret rekey`, the stack's file
+4. Access back: with the credentials deleted, the CLI reaches nothing;
+   `clowderd credentials --revoke-older` on the host gives new credentials, and the old
+   certificate is refused from then on.
+5. `recovery rotate` makes a new recovery key. After `secret rekey`, the stack's file
    opens with the new key and no longer with the old one, and the cluster keeps what it had.
    The new key replaces `/work/recovery-key`.
 6. `stack restart` recreates the unchanged stack's container, and `get stacks --watch`,

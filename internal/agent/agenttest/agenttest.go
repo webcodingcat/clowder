@@ -430,7 +430,7 @@ func NewCluster(t *testing.T) *Cluster {
 			ServerID: 40, WGPublicKey: "wg", CertificateSerial: "s0", CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
-	cluster.Apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
+	cluster.Apply(state.KindApplyConfig, state.CLIActor, state.ApplyConfig{
 		Spec: clusterspec.Config{
 			Name: "prod", Endpoints: []string{"198.51.100.2"},
 			Hetzner:        clusterspec.Hetzner{Token: "hetzner.token"},
@@ -451,7 +451,7 @@ func NewCluster(t *testing.T) *Cluster {
 func (c *Cluster) AddHost(id state.HostID) {
 	c.t.Helper()
 	token := "token-" + strconv.Itoa(int(id))
-	c.Apply(state.KindAddJoinToken, state.UserActor("alice"), state.AddJoinToken{
+	c.Apply(state.KindAddJoinToken, state.CLIActor, state.AddJoinToken{
 		ID: token, Hash: strings.Repeat("ab", 32), TTL: time.Hour,
 	})
 	c.Apply(state.KindAddHost, state.LeaderActor, state.AddHost{Token: token, Host: state.Host{
@@ -510,7 +510,7 @@ func (c *Cluster) Put(kind, name string, spec any) {
 	if err != nil {
 		c.t.Fatal(err)
 	}
-	c.Apply(state.KindPutResource, state.UserActor("alice"), state.PutResource{
+	c.Apply(state.KindPutResource, state.CLIActor, state.PutResource{
 		Kind: kind, Namespace: names.Default, Name: name, Owner: state.OwnerCLI, Spec: encoded,
 	})
 }
@@ -518,7 +518,7 @@ func (c *Cluster) Put(kind, name string, spec any) {
 // Remove deletes a resource of the namespace default.
 func (c *Cluster) Remove(kind, name string) {
 	c.t.Helper()
-	c.Apply(state.KindDeleteResource, state.UserActor("alice"), state.DeleteResource{
+	c.Apply(state.KindDeleteResource, state.CLIActor, state.DeleteResource{
 		Kind: kind, Namespace: names.Default, Name: name, Owner: state.OwnerCLI,
 	})
 }

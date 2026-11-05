@@ -10,15 +10,14 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/names"
-	"github.com/webcodingcat/clowder/internal/pki"
 )
 
-// Credentials are the user's way into one cluster: the user's name, key and
-// certificate, and the cluster's CA, which is what the CLI trusts. They live
-// in the user's config directory, not in the cluster directory: a
-// repository is shared, the key is the user's alone.
+// Credentials are the way into one cluster: the CLI's key and certificate,
+// and the cluster's CA, which is what the CLI trusts. Whoever holds them
+// controls the cluster, as with kubeadm's admin.conf. They live in the
+// user's config directory, not in the cluster directory: a repository is
+// shared, the key is not.
 type Credentials struct {
-	User        string `yaml:"user"`
 	CA          string `yaml:"ca"`
 	Certificate string `yaml:"certificate"`
 	Key         string `yaml:"key"`
@@ -49,7 +48,7 @@ func ReadCredentials(cluster string) (*Credentials, error) {
 	}
 	content, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("no credentials for cluster %s (%s): you are not a user of it on this machine",
+		return nil, fmt.Errorf("no credentials for cluster %s (%s): get them from a host with clowderd credentials, as root there",
 			cluster, path)
 	}
 	if err != nil {
@@ -57,9 +56,6 @@ func ReadCredentials(cluster string) (*Credentials, error) {
 	}
 	var credentials Credentials
 	if err := decodeStrict(content, &credentials); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	if err := pki.CheckUserName(credentials.User); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &credentials, nil

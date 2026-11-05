@@ -57,10 +57,15 @@ func printStatus(out io.Writer, status api.Status) error {
 
 // localApply is what clowder cluster apply sends: cluster.yaml, checked
 // here first so its problems show without a round trip, its values still
-// encrypted, and its files.
-func localApply(directory *clusterdir.Directory) (api.ClusterApply, error) {
+// encrypted, and its files. Its warnings go to warnings.
+func localApply(directory *clusterdir.Directory, warnings io.Writer) (api.ClusterApply, error) {
 	if problems := clusterspec.Check(directory.Config); len(problems) > 0 {
 		return api.ClusterApply{}, problems
+	}
+	for _, warning := range clusterspec.EndpointWarnings(directory.Config) {
+		if _, err := fmt.Fprintf(warnings, "warning: %s\n", warning); err != nil {
+			return api.ClusterApply{}, err
+		}
 	}
 	files, err := directory.Files()
 	if err != nil {
@@ -79,7 +84,7 @@ func newApply(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			apply, err := localApply(directory)
+			apply, err := localApply(directory, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -109,7 +114,7 @@ func newDiff(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			apply, err := localApply(directory)
+			apply, err := localApply(directory, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

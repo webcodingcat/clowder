@@ -9,7 +9,6 @@ import (
 	"net/url"
 
 	"github.com/webcodingcat/clowder/internal/names"
-	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -34,10 +33,6 @@ type Containers interface {
 func (s *Server) stackHost(w http.ResponseWriter, r *http.Request) (state.HostID, string, bool) {
 	namespace, name := r.PathValue("namespace"), r.PathValue("name")
 	id := names.ID(namespace, name)
-	if err := state.Authorize(actorOf(identityOf(r)), state.VerbRead, resource.KindStack, namespace); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return 0, "", false
-	}
 	var host *state.HostID
 	var exists bool
 	s.config.Cluster.Read(func(current *state.State) {

@@ -92,7 +92,7 @@ func TestAFenceThatCannotPowerOffTakesTheHostBackToFailed(t *testing.T) {
 		t.Errorf("host %s, fenced at %v", host.Phase, host.FencedAt)
 	}
 	// a user who checked that it is off confirms it
-	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 1, Phase: Fenced, From: Failed})
+	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Fenced, From: Failed})
 	if host := c.state.Hosts[1]; host.Phase != Fenced || len(host.FencedAt) != 1 {
 		t.Errorf("host %s, fenced at %v", host.Phase, host.FencedAt)
 	}
@@ -117,7 +117,7 @@ func TestOnlyAFailedHostWithACheckedServerIsFenced(t *testing.T) {
 
 func TestAFencedHostIsBackOnceItsCopiesCaughtUp(t *testing.T) {
 	c := failedHost(t)
-	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 1, Phase: Fenced, From: Failed})
+	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Fenced, From: Failed})
 	c.mustApply(KindSetHostPhase, HostActor(1), SetHostPhase{Host: 1, Phase: Recovering, From: Fenced})
 	c.refuse(KindSetHostPhase, HostActor(1), SetHostPhase{Host: 1, Phase: Active}, "not synced yet")
 	if c.state.CaughtUp(1) {
@@ -143,7 +143,7 @@ func TestTheFlappingBrakeCountsTheFencesOfAnHour(t *testing.T) {
 	c := failedHost(t)
 	c.state.Hosts[1].FencedAt = host.FencedAt
 	c.state.Hosts[1].Phase = Disabled
-	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 1, Phase: Fenced, From: Disabled})
+	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Fenced, From: Disabled})
 	if fenced := c.state.Hosts[1].FencedAt; len(fenced) != 0 {
 		t.Errorf("enabled with the fences %v still counted", fenced)
 	}
@@ -152,7 +152,7 @@ func TestTheFlappingBrakeCountsTheFencesOfAnHour(t *testing.T) {
 func TestAFenceForgetsFencesOlderThanTheBrakesWindow(t *testing.T) {
 	c := failedHost(t)
 	c.state.Hosts[1].FencedAt = []time.Time{testTime.Add(-2 * time.Hour), testTime.Add(-30 * time.Minute)}
-	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 1, Phase: Fenced, From: Failed})
+	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Fenced, From: Failed})
 	want := []time.Time{testTime.Add(-30 * time.Minute), testTime}
 	if fenced := c.state.Hosts[1].FencedAt; !slices.Equal(fenced, want) {
 		t.Errorf("fenced at %v, want %v", fenced, want)
@@ -166,7 +166,7 @@ func TestAStackFailsOverOnlyFromAHostThatIsOff(t *testing.T) {
 	// failed: it may still run the stack
 	failover.PlannedAt = c.index
 	c.refuse(KindSetStackStatus, LeaderActor, failover, "only an operation that holds its lock moves it")
-	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 1, Phase: Fenced, From: Failed})
+	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Fenced, From: Failed})
 	// only to an active host
 	c.state.Hosts[2].Phase = Draining
 	failover.PlannedAt = c.index

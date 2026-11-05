@@ -23,7 +23,7 @@ func NewRoot() *cobra.Command {
 	var shared globals
 	shared.register(root)
 	root.AddCommand(newVersion(), newCluster(&shared), newSecret(&shared), newHost(&shared), newStack(&shared),
-		newVolume(&shared), newAlert(&shared), newUser(&shared), newRecovery(&shared), newApplyResources(&shared),
+		newVolume(&shared), newAlert(&shared), newRecovery(&shared), newApplyResources(&shared),
 		newGet(&shared), newDelete(&shared))
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError{err} })
 	checkArgs(root)

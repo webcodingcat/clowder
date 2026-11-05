@@ -21,7 +21,7 @@ func useConfigDir(t *testing.T) {
 
 func TestCredentialsComeBackByTheClustersName(t *testing.T) {
 	useConfigDir(t)
-	written := Credentials{User: "alice", CA: "CA-PEM", Certificate: "CERT-PEM", Key: "KEY-PEM"}
+	written := Credentials{CA: "CA-PEM", Certificate: "CERT-PEM", Key: "KEY-PEM"}
 	if err := WriteCredentials("prod", written); err != nil {
 		t.Fatal(err)
 	}
@@ -64,8 +64,9 @@ func TestReadCredentialsRefusesABrokenFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	for content, want := range map[string]string{
-		"user: alice\ncert: x\n": "cert",
-		"user: ../alice\n":       "user name",
+		"ca: x\ncert: x\n": "cert",
+		// credentials of a release that had users: get new ones from a host
+		"user: alice\n": "field user not found",
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
@@ -85,7 +86,7 @@ func TestABootstrapWritesOverNothing(t *testing.T) {
 	if err := CheckBootstrap(dir, "prod", false); err != nil {
 		t.Fatalf("an empty directory: %v", err)
 	}
-	if err := WriteCredentials("prod", Credentials{User: "alice"}); err != nil {
+	if err := WriteCredentials("prod", Credentials{CA: "CA-PEM"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := CheckBootstrap(dir, "prod", false); err == nil || !strings.Contains(err.Error(), "--force") {

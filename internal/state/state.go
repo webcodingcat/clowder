@@ -39,8 +39,8 @@ type State struct {
 	// passwords, the alert channels'. A digest each, so a diff tells a
 	// changed value from one encrypted anew.
 	ClusterSecrets map[string]SealedSecret `json:"cluster_secrets,omitempty"`
-	// BootstrapKey is init's key, sealed, until the bootstrap made the
-	// user; then it is gone.
+	// BootstrapKey is init's key, sealed, until the bootstrap gave the CLI
+	// its first certificate; then it is gone (FinishBootstrap).
 	BootstrapKey Sealed `json:"bootstrap_key,omitempty"`
 	// JoinTokens are the tokens a host may join with, by ID, until one
 	// joins with it or it expires.
@@ -70,13 +70,12 @@ type State struct {
 	Challenges map[string]string `json:"challenges,omitempty"`
 	// Certificates are the HTTP routes' certificates by domain.
 	Certificates map[string]*Certificate `json:"certificates,omitempty"`
-	Users        map[string]*User        `json:"users,omitempty"`
-	// Revoked are the revoked certificates by serial, each until a while
-	// after it expired (revoke).
+	// Revoked are the revoked host certificates by serial, each until a
+	// while after it expired (revoke).
 	Revoked map[string]Revocation `json:"revoked,omitempty"`
-	// UsedCodes are the recovery codes that were used, by digest, each with
-	// when it expires: a code opens once (useCode).
-	UsedCodes map[string]time.Time `json:"used_codes,omitempty"`
+	// CLICutoff refuses the CLI certificates issued before it (SetCLICutoff):
+	// the CLI's certificates are not listed one by one, as kubeadm does not.
+	CLICutoff time.Time `json:"cli_cutoff,omitzero"`
 	// Namespaces hold the other resources; the bootstrap makes names.Default.
 	Namespaces map[string]*Namespace `json:"namespaces,omitempty"`
 	Stacks     map[string]*Stack     `json:"stacks,omitempty"`  // names.ID: "<namespace>/<stack>"
@@ -209,14 +208,6 @@ type Pool struct {
 	SizeBytes       int64  `json:"size_bytes"`
 	DataPercent     int    `json:"data_percent"`
 	MetadataPercent int    `json:"metadata_percent"`
-}
-
-// User may use the CLI with the certificates listed here.
-type User struct {
-	Name string `json:"name"`
-	// Serials are the user's certificates, each with when it expires;
-	// removing the user revokes them.
-	Serials map[string]time.Time `json:"serials,omitempty"`
 }
 
 // Revocation is a revoked certificate: when it was revoked, and when it

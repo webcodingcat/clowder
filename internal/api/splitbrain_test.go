@@ -65,7 +65,7 @@ func splitVolume(cluster *testCluster) {
 func TestASplitBrainIsResolvedOnTheOtherCopiesFirstThenOnTheKeptOne(t *testing.T) {
 	cluster := newTestCluster(t)
 	splitVolume(cluster)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 1)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 1)
 	ctx := context.Background()
 	path := "/v1/volumes/shop/data/resolve-splitbrain"
 

@@ -85,6 +85,21 @@ func TestHetznersAPIIsAFullURL(t *testing.T) {
 	}
 }
 
+func TestOwnEndpointsAreWarnedAboutAndHTTPAboveAll(t *testing.T) {
+	if warnings := EndpointWarnings(Config{}); len(warnings) != 0 {
+		t.Errorf("the default endpoints warn: %v", warnings)
+	}
+	warnings := EndpointWarnings(Config{
+		Hetzner: Hetzner{API: "http://198.18.0.1/v1"},
+		ACME:    ACME{Directory: "https://ca.example.com/directory"},
+	})
+	if len(warnings) != 2 ||
+		!strings.Contains(warnings[0], "hetzner.api is set") || !strings.Contains(warnings[0], "the Hetzner token crosses") ||
+		!strings.Contains(warnings[1], "acme.directory is set") || strings.Contains(warnings[1], "unencrypted") {
+		t.Errorf("warnings %q", warnings)
+	}
+}
+
 func TestThePrivateNetworkIsAnIPv4NetworkOutsideClowders(t *testing.T) {
 	for network, problem := range map[string]string{
 		"10.0.0.0/16":  "",

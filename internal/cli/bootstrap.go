@@ -31,27 +31,23 @@ type bootstrapFlags struct {
 func newBootstrap(g *globals) *cobra.Command {
 	var flags bootstrapFlags
 	command := &cobra.Command{
-		Use:   "bootstrap <user>",
-		Short: "Become the user of a new cluster and set up its directory",
+		Use:   "bootstrap",
+		Short: "Get the first credentials of a new cluster and set up its directory",
 		Long: "Asks the first host for the cluster's CA and trusts it only if the host proves it knows\n" +
 			"the bootstrap key. Makes the recovery key, shows it once and asks for its last 8\n" +
-			"characters (or writes it to --recovery-out), then gets the user's first certificate.\n" +
+			"characters (or writes it to --recovery-out), then gets the CLI's first certificate.\n" +
 			"Writes your credentials into your config directory, under the cluster's name, and\n" +
 			"cluster.yaml to fill in into the cluster directory, with the first host as its only\n" +
 			"endpoint. The CLI tries the endpoints in turn and learns no others: add each host\n" +
 			"that joins, so the CLI reaches the cluster while the first host is down.",
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			user := args[0]
-			if err := pki.CheckUserName(user); err != nil {
-				return err
-			}
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			path, err := clusterdir.Target(g.cluster)
 			if err != nil {
 				return err
 			}
-			// before the cluster is asked: once it has its user, a
-			// bootstrap cannot be repeated
+			// before the cluster is asked: once the CLI has its first
+			// certificate, a bootstrap cannot be repeated
 			if err := clusterdir.CheckBootstrap(path, flags.name, flags.force); err != nil {
 				return err
 			}
@@ -64,7 +60,7 @@ func newBootstrap(g *globals) *cobra.Command {
 			cluster, err := api.FindCluster(cmd.Context(), flags.endpoint, g.connectTimeout, []byte(bootstrapKey), buildinfo.Version)
 			if errors.Is(err, api.ErrBootstrapped) {
 				return fmt.Errorf("%w. If that was an earlier try of yours, the recovery key it gave out is the one "+
-					"that counts; %s", err, accessByCode(user, flags.name, flags.endpoint))
+					"that counts; %s", err, credentialsFromHost(flags.name))
 			}
 			if err != nil {
 				return err
@@ -76,25 +72,23 @@ func newBootstrap(g *globals) *cobra.Command {
 			if err := handOverRecoveryKey(cmd, recovery, flags.recoveryOut); err != nil {
 				return err
 			}
-			credentials, err := becomeFirstUser(cmd.Context(), cluster, user, recovery)
+			credentials, err := firstCredentials(cmd.Context(), cluster, recovery)
 			if err != nil {
 				return err
 			}
-			// the credentials first: without them the cluster's user
-			// is lost, while cluster.yaml can be written by hand
+			// the credentials first: cluster.yaml can be written by hand
 			if err := clusterdir.WriteCredentials(flags.name, credentials); err != nil {
-				return fmt.Errorf("%w. The cluster has %s as its user and the recovery key just made counts; "+
-					"%s, and write cluster.yaml after the README's example", err, user,
-					accessByCode(user, flags.name, flags.endpoint))
+				return fmt.Errorf("%w. The cluster is bootstrapped and the recovery key just made counts; "+
+					"%s, and write cluster.yaml after the README's example", err, credentialsFromHost(flags.name))
 			}
 			newDirectory := clusterdir.NewDirectory{Path: path, Name: flags.name, Endpoint: flags.endpoint}
 			if err := createDirectory(cmd.Context(), newDirectory, credentials, cluster, recovery, g.connectTimeout); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s is the user of cluster %s. Next:\n"+
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Cluster %s is bootstrapped. Next:\n"+
 				"  1. fill in cluster.yaml: hetzner with its token (clowder secret encrypt --cluster-yaml),\n"+
 				"     the private network, the Floating IP, the storage classes\n"+
-				"  2. clowder cluster apply\n", user, flags.name)
+				"  2. clowder cluster apply\n", flags.name)
 			return err
 		},
 	}
@@ -111,16 +105,15 @@ func newBootstrap(g *globals) *cobra.Command {
 	return command
 }
 
-// becomeFirstUser makes the user's key and gets its certificate from the
+// firstCredentials makes the CLI's key and gets its certificate from the
 // cluster, which takes recovery's public key as the cluster's recovery key.
-func becomeFirstUser(ctx context.Context, cluster *api.TrustedCluster, user string,
-	recovery *age.X25519Identity,
+func firstCredentials(ctx context.Context, cluster *api.TrustedCluster, recovery *age.X25519Identity,
 ) (clusterdir.Credentials, error) {
 	key, err := pki.NewKey()
 	if err != nil {
 		return clusterdir.Credentials{}, err
 	}
-	certificatePEM, err := cluster.Bootstrap(ctx, user, key.Public().(ed25519.PublicKey), recovery.Recipient().String())
+	certificatePEM, err := cluster.Bootstrap(ctx, key.Public().(ed25519.PublicKey), recovery.Recipient().String())
 	if err != nil {
 		return clusterdir.Credentials{}, err
 	}
@@ -128,7 +121,7 @@ func becomeFirstUser(ctx context.Context, cluster *api.TrustedCluster, user stri
 	if err != nil {
 		return clusterdir.Credentials{}, err
 	}
-	return clusterdir.Credentials{User: user, CA: cluster.CAPEM, Certificate: certificatePEM, Key: string(keyPEM)}, nil
+	return clusterdir.Credentials{CA: cluster.CAPEM, Certificate: certificatePEM, Key: string(keyPEM)}, nil
 }
 
 // createDirectory writes the cluster directory with cluster.yaml to fill
@@ -150,15 +143,19 @@ func createDirectory(ctx context.Context, directory clusterdir.NewDirectory, cre
 	// before, or the cluster refuses it
 	if encryption.Recovery != recovery.Recipient().String() {
 		return fmt.Errorf("the cluster's recovery key is %s, not the one just made; "+
-			"make a new one with clowder recovery rotate and a code from a host", encryption.Recovery)
+			"make a new one with clowder recovery rotate", encryption.Recovery)
 	}
 	return clusterdir.Create(directory)
 }
 
-// accessByCode says how a user of the cluster gets in without credentials.
-func accessByCode(user, cluster, endpoint string) string {
-	return fmt.Sprintf("get access with a code from a host: clowderd user recovery-code %s, as root there, "+
-		"then clowder user recover %s --code <code> --name %s --endpoint %s", user, user, cluster, endpoint)
+// credentialsFromHost says how to get credentials without any: from root
+// on a host, as kubeadm's admin.conf.
+func credentialsFromHost(cluster string) string {
+	path, err := clusterdir.CredentialsPath(cluster)
+	if err != nil {
+		path = "your credentials file"
+	}
+	return fmt.Sprintf("get credentials from a host: clowderd credentials, as root there, into %s", path)
 }
 
 // confirmChars is how much of the recovery key the user types back: enough

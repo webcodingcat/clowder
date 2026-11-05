@@ -37,7 +37,8 @@ type Client struct {
 	answered atomic.Pointer[string]
 }
 
-// NewClient connects with a user's certificate to the agents at endpoints.
+// NewClient connects with a certificate (the CLI's, or a host's for
+// clowderd's own commands) to the agents at endpoints.
 // An endpoint that has not connected within connectTimeout, or not finished
 // TLS within as long again, is skipped like one that refused it: a host cut
 // off drops the packets, and without a timeout of its own the whole

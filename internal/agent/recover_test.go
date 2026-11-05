@@ -89,7 +89,7 @@ func lostCluster(t *testing.T) (Files, *hetznertest.API) {
 			t.Fatalf("%s: %v", kind, err)
 		}
 	}
-	commit(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
+	commit(state.KindApplyConfig, state.CLIActor, state.ApplyConfig{
 		Spec: clusterspec.Config{
 			Name: "prod", Endpoints: []string{"198.51.100.2"},
 			Hetzner:        clusterspec.Hetzner{Token: "hetzner.token", API: project.URL},
@@ -103,7 +103,7 @@ func lostCluster(t *testing.T) (Files, *hetznertest.API) {
 		name := "node" + string(rune('0'+id))
 		underlay, public := netip.AddrFrom4([4]byte{127, 0, 0, byte(id + 2)}), netip.AddrFrom4([4]byte{198, 51, 100, byte(id + 2)})
 		project.AddServer(40+int64(id), underlay, public)
-		commit(state.KindAddJoinToken, state.UserActor("alice"), state.AddJoinToken{
+		commit(state.KindAddJoinToken, state.CLIActor, state.AddJoinToken{
 			ID: name, Hash: strings.Repeat("ab", 32), TTL: time.Hour,
 		})
 		commit(state.KindAddHost, state.LeaderActor, state.AddHost{Token: name, Host: state.Host{

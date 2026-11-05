@@ -59,29 +59,6 @@ func (s *State) deleted(kind string, meta Meta) {
 	})
 }
 
-// The verbs Authorize knows: put, delete, restart and move change resources in
-// the state; read and resolve are for what never passes Raft (the API's
-// lists, a stack's ps and logs; a volume's split brain, which its hosts
-// resolve).
-const (
-	VerbPut     = "put"
-	VerbDelete  = "delete"
-	VerbRestart = "restart"
-	VerbMove    = "move"
-	VerbRead    = "read"
-	VerbResolve = "resolve"
-)
-
-// Authorize tells whether an actor may apply a verb to the resources of a
-// kind in a namespace. The state calls it as each command is applied, so
-// it uses the permissions as they are at that point of the log, and no
-// single agent that took the request decides on its own. The API also
-// calls it for reads. Until users have permissions, every user may do
-// everything, so it ignores its arguments for now.
-func Authorize(_, _, _, _ string) error {
-	return nil
-}
-
 // PutResource creates or changes a resource. A spec equal to the stored
 // one changes nothing: not the generation, not the resource version, so
 // applying the same files again restarts nothing.
@@ -143,9 +120,6 @@ func applyPutResource(s *State, cmd Command, payload PutResource) (func(), error
 	if !ok {
 		return nil, fmt.Errorf("no kind of resource %q", payload.Kind)
 	}
-	if err := Authorize(cmd.Actor, VerbPut, payload.Kind, payload.Namespace); err != nil {
-		return nil, err
-	}
 	id, err := s.resourceID(payload.Kind, payload.Namespace, payload.Name)
 	if err != nil {
 		return nil, err
@@ -171,9 +145,6 @@ func applyDeleteResource(s *State, cmd Command, payload DeleteResource) (func(),
 	kind, ok := resourceKinds[payload.Kind]
 	if !ok {
 		return nil, fmt.Errorf("no kind of resource %q", payload.Kind)
-	}
-	if err := Authorize(cmd.Actor, VerbDelete, payload.Kind, payload.Namespace); err != nil {
-		return nil, err
 	}
 	id, err := s.resourceID(payload.Kind, payload.Namespace, payload.Name)
 	if err != nil {

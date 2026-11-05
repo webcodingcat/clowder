@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/webcodingcat/clowder/internal/names"
-	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -64,10 +63,6 @@ type resolvingCopy struct {
 // from their reports.
 func (s *Server) resolveSplitBrain(w http.ResponseWriter, r *http.Request) {
 	namespace, name := r.PathValue("namespace"), r.PathValue("name")
-	if err := state.Authorize(actorOf(identityOf(r)), state.VerbResolve, resource.KindVolume, namespace); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
 	var request ResolveRequest
 	if err := decodeStrict(r.Body, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err)

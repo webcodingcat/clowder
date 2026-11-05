@@ -32,7 +32,7 @@ func TestTheStateIsReadOnlyWhileTheAgentIsStopped(t *testing.T) {
 	if err := node.raft.Snapshot().Error(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := node.Propose(ctx, addUser(t, "alice", "a1")); err != nil {
+	if _, err := node.Propose(ctx, finishBootstrap(t)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ReadState(dir); err == nil || !strings.Contains(err.Error(), "stop clowderd.service first") {
@@ -45,8 +45,8 @@ func TestTheStateIsReadOnlyWhileTheAgentIsStopped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := current.Users["alice"]; !ok || current.Hosts[0] == nil {
-		t.Errorf("users %v, hosts %v", current.Users, current.Hosts)
+	if current.RecoveryRecipient != "age1recovery" || current.Hosts[0] == nil {
+		t.Errorf("recovery recipient %q, hosts %v", current.RecoveryRecipient, current.Hosts)
 	}
 }
 
@@ -71,7 +71,7 @@ func TestARecoveredMemberLeadsAloneWithItsState(t *testing.T) {
 	if _, err := nodes[0].Propose(ctx, bootstrapCommand(t)); err != nil {
 		t.Fatal(err)
 	}
-	index, err := nodes[0].Propose(ctx, addUser(t, "alice", "a1"))
+	index, err := nodes[0].Propose(ctx, finishBootstrap(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,8 +93,8 @@ func TestARecoveredMemberLeadsAloneWithItsState(t *testing.T) {
 	recovered := cluster.open(2, dirs[2], addresses[2])
 	defer func() { _ = recovered.Close() }()
 	waitForLeader(t, recovered)
-	if got := users(recovered); len(got) != 1 || got[0] != "alice" {
-		t.Errorf("users after the recover: %v", got)
+	if got := recoveryRecipient(recovered); got != "age1recovery" {
+		t.Errorf("recovery recipient after the recover: %q", got)
 	}
 	members, err := recovered.Members()
 	if err != nil || len(members) != 1 || !members[2] {

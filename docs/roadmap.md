@@ -16,8 +16,8 @@ clowder is built in phases; each ends with live tests on HLab
 
 Phase 1d replaced SOPS with values of their own: tagged `!secret` in `cluster.yaml` and in
 Secrets, encrypted for the cluster and the recovery key (`secret encrypt`, `rekey`,
-`decrypt`), with the credentials in the user's config directory and access back through a
-code from a host (`user recover`, `recovery rotate`).
+`decrypt`), with the credentials in the user's config directory and access back from root
+on a host (now `clowderd credentials`, below).
 
 Phase 2 began with the live tests, before any code for several hosts: `bin/dev live up`,
 `run` and `down` apart, with a lock against two runs; scenarios that each check their
@@ -203,8 +203,7 @@ out; its release candidate passed the live tests without the test hook.
 
 Code without a caller went then; each phase brings back what it needs:
 
-- phase 3: `backup:` in `cluster.yaml`, and resources owned by a GitOps source;
-- user management: more users per cluster, removing a user, revoking one certificate.
+- phase 3: `backup:` in `cluster.yaml`, and resources owned by a GitOps source.
 
 Then the layer between clowder and its one cloud went: clowder runs on Hetzner Cloud,
 with a Hetzner private network between the hosts, and nothing else.
@@ -225,6 +224,21 @@ with a Hetzner private network between the hosts, and nothing else.
 The state, the join request and `clowderd init`'s and `join`'s flags changed with it,
 so a cluster of an earlier build must be set up anew.
 
+Then access went the way of kubeadm, before real production use:
+
+- A cluster has no users. The CLI's certificate (`cli`, as `admin.conf`) controls it;
+  the actor of its commands is `cli`, so a host that forwards one has no name to forge.
+  `Authorize` and the user names went (`cluster bootstrap` takes none).
+- More credentials, or new ones after a lost laptop, come from root on a host:
+  `clowderd credentials` prints a `credentials.yaml`. With `--revoke-older` every agent
+  refuses the CLI certificates issued before it (`State.CLICutoff`). The codes from a
+  host, `user recover` and the code of `recovery rotate` went.
+- `hetzner.api` and `acme.directory` are for test labs: set, they may be `http://`, and
+  `cluster apply`, `diff` and the leader's log warn about them.
+
+The state, the bootstrap request and `credentials.yaml` changed with it: a cluster of an
+earlier build must be set up anew, and credentials of an earlier build are refused.
+
 Until `v1.0.0`, the state and `cluster.yaml` may change between releases without a way
 to upgrade a running cluster.
 
@@ -240,6 +254,8 @@ Phase 3 (backup and restore):
 
 Phase 4 (comfort and operations):
 
+- A removed host keeps the cluster's keys until `cluster rotate-keys` exists (Keys of a
+  removed host, below); until then, wipe its disk.
 - A host that comes back after a fence resyncs all its copies at once, each at the
   resync limit's rate; the limit holds back only new copies meanwhile.
 - A failed host that is not fenced (it needs none, no `cluster.yaml` applied yet, a server
@@ -291,26 +307,24 @@ Not live-tested, as the lab cannot make it:
 - recover on a host that rebooted since the others went: its DRBD resources come up from
   the agent's files, with this host alone.
 
-## Before users get permissions
+## Keys of a removed host
 
-A cluster has one user so far, and it may do everything.
+A cluster has no users: whoever holds the CLI's credentials controls it, as with
+kubeadm's `admin.conf`. What a removed host keeps is the open point.
 
 - A removed host keeps the data key, and with it the CA's key and every `!secret`
   value: a host that kept its disk can still issue certificates the revocations do not
-  name. Rotating the data key, the CA and the cluster's age key (`cluster rotate-keys`)
-  comes before users get permissions. Until then, wipe a removed host's disk.
-- The CLI checks an agent's certificate against the CA, not against the revocations: a
-  removed host that kept its key could answer it as the cluster, with recipients of its
-  own for `secret encrypt`. The CLI needs the revocation list or the cluster's recipients
-  pinned in the credentials.
-- The leader trusts the actor a host names for a user's command it forwards
-  (`/v1/internal/propose`, `/v1/internal/changes`). That holds while root on any host has
-  every key anyway.
-- The state already asks `Authorize` on the leader for every change of a resource; with
-  permissions it reads the cluster's role bindings there.
-- Whoever may use the API can check a guessed value against a secret's digest. Until there
-  are permissions that is every user, who can read the value through a privileged stack
-  anyway.
+  name, host certificates and CLI certificates after the cutoff alike. Rotating the data
+  key, the CA and the cluster's age key (`cluster rotate-keys`, planned for phase 4)
+  closes it. Until then, wipe a removed host's disk.
+- The CLI checks an agent's certificate against the CA, not against the revocations, as
+  kubectl does: a removed host could answer it as the cluster, with recipients of its own
+  for `secret encrypt`. The agents refuse it, but only the CLI's `endpoints` keep the CLI
+  from asking it, so remove a host's address from `endpoints` as the host goes. With the
+  CA's key on such a host, no list the CLI pinned would help; `cluster rotate-keys`
+  closes this too.
+- Whoever holds the CLI's credentials can check a guessed value against a secret's
+  digest; they can read the value through a privileged stack anyway.
 
 ## What the spike of phase 0 showed
 

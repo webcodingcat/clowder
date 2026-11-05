@@ -19,7 +19,7 @@ import (
 func addActiveHost(l *leader, id state.HostID) {
 	l.t.Helper()
 	token := "token-" + strconv.Itoa(int(id))
-	l.apply(state.KindAddJoinToken, state.UserActor("alice"), state.AddJoinToken{
+	l.apply(state.KindAddJoinToken, state.CLIActor, state.AddJoinToken{
 		ID: token, Hash: strings.Repeat("ab", 32), TTL: time.Hour,
 	})
 	l.apply(state.KindAddHost, state.LeaderActor, state.AddHost{Token: token, Host: state.Host{
@@ -69,7 +69,7 @@ func TestAStackMovesWhereAUserAsksStepByStep(t *testing.T) {
 	l := newLeader(t, 100<<30)
 	addActiveHost(l, 1)
 	runningShopOnZero(t, l)
-	l.apply(state.KindRequestMove, state.UserActor("alice"), state.RequestMove{Namespace: "default", Name: "shop", To: 1})
+	l.apply(state.KindRequestMove, state.CLIActor, state.RequestMove{Namespace: "default", Name: "shop", To: 1})
 	placer, mover := newPlacer(l), newMover(l, nil)
 	ctx := context.Background()
 
@@ -125,7 +125,7 @@ func TestALateResyncGetsMoreTimeOnlyWhileItGetsOn(t *testing.T) {
 	l := newLeader(t, 100<<30)
 	addActiveHost(l, 1)
 	runningShopOnZero(t, l)
-	l.apply(state.KindRequestMove, state.UserActor("alice"), state.RequestMove{Namespace: "default", Name: "shop", To: 1})
+	l.apply(state.KindRequestMove, state.CLIActor, state.RequestMove{Namespace: "default", Name: "shop", To: 1})
 	left := map[string]int64{"default/db": 3 << 30}
 	progress := func(_ context.Context, host state.HostID) (map[string]int64, error) {
 		if host != 1 {
@@ -185,7 +185,7 @@ func startedMove(t *testing.T, left map[string]int64, err *error) (*leader, *mov
 	l := newLeader(t, 100<<30)
 	addActiveHost(l, 1)
 	runningShopOnZero(t, l)
-	l.apply(state.KindRequestMove, state.UserActor("alice"), state.RequestMove{Namespace: "default", Name: "shop", To: 1})
+	l.apply(state.KindRequestMove, state.CLIActor, state.RequestMove{Namespace: "default", Name: "shop", To: 1})
 	progress := func(context.Context, state.HostID) (map[string]int64, error) { return left, *err }
 	placer, mover := newPlacer(l), newMover(l, progress)
 	placer.pass(context.Background())

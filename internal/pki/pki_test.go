@@ -42,18 +42,19 @@ func issued(t *testing.T, issue func(public ed25519.PublicKey) ([]byte, error)) 
 	return key, certificate
 }
 
-func TestVerifyTellsUsersAndHostsApart(t *testing.T) {
+func TestVerifyTellsTheCLIAndHostsApart(t *testing.T) {
 	ca := newTestCA(t)
-	_, user := issued(t, func(public ed25519.PublicKey) ([]byte, error) {
-		return ca.IssueUser(public, "alice", testTime)
+	_, cli := issued(t, func(public ed25519.PublicKey) ([]byte, error) {
+		return ca.IssueCLI(public, testTime)
 	})
 	_, host := issued(t, func(public ed25519.PublicKey) ([]byte, error) {
 		return ca.IssueHost(public, 2, []netip.Addr{netip.MustParseAddr("10.77.0.3")}, testTime)
 	})
 
-	identity, err := Verify(ca.Certificate, user, notRevoked, testTime)
-	if err != nil || identity.Role != RoleUser || identity.Name != "alice" || identity.Serial != Serial(user) {
-		t.Errorf("user: %+v, %v", identity, err)
+	identity, err := Verify(ca.Certificate, cli, notRevoked, testTime)
+	if err != nil || identity.Role != RoleCLI || identity.Name != CLIName || identity.Serial != Serial(cli) ||
+		!identity.NotBefore.Equal(testTime.Add(-clockSkew)) {
+		t.Errorf("CLI: %+v, %v", identity, err)
 	}
 	identity, err = Verify(ca.Certificate, host, notRevoked, testTime)
 	if err != nil || identity.Role != RoleHost || identity.HostID != 2 || identity.Name != "host-2" {
@@ -70,11 +71,11 @@ func TestVerifyTellsUsersAndHostsApart(t *testing.T) {
 func TestVerifyRefuses(t *testing.T) {
 	ca := newTestCA(t)
 	_, user := issued(t, func(public ed25519.PublicKey) ([]byte, error) {
-		return ca.IssueUser(public, "alice", testTime)
+		return ca.IssueCLI(public, testTime)
 	})
 	otherCA := newTestCA(t)
 	_, stranger := issued(t, func(public ed25519.PublicKey) ([]byte, error) {
-		return otherCA.IssueUser(public, "mallory", testTime)
+		return otherCA.IssueCLI(public, testTime)
 	})
 	tests := []struct {
 		name        string
@@ -101,19 +102,6 @@ func TestVerifyRefuses(t *testing.T) {
 	}
 }
 
-func TestUserNamesFollowOneRule(t *testing.T) {
-	ca := newTestCA(t)
-	key, err := NewKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"", "a/b", "a,b", "Alice.Smith"} {
-		if _, err := ca.IssueUser(key.Public(), name, testTime); err == nil {
-			t.Errorf("%q: no error", name)
-		}
-	}
-}
-
 func TestTheCASurvivesPEM(t *testing.T) {
 	ca := newTestCA(t)
 	keyPEM, err := ca.KeyPEM()
@@ -125,7 +113,7 @@ func TestTheCASurvivesPEM(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, user := issued(t, func(public ed25519.PublicKey) ([]byte, error) {
-		return loaded.IssueUser(public, "alice", testTime)
+		return loaded.IssueCLI(public, testTime)
 	})
 	if _, err := Verify(ca.Certificate, user, notRevoked, testTime); err != nil {
 		t.Errorf("a certificate of the loaded CA does not verify with the original: %v", err)

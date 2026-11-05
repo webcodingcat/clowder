@@ -24,7 +24,7 @@ type Command struct {
 	// At is the leader's clock when it wrote the command; Apply uses it
 	// instead of reading the clock, so every agent gets the same state.
 	At time.Time `json:"at"`
-	// Actor is who asked: LeaderActor, HostActor or UserActor.
+	// Actor is who asked: LeaderActor, HostActor or CLIActor.
 	Actor   string          `json:"actor"`
 	Payload json.RawMessage `json:"payload"`
 }
@@ -41,8 +41,8 @@ const (
 	KindDeleteACMEChallenge  = "delete-acme-challenge"
 	KindPutCertificate       = "put-certificate"
 	KindDeleteCertificate    = "delete-certificate"
-	KindAddUser              = "add-user"
-	KindRecoverUser          = "recover-user"
+	KindFinishBootstrap      = "finish-bootstrap"
+	KindSetCLICutoff         = "set-cli-cutoff"
 	KindSetRecoveryRecipient = "set-recovery-recipient"
 	KindPutResource          = "put-resource"
 	KindDeleteResource       = "delete-resource"
@@ -76,7 +76,8 @@ const LeaderActor = "leader"
 // hostActorPrefix starts the actor of every host.
 const hostActorPrefix = "host/"
 
-// IsHostActor tells whether an actor is a host (and not the leader or a user).
+// IsHostActor tells whether an actor is a host (and not the leader or the
+// CLI).
 func IsHostActor(actor string) bool {
 	return strings.HasPrefix(actor, hostActorPrefix)
 }
@@ -84,19 +85,6 @@ func IsHostActor(actor string) bool {
 // HostActor is the agent of a host, as its certificate names it.
 func HostActor(id HostID) string {
 	return hostActorPrefix + strconv.Itoa(int(id))
-}
-
-// userActorPrefix starts the actor of every user.
-const userActorPrefix = "user/"
-
-// IsUserActor tells whether an actor is a user of the CLI.
-func IsUserActor(actor string) bool {
-	return strings.HasPrefix(actor, userActorPrefix)
-}
-
-// UserActor is a user of the CLI, as their certificate names them.
-func UserActor(name string) string {
-	return userActorPrefix + name
 }
 
 // NewCommand wraps a payload into a command of the current version.
@@ -134,8 +122,8 @@ var commandKinds = map[string]commandKind{
 	KindDeleteACMEChallenge:  {"0.1.0", decoded(applyDeleteACMEChallenge)},
 	KindPutCertificate:       {"0.1.0", decoded(applyPutCertificate)},
 	KindDeleteCertificate:    {"0.1.0", decoded(applyDeleteCertificate)},
-	KindAddUser:              {"0.1.0", decoded(applyAddUser)},
-	KindRecoverUser:          {"0.1.0", decoded(applyRecoverUser)},
+	KindFinishBootstrap:      {"0.2.0", decoded(applyFinishBootstrap)},
+	KindSetCLICutoff:         {"0.2.0", decoded(applySetCLICutoff)},
 	KindSetRecoveryRecipient: {"0.1.0", decoded(applySetRecoveryRecipient)},
 	KindPutResource:          {"0.1.0", decoded(applyPutResource)},
 	KindDeleteResource:       {"0.1.0", decoded(applyDeleteResource)},
@@ -322,9 +310,6 @@ func (s *State) makeMaps() {
 	if s.Certificates == nil {
 		s.Certificates = map[string]*Certificate{}
 	}
-	if s.Users == nil {
-		s.Users = map[string]*User{}
-	}
 	if s.Revoked == nil {
 		s.Revoked = map[string]Revocation{}
 	}
@@ -336,9 +321,6 @@ func (s *State) makeMaps() {
 	}
 	if s.JoinTokens == nil {
 		s.JoinTokens = map[string]JoinToken{}
-	}
-	if s.UsedCodes == nil {
-		s.UsedCodes = map[string]time.Time{}
 	}
 	if s.Namespaces == nil {
 		s.Namespaces = map[string]*Namespace{}

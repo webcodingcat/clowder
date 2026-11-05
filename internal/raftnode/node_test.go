@@ -116,21 +116,17 @@ func bootstrapCommand(t *testing.T) state.Command {
 	})
 }
 
-// addUser is the command that makes the cluster's user.
-func addUser(t *testing.T, name, serial string) state.Command {
-	return command(t, state.KindAddUser, state.AddUser{
-		Name: name, Serial: serial, NotAfter: time.Now().AddDate(1, 0, 0), RecoveryRecipient: "age1recovery",
-	})
+// finishBootstrap is the command that ends the bootstrap; the cluster
+// takes it once.
+func finishBootstrap(t *testing.T) state.Command {
+	return command(t, state.KindFinishBootstrap, state.FinishBootstrap{RecoveryRecipient: "age1recovery"})
 }
 
-func users(node *Node) []string {
-	var names []string
-	node.Read(func(current *state.State) {
-		for name := range current.Users {
-			names = append(names, name)
-		}
-	})
-	return names
+// recoveryRecipient is what finishBootstrap left in the node's state.
+func recoveryRecipient(node *Node) string {
+	var recipient string
+	node.Read(func(current *state.State) { recipient = current.RecoveryRecipient })
+	return recipient
 }
 
 func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
@@ -149,15 +145,15 @@ func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
 	if err := node.raft.Snapshot().Error(); err != nil {
 		t.Fatal(err)
 	}
-	index, err := node.Propose(ctx, addUser(t, "alice", "a1"))
+	index, err := node.Propose(ctx, finishBootstrap(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// a refused command comes back as the state's error
-	_, err = node.Propose(ctx, addUser(t, "bob", "b1"))
+	_, err = node.Propose(ctx, finishBootstrap(t))
 	var refused *state.Refused
 	if !errors.As(err, &refused) {
-		t.Errorf("want a refusal for a second user, got %v", err)
+		t.Errorf("want a refusal for a second end of the bootstrap, got %v", err)
 	}
 	if err := node.Close(); err != nil {
 		t.Fatal(err)
@@ -174,8 +170,8 @@ func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
 	if err := reopened.WaitIndex(waitCtx, index); err != nil {
 		t.Fatal(err)
 	}
-	if got := users(reopened); len(got) != 1 || got[0] != "alice" {
-		t.Errorf("users after the restart: %v", got)
+	if got := recoveryRecipient(reopened); got != "age1recovery" {
+		t.Errorf("recovery recipient after the restart: %q", got)
 	}
 }
 
@@ -284,7 +280,7 @@ func TestThreeHostsReplicateOverMutualTLS(t *testing.T) {
 	if _, err := nodes[0].Propose(ctx, bootstrapCommand(t)); err != nil {
 		t.Fatal(err)
 	}
-	index, err := nodes[0].Propose(ctx, addUser(t, "alice", "a1"))
+	index, err := nodes[0].Propose(ctx, finishBootstrap(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,14 +290,14 @@ func TestThreeHostsReplicateOverMutualTLS(t *testing.T) {
 		if err := node.WaitIndex(waitCtx, index); err != nil {
 			t.Fatalf("host %d: %v", id, err)
 		}
-		if got := users(node); len(got) != 1 || got[0] != "alice" {
-			t.Errorf("host %d has users %v", id, got)
+		if got := recoveryRecipient(node); got != "age1recovery" {
+			t.Errorf("host %d has the recovery recipient %q", id, got)
 		}
 	}
 	if id, ok := nodes[2].Leader(); !ok || id != 0 {
 		t.Errorf("host 2 sees leader %d (%v)", id, ok)
 	}
-	if _, err := nodes[1].Propose(ctx, addUser(t, "bob", "b1")); err == nil {
+	if _, err := nodes[1].Propose(ctx, finishBootstrap(t)); err == nil {
 		t.Error("a follower committed a command")
 	}
 	if err := nodes[0].VerifyLeader(waitCtx); err != nil {
@@ -330,11 +326,11 @@ func TestOnlyHostsOfTheClusterGetIn(t *testing.T) {
 	node := cluster.open(0, t.TempDir(), address)
 	defer func() { _ = node.Close() }()
 
-	user := cluster.certificate(func(public ed25519.PublicKey) ([]byte, error) {
-		return cluster.ca.IssueUser(public, "alice", time.Now())
+	cli := cluster.certificate(func(public ed25519.PublicKey) ([]byte, error) {
+		return cluster.ca.IssueCLI(public, time.Now())
 	})
 	stranger := newTestCluster(t).hostCertificate(1)
-	for name, certificate := range map[string]tls.Certificate{"a user": user, "another cluster's host": stranger} {
+	for name, certificate := range map[string]tls.Certificate{"the CLI": cli, "another cluster's host": stranger} {
 		connection, err := tls.Dial("tcp", address, &tls.Config{
 			Certificates: []tls.Certificate{certificate}, InsecureSkipVerify: true, // only the server's check is tested
 			MinVersion: tls.VersionTLS13,

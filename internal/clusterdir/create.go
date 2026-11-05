@@ -20,8 +20,8 @@ type NewDirectory struct {
 // CheckBootstrap tells whether a bootstrap may write a cluster of that name
 // into path: not over a cluster.yaml, and not over credentials of a cluster
 // of the same name unless force says so (a cluster set up anew). The CLI
-// asks before it contacts the cluster, so nothing fails after the cluster
-// has its user.
+// asks before it contacts the cluster, so nothing fails after the bootstrap
+// is over.
 func CheckBootstrap(path, cluster string, force bool) error {
 	if err := checkNoConfig(path); err != nil {
 		return err

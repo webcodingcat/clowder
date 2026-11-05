@@ -99,12 +99,9 @@ type RestartStack struct {
 // applyRestartStack records the restart's time for each service. It changes
 // no spec, so the generation stays; and any channel may restart a stack,
 // whoever owns it, so an operator can restart one that GitOps applies.
-// Whether a user may is Authorize's. A running or failing stack is starting
-// until its host reports the recreated containers up.
+// A running or failing stack is starting until its host reports the
+// recreated containers up.
 func applyRestartStack(s *State, cmd Command, payload RestartStack) (func(), error) {
-	if err := Authorize(cmd.Actor, VerbRestart, resource.KindStack, payload.Namespace); err != nil {
-		return nil, err
-	}
 	id := names.ID(payload.Namespace, payload.Name)
 	stack, ok := s.Stacks[id]
 	if !ok {
@@ -324,9 +321,6 @@ type RequestMove struct {
 // A move to the host the stack runs on takes a request back.
 // Like a restart, it changes no spec, and any channel may ask for it.
 func applyRequestMove(s *State, cmd Command, payload RequestMove) (func(), error) {
-	if err := Authorize(cmd.Actor, VerbMove, resource.KindStack, payload.Namespace); err != nil {
-		return nil, err
-	}
 	id := names.ID(payload.Namespace, payload.Name)
 	stack, ok := s.Stacks[id]
 	if !ok {

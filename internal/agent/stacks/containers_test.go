@@ -24,7 +24,7 @@ func TestDockerLogsInOnceForEachRegistryLogin(t *testing.T) {
 		name := `registries["ghcr.io"].password`
 		applied.Spec.Registries = map[string]clusterspec.Registry{"ghcr.io": {Username: "robot", Password: clusterspec.SecretRef(name)}}
 		applied.Secrets[name] = state.SealedSecret{Value: sealed, Digest: name}
-		cluster.Apply(state.KindApplyConfig, state.UserActor("alice"), applied)
+		cluster.Apply(state.KindApplyConfig, state.CLIActor, applied)
 	}
 	login("first")
 	runner.passAndWait(context.Background())

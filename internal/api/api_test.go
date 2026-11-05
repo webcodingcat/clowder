@@ -248,7 +248,7 @@ func bootstrappedState(t *testing.T) *state.State {
 		PublicAddress: netip.MustParseAddr("203.0.113.3"), WGPublicKey: "wg", CertificateSerial: "s1",
 		CertificateNotAfter: notAfter, Phase: state.Joining,
 	}
-	apply(2, state.KindAddUser, state.AddUser{Name: "alice", Serial: "a1", NotAfter: notAfter, RecoveryRecipient: "age1recovery"})
+	apply(2, state.KindFinishBootstrap, state.FinishBootstrap{RecoveryRecipient: "age1recovery"})
 	return current
 }
 
@@ -275,13 +275,13 @@ func (c *testCluster) hostCertificate(id state.HostID) tls.Certificate {
 	})
 }
 
-func (c *testCluster) userCertificate(name string) tls.Certificate {
+func (c *testCluster) cliCertificate() tls.Certificate {
 	return c.certificate(func(public ed25519.PublicKey) ([]byte, error) {
-		return c.ca.IssueUser(public, name, time.Now())
+		return c.ca.IssueCLI(public, time.Now())
 	})
 }
 
-// client connects as a user to the given servers.
+// client connects with a certificate to the given servers.
 func (c *testCluster) client(certificate tls.Certificate, version string, ids ...int) *Client {
 	var endpoints []string
 	for _, id := range ids {
@@ -298,9 +298,9 @@ func statusOf(err error) int {
 	return 0
 }
 
-func TestUsersReadTheStatusFromAnyAgent(t *testing.T) {
+func TestTheCLIReadsTheStatusFromAnyAgent(t *testing.T) {
 	cluster := newTestCluster(t)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 1)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 1)
 	var status Status
 	if err := client.Get(context.Background(), "/v1/status", &status); err != nil {
 		t.Fatal(err)
@@ -312,7 +312,7 @@ func TestUsersReadTheStatusFromAnyAgent(t *testing.T) {
 
 func TestAFollowerForwardsWritesToTheLeader(t *testing.T) {
 	cluster := newTestCluster(t)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 1)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 1)
 	ctx := context.Background()
 
 	// node0 is active: draining it is allowed
@@ -326,7 +326,7 @@ func TestAFollowerForwardsWritesToTheLeader(t *testing.T) {
 		phase = current.Hosts[0].Phase
 		actor = current.Audit[len(current.Audit)-1].Actor
 	})
-	if phase != state.Draining || actor != "user/alice" {
+	if phase != state.Draining || actor != state.CLIActor {
 		t.Errorf("leader's host 0 is %s, last actor %s", phase, actor)
 	}
 
@@ -367,18 +367,23 @@ func TestAFollowerForwardsWritesToTheLeader(t *testing.T) {
 func TestCallersAreCheckedOnEveryCall(t *testing.T) {
 	cluster := newTestCluster(t)
 	ctx := context.Background()
-	revoked := cluster.userCertificate("bob")
+	revoked := cluster.hostCertificate(1)
+	beforeCutoff := cluster.certificate(func(public ed25519.PublicKey) ([]byte, error) {
+		return cluster.ca.IssueCLI(public, time.Now().Add(-time.Hour))
+	})
 	cluster.clusters[0].Read(func(current *state.State) {
 		current.Revoked[pki.Serial(revoked.Leaf)] = state.Revocation{At: time.Now(), NotAfter: revoked.Leaf.NotAfter}
+		current.CLICutoff = beforeCutoff.Leaf.NotBefore.Add(time.Minute)
 	})
 	tests := []struct {
 		name   string
 		client *Client
 		want   int
 	}{
-		{"revoked user", cluster.client(revoked, testVersion, 0), http.StatusUnauthorized},
-		{"host on a user route", cluster.client(cluster.hostCertificate(1), testVersion, 0), http.StatusForbidden},
-		{"CLI two minor versions away", cluster.client(cluster.userCertificate("alice"), "1.2.0", 0), http.StatusBadRequest},
+		{"revoked host", cluster.client(revoked, testVersion, 0), http.StatusUnauthorized},
+		{"CLI issued before the cutoff", cluster.client(beforeCutoff, testVersion, 0), http.StatusUnauthorized},
+		{"host on a CLI route", cluster.client(cluster.hostCertificate(1), testVersion, 0), http.StatusForbidden},
+		{"CLI two minor versions away", cluster.client(cluster.cliCertificate(), "1.2.0", 0), http.StatusBadRequest},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -402,8 +407,8 @@ func TestCallersAreCheckedOnEveryCall(t *testing.T) {
 		t.Errorf("without a certificate: HTTP %d", response.StatusCode)
 	}
 
-	// another cluster's user does not even get through the handshake
-	stranger := newTestCluster(t).userCertificate("mallory")
+	// another cluster's CLI does not even get through the handshake
+	stranger := newTestCluster(t).cliCertificate()
 	if err := cluster.client(stranger, testVersion, 0).Get(ctx, "/v1/status", &Status{}); err == nil || statusOf(err) != 0 {
 		t.Errorf("want a failed handshake, got %v", err)
 	}
@@ -435,7 +440,7 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 			true,
 		},
 		{
-			"a user's write it forwards", state.KindSetHostPhase, state.UserActor("alice"),
+			"the CLI's write it forwards", state.KindSetHostPhase, state.CLIActor,
 			state.SetHostPhase{Host: 1, Phase: state.Active},
 			true,
 		},
@@ -445,17 +450,27 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 			false,
 		},
 		{
-			"a command as the leader", state.KindAddUser, state.LeaderActor,
-			state.AddUser{Name: "mallory", Serial: "m1", NotAfter: time.Now().AddDate(1, 0, 0)},
+			"its own cutoff of the CLI certificates", state.KindSetCLICutoff, state.HostActor(1),
+			state.SetCLICutoff{Cutoff: time.Now()},
+			true,
+		},
+		{
+			"another host's cutoff", state.KindSetCLICutoff, state.HostActor(0),
+			state.SetCLICutoff{Cutoff: time.Now()},
 			false,
 		},
 		{
-			"a user's write as itself", state.KindAddUser, state.HostActor(1),
-			state.AddUser{Name: "mallory", Serial: "m2", NotAfter: time.Now().AddDate(1, 0, 0)},
+			"a command as the leader", state.KindFinishBootstrap, state.LeaderActor,
+			state.FinishBootstrap{RecoveryRecipient: "age1mallory"},
 			false,
 		},
 		{
-			"the leader's own work for a user", state.KindSetIngress, state.UserActor("alice"),
+			"the CLI's write as itself", state.KindSetRecoveryRecipient, state.HostActor(1),
+			state.SetRecoveryRecipient{Recipient: "age1mallory"},
+			false,
+		},
+		{
+			"the leader's own work for the CLI", state.KindSetIngress, state.CLIActor,
 			state.SetIngress{Host: 0},
 			false,
 		},
@@ -486,13 +501,13 @@ func TestTheClientTriesTheNextEndpoint(t *testing.T) {
 	dead := listener.Addr().String()
 	_ = listener.Close() // nobody listens here now
 	endpoints := []string{dead, cluster.servers[0].Listener.Addr().String()}
-	client := NewClient(endpoints, time.Second, cluster.userCertificate("alice"), cluster.ca.Certificate, testVersion)
-	var users []UserInfo
-	if err := client.Get(context.Background(), "/v1/users", &users); err != nil {
+	client := NewClient(endpoints, time.Second, cluster.cliCertificate(), cluster.ca.Certificate, testVersion)
+	var status Status
+	if err := client.Get(context.Background(), "/v1/status", &status); err != nil {
 		t.Fatal(err)
 	}
-	if len(users) != 1 || users[0].Name != "alice" {
-		t.Errorf("users %+v", users)
+	if status.Leader != "node0" {
+		t.Errorf("status %+v", status)
 	}
 	// a write that could not leave goes on to the next endpoint
 	if _, err := client.Post(context.Background(), "/v1/hosts/0/drain", nil); err != nil {
@@ -540,17 +555,17 @@ func TestTheClientGivesUpOnASilentEndpointAfterTheConnectTimeout(t *testing.T) {
 	endpoints := []string{silent, cluster.servers[0].Listener.Addr().String()}
 	// a client each, so that each request meets the silent endpoint first
 	newClient := func() *Client {
-		return NewClient(endpoints, 200*time.Millisecond, cluster.userCertificate("alice"), cluster.ca.Certificate, testVersion)
+		return NewClient(endpoints, 200*time.Millisecond, cluster.cliCertificate(), cluster.ca.Certificate, testVersion)
 	}
 	started := time.Now()
-	if err := newClient().Get(context.Background(), "/v1/users", &[]UserInfo{}); err != nil {
+	if err := newClient().Get(context.Background(), "/v1/status", &Status{}); err != nil {
 		t.Errorf("a read after a silent endpoint: %v", err)
 	}
 	// a write that never got past the handshake goes on as well
 	if _, err := newClient().Post(context.Background(), "/v1/hosts/0/drain", nil); err != nil {
 		t.Errorf("a write after a silent endpoint: %v", err)
 	}
-	if err := newClient().Stream(context.Background(), "/v1/users", io.Discard); err != nil {
+	if err := newClient().Stream(context.Background(), "/v1/status", io.Discard); err != nil {
 		t.Errorf("a stream after a silent endpoint: %v", err)
 	}
 	// generous for the race detector; the request's own timeout would be
@@ -564,9 +579,9 @@ func TestTheClientStartsWithTheEndpointThatAnsweredLast(t *testing.T) {
 	cluster := newTestCluster(t)
 	silent, taken := silentEndpoint(t)
 	endpoints := []string{silent, cluster.servers[0].Listener.Addr().String()}
-	client := NewClient(endpoints, 200*time.Millisecond, cluster.userCertificate("alice"), cluster.ca.Certificate, testVersion)
+	client := NewClient(endpoints, 200*time.Millisecond, cluster.cliCertificate(), cluster.ca.Certificate, testVersion)
 	for range 3 {
-		if err := client.Get(context.Background(), "/v1/users", &[]UserInfo{}); err != nil {
+		if err := client.Get(context.Background(), "/v1/status", &Status{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -589,8 +604,8 @@ func TestTheClientNamesAClusterOfAnotherCA(t *testing.T) {
 	cluster, other := newTestCluster(t), newTestCluster(t)
 	// credentials of the other cluster, against this one's agent
 	client := NewClient([]string{cluster.servers[0].Listener.Addr().String()}, time.Second,
-		other.userCertificate("alice"), other.ca.Certificate, testVersion)
-	err := client.Get(context.Background(), "/v1/users", &[]UserInfo{})
+		other.cliCertificate(), other.ca.Certificate, testVersion)
+	err := client.Get(context.Background(), "/v1/status", &Status{})
 	if err == nil || !strings.Contains(err.Error(), "belongs to another cluster than your credentials") {
 		t.Errorf("read: %v", err)
 	}
@@ -628,7 +643,7 @@ func TestAWriteThatLeftIsNotSentAgain(t *testing.T) {
 	defer hangsUp.Close()
 
 	endpoints := []string{hangsUp.Listener.Addr().String(), cluster.servers[0].Listener.Addr().String()}
-	client := NewClient(endpoints, time.Second, cluster.userCertificate("alice"), cluster.ca.Certificate, testVersion)
+	client := NewClient(endpoints, time.Second, cluster.cliCertificate(), cluster.ca.Certificate, testVersion)
 	_, err := client.Post(context.Background(), "/v1/hosts/0/drain", nil)
 	if err == nil || !strings.Contains(err.Error(), "may have gone through") {
 		t.Errorf("want a warning that the write may have gone through, got %v", err)
@@ -667,11 +682,11 @@ func (f *fakeCluster) WaitCommitted(ctx context.Context, index uint64) error {
 	return f.WaitIndex(ctx, index)
 }
 
-// A user's call waits until the agent caught up after its start: its state
+// The CLI's call waits until the agent caught up after its start: its state
 // may be empty until then. The hosts' own routes do not wait.
-func TestAUsersCallWaitsUntilTheAgentCaughtUp(t *testing.T) {
+func TestTheCLIsCallWaitsUntilTheAgentCaughtUp(t *testing.T) {
 	cluster := newCatchingUpCluster(t)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	done := make(chan error, 1)
 	go func() {
 		var status Status
@@ -708,8 +723,8 @@ func TestKnowsLeaderTellsWhoKnowsALeaderAndWhoIsNotReached(t *testing.T) {
 		t.Errorf("a follower without a leader: %v, %v", knows, err)
 	}
 	// an answer that is no word on the leader leaves it unknown
-	if _, err := ask(0, cluster.userCertificate("alice")); err == nil || errors.Is(err, ErrNotReached) {
-		t.Errorf("a user's certificate: %v", err)
+	if _, err := ask(0, cluster.cliCertificate()); err == nil || errors.Is(err, ErrNotReached) {
+		t.Errorf("the CLI's certificate: %v", err)
 	}
 	gone := cluster.servers[1].Listener.Addr().String()
 	cluster.servers[1].Close()

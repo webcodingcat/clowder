@@ -59,7 +59,7 @@ func outcomes(result ChangeResult) []string {
 func TestAnApplyGoesInOrderAndStopsAtTheFirstRefusal(t *testing.T) {
 	cluster := newTestCluster(t)
 	withStorageClass(cluster)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	ctx := context.Background()
 	shop := ApplyRequest{Resources: []resource.Object{
 		object(resource.KindNamespace, "", "shop", ""),
@@ -89,7 +89,7 @@ func TestAnApplyGoesInOrderAndStopsAtTheFirstRefusal(t *testing.T) {
 func TestADryRunChecksEverythingAndWritesNothing(t *testing.T) {
 	cluster := newTestCluster(t)
 	withStorageClass(cluster)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	var before uint64
 	cluster.clusters[0].Read(func(current *state.State) { before = current.Index })
 	// the volume's namespace comes with the same request
@@ -110,7 +110,7 @@ func TestADryRunChecksEverythingAndWritesNothing(t *testing.T) {
 func TestASpecIsReadStrictly(t *testing.T) {
 	cluster := newTestCluster(t)
 	withStorageClass(cluster)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	for spec, want := range map[string]string{
 		`{"class": "fast", "size": "1G"}`:                              "replicas is required",
 		`{"class": "fast", "size": "1G", "replicas": 1, "fast": true}`: "unknown field",
@@ -138,7 +138,7 @@ func TestASpecIsReadStrictly(t *testing.T) {
 
 func TestASecretTakesOnlyAValueEncryptedForIt(t *testing.T) {
 	cluster := newTestCluster(t)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	for forID, want := range map[string]string{
 		secretvalue.Cluster: "the value is for cluster, not for default/token", // the Hetzner token, copied
 		"shop/token":        "the value is for shop/token, not for default/token",
@@ -156,7 +156,7 @@ func TestASecretTakesOnlyAValueEncryptedForIt(t *testing.T) {
 func TestResourcesReadBackAsTheyApplyAndSecretsWithoutTheirValue(t *testing.T) {
 	cluster := newTestCluster(t)
 	withStorageClass(cluster)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	ctx := context.Background()
 	if _, err := client.ApplyResources(ctx, ApplyRequest{Resources: []resource.Object{
 		object(resource.KindNamespace, "", "shop", ""),
@@ -209,7 +209,7 @@ func TestResourcesReadBackAsTheyApplyAndSecretsWithoutTheirValue(t *testing.T) {
 
 func TestAStackShowsItsStatusAndIsAskedForOnItsHost(t *testing.T) {
 	cluster := newTestCluster(t)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	ctx := context.Background()
 	result, err := client.ApplyResources(ctx, ApplyRequest{Resources: []resource.Object{
 		object(resource.KindNamespace, "", "shop", ""),
@@ -255,8 +255,8 @@ func TestAStackShowsItsStatusAndIsAskedForOnItsHost(t *testing.T) {
 
 func TestARestartGoesThroughAFollowerAndShowsInTheStatus(t *testing.T) {
 	cluster := newTestCluster(t)
-	leader := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
-	follower := cluster.client(cluster.userCertificate("alice"), testVersion, 1)
+	leader := cluster.client(cluster.cliCertificate(), testVersion, 0)
+	follower := cluster.client(cluster.cliCertificate(), testVersion, 1)
 	ctx := context.Background()
 	if _, err := leader.ApplyResources(ctx, ApplyRequest{Resources: []resource.Object{
 		object(resource.KindStack, "default", "web", `{"services": {"db": {"image": "x"}, "app": {"image": "x", "dependsOn": ["db"]}}}`),
@@ -298,7 +298,7 @@ func TestTheLeaderDecidesNotAFollowerThatIsBehind(t *testing.T) {
 	cluster.clusters[1].mu.Lock()
 	cluster.clusters[1].state.Namespaces["shop"] = &state.Namespace{Meta: state.Meta{Name: "shop", Owner: state.OwnerCLI}}
 	cluster.clusters[1].mu.Unlock()
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 1)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 1)
 	ctx := context.Background()
 	shop := ApplyRequest{Resources: []resource.Object{object(resource.KindNamespace, "", "shop", "")}}
 	result, err := client.ApplyResources(ctx, shop, false)
@@ -328,19 +328,19 @@ func TestTheLeaderDecidesNotAFollowerThatIsBehind(t *testing.T) {
 	}
 }
 
-func TestABatchCarriesOnlyUsersResourceCommands(t *testing.T) {
+func TestABatchCarriesOnlyTheCLIsResourceCommands(t *testing.T) {
 	cluster := newTestCluster(t)
 	host1 := cluster.client(cluster.hostCertificate(1), testVersion, 0)
-	cmd, err := state.NewCommand(state.KindAddUser, time.Time{}, state.UserActor("alice"),
-		state.AddUser{Name: "mallory", Serial: "m1", NotAfter: time.Now().AddDate(1, 0, 0), RecoveryRecipient: "age1m"})
+	cmd, err := state.NewCommand(state.KindSetRecoveryRecipient, time.Time{}, state.CLIActor,
+		state.SetRecoveryRecipient{Recipient: "age1mallory"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var result ChangeResult
 	err = host1.Act(context.Background(), "/v1/internal/changes",
-		changeBatch{Changes: []batchChange{{Ref: resource.Ref{Kind: "User", Name: "mallory"}, Command: &cmd}}}, &result)
+		changeBatch{Changes: []batchChange{{Ref: resource.Ref{Kind: "Recovery", Name: "key"}, Command: &cmd}}}, &result)
 	if statusOf(err) != http.StatusForbidden {
-		t.Errorf("an add-user in a batch: %v", err)
+		t.Errorf("a set-recovery-recipient in a batch: %v", err)
 	}
 }
 
@@ -387,7 +387,7 @@ func (alwaysLeader) IsLeader() bool { return true }
 
 func mustCommand(t *testing.T, namespace string) *state.Command {
 	t.Helper()
-	cmd, err := state.NewCommand(state.KindPutResource, time.Time{}, state.UserActor("alice"),
+	cmd, err := state.NewCommand(state.KindPutResource, time.Time{}, state.CLIActor,
 		state.PutResource{Kind: resource.KindNamespace, Name: namespace, Owner: state.OwnerCLI})
 	if err != nil {
 		t.Fatal(err)

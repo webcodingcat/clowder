@@ -84,7 +84,7 @@ type ServerConfig struct {
 	// Joins adds joining hosts while this agent leads.
 	Joins Joins
 	// CaughtUp closes once this agent's state caught up with the leader's
-	// after its start; until then a user's call waits for it, as the state
+	// after its start; until then the CLI's call waits for it, as the state
 	// may still be empty. Nil: caught up (tests).
 	CaughtUp <-chan struct{}
 	Version  string
@@ -122,8 +122,8 @@ type Server struct {
 	streams    context.Context
 	endStreams context.CancelFunc
 	// the routes without a certificate count their tries, each pair for
-	// itself, so that strangers at the bootstrap do not block a recovery
-	bootstraps, recoveries, joins limiter
+	// itself, so that strangers at the bootstrap do not block a join
+	bootstraps, joins limiter
 	// warnedVersions are the callers' versions checkVersion has warned
 	// about, so the log says it once
 	warnedVersions sync.Map
@@ -136,35 +136,35 @@ func NewServer(config ServerConfig) *Server {
 	transport := &http.Transport{TLSClientConfig: pki.ClientTLSToHosts(config.Certificate, config.CA, server.revoked)}
 	server.forwarder = &http.Client{Timeout: waitTimeout, Transport: transport}
 	server.streamer = &http.Client{Transport: transport}
-	server.handle("GET /v1/status", pki.RoleUser, server.status)
-	server.handle("GET /v1/hosts", pki.RoleUser, server.hosts)
-	server.handle("POST /v1/hosts/{id}/{action}", pki.RoleUser, server.hostAction)
-	server.handle("POST /v1/join-tokens", pki.RoleUser, server.newJoinToken)
-	server.handle("GET /v1/users", pki.RoleUser, server.users)
-	server.handle("GET /v1/audit", pki.RoleUser, server.audit)
-	server.handle("GET /v1/cluster", pki.RoleUser, server.cluster)
-	server.handle("PUT /v1/cluster", pki.RoleUser, server.applyCluster)
-	server.handle("GET /v1/encryption", pki.RoleUser, server.encryption)
-	server.handle("POST /v1/encryption/rekey", pki.RoleUser, server.rekey)
-	server.handle("POST /v1/recovery/rotate", pki.RoleUser, server.rotateRecovery)
-	server.handle("POST /v1/apply", pki.RoleUser, server.applyResources)
-	server.handle("POST /v1/delete", pki.RoleUser, server.deleteResources)
-	server.handle("GET /v1/resources/{kind}", pki.RoleUser, server.listResources)
-	server.handle("GET /v1/resources/{kind}/{namespace}/{name}", pki.RoleUser, server.getResource)
-	server.handle("GET /v1/resources/namespace/{name}", pki.RoleUser, server.getNamespace)
-	server.handle("GET /v1/watch", pki.RoleUser, server.watch)
-	server.handle("GET /v1/stacks/{namespace}/{name}/ps", pki.RoleUser, server.stackPs)
-	server.handle("GET /v1/stacks/{namespace}/{name}/logs", pki.RoleUser, server.stackLogs)
-	server.handle("POST /v1/stacks/{namespace}/{name}/restart", pki.RoleUser, server.restartStack)
-	server.handle("POST /v1/stacks/{namespace}/{name}/move", pki.RoleUser, server.moveStack)
-	server.handle("POST /v1/volumes/{namespace}/{name}/resolve-splitbrain", pki.RoleUser, server.resolveSplitBrain)
-	server.handle("POST /v1/alerts/test", pki.RoleUser, server.alertTest)
-	server.handle("GET /v1/alerts/failures", pki.RoleUser, server.alertFailures)
+	server.handle("GET /v1/status", pki.RoleCLI, server.status)
+	server.handle("GET /v1/hosts", pki.RoleCLI, server.hosts)
+	server.handle("POST /v1/hosts/{id}/{action}", pki.RoleCLI, server.hostAction)
+	server.handle("POST /v1/join-tokens", pki.RoleCLI, server.newJoinToken)
+	server.handle("GET /v1/audit", pki.RoleCLI, server.audit)
+	server.handle("GET /v1/cluster", pki.RoleCLI, server.cluster)
+	server.handle("PUT /v1/cluster", pki.RoleCLI, server.applyCluster)
+	server.handle("GET /v1/encryption", pki.RoleCLI, server.encryption)
+	server.handle("POST /v1/encryption/rekey", pki.RoleCLI, server.rekey)
+	server.handle("POST /v1/recovery/rotate", pki.RoleCLI, server.rotateRecovery)
+	server.handle("POST /v1/apply", pki.RoleCLI, server.applyResources)
+	server.handle("POST /v1/delete", pki.RoleCLI, server.deleteResources)
+	server.handle("GET /v1/resources/{kind}", pki.RoleCLI, server.listResources)
+	server.handle("GET /v1/resources/{kind}/{namespace}/{name}", pki.RoleCLI, server.getResource)
+	server.handle("GET /v1/resources/namespace/{name}", pki.RoleCLI, server.getNamespace)
+	server.handle("GET /v1/watch", pki.RoleCLI, server.watch)
+	server.handle("GET /v1/stacks/{namespace}/{name}/ps", pki.RoleCLI, server.stackPs)
+	server.handle("GET /v1/stacks/{namespace}/{name}/logs", pki.RoleCLI, server.stackLogs)
+	server.handle("POST /v1/stacks/{namespace}/{name}/restart", pki.RoleCLI, server.restartStack)
+	server.handle("POST /v1/stacks/{namespace}/{name}/move", pki.RoleCLI, server.moveStack)
+	server.handle("POST /v1/volumes/{namespace}/{name}/resolve-splitbrain", pki.RoleCLI, server.resolveSplitBrain)
+	server.handle("POST /v1/alerts/test", pki.RoleCLI, server.alertTest)
+	server.handle("GET /v1/alerts/failures", pki.RoleCLI, server.alertFailures)
 	server.handle("GET /v1/internal/alerts/failures", pki.RoleHost, server.localAlertFailures)
 	server.handle("POST /v1/internal/propose", pki.RoleHost, server.internalPropose)
 	server.handle("POST /v1/internal/changes", pki.RoleHost, server.internalChanges)
 	server.handle("POST /v1/internal/join", pki.RoleHost, server.internalJoin)
 	server.handle("POST /v1/internal/hand-over", pki.RoleHost, server.internalHandOver)
+	server.handle("POST /v1/internal/credentials", pki.RoleHost, server.internalCredentials)
 	server.handle("GET /v1/internal/stacks/{project}/ps", pki.RoleHost, server.localPs)
 	server.handle("GET /v1/internal/stacks/{project}/logs", pki.RoleHost, server.localLogs)
 	server.handle("GET /v1/internal/volumes/progress", pki.RoleHost, server.localProgress)
@@ -175,8 +175,6 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/internal/beats/{id}", pki.RoleHost, server.localSilence)
 	server.handleOpen("GET /v1/bootstrap", limited(&server.bootstraps, server.bootstrapOffer))
 	server.handleOpen("POST /v1/bootstrap", limited(&server.bootstraps, server.bootstrap))
-	server.handleOpen("GET /v1/recover/offer", limited(&server.recoveries, server.recoverOffer))
-	server.handleOpen("POST /v1/recover", limited(&server.recoveries, server.recoverUser))
 	server.handleOpen("GET /v1/join", limited(&server.joins, server.joinOffer))
 	server.handleOpen("POST /v1/join", limited(&server.joins, server.join))
 	return server
@@ -221,8 +219,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type identityKey struct{}
 
 // handle registers a route that only callers of one role may use. Every
-// call is checked against the CA and the revocation list in the state, so a
-// revoked certificate is refused at once on every agent.
+// call is checked against the CA, the revocation list and the CLI's cutoff
+// in the state, so a revoked certificate is refused at once on every agent.
 func (s *Server) handle(pattern string, role pki.Role, handler http.HandlerFunc) {
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
@@ -234,6 +232,11 @@ func (s *Server) handle(pattern string, role pki.Role, handler http.HandlerFunc)
 			writeError(w, http.StatusUnauthorized, err)
 			return
 		}
+		if identity.Role == pki.RoleCLI && !s.cliCutoffPassed(identity.NotBefore) {
+			writeError(w, http.StatusUnauthorized, errors.New("this CLI certificate was revoked with all issued "+
+				"before a newer one (clowderd credentials --revoke-older); get new credentials from a host"))
+			return
+		}
 		if identity.Role != role {
 			writeError(w, http.StatusForbidden, fmt.Errorf("%s may not call %s", identity.Name, r.URL.Path))
 			return
@@ -241,7 +244,7 @@ func (s *Server) handle(pattern string, role pki.Role, handler http.HandlerFunc)
 		if !s.checkVersion(w, r) {
 			return
 		}
-		if role == pki.RoleUser && !s.waitForCatchUp(r) {
+		if role == pki.RoleCLI && !s.waitForCatchUp(r) {
 			writeError(w, http.StatusServiceUnavailable,
 				errors.New("this agent has not caught up with the cluster's state since it started; try again"))
 			return
@@ -256,9 +259,8 @@ func (s *Server) handle(pattern string, role pki.Role, handler http.HandlerFunc)
 }
 
 // handleOpen registers a route callers reach without a certificate: the
-// bootstrap, which proves itself with the bootstrap key instead, the
-// recovery, which proves itself with a code from a host, and the join,
-// which proves itself with a join token.
+// bootstrap, which proves itself with the bootstrap key instead, and the
+// join, which proves itself with a join token.
 func (s *Server) handleOpen(pattern string, handler http.HandlerFunc) {
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		if s.checkVersion(w, r) {
@@ -303,7 +305,7 @@ func (s *Server) revoked(serial string) bool {
 	return revoked
 }
 
-// waitForCatchUp holds a user's request until this agent caught up after
+// waitForCatchUp holds the CLI's request until this agent caught up after
 // its start (ServerConfig.CaughtUp), for waitTimeout at most. Host routes
 // do not wait: the catch-up itself, the beats and the joins use them.
 func (s *Server) waitForCatchUp(r *http.Request) bool {
@@ -346,7 +348,7 @@ func actorOf(identity pki.Identity) string {
 	if identity.Role == pki.RoleHost {
 		return state.HostActor(state.HostID(identity.HostID))
 	}
-	return state.UserActor(identity.Name)
+	return state.CLIActor
 }
 
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
@@ -561,16 +563,6 @@ func phaseList(phases []state.HostPhase) string {
 	return strings.Join(names, " or ")
 }
 
-func (s *Server) users(w http.ResponseWriter, _ *http.Request) {
-	users := []UserInfo{}
-	s.config.Cluster.Read(func(current *state.State) {
-		for _, name := range slices.Sorted(maps.Keys(current.Users)) {
-			users = append(users, UserInfo{Name: name, Certificates: len(current.Users[name].Serials)})
-		}
-	})
-	writeJSON(w, http.StatusOK, users)
-}
-
 // audit returns the last entries, newest last; ?limit= says how many
 // (default 50).
 func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
@@ -592,34 +584,36 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, entries)
 }
 
-// userKinds are the commands a follower may forward for a user: exactly
-// those the user routes of the API and the bootstrap make; a kind joins when
+// cliKinds are the commands a follower may forward for the CLI: exactly
+// those the CLI routes of the API and the bootstrap make; a kind joins when
 // its route does.
-var userKinds = map[string]bool{
+var cliKinds = map[string]bool{
 	state.KindApplyConfig: true, state.KindSetHostPhase: true, state.KindRestartStack: true, state.KindRequestMove: true,
-	state.KindAddUser:              true, // the bootstrap's user
-	state.KindRecoverUser:          true, // a user back with a code from a host
+	state.KindFinishBootstrap:      true,
 	state.KindSetRecoveryRecipient: true,
 	state.KindAddJoinToken:         true,
 }
 
-// hostKinds are what a host reports about itself.
+// hostKinds are what a host commits as itself: what it reports about
+// itself, and the cutoff root on it sets (clowderd credentials).
 var hostKinds = map[string]bool{
 	state.KindReportHost:     true,
 	state.KindSetStackStatus: true, state.KindForgetCopy: true, state.KindSetVolumeInitialized: true,
 	state.KindReportPeerForgotten: true, state.KindSetCopySynced: true,
 	state.KindAdvanceOperation: true, // the step of an operation a host owns
 	state.KindSetHostPhase:     true, // its own: recovering, then active (the state checks who)
+	state.KindSetCLICutoff:     true,
 }
 
-// internalPropose is where a follower forwards a user's write and where an
-// agent proposes what it reports about itself. Nothing else comes in from
-// outside: the leader's own commands (placements, the ingress)
-// are made on the leader. A host may name the user it forwards for, since the
-// user's certificate ended at the first agent; it may never speak for another
-// host or for the leader.
+// internalPropose is where a follower forwards the CLI's write and where an
+// agent proposes what it commits as itself. Nothing else comes in from
+// outside: the leader's own commands (placements, the ingress) are made on
+// the leader. A host may forward for the CLI, whose certificate ended at
+// the first agent; it may never speak for another host or for the leader.
+// The cluster has no users, so there is no name a host could forge: root
+// on any host holds every key anyway.
 func (s *Server) internalPropose(w http.ResponseWriter, r *http.Request) {
-	// not strict, unlike the user's requests: the agent that forwards may be
+	// not strict, unlike the CLI's requests: the agent that forwards may be
 	// of the next release, and a command may carry fields this one does not
 	// know (State, Versions)
 	var cmd state.Command
@@ -628,7 +622,7 @@ func (s *Server) internalPropose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	caller := actorOf(identityOf(r))
-	allowed := (state.IsUserActor(cmd.Actor) && userKinds[cmd.Kind]) ||
+	allowed := (cmd.Actor == state.CLIActor && cliKinds[cmd.Kind]) ||
 		(cmd.Actor == caller && hostKinds[cmd.Kind])
 	if !allowed {
 		writeError(w, http.StatusForbidden, fmt.Errorf("%s may not send %s as %s", caller, cmd.Kind, cmd.Actor))

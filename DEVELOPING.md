@@ -116,7 +116,7 @@ What follows from there:
 | fencing | powering a failed host's server off through Hetzner's API before its stacks start elsewhere |
 | tiebreaker | a diskless DRBD member that gives a volume with two copies its third vote |
 | active, passive | phases of a host. Active: it takes and runs stacks and may vote; the first host starts active, a host that joins becomes active, and so does one back from `recovering`. Passive: the second host of a cluster that is not yet highly available; it waits without stacks and without a vote until a third host joins (`state.MinHAHosts`), then it becomes active too |
-| actor | who sent a command: `leader`, `host/<id>` or `user/<name>` |
+| actor | who sent a command: `leader`, `host/<id>` or `cli`; the cluster has no users, whoever holds the CLI's credentials controls it (as kubeadm's `admin.conf`). A host is trusted as fully as the CLI: it holds the data key and the CA's key, forwards the CLI's commands as `cli` and prints credentials for root (`clowderd credentials`), so a compromised host is a compromised cluster |
 | channel, owner | the way a resource came in: `cli` (`clowder apply`) or, later, a GitOps source; a resource's owner is the channel that made it, and only that channel changes it |
 | sealed | encrypted with the cluster's data key before it goes into the state |
 | generation | of a resource: counts the changes of its spec; an apply that changes nothing does not count |
@@ -133,7 +133,7 @@ What follows from there:
 | Binary | Package | Runs on | Does |
 |---|---|---|---|
 | `clowder` | `cmd/clowder`, `internal/cli` | Linux, macOS, Windows | the user's CLI: reads the cluster directory, talks to an agent over mTLS |
-| `clowderd` | `cmd/clowderd`, `internal/agent` | Linux | the agent (`run`, systemd service `clowderd`) and the host commands `check`, `init`, `join`, `user recovery-code`, `recover` |
+| `clowderd` | `cmd/clowderd`, `internal/agent` | Linux | the agent (`run`, systemd service `clowderd`) and the host commands `check`, `init`, `join`, `credentials`, `recover` |
 
 `cmd/clowderd` has the build constraint `linux`. Both get their version from
 `internal/buildinfo.Version`, which `bin/dev build` stamps from the Git tag, or
@@ -145,8 +145,8 @@ The package layout is planned for the whole of v1; packages appear as the phases
 
 - **Portable**: `cli`, `api`, `clusterspec` (`cluster.yaml`'s types and checks),
   `clusterdir` (the cluster directory's files), `secretvalue` (values tagged
-  `!secret`), `yamlpath` (the names of places in YAML), `pki`, `recoverycode` (the codes
-  from a host that give access back), `jointoken` (the tokens hosts join with),
+  `!secret`), `yamlpath` (the names of places in YAML), `pki`, `jointoken` (the tokens
+  hosts join with),
   `compose`, `units`,
   `names` (the rules for the names users give, and the names on the host made of them),
   `buildinfo`, `logging`, `atomicfile` (files written whole or not at all), `metrics`

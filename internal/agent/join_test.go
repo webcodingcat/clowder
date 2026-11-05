@@ -85,7 +85,7 @@ func (j *joinTest) token() jointoken.Token {
 	if err != nil {
 		j.t.Fatal(err)
 	}
-	j.cluster.Apply(state.KindAddJoinToken, state.UserActor("alice"),
+	j.cluster.Apply(state.KindAddJoinToken, state.CLIActor,
 		state.AddJoinToken{ID: token.ID, Hash: token.Hash(), TTL: time.Hour})
 	return token
 }

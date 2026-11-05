@@ -300,9 +300,10 @@ func TestRunEndsAtItsStartWhenAPartFailsAndLeavesNothingOpen(t *testing.T) {
 	}
 }
 
-// TestAFirstHostAndItsFirstUser goes the way of a new cluster: init on the
-// host, the agent running, the user's bootstrap, apply and diff.
-func TestAFirstHostAndItsFirstUser(t *testing.T) {
+// TestAFirstHostAndItsCLI goes the way of a new cluster: init on the host,
+// the agent running, the CLI's bootstrap, new credentials from the host,
+// apply and diff.
+func TestAFirstHostAndItsCLI(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	loopback := netip.MustParseAddr("127.0.0.1")
 	files := Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}
@@ -357,7 +358,7 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 		t.Fatalf("systemd heard %q, %v", message[:n], err)
 	}
 
-	// the user's side: an empty cluster directory, a config directory
+	// the CLI's side: an empty cluster directory, a config directory
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
@@ -366,39 +367,61 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	dir := t.TempDir()
 	endpoint := net.JoinHostPort("127.0.0.2", strconv.Itoa(apiPort))
 	recoveryFile := filepath.Join(t.TempDir(), "recovery-key")
-	bootstrap := func(user, name, cluster, key string, more ...string) error {
+	bootstrap := func(name, cluster, key string, more ...string) error {
 		_, err := clowder(t, append([]string{
-			"--cluster", cluster, "cluster", "bootstrap", user, "--name", name,
+			"--cluster", cluster, "cluster", "bootstrap", "--name", name,
 			"--endpoint", endpoint, "--key-file", key,
 		}, more...)...)
 		return err
 	}
 
-	if err := bootstrap("alice", "test", dir, keyFile(t, "a-guess-that-is-long-enough-to-be-tried"), "--recovery-out", recoveryFile); err == nil ||
+	if err := bootstrap("test", dir, keyFile(t, "a-guess-that-is-long-enough-to-be-tried"), "--recovery-out", recoveryFile); err == nil ||
 		!strings.Contains(err.Error(), "cannot prove it knows the bootstrap key") {
 		t.Errorf("a wrong bootstrap key: %v", err)
 	}
 	theKey := keyFile(t, testBootstrapKey+"\n")
-	if err := bootstrap("alice", "test", dir, theKey); err == nil || !strings.Contains(err.Error(), "--recovery-out") {
+	if err := bootstrap("test", dir, theKey); err == nil || !strings.Contains(err.Error(), "--recovery-out") {
 		t.Errorf("no terminal and no --recovery-out: %v", err)
 	}
-	if err := bootstrap("alice", "test", dir, theKey, "--recovery-out", recoveryFile); err != nil {
+	if err := bootstrap("test", dir, theKey, "--recovery-out", recoveryFile); err != nil {
 		t.Fatal(err)
 	}
 	if recovery, err := os.ReadFile(recoveryFile); err != nil || !strings.HasPrefix(string(recovery), "AGE-SECRET-KEY-1") {
 		t.Errorf("the recovery key: %q, %v", recovery, err)
 	}
-	if err := bootstrap("bob", "test", t.TempDir(), theKey, "--recovery-out", filepath.Join(t.TempDir(), "r")); err == nil ||
+	if err := bootstrap("test", t.TempDir(), theKey, "--recovery-out", filepath.Join(t.TempDir(), "r")); err == nil ||
 		!strings.Contains(err.Error(), "--force") {
 		t.Errorf("a second bootstrap under the same name: %v", err)
 	}
 	secondRecovery := filepath.Join(t.TempDir(), "r")
-	if err := bootstrap("bob", "other", t.TempDir(), theKey, "--recovery-out", secondRecovery); err == nil ||
-		!strings.Contains(err.Error(), "has a user already") {
+	if err := bootstrap("other", t.TempDir(), theKey, "--recovery-out", secondRecovery); err == nil ||
+		!strings.Contains(err.Error(), "bootstrapped already") {
 		t.Errorf("a second bootstrap: %v", err)
 	}
 	if _, err := os.Stat(secondRecovery); err == nil {
 		t.Error("a second bootstrap made a recovery key")
+	}
+
+	// root on the host hands out new credentials and, with --revoke-older,
+	// locks out the bootstrap's. A certificate of the same second as the
+	// new one stays valid (certificates count in seconds): wait for the next.
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second)))
+	var issued bytes.Buffer
+	if err := printCredentials(context.Background(), &issued, files, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clowder(t, "--cluster", dir, "host", "list"); err == nil || !strings.Contains(err.Error(), "revoke-older") {
+		t.Errorf("the bootstrap's credentials after --revoke-older: %v", err)
+	}
+	credentialsPath, err := clusterdir.CredentialsPath("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(credentialsPath, issued.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clowder(t, "--cluster", dir, "host", "list"); err != nil {
+		t.Errorf("the host's new credentials: %v", err)
 	}
 
 	// cluster.yaml as the bootstrap wrote it, without the bootstrap key,

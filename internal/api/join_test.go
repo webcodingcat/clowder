@@ -51,7 +51,7 @@ func (f *fakeJoins) refuse(why error) {
 func (c *testCluster) openToken(token jointoken.Token) {
 	c.t.Helper()
 	for _, cluster := range c.clusters {
-		cmd, err := state.NewCommand(state.KindAddJoinToken, time.Now(), state.UserActor("alice"),
+		cmd, err := state.NewCommand(state.KindAddJoinToken, time.Now(), state.CLIActor,
 			state.AddJoinToken{ID: token.ID, Hash: token.Hash(), TTL: time.Hour})
 		if err != nil {
 			c.t.Fatal(err)
@@ -67,7 +67,7 @@ func (c *testCluster) openToken(token jointoken.Token) {
 
 func TestAJoinTokenIsShownOnceAndTheStateKeepsItsHash(t *testing.T) {
 	cluster := newTestCluster(t)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	var answer JoinTokenAnswer
 	if err := client.Act(context.Background(), "/v1/join-tokens", JoinTokenRequest{TTL: "2h"}, &answer); err != nil {
 		t.Fatal(err)
@@ -196,7 +196,7 @@ func TestARemovedLeaderHandsItsLeadOverFirst(t *testing.T) {
 	leader.mu.Lock()
 	leader.state.Hosts[1].Phase = state.Active
 	leader.mu.Unlock()
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	// host 1 is not the leader: no hand-over
 	if _, err := client.Post(context.Background(), "/v1/hosts/1/drain", nil); err != nil {
 		t.Fatal(err)
@@ -213,7 +213,7 @@ func TestARemovedLeaderHandsItsLeadOverFirst(t *testing.T) {
 
 func TestARefusedRemovalMovesNoLead(t *testing.T) {
 	cluster := newTestCluster(t)
-	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	if _, err := client.Post(context.Background(), "/v1/hosts/0/remove", nil); statusOf(err) != http.StatusConflict ||
 		!strings.Contains(err.Error(), "the last that runs stacks") {
 		t.Errorf("removing the last host: %v", err)

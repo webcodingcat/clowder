@@ -159,6 +159,34 @@ func fullURL(text string) bool {
 	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
+// EndpointWarnings warns about hetzner.api and acme.directory. Unset, clowder
+// talks to Hetzner's API and Let's Encrypt over https; set, they point it
+// elsewhere, which is meant for test labs, and over http the Hetzner token
+// and the ACME requests cross the network unencrypted. The CLI prints them
+// as cluster.yaml goes out, the leader logs them.
+func EndpointWarnings(config Config) []string {
+	var warnings []string
+	if config.Hetzner.API != "" {
+		warnings = append(warnings, endpointWarning("hetzner.api", config.Hetzner.API,
+			"instead of Hetzner's own API", "the Hetzner token"))
+	}
+	if config.ACME.Directory != "" {
+		warnings = append(warnings, endpointWarning("acme.directory", config.ACME.Directory,
+			"instead of Let's Encrypt", "the ACME account's requests"))
+	}
+	return warnings
+}
+
+// endpointWarning says that a field points clowder elsewhere, and what
+// crosses the network in the clear when the URL is http.
+func endpointWarning(field, address, insteadOf, secret string) string {
+	warning := fmt.Sprintf("%s is set: clowder uses %s %s, which is meant for test labs", field, address, insteadOf)
+	if strings.HasPrefix(address, "http://") {
+		warning += "; over http " + secret + " crosses the network unencrypted"
+	}
+	return warning
+}
+
 // checkACME: a full URL for the directory, an address for the email and a
 // positive duration for renew_before.
 func checkACME(acme ACME) Problems {

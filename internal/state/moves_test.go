@@ -15,11 +15,11 @@ import (
 func moveCluster(t *testing.T) *cluster {
 	t.Helper()
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.mustApply(KindApplyConfig, CLIActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
 	c.activeHosts(2)
 	spec := testVolumeSpec()
 	spec.Replicas = 2
-	c.mustApply(KindPutResource, UserActor("alice"), putResource(resource.KindVolume, "default", "data", spec))
+	c.mustApply(KindPutResource, CLIActor, putResource(resource.KindVolume, "default", "data", spec))
 	shop := shopSpec()
 	app := shop.Services["app"]
 	app.Volumes = []stackspec.Mount{{Volume: "data", Path: "/data"}}
@@ -246,10 +246,10 @@ func TestAnExtensionGivesTheCurrentStepMoreTime(t *testing.T) {
 func TestAUserAsksToMoveAStackAndTheMovesEndAnswersIt(t *testing.T) {
 	c := moveCluster(t)
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 2, Phase: Draining})
-	c.refuse(KindRequestMove, UserActor("alice"), RequestMove{Namespace: "default", Name: "shop", To: 0}, "runs on host 0 already")
-	c.refuse(KindRequestMove, UserActor("alice"), RequestMove{Namespace: "default", Name: "shop", To: 2}, "no active host")
-	c.refuse(KindRequestMove, UserActor("alice"), RequestMove{Namespace: "default", Name: "blog", To: 1}, "no stack default/blog")
-	c.mustApply(KindRequestMove, UserActor("alice"), RequestMove{Namespace: "default", Name: "shop", To: 1})
+	c.refuse(KindRequestMove, CLIActor, RequestMove{Namespace: "default", Name: "shop", To: 0}, "runs on host 0 already")
+	c.refuse(KindRequestMove, CLIActor, RequestMove{Namespace: "default", Name: "shop", To: 2}, "no active host")
+	c.refuse(KindRequestMove, CLIActor, RequestMove{Namespace: "default", Name: "blog", To: 1}, "no stack default/blog")
+	c.mustApply(KindRequestMove, CLIActor, RequestMove{Namespace: "default", Name: "shop", To: 1})
 	if got := c.state.Stacks["default/shop"].MoveTo; got == nil || *got != 1 {
 		t.Fatalf("move to %v", got)
 	}
@@ -281,22 +281,22 @@ func TestAHostWithStacksLeavesInsteadOfGoingAtOnce(t *testing.T) {
 	if err := c.state.CheckLeaving(0); err != nil {
 		t.Fatalf("it may leave: %v", err)
 	}
-	c.refuse(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 0, Phase: Active, Leaving: true}, "only a draining host leaves")
-	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 0, Phase: Draining, Leaving: true, From: Active})
+	c.refuse(KindSetHostPhase, CLIActor, SetHostPhase{Host: 0, Phase: Active, Leaving: true}, "only a draining host leaves")
+	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 0, Phase: Draining, Leaving: true, From: Active})
 	if host := c.state.Hosts[0]; host.Phase != Draining || !host.Leaving {
 		t.Fatalf("host 0 is %s, leaving %t", host.Phase, host.Leaving)
 	}
 	// once draining, it may still leave; an undrain takes it back
-	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 0, Phase: Active})
-	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 0, Phase: Draining})
-	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 0, Phase: Draining, Leaving: true})
-	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 0, Phase: Active})
+	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 0, Phase: Active})
+	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 0, Phase: Draining})
+	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 0, Phase: Draining, Leaving: true})
+	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 0, Phase: Active})
 	if c.state.Hosts[0].Leaving {
 		t.Error("an undrain keeps the host leaving")
 	}
-	c.mustApply(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 0, Phase: Draining, Leaving: true})
+	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 0, Phase: Draining, Leaving: true})
 	// a highly available cluster keeps three hosts that do not leave
-	c.refuse(KindSetHostPhase, UserActor("alice"), SetHostPhase{Host: 1, Phase: Draining, Leaving: true},
+	c.refuse(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Draining, Leaving: true},
 		"join a replacement first")
 }
 
@@ -304,7 +304,7 @@ func TestARequestToMoveIsTakenBackOrDroppedWithItsHost(t *testing.T) {
 	c := moveCluster(t)
 	request := func(to HostID) {
 		c.t.Helper()
-		c.mustApply(KindRequestMove, UserActor("alice"), RequestMove{Namespace: "default", Name: "shop", To: to})
+		c.mustApply(KindRequestMove, CLIActor, RequestMove{Namespace: "default", Name: "shop", To: to})
 	}
 	request(1)
 	request(0) // where it runs: the request goes

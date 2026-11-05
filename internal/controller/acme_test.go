@@ -262,7 +262,7 @@ func newACMERunner(t *testing.T, ca *fakeCA) (*acmeRunner, *leader) {
 			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
-	l.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
+	l.apply(state.KindApplyConfig, state.CLIActor, state.ApplyConfig{
 		Spec: clusterspec.Config{
 			Name: "prod", Endpoints: []string{"198.51.100.2"},
 			Hetzner:        clusterspec.Hetzner{Token: "hetzner.token"},

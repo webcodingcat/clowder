@@ -122,10 +122,6 @@ func selectNamespace(w http.ResponseWriter, r *http.Request, kind string) (names
 		writeError(w, http.StatusBadRequest, errors.New("name either namespace= or allNamespaces=true"))
 		return selected, false
 	}
-	if err := state.Authorize(actorOf(identityOf(r)), state.VerbRead, kind, selected.namespace); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return selected, false
-	}
 	return selected, true
 }
 
@@ -137,20 +133,16 @@ func (s *Server) getResource(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Errorf("no resource at %s", r.URL.Path))
 		return
 	}
-	s.answerResource(w, r, resource.Ref{Kind: kind, Namespace: r.PathValue("namespace"), Name: r.PathValue("name")})
+	s.answerResource(w, resource.Ref{Kind: kind, Namespace: r.PathValue("namespace"), Name: r.PathValue("name")})
 }
 
 // getNamespace answers one namespace, which lives in none:
 // /v1/resources/namespace/{name}.
 func (s *Server) getNamespace(w http.ResponseWriter, r *http.Request) {
-	s.answerResource(w, r, resource.Ref{Kind: resource.KindNamespace, Name: r.PathValue("name")})
+	s.answerResource(w, resource.Ref{Kind: resource.KindNamespace, Name: r.PathValue("name")})
 }
 
-func (s *Server) answerResource(w http.ResponseWriter, r *http.Request, ref resource.Ref) {
-	if err := state.Authorize(actorOf(identityOf(r)), state.VerbRead, ref.Kind, ref.Namespace); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
+func (s *Server) answerResource(w http.ResponseWriter, ref resource.Ref) {
 	var found *resource.Object
 	s.config.Cluster.Read(func(current *state.State) {
 		for _, object := range objects(current, ref.Kind) {

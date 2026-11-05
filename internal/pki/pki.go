@@ -1,11 +1,15 @@
-// Package pki is the cluster's certificate authority. Hosts and users
+// Package pki is the cluster's certificate authority. Hosts and the CLI
 // authenticate with certificates it issues (mTLS): hosts between agents and
-// for Raft, users from the CLI. Keys are Ed25519. A private key never leaves
-// the machine that made it: hosts and the CLI send only their public key.
+// for Raft, the CLI towards the agents. Keys are Ed25519. Hosts and the
+// bootstrap's CLI send only their public key; clowderd credentials makes
+// the CLI's key on a host and hands it over with the certificate, as
+// kubeadm does with admin.conf.
 //
-// A certificate ends by revocation, not by expiry: the cluster keeps the
-// revoked serials, and Verify takes them. The long lifetimes spare hosts
-// that stay powered off for months a renewal they cannot do.
+// A host certificate ends by revocation, not by expiry: the cluster keeps
+// the revoked serials, and Verify takes them. CLI certificates end with
+// the cluster's cutoff (state.SetCLICutoff), which the API checks. The
+// long lifetimes spare hosts that stay powered off for months a renewal
+// they cannot do.
 package pki
 
 import (
@@ -23,7 +27,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -45,7 +48,7 @@ type Role string
 // The roles.
 const (
 	RoleHost Role = "host"
-	RoleUser Role = "user"
+	RoleCLI  Role = "cli"
 )
 
 // CA is the cluster's certificate authority.
@@ -128,14 +131,15 @@ func (ca *CA) IssueHost(public crypto.PublicKey, id int, addresses []netip.Addr,
 	return ca.issue(template, public)
 }
 
-// IssueUser issues the certificate a user's CLI presents.
-func (ca *CA) IssueUser(public crypto.PublicKey, name string, now time.Time) ([]byte, error) {
-	if err := CheckUserName(name); err != nil {
-		return nil, err
-	}
+// CLIName is the name in every CLI certificate: the cluster has no users,
+// only the CLI.
+const CLIName = "cli"
+
+// IssueCLI issues a certificate the CLI presents.
+func (ca *CA) IssueCLI(public crypto.PublicKey, now time.Time) ([]byte, error) {
 	template, err := newTemplate(pkix.Name{
-		CommonName:         name,
-		OrganizationalUnit: []string{string(RoleUser)},
+		CommonName:         CLIName,
+		OrganizationalUnit: []string{string(RoleCLI)},
 	}, now, leafLifetime)
 	if err != nil {
 		return nil, err
@@ -157,18 +161,6 @@ func (ca *CA) issue(template *x509.Certificate, public crypto.PublicKey) ([]byte
 	return encodeCertificate(der), nil
 }
 
-// userName is what a user may be called: the name goes into certificates and
-// becomes the file name of the user's credentials.
-var userName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
-
-// CheckUserName refuses a name a user cannot have.
-func CheckUserName(name string) error {
-	if !userName.MatchString(name) {
-		return fmt.Errorf("user name %q: use lowercase letters, digits, - and _", name)
-	}
-	return nil
-}
-
 // HostName is the name in a host's certificate.
 func HostName(id int) string {
 	return "host-" + strconv.Itoa(id)
@@ -177,11 +169,14 @@ func HostName(id int) string {
 // Identity is who a verified certificate belongs to.
 type Identity struct {
 	Role Role
-	// Name is the user's name, or the host's name (host-<id>).
+	// Name is CLIName, or the host's name (host-<id>).
 	Name string
 	// HostID is set for hosts.
 	HostID int
 	Serial string
+	// NotBefore is when the certificate starts: the API holds a CLI
+	// certificate against the cluster's cutoff with it.
+	NotBefore time.Time
 }
 
 // Verify checks a certificate a peer presented (a CLI, or an agent calling
@@ -202,12 +197,15 @@ func Verify(caCertificate, certificate *x509.Certificate, revoked func(serial st
 	if revoked(serial) {
 		return Identity{}, fmt.Errorf("certificate %s (%s) is revoked", certificate.Subject.CommonName, serial)
 	}
-	identity := Identity{Name: certificate.Subject.CommonName, Serial: serial}
+	identity := Identity{Name: certificate.Subject.CommonName, Serial: serial, NotBefore: certificate.NotBefore}
 	if units := certificate.Subject.OrganizationalUnit; len(units) == 1 {
 		identity.Role = Role(units[0])
 	}
 	switch identity.Role {
-	case RoleUser:
+	case RoleCLI:
+		if identity.Name != CLIName {
+			return Identity{}, fmt.Errorf("CLI certificate with the name %q", identity.Name)
+		}
 	case RoleHost:
 		id, err := strconv.Atoi(strings.TrimPrefix(identity.Name, "host-"))
 		if err != nil || HostName(id) != identity.Name {
@@ -225,7 +223,7 @@ func Serial(certificate *x509.Certificate) string {
 	return certificate.SerialNumber.Text(16)
 }
 
-// NewKey makes a key pair for a host or a user.
+// NewKey makes a key pair for a host or the CLI.
 func NewKey() (ed25519.PrivateKey, error) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -284,7 +282,7 @@ func TrustProof(bootstrapKey, caCertificatePEM []byte) []byte {
 }
 
 // MinBootstrapKeyLength is the shortest bootstrap key taken. The key is the
-// only defense of the bootstrap until the cluster has its user, and the
+// only defense of the bootstrap until the CLI has its certificate, and the
 // offer's proof lets anyone try keys offline; OpenTofu's example makes 48
 // letters and digits, and a key chosen by hand must not be much weaker.
 const MinBootstrapKeyLength = 32
