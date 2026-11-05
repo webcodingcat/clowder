@@ -92,8 +92,8 @@ headers, the operator base and what `clowderd` depends on (the `Depends` of the 
 of `dist/`), but not `clowderd` and no cluster. Then it cleans the server for reuse:
 cloud-init's instance (with it the SSH host keys and the network), the machine-id,
 Docker's engine ID, the package lists and every file of the setup go. The server is
-powered off and snapshotted, `hlab image export` writes the snapshot into the Docker
-volume `clowder-live-image` (`host.qcow2`), and the lab stops; its own volume keeps
+powered off and snapshotted, `hlab image export --volume` writes the snapshot into the
+Docker volume `clowder-live-image` (`host.qcow2`), and the lab stops; its own volume keeps
 Debian's image for the next time, and `hlab reset` clears it before. A failed image
 leaves its lab running for a look until the next image or `bin/dev live down`. The labs
 load only `debian-13`, the one OS image the hosts need.
@@ -103,8 +103,10 @@ and DRBD move on; `--rebuild` makes it anew at once. The inputs are Debian's ima
 line in Debian's `SHA512SUMS`), `setup.sh` and its unit, `packaging/clowderd.yaml` and
 `test/live/image_test.go`; their hash is in the volume (`inputs`) and in the label
 `clowder-live-image` of each snapshot made from it. `up` imports the image into its lab
-with `hlab image import` and gives its ID to the module (`image`), for the first host and
-every host that joins later.
+with `hlab image import --volume` and gives its ID to the module (`image`), for the first
+host and every host that joins later. Both copies stay inside Docker: through a file on
+the host, the 3 GB image takes minutes each way on Docker Desktop. `--volume` needs an
+HLab that has it (from its commit "Move images to and from Docker volumes" on).
 
 `up <tag>` always makes the image anew, from the release: the setup reads the
 dependencies from the APT repository, so the release's setup runs from scratch once per

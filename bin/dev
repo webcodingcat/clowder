@@ -106,9 +106,6 @@ registry_container=""
 mail_container=""
 # The volume whose lock bin/dev holds (live_lock).
 locked_volume=""
-# A directory of the live commands' files on this host (hlab image import
-# and export read and write files here), removed when bin/dev ends.
-live_temp_dir=""
 
 # in_image <image> <command...>: Run a command in an image with the repository
 # mounted at /src as the working directory.
@@ -518,7 +515,7 @@ ensure_image() {
 # The lab stops once the image is in the volume and keeps its own volume,
 # with Debian's image loaded; a failure leaves it running for a look.
 make_image() {
-  local inputs="$1" tag="$2" settings image_id file
+  local inputs="$1" tag="$2" settings image_id
   use_lab "${IMAGE_LAB}"
   live_lock
   live_lab
@@ -539,21 +536,19 @@ make_image() {
     return 1
   fi
   image_id="$(in_lab "${GO_IMAGE}" cat /work/image-id </dev/null)"
-  file="${live_temp_dir}/export.qcow2"
-  lab image export "${image_id}" "${file}"
-  # the inputs only beside a whole image: image_current reads them
-  docker run --rm -i -v "${IMAGE_VOLUME}:/image" "${BUSYBOX_IMAGE}" sh -c \
-    'rm -f /image/inputs && cat >/image/host.qcow2.new && mv /image/host.qcow2.new /image/host.qcow2 \
-      && echo "$1" >/image/inputs' sh "${inputs}" <"${file}"
-  rm -f "${file}"
+  # the inputs only beside a whole image: image_current reads them. The
+  # export names the file only once it is whole, and copies inside Docker.
+  docker run --rm -v "${IMAGE_VOLUME}:/image" "${BUSYBOX_IMAGE}" rm -f /image/inputs
+  lab image export "${image_id}" --volume "${IMAGE_VOLUME}:host.qcow2"
+  docker run --rm -v "${IMAGE_VOLUME}:/image" "${BUSYBOX_IMAGE}" sh -c \
+    'echo "$1" >/image/inputs' sh "${inputs}"
   docker rm -f "${packages_container}" >/dev/null 2>&1 || true
   lab down
   echo "bin/dev live: made the hosts' image (${inputs})"
 }
 
 # prepare_live [<tag>]: What every lab's up needs first: the packages (or,
-# with a tag, a checkout at it) and the hosts' image, copied out of its
-# volume for hlab image import.
+# with a tag, a checkout at it) and the hosts' image.
 prepare_live() {
   local tag="${1:-}"
   if [[ -n "${tag}" ]]; then
@@ -562,29 +557,18 @@ prepare_live() {
     cmd_package
   fi
   ensure_image "${tag}"
-  copy_image_out
   # the labs run tofu init at once; with the providers in the cache before,
   # none of them writes to it
   tofu_validate examples/hetzner
 }
 
-# copy_image_out: Copy the hosts' image out of its volume into the
-# temporary directory: hlab image import reads a file here.
-# Globals:
-#   live_temp_dir (read)
-copy_image_out() {
-  docker run --rm -v "${IMAGE_VOLUME}:/image:ro" "${BUSYBOX_IMAGE}" cat /image/host.qcow2 \
-    >"${live_temp_dir}/host.qcow2"
-}
-
-# import_image: Import the hosts' image of copy_image_out into the lab as a
-# snapshot labeled with its inputs; print its ID.
-# Globals:
-#   live_temp_dir (read)
+# import_image: Import the hosts' image from its volume into the lab as a
+# snapshot labeled with its inputs; print its ID. The copy stays inside
+# Docker.
 import_image() {
   local inputs
   inputs="$(docker run --rm -v "${IMAGE_VOLUME}:/image:ro" "${BUSYBOX_IMAGE}" cat /image/inputs)"
-  lab image import "${live_temp_dir}/host.qcow2" --description "clowder live host" \
+  lab image import --volume "${IMAGE_VOLUME}:host.qcow2" --description "clowder live host" \
     --label "clowder-live-image=${inputs}"
 }
 
@@ -898,17 +882,6 @@ cmd_all() {
   cmd_package
 }
 
-# start_live: Make the live commands' temporary directory, removed when
-# bin/dev ends.
-# Globals:
-#   live_temp_dir (set)
-start_live() {
-  live_temp_dir="$(mktemp -d)"
-  # expanded now: the trap runs after the function returned
-  # shellcheck disable=SC2064
-  trap "rm -rf '${live_temp_dir}'" EXIT
-}
-
 # main: Dispatch to the command named in the first argument.
 main() {
   case "${1:-}" in
@@ -916,7 +889,6 @@ main() {
     test) cmd_test "${@:2}" ;;
     test-tools) cmd_test_tools ;;
     live)
-      start_live
       case "${2:-}" in
         "") cmd_live ;;
         up) cmd_live_up "${@:3}" ;;
