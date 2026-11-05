@@ -134,8 +134,10 @@ install_headers() {
     return
   fi
   # the image ships empty index files for trixie-security, which hides the
-  # headers of the running kernel; fetch the lists anew
-  rm -rf /var/lib/apt/lists/*
+  # headers of the running kernel; fetch the lists anew. Only the index
+  # files go: apt's lock and partial/ stay, so another apt-get update at boot
+  # (HLab's guest agent, apt-daily) finishes before ours instead of breaking
+  find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock -delete
   "${APT[@]}" update
   # a package the mirror has must install; a failure then is no reason to reboot
   if apt-cache show "${headers}" >/dev/null 2>&1; then
@@ -206,6 +208,9 @@ trust_key() {
 # add_sources: LINBIT's repository for DRBD 9 and, without the test hook,
 # clowder's; then the package lists.
 add_sources() {
+  # the lists may be from a run that stopped halfway, or broken by another
+  # apt-get update at boot; install_headers fetches them only once
+  "${APT[@]}" update
   "${APT[@]}" install -y --no-install-recommends gnupg curl
   trust_key "${LINBIT_KEY_URL}" "${LINBIT_FINGERPRINT}" /usr/share/keyrings/linbit.gpg
   echo "deb [signed-by=/usr/share/keyrings/linbit.gpg] ${LINBIT_SOURCE}" >/etc/apt/sources.list.d/linbit.list
