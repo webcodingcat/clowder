@@ -11,6 +11,7 @@ clowder is built in phases; each ends with live tests on HLab
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
 | 2 | three hosts: replication, failover with fencing | done, passes the live tests |
+| 2b | access and host roles the way of kubeadm ([below](#phase-2b-access-and-host-roles-the-way-of-kubeadm)) | planned |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -241,6 +242,171 @@ earlier build must be set up anew, and credentials of an earlier build are refus
 
 Until `v1.0.0`, the state and `cluster.yaml` may change between releases without a way
 to upgrade a running cluster.
+
+## Phase 2b: access and host roles the way of kubeadm
+
+Before phase 3, while the structure is still cheap to change, clowder moves closer to
+Kubernetes and kubeadm in how users get in, how long their certificates last, how the
+cluster's configuration and secrets come in, and which hosts hold the cluster's keys.
+clowder goes beyond Kubernetes only where it would otherwise lose a protection (the
+CLI's cutoff, the check of the Hetzner token).
+
+Six packages, in this order, each in a session of its own. Each changes the state or a
+file format, so a cluster of an earlier build is set up anew. Each touches access, keys
+or a format, so each gets the full review loop (junior and senior), and ends with the
+live tests.
+
+### Package 1: CLI certificates and credentials
+
+- **A name in each CLI certificate,** for the audit: `clowderd credentials --name
+  <name>`, held to `names.Valid`, as `kubeadm kubeconfig user --client-name`. Without
+  it the name is `admin`, as kubeadm's `admin.conf` is always `kubernetes-admin`. The
+  certificate's common name is the name; its organizational unit
+  stays `cli`. The actor of its commands becomes `cli/<name>`, in the agent's log and in
+  the Raft command. The name grants nothing: every CLI certificate controls the cluster,
+  and a resource's owner stays the channel `cli`. The cutoff (`--revoke-older`) stays the
+  only revocation, as Kubernetes cannot revoke client certificates at all.
+- **One year,** kubeadm's default for client certificates. Host certificates keep
+  `leafLifetime`, the CA `caLifetime`. From 30 days before the end, every CLI command
+  warns on stderr. A new certificate comes from `clowderd credentials` again (as
+  `kubeadm certs renew admin.conf`); the CLI does not renew itself.
+- **The credentials work as a kubeconfig.** One file holds contexts, each with its
+  endpoints, the CA, the key and the certificate; `current_context` picks one. The CLI
+  reads `--config`, else `$CLOWDER_CONFIG`, else `~/.clowder/config` (as
+  `~/.kube/config`), with `--context` for another context in one call and `clowder
+  config use-context|get-contexts`. `clowderd credentials` prints a file with one
+  context, so one file from the host is all a user needs. `clowder config import <file>
+  [--context <name>]` adds it to the user's file: kubectl has no such command, and
+  merging by hand is where keys get lost. A context's name is the user's own, as in a
+  kubeconfig: the cluster's name without `--context`, and a name already taken needs
+  one.
+- **The cluster's name is optional,** as kubeadm's `clusterName`: `clowderd init
+  --cluster-name <name>`, `clowder-cluster` without it. It is kept in the state, shown by
+  `cluster status`, and names the context of new credentials; it checks nothing.
+- **`endpoints` leave `cluster.yaml`:** the credentials name the server, as a kubeconfig
+  does. Which addresses they list is the operator's choice: those of the control-plane
+  hosts, or one address in front of them (a Floating IP of their own, as kubeadm's
+  `--control-plane-endpoint`). `clowderd credentials` writes the public addresses of the
+  control-plane hosts at the time, or what `--endpoint` names. The CLI trusts any host
+  certificate of the CA, whatever the address, so both work. The known gap that the CLI
+  learns no hosts stays for the first way: after joins and removes, the user fetches new
+  credentials or edits the endpoints.
+- The CLI no longer finds its credentials through the cluster directory; until package 2,
+  only `cluster apply`, `diff` and the `secret` commands read `cluster.yaml`.
+
+For the operator: the credentials move to `~/.clowder/config` in a new format,
+`endpoints` go from `cluster.yaml` into it, `clowderd credentials` takes a `--name`,
+`clowderd init` takes an optional `--cluster-name`, and the CLI's certificate is renewed
+once a year.
+
+### Package 2: configuration and secrets the way of Kubernetes
+
+- **`cluster.yaml` becomes a resource,** `kind: ClusterConfiguration`, as kubeadm's
+  `ClusterConfiguration`: one per cluster, without a namespace, applied with `clowder
+  apply -f` together with namespaces, secrets and stacks. Its fields are camelCase, as
+  every resource's. `cluster apply` and `cluster diff` go (`apply --dry-run` and a
+  `clowder diff -f`, as `kubectl diff`, take their place), and with them the cluster
+  directory: `--cluster`, `$CLOWDER_CLUSTER`, `clusterdir.Find` and `clusterdir.Create`.
+  clowder does not care where the files come from. Its `metadata.name` is always
+  `cluster`, as OpenShift names its configuration resources.
+- **No name check,** as Kubernetes checks none: `cluster.yaml`'s `name` goes (the
+  cluster's name comes from `clowderd init`, package 1), and `clowderd recover` asks for
+  the host's name instead of the cluster's. What the name guarded against, a configuration with another project's Hetzner token
+  (fencing would power off that project's servers), the token itself now shows: the
+  leader refuses a configuration whose token does not see the servers of every host
+  (`hetzner.Client.CheckServer`, as at a join).
+- **No files next to it:** `acme.ca` and an alert channel's `smtp.ca` stand in the
+  resource as PEM, as Kubernetes' `caBundle` does. `clusterspec.FileNames`,
+  `CheckFiles` and `ClusterConfig.Files` go.
+- **No secret values in it:** the Hetzner token, the registries' passwords and the
+  alert channels' URLs and passwords are Secrets in the namespace `clowder-system`, which
+  the configuration names, as the hcloud controller reads `kube-system/hcloud`. `apply`
+  refuses a configuration that names a Secret that does not exist, and a delete of a
+  Secret it names. `!secret`, `clusterspec.SecretPlaces` and the case of `cluster.yaml`
+  in `secret rekey` go.
+- **`Secret` and `SealedSecret`,** as in Kubernetes with Bitnami's sealed secrets. A
+  `Secret` carries its value in clear (`stringData`, `data`), or comes from `clowder
+  create secret <namespace>/<name> --from-literal|--from-file`; the CLI sends it over
+  mTLS and the cluster seals it. It does not belong in Git. A `SealedSecret` carries its
+  value encrypted for the cluster's age key and its own namespace and name (today's
+  `!secret` value), made by `clowder secret seal` as `kubeseal` makes one; it goes into
+  Git. Both end as the same sealed secret in the state; a stack or the configuration
+  names a Secret and does not care which way it came.
+- **No recovery key:** as with sealed secrets, the cluster's age key is exported and kept
+  offline: `clowderd sealing-key export`, as root on a host. `secret decrypt` and `secret
+  rekey` take that key in place of the recovery key. The recovery key, `recovery rotate`,
+  `/v1/recovery/rotate` and the second recipient of every value go. Whether phase 3's
+  backups keep the key too is decided there.
+
+For the operator: `cluster.yaml` is a `ClusterConfiguration` applied with `clowder apply`,
+without `name`, with its CAs inline and its secrets as Secrets in `clowder-system`; `!secret` values
+become `SealedSecret`s (`clowder secret seal`); the recovery key gives way to an exported
+sealing key.
+
+### Package 3: the first access as `kubeadm init`
+
+- `clowderd init` makes the cluster as now; the first credentials come over SSH, as
+  kubeadm's `admin.conf` does: `ssh root@<host> clowderd credentials --name <name>`. The
+  CA is trusted through SSH.
+- Gone: the bootstrap key (`examples/hetzner`'s `random_password`, the user data,
+  `/etc/clowder/bootstrap-key`, `--bootstrap-key-file`), `GET` and `POST /v1/bootstrap`,
+  `finish-bootstrap`, `MinBootstrapKeyLength`, the limit on the bootstrap's routes,
+  and `clowder cluster bootstrap`. `TrustProof` stays for join tokens. The module's
+  output and the README take the place of the configuration the bootstrap wrote: a
+  `ClusterConfiguration` to apply.
+- The live tests fetch their credentials over SSH.
+
+Why: no secret is left in the user data or the metadata service, which closes the window
+at boot that the module's README describes, and a whole protocol goes. The price is SSH,
+which `examples/hetzner` already opens to `admin_cidrs`.
+
+For the operator: no bootstrap key; `ssh … clowderd credentials`, then `clowder config
+import`, then `clowder apply` of the configuration.
+
+### Package 4: control plane and workers – roles, join, Raft
+
+- A host has the role control plane, worker, or both. Today every host has both; a
+  cluster of three stays so. Only a worker runs stacks and holds volume copies: a
+  control-plane host without the worker role runs none. `clowderd init` makes a host
+  with both roles, `--worker=false` one of the control plane only; `clowderd join` makes
+  a worker, `--control-plane` adds the control plane (and `--worker=false` drops the
+  worker). A control-plane join needs a token made with `clowder host join-token
+  --control-plane`; only its answer carries the data key. The token's role replaces
+  kubeadm's `--certificate-key`.
+- Only control-plane hosts hold the data key (and with it the CA's key and the cluster's
+  age key), vote in Raft (1, 3 or 5 of them, as now), lead, serve the CLI's API, and run
+  `clowderd credentials` and `clowderd recover`. The passive phase applies to them.
+- Workers follow the Raft log as non-voters, so the agent's loops keep reading the
+  state as now. They see every spec, which Kubernetes does not show a node, and the
+  secrets only sealed.
+- The placement places stacks and copies on workers only. A tiebreaker holds no data
+  and no load, so it may go on any host, a control-plane host without the worker role
+  too. High availability needs three voters and enough workers for the volumes' copies;
+  three hosts with both roles are enough.
+
+### Package 5: workers get only their stacks' secrets
+
+- A worker asks a control-plane host over mTLS for the secrets of a stack the state
+  places on it, and the control-plane host checks that it does, as Kubernetes' node
+  authorizer. Stacks start only after the catch-up with the leader anyway.
+- A worker commits only host commands about itself, as Kubernetes' NodeRestriction, and
+  never forwards the CLI's commands; today every host forwards them as `cli`.
+- The ingress host needs the TLS keys of every route. A worker that holds the Floating
+  IP fetches them as it fetches secrets, and the control-plane host checks that it is
+  the ingress host.
+
+### Package 6: recover and fencing with workers
+
+- Fencing and failover stay as they are: every host beats to the voters.
+- `clowderd recover` runs on a control-plane host, which may hold no copies: the remap
+  must take the copies on workers that are still reachable into account instead of
+  retiring every other host. The package starts with a design of its own.
+
+### After phase 2b
+
+- A removed worker holds no keys; revoking its certificate is enough. `cluster
+  rotate-keys` (phase 4) is needed only after a control-plane host is removed, which
+  makes [Keys of a removed host](#keys-of-a-removed-host) smaller.
 
 ## Known gaps
 
