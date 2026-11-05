@@ -251,10 +251,11 @@ cluster's configuration and secrets come in, and which hosts hold the cluster's 
 clowder goes beyond Kubernetes only where it would otherwise lose a protection (the
 CLI's cutoff, the check of the Hetzner token).
 
-Six packages, in this order, each in a session of its own. Each changes the state or a
-file format, so a cluster of an earlier build is set up anew. Each touches access, keys
-or a format, so each gets the full review loop (junior and senior), and ends with the
-live tests.
+Seven packages, in this order, each in a session of its own. Each that changes code
+changes the state or a file format, so a cluster of an earlier build is set up anew, and
+touches access, keys or a format, so it gets the full review loop (junior and senior).
+Packages 1 to 6 end with lint and the unit tests; package 7 runs the live tests once, on
+the whole phase.
 
 ### Package 1: CLI certificates and credentials
 
@@ -354,7 +355,6 @@ sealing key.
   and `clowder cluster bootstrap`. `TrustProof` stays for join tokens. The module's
   output and the README take the place of the configuration the bootstrap wrote: a
   `ClusterConfiguration` to apply.
-- The live tests fetch their credentials over SSH.
 
 Why: no secret is left in the user data or the metadata service, which closes the window
 at boot that the module's README describes, and a whole protocol goes. The price is SSH,
@@ -401,6 +401,21 @@ import`, then `clowder apply` of the configuration.
 - `clowderd recover` runs on a control-plane host, which may hold no copies: the remap
   must take the copies on workers that are still reachable into account instead of
   retiring every other host. The package starts with a design of its own.
+
+### Package 7: the live tests of phase 2b
+
+- `test/live` and `bin/dev live` follow the whole phase: credentials fetched over SSH
+  into `~/.clowder/config` (through `$CLOWDER_CONFIG`), the `ClusterConfiguration` and
+  the cluster's secrets applied with `clowder apply`, `SealedSecret`s in place of
+  `!secret`, no bootstrap key.
+- Scenarios for what is new: a CLI certificate with a name and its actor in the log, the
+  warning before a certificate ends, a configuration whose Hetzner token does not see
+  the hosts' servers refused, a `Secret` in clear and a `SealedSecret` alike in a stack,
+  the sealing key exported and used by `secret decrypt`; a cluster with a control-plane
+  host without the worker role and a worker that is no control-plane host, a tiebreaker
+  on the control plane, a worker that gets only its stacks' secrets and refuses to
+  forward the CLI's commands, failover and recover with workers.
+- All live tests green; a failure goes back to the package it came from.
 
 ### After phase 2b
 
