@@ -77,25 +77,25 @@ volume_device() {
   echo "/dev/disk/by-id/scsi-0HC_Volume_$1"
 }
 
-# wait_for_hardware: Wait for the private address and the volumes, which
-# Hetzner attaches after the server has booted.
-wait_for_hardware() {
-  local class_volume
-  wait_for 300 "the private network" has_address "$(private_address)"
-  for class_volume in ${VOLUMES}; do
-    wait_for 300 "volume ${class_volume}" test -b "$(volume_device "${class_volume#*=}")"
-  done
-}
-
-# metadata <path>: Print a value of Hetzner's metadata service, read once and
-# kept from then on: once clowderd runs, its nft rules close the service to
-# the host (the user data holds the bootstrap key), and the setup runs again
-# at a boot until its marker exists.
+# metadata <path> [<pattern>]: Print a value of Hetzner's metadata service,
+# read once and kept from then on: once clowderd runs, its nft rules close the
+# service to the host (the user data holds the bootstrap key), and the setup
+# runs again at a boot until its marker exists. An answer that is empty or
+# does not match the pattern (an extended regex) fails and is not kept: until
+# Hetzner has attached the private network, private-networks is [], and a
+# kept [] would hide the address at every later boot.
 metadata() {
-  local kept="${STATE_DIR}/metadata/$1"
+  local path="$1" pattern="${2:-.}" kept="${STATE_DIR}/metadata/$1" answer
   if [[ ! -s "${kept}" ]]; then
+    # the time limit lets wait_for's deadline hold while the service hangs
+    answer="$(curl -fsS --max-time 10 "${METADATA}/${path}")"
+    if ! grep -qE -- "${pattern}" <<<"${answer}"; then
+      # on stderr: callers take the output as the value
+      log "the metadata service has no ${path} yet" >&2
+      return 1
+    fi
     mkdir -p "${STATE_DIR}/metadata"
-    curl -fsS "${METADATA}/$1" >"${kept}.new"
+    printf '%s\n' "${answer}" >"${kept}.new"
     mv "${kept}.new" "${kept}"
   fi
   cat "${kept}"
@@ -103,7 +103,24 @@ metadata() {
 
 # private_address: Print the host's address in the private network.
 private_address() {
-  metadata private-networks | awk '/- ip:/ {print $3; exit}'
+  metadata private-networks '- ip: ' | awk '/- ip: / {print $3; exit}'
+}
+
+# has_private_address: Tell whether the metadata service names the host's
+# private address yet and an interface holds it.
+has_private_address() {
+  local address
+  address="$(private_address)" && has_address "${address}"
+}
+
+# wait_for_hardware: Wait for the private address and the volumes, which
+# Hetzner attaches after the server has booted.
+wait_for_hardware() {
+  local class_volume
+  wait_for 300 "the private network" has_private_address
+  for class_volume in ${VOLUMES}; do
+    wait_for 300 "volume ${class_volume}" test -b "$(volume_device "${class_volume#*=}")"
+  done
 }
 
 # install_headers: Install the headers of the running kernel for the DRBD
@@ -324,7 +341,7 @@ join_cluster() {
 # enter_cluster: clowderd check, then clowderd init with the bootstrap key or
 # clowderd join with the join token, once.
 enter_cluster() {
-  local class_volume pools=() host=()
+  local class_volume pools=() host=() underlay public_address server_ref
   for class_volume in ${VOLUMES}; do
     pools+=(--pool "vg-${class_volume%%=*}/thin")
   done
@@ -337,9 +354,13 @@ enter_cluster() {
     log "an earlier clowderd init or join stopped halfway; to start anew, remove /var/lib/clowder and reboot"
     return 1
   fi
+  # one value per assignment: a failed $(...) in an array's assignment does
+  # not stop the script
+  underlay="$(private_address)"
+  public_address="$(metadata public-ipv4)"
+  server_ref="$(metadata instance-id)"
   # the host's name in the cluster is its hostname, the server's name
-  host=(--underlay "$(private_address)" --public-address "$(metadata public-ipv4)"
-  --server-ref "$(metadata instance-id)")
+  host=(--underlay "${underlay}" --public-address "${public_address}" --server-ref "${server_ref}")
   if [[ -f "${TOKEN_FILE}" ]]; then
     join_cluster "${host[@]}"
   else

@@ -21,7 +21,8 @@ the others. How to use it is in the main [README](../../README.md#getting-starte
   that reaches it. Once `clowderd` runs, its rules close the service to the host and its
   containers, but at boot cloud-init reads it before `clowderd` starts. So bootstrap
   soon after the first host is up. The setup reads the service once, keeps what it needs
-  in `/var/lib/clowder-setup`, and deletes its own copy of the key in `/etc/clowder`.
+  in `/var/lib/clowder-setup` (the private networks only once they list an address),
+  and deletes its own copy of the key in `/etc/clowder`.
 - **More hosts** join with a token each: `clowder host join-token` prints one, which goes
   into `join_tokens` under the host's name, and the host's name into `hosts`. A token
   opens once and expires (an hour by default, `--ttl` up to a day), so a host made later
