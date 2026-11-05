@@ -40,13 +40,11 @@ const (
 )
 
 // HostParts are the host's network, storage and Docker, which the agent
-// changes, and how it connects to the hoster's API while it leads; tests
-// use fakes.
+// changes; tests use fakes.
 type HostParts struct {
 	Network HostNetwork
 	Storage Storage
 	Docker  Docker
-	Hoster  controller.ConnectHoster
 }
 
 // Docker is what the agent and its runners need from Docker; docker.Client
@@ -93,7 +91,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	if err != nil {
 		return err
 	}
-	if err := checkRetired(ctx, files, host, credentials, parts.Hoster, logger); err != nil {
+	if err := checkRetired(ctx, files, host, credentials, logger); err != nil {
 		return err
 	}
 	if err := parts.Network.SetUpInterface(ctx, host.NodeAddress); err != nil {
@@ -244,7 +242,7 @@ func newDaemon(base shared) (*daemon, error) {
 	}
 	conditions := controller.NewConditions()
 	alerts := controller.NewAlerts(base.node, proposer.propose, base.credentials.dataKey.Open, conditions, base.logger)
-	joins := &joiner{cluster: base.node, propose: proposer.propose, dataKey: base.credentials.dataKey, connect: base.parts.Hoster}
+	joins := &joiner{cluster: base.node, propose: proposer.propose, dataKey: base.credentials.dataKey}
 	heard := controller.NewHeard()
 	caughtUp := make(chan struct{})
 	proposer.server = newAPIServer(base, runner, reconciler, alerts, heard, joins, caughtUp)
@@ -385,12 +383,12 @@ func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup) {
 	loops.Go(func() { controller.RunPlacement(ctx, node, propose, d.conditions, logger) })
 	loops.Go(func() { controller.RunMoves(ctx, node, propose, d.server.Progress, logger) })
 	loops.Go(func() {
-		controller.RunFloatingIP(ctx, node, propose, d.credentials.dataKey.Open, d.parts.Hoster, d.conditions, logger)
+		controller.RunFloatingIP(ctx, node, propose, d.credentials.dataKey.Open, d.conditions, logger)
 	})
 	loops.Go(func() { controller.RunACME(ctx, node, propose, d.credentials.dataKey, logger) })
 	loops.Go(func() {
 		controller.RunFencing(ctx, controller.FenceParts{
-			Cluster: node, Propose: propose, Open: d.credentials.dataKey.Open, Connect: d.parts.Hoster,
+			Cluster: node, Propose: propose, Open: d.credentials.dataKey.Open,
 			Heard: d.heard, Ask: d.server.AskSilence, Self: d.host.ID, Conditions: d.conditions, Logger: logger,
 		})
 	})

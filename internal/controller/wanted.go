@@ -230,7 +230,7 @@ func addHostAlerts(host *state.Host, blocked bool, add func(key, kind, severity,
 	case state.Failed, state.Fencing:
 		add("host-failed/"+host.Name, "host-failed", clusterspec.SeverityWarning, fmt.Sprintf("%s does not answer", host.Name),
 			fmt.Sprintf("A majority of the voters has not heard the host for %v or more. If another host can take its stacks, "+
-				"the leader powers it off through the hoster, and then they start there; otherwise it stays as it "+
+				"the leader powers it off through Hetzner's API, and then they start there; otherwise it stays as it "+
 				"is until it answers again.", FailAfter))
 	case state.Fenced, state.Recovering:
 		add("host-fenced/"+host.Name, "host-fenced", clusterspec.SeverityCritical, fmt.Sprintf("%s was fenced", host.Name),
@@ -244,8 +244,8 @@ func addHostAlerts(host *state.Host, blocked bool, add func(key, kind, severity,
 	if blocked {
 		add("fencing-blocked/"+host.Name, "fencing-blocked", clusterspec.SeverityCritical,
 			fmt.Sprintf("%s cannot be fenced", host.Name),
-			"The host failed, but the leader cannot power it off: no hoster, an unconfirmed server, the hoster's "+
-				"API, or more hosts failed at once. Its stacks do not start elsewhere. The leader's log says why. If "+
+			"The host failed, but the leader cannot power it off: no Hetzner token yet, an unconfirmed server, "+
+				"Hetzner's API, or more hosts failed at once. Its stacks do not start elsewhere. The leader's log says why. If "+
 				"you know the host is off, run clowder host fence-confirm "+host.Name+".")
 	}
 }

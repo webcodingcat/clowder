@@ -97,9 +97,8 @@ type HostInfo struct {
 	Phase    string `json:"phase"`
 	Voter    bool   `json:"voter"`
 	Underlay string `json:"underlay"`
-	// PublicAddress is where users reach the host's API when the underlay
-	// is a private network; empty when they reach it at the underlay.
-	PublicAddress string `json:"public_address,omitempty"`
+	// PublicAddress is where users reach the host's API.
+	PublicAddress string `json:"public_address"`
 	Version       string `json:"version,omitempty"`
 }
 

@@ -101,7 +101,7 @@ func (s *State) CheckJoinToken(id string, at time.Time) (JoinToken, error) {
 }
 
 // AddHost adds a host that joined with a token. The leader checked the
-// token's hash and the host's server ref with the hoster, issued the
+// token's hash and the host's server with Hetzner, issued the
 // host's certificate and chose its ID (FreeHostID).
 type AddHost struct {
 	// Token is the ID of the join token, which the command uses up.
@@ -126,10 +126,10 @@ func applyAddHost(s *State, cmd Command, payload AddHost) (func(), error) {
 	if err := s.CheckJoiningHost(host); err != nil {
 		return nil, err
 	}
-	// the Floating IP and fencing act on the server ref, so a host without
-	// a checked one would be a host the cluster cannot fail over from
-	if !host.ServerRefChecked {
-		return nil, fmt.Errorf("host %s has no checked server ref", host.Name)
+	// the Floating IP and fencing act on the server, so a host without a
+	// checked one would be a host the cluster cannot fail over from
+	if !host.ServerChecked {
+		return nil, fmt.Errorf("host %s has no checked server", host.Name)
 	}
 	return func() {
 		s.dropExpiredTokens(cmd.At)
@@ -165,16 +165,17 @@ func (s *State) FreeHostID() (HostID, bool) {
 }
 
 // CheckJoiningHost refuses a joining host that lacks what a host must
-// bring (a server ref among it), whose certificate's serial is in use, or
-// whose name, underlay or server ref another host has, unless that host is
-// removed: two hosts of one server would fence each other's. The leader
-// asks it before it asks the hoster, add-host again.
+// bring, whose underlay is outside the private network, whose
+// certificate's serial is in use, or whose name, underlay or server
+// another host has, unless that host is removed: two hosts of one server
+// would fence each other's. The leader asks it before it asks Hetzner,
+// add-host again.
 func (s *State) CheckJoiningHost(host Host) error {
 	if err := checkNewHost(host); err != nil {
 		return err
 	}
-	if host.ServerRef == "" {
-		return fmt.Errorf("host %s has no server ref", host.Name)
+	if err := checkUnderlay(s.Config.Spec, &host); err != nil {
+		return err
 	}
 	if s.serialInUse(host.CertificateSerial) {
 		return fmt.Errorf("serial %s is used already", host.CertificateSerial)
@@ -186,40 +187,40 @@ func (s *State) CheckJoiningHost(host Host) error {
 			return fmt.Errorf("a host is named %s already", host.Name)
 		case other.Underlay == host.Underlay:
 			return fmt.Errorf("host %s has the underlay %s already", other.Name, host.Underlay)
-		case other.ServerRef == host.ServerRef:
-			return fmt.Errorf("host %s has the server ref %s already", other.Name, host.ServerRef)
+		case other.ServerID == host.ServerID:
+			return fmt.Errorf("host %s has the server %d already", other.Name, host.ServerID)
 		}
 	}
 	return nil
 }
 
-// ConfirmServerRef records that the hoster confirmed a host's server ref:
-// the first host's, which init took from the metadata service unchecked,
-// once cluster.yaml brought the hoster's token. ServerRef is the ref the
+// ConfirmServer records that Hetzner confirmed a host's server: the first
+// host's, which init took from the metadata service unchecked, once
+// cluster.yaml brought the project's token. ServerID is the server the
 // leader checked; it must still be the host's.
-type ConfirmServerRef struct {
-	Host      HostID `json:"host"`
-	ServerRef string `json:"server_ref"`
+type ConfirmServer struct {
+	Host     HostID `json:"host"`
+	ServerID int64  `json:"server_id"`
 }
 
-func applyConfirmServerRef(s *State, cmd Command, payload ConfirmServerRef) (func(), error) {
+func applyConfirmServer(s *State, cmd Command, payload ConfirmServer) (func(), error) {
 	host, ok := s.Hosts[payload.Host]
 	switch {
 	case cmd.Actor != LeaderActor:
-		return nil, fmt.Errorf("%s cannot confirm a server ref; only the leader does", cmd.Actor)
+		return nil, fmt.Errorf("%s cannot confirm a server; only the leader does", cmd.Actor)
 	case !ok:
 		return nil, fmt.Errorf("no host %d", payload.Host)
 	case host.Phase == Removed:
 		return nil, fmt.Errorf("host %s is removed", host.Name)
-	case payload.ServerRef == "" || host.ServerRef != payload.ServerRef:
-		return nil, fmt.Errorf("host %s has the server ref %q, not %q", host.Name, host.ServerRef, payload.ServerRef)
-	case host.ServerRefChecked:
+	case host.ServerID != payload.ServerID:
+		return nil, fmt.Errorf("host %s has the server %d, not %d", host.Name, host.ServerID, payload.ServerID)
+	case host.ServerChecked:
 		return nil, errUnchanged
 	}
 	for _, other := range s.Hosts {
-		if other.ID != host.ID && other.Phase != Removed && other.ServerRef == host.ServerRef {
-			return nil, fmt.Errorf("hosts %s and %s have the same server ref %s", other.Name, host.Name, host.ServerRef)
+		if other.ID != host.ID && other.Phase != Removed && other.ServerID == host.ServerID {
+			return nil, fmt.Errorf("hosts %s and %s have the same server %d", other.Name, host.Name, host.ServerID)
 		}
 	}
-	return func() { host.ServerRefChecked = true }, nil
+	return func() { host.ServerChecked = true }, nil
 }

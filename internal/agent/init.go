@@ -30,12 +30,13 @@ type InitOptions struct {
 	// BootstrapKey is the key OpenTofu made; it lets the user in, once.
 	BootstrapKey string
 	Name         string
-	Underlay     netip.Addr
-	// PublicAddress is where users reach the API when the underlay is a
-	// private network; it may equal the underlay or be missing.
+	// Underlay is the server's address in the Hetzner private network.
+	Underlay netip.Addr
+	// PublicAddress is the server's public IPv4, where users reach the API.
 	PublicAddress netip.Addr
-	// ServerRef is the hoster's ID of the server, for fencing.
-	ServerRef string
+	// ServerID is the Hetzner Cloud ID of the server, for the Floating IP
+	// and fencing.
+	ServerID int64
 	// NodeAddress, RaftPort and APIPort are fixed in a cluster; tests change
 	// them to run on 127.0.0.1.
 	NodeAddress netip.Addr
@@ -64,8 +65,8 @@ func Init(ctx context.Context, files Files, options InitOptions, hostNetwork Hos
 		return fmt.Errorf("%s exists: this host was part of a cluster, or an init failed halfway "+
 			"(to start anew, remove all of %s)", files.raftDir(), files.Dir)
 	}
-	if options.BootstrapKey == "" || options.Name == "" || !options.Underlay.IsValid() {
-		return errors.New("init needs the bootstrap key, the host's name and its underlay address")
+	if options.BootstrapKey == "" || options.Name == "" || options.ServerID <= 0 {
+		return errors.New("init needs the bootstrap key, the host's name and its server ID")
 	}
 	if len(options.BootstrapKey) < pki.MinBootstrapKeyLength {
 		return fmt.Errorf("the bootstrap key has fewer than %d characters", pki.MinBootstrapKeyLength)
@@ -77,12 +78,12 @@ func Init(ctx context.Context, files Files, options InitOptions, hostNetwork Hos
 	}
 	// the state takes only IPv4 (checkNewHost); refused there, init would
 	// stop halfway
-	if !options.Underlay.Is4() || options.PublicAddress.IsValid() && !options.PublicAddress.Is4() {
+	if !options.Underlay.Is4() || !options.PublicAddress.Is4() {
 		return errors.New("the underlay and the public address must be IPv4 addresses")
 	}
 	host := Host{
 		ID: 0, Name: options.Name, NodeAddress: options.NodeAddress, Underlay: options.Underlay,
-		PublicAddress: options.PublicAddress, ServerRef: options.ServerRef,
+		PublicAddress: options.PublicAddress, ServerID: options.ServerID,
 		RaftPort: options.RaftPort, APIPort: options.APIPort,
 	}
 	if !host.NodeAddress.IsValid() {
@@ -160,7 +161,7 @@ func createKeys(files Files, host Host) (state.ClusterKeys, state.Host, error) {
 		return keys, state.Host{}, err
 	}
 	entry := state.Host{
-		ID: host.ID, Name: host.Name, ServerRef: host.ServerRef, Underlay: host.Underlay,
+		ID: host.ID, Name: host.Name, ServerID: host.ServerID, Underlay: host.Underlay,
 		PublicAddress:       host.PublicAddress,
 		WGPublicKey:         base64.StdEncoding.EncodeToString(wireGuardKey.PublicKey().Bytes()),
 		CertificateSerial:   pki.Serial(certificate),

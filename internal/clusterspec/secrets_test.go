@@ -7,7 +7,7 @@ import (
 
 func TestSecretPlacesNameEveryPlaceThatHoldsASecret(t *testing.T) {
 	config := Config{
-		Hoster:     Hoster{Token: "hoster.token"},
+		Hetzner:    Hetzner{Token: "hetzner.token"},
 		Registries: map[string]Registry{"ghcr.io": {Password: "a"}, "localhost": {Password: "b"}, "[::1]:5000": {}},
 		Alerts: &Alerts{
 			Channels: []AlertChannel{
@@ -22,7 +22,7 @@ func TestSecretPlacesNameEveryPlaceThatHoldsASecret(t *testing.T) {
 	}
 	want := []string{
 		"alerts.channels[0].webhook", "alerts.channels[1].url", "alerts.channels[2].smtp.password",
-		"alerts.heartbeat.url", "hoster.token",
+		"alerts.heartbeat.url", "hetzner.token",
 		"registries.localhost.password", `registries["ghcr.io"].password`,
 	}
 	if !slices.Equal(paths, want) {

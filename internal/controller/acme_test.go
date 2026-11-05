@@ -257,19 +257,21 @@ func newACMERunner(t *testing.T, ca *fakeCA) (*acmeRunner, *leader) {
 		Keys:         state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
 		BootstrapKey: state.Sealed("j"),
 		Host: state.Host{
-			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
+			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
+			PublicAddress: netip.MustParseAddr("198.51.100.2"), WGPublicKey: "wg", CertificateSerial: "s0",
 			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
 	l.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
 		Spec: clusterspec.Config{
-			Name: "prod", Endpoints: []string{"10.0.0.2"},
-			Hoster:         clusterspec.Hoster{Type: "hetzner", Token: "hoster.token"},
+			Name: "prod", Endpoints: []string{"198.51.100.2"},
+			Hetzner:        clusterspec.Hetzner{Token: "hetzner.token"},
+			PrivateNetwork: "10.0.0.0/16",
 			Ingress:        clusterspec.Ingress{FloatingIP: "127.0.0.1"},
 			StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 			ACME:           clusterspec.ACME{Directory: ca.server.URL + "/directory", CA: "ca.pem", Email: "ops@example.com"},
 		},
-		Secrets: map[string]state.SealedSecret{"hoster.token": {Value: state.Sealed("t"), Digest: "d"}},
+		Secrets: map[string]state.SealedSecret{"hetzner.token": {Value: state.Sealed("t"), Digest: "d"}},
 		Files:   map[string][]byte{"ca.pem": ca.trust()},
 	})
 	putResource(l, resource.KindStack, "shop", stackspec.Spec{Services: map[string]stackspec.Service{

@@ -1,7 +1,8 @@
 # clowder
 
 A small cluster orchestrator that runs stacks with Docker Compose: replicated volumes (DRBD
-9), the real client IP behind a Floating IP, priorities, fencing through the hoster's API. Go, one module,
+9), the real client IP behind a Floating IP, priorities, fencing through Hetzner Cloud's
+API (clowder runs on Hetzner Cloud with a Hetzner private network only). Go, one module,
 two binaries: `clowder` (the CLI; Linux, macOS, Windows) and `clowderd` (the agent; Linux).
 
 Everything in this repo is English. Read these before changing code:

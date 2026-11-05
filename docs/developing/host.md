@@ -13,9 +13,10 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   its only voter and the bootstrap command. Then it enables and starts `clowderd.service`.
   It refuses a host that has a `raft/` directory. The bootstrap key comes from a file
   (`--bootstrap-key-file`; `clowder cluster bootstrap --key-file` alike), never from the
-  command line, where `/proc` and shell histories keep it. `--public-address` is where users
-  reach the API when the underlay is a private network; it goes into `host.json` and the
-  state, like `--server-ref`, the hoster's ID of the server (for fencing). The host's
+  command line, where `/proc` and shell histories keep it. `--underlay` is the server's
+  address in the Hetzner private network, `--public-address` its public IPv4, where users
+  reach the API, and `--server-id` its Hetzner Cloud ID (the Floating IP and fencing);
+  each is required, and goes into `host.json` and the state. The host's
   name in the cluster is its hostname, by which DRBD names it in a resource. The
   bootstrap key has at least `pki.MinBootstrapKeyLength` characters.
 - **`clowderd join`** (from cloud-init) makes a host a member of a cluster, with a join
@@ -43,14 +44,14 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   ([Recover](cluster.md#recover-clowderd-recover-agentrecovergo)). It stops the agent while
   it works on Raft's files and starts it again at its end.
 - **`clowderd run`** (the service) starts in this order:
-  1. It asks the hoster whether `clowderd recover` retired this host (`checkRetired`: the
+  1. It asks Hetzner whether `clowderd recover` retired this host (`checkRetired`: the
      label `clowder-retired` of its server names its certificate;
      [Recover](cluster.md#recover-clowderd-recover-agentrecovergo)), with the token of the
      state its Raft log on disk holds (`raftnode.ReadState`). A retired server's
      agent ends with `ErrRetired`, exit status 4, before Raft, the mesh or a stack: two
-     retired hosts would still have the old cluster's majority. A host without a server
-     ref or a hoster, or a hoster that does not answer within `retiredCheckTimeout`,
-     starts as before.
+     retired hosts would still have the old cluster's majority. A cluster without an
+     applied `cluster.yaml` has no token to ask with; a host whose API call does not
+     come back within `retiredCheckTimeout` starts as before.
   2. `clowder0` with the node address: a dummy interface, so the address exists on a host
      without peers. Then the WireGuard mesh of `net.json` (`restoreMesh`): Raft runs over
      the mesh, so after a reboot a host would learn its peers from a leader it cannot
@@ -88,7 +89,8 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   (`Node.Halted`, [Versions](cluster.md)). It then exits with status 3 (`exitUnreadable`
   in `cmd/clowderd`), which systemd does not restart (Shipping); so is status 4 of a retired server.
 - `HostParts` are what the agent changes on its host (the network, the storage driver and
-  Docker) and the hoster's API. `clowderd run` passes the real ones, the tests fakes.
+  Docker). `clowderd run` passes the real ones, the tests fakes; Hetzner's API the tests
+  fake with `hetzner/hetznertest` in `cluster.yaml`'s `hetzner.api`.
 - **Reconcilers** run after a change of the state and every `loop.Interval`, to repair
   what someone changed by hand: `reconcileNetwork` keeps the nft rules as the state says,
   the volume reconciler the volume copies, and the stack runner the stacks.

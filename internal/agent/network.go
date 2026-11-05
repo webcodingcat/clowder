@@ -146,7 +146,7 @@ func restoreMesh(ctx context.Context, files Files, self state.HostID, hostNetwor
 // readWantedNetwork reads the mesh and the nft ruleset from the current
 // state. Every other host is a peer until it is removed. The addresses of
 // all hosts stay closed to containers, a removed host's too: it may still
-// run, until the hoster's server is gone. known is false while the state
+// run, until its server is gone. known is false while the state
 // does not know this host yet: then it says nothing about the network.
 func readWantedNetwork(cluster loop.Cluster, self state.HostID) (wanted wantedNetwork, known bool) {
 	wanted = wantedNetwork{mesh: network.Mesh{Self: self}, ruleset: network.Ruleset{NodeAddress: network.NodeAddress(self)}}

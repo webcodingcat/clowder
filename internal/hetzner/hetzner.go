@@ -1,7 +1,10 @@
-// Package hetzner is the Hetzner Cloud API as clowder uses it: Floating IPs,
-// the power of servers and the label of a retired one. It is a small client
-// of its own: the official SDK would bring Prometheus' client and much more
-// into clowderd.
+// Package hetzner is the Hetzner Cloud API as clowder uses it: for the
+// leader it routes the Floating IP to the ingress host, checks which server
+// a host runs on, and powers servers off (fencing) and on; clowderd recover
+// labels the servers it takes out of the cluster, and an agent reads the
+// label when it starts. A server is named by its ID, which the state keeps
+// as the host's ServerID. It is a small client of its own: the official SDK
+// would bring Prometheus' client and much more into clowderd.
 package hetzner
 
 import (
@@ -15,6 +18,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -23,8 +27,7 @@ import (
 // DefaultAPI is Hetzner Cloud's API; a test lab has another one.
 const DefaultAPI = "https://api.hetzner.cloud/v1"
 
-// Client talks to the API of one Hetzner Cloud project. A server is named
-// by its ID, which clowder keeps as the host's ServerRef.
+// Client talks to the API of one Hetzner Cloud project.
 type Client struct {
 	api   string
 	token string
@@ -38,6 +41,10 @@ type Client struct {
 
 // attempts is how often do sends a request at most.
 const attempts = 5
+
+// maxErrorBody bounds what is read of an answer: an error's body, or the
+// rest of one nobody reads.
+const maxErrorBody = 64 << 10
 
 // New is a client of the API at api (DefaultAPI when empty) with the
 // project's token.
@@ -62,53 +69,52 @@ type floatingIP struct {
 	Server *int64 `json:"server"`
 }
 
-// FloatingIPTarget is the ID of the server the Floating IP is routed to,
-// "" for none.
-func (c *Client) FloatingIPTarget(ctx context.Context, ip netip.Addr) (string, error) {
+// FloatingIPTarget is the ID of the server the Floating IP is routed to, 0
+// for none.
+func (c *Client) FloatingIPTarget(ctx context.Context, ip netip.Addr) (int64, error) {
 	found, err := c.findFloatingIP(ctx, ip)
 	if err != nil {
-		return "", err
+		return 0, err
 	}
 	if found.Server == nil {
-		return "", nil
+		return 0, nil
 	}
-	return strconv.FormatInt(*found.Server, 10), nil
+	return *found.Server, nil
 }
 
 // AssignFloatingIP routes the Floating IP to the server and waits until
 // Hetzner has done it.
-func (c *Client) AssignFloatingIP(ctx context.Context, ip netip.Addr, serverRef string) error {
-	id, err := serverID(serverRef)
-	if err != nil {
+func (c *Client) AssignFloatingIP(ctx context.Context, ip netip.Addr, serverID int64) error {
+	if err := checkID(serverID); err != nil {
 		return err
 	}
 	found, err := c.findFloatingIP(ctx, ip)
 	if err != nil {
 		return err
 	}
-	return c.act(ctx, fmt.Sprintf("/floating_ips/%d/actions/assign", found.ID), map[string]int64{"server": id},
-		fmt.Sprintf("assign the Floating IP %s to server %s", ip, serverRef))
+	return c.act(ctx, fmt.Sprintf("/floating_ips/%d/actions/assign", found.ID), map[string]int64{"server": serverID},
+		fmt.Sprintf("assign the Floating IP %s to server %d", ip, serverID))
 }
 
 // PowerOff cuts the server's power, as pulling the plug would, and waits
-// until Hetzner has done it. A server that is off stays off.
-func (c *Client) PowerOff(ctx context.Context, serverRef string) error {
-	return c.power(ctx, serverRef, "poweroff", "power server %s off")
+// until Hetzner has done it: fencing relies on it. A server that is off
+// stays off.
+func (c *Client) PowerOff(ctx context.Context, serverID int64) error {
+	return c.power(ctx, serverID, "poweroff", "power server %d off")
 }
 
 // PowerOn switches the server on and waits until Hetzner has done it. A
 // server that runs keeps running.
-func (c *Client) PowerOn(ctx context.Context, serverRef string) error {
-	return c.power(ctx, serverRef, "poweron", "power server %s on")
+func (c *Client) PowerOn(ctx context.Context, serverID int64) error {
+	return c.power(ctx, serverID, "poweron", "power server %d on")
 }
 
 // power runs a power action on the server; what names it in the error.
-func (c *Client) power(ctx context.Context, serverRef, action, what string) error {
-	id, err := serverID(serverRef)
-	if err != nil {
+func (c *Client) power(ctx context.Context, serverID int64, action, what string) error {
+	if err := checkID(serverID); err != nil {
 		return err
 	}
-	return c.act(ctx, fmt.Sprintf("/servers/%d/actions/%s", id, action), nil, fmt.Sprintf(what, serverRef))
+	return c.act(ctx, fmt.Sprintf("/servers/%d/actions/%s", serverID, action), nil, fmt.Sprintf(what, serverID))
 }
 
 // server is the part of the API's server that clowder reads.
@@ -127,32 +133,72 @@ type server struct {
 
 // readServer reads the server: ErrNoSuchServer for one the project does
 // not have.
-func (c *Client) readServer(ctx context.Context, serverRef string) (server, error) {
-	id, err := serverID(serverRef)
-	if err != nil {
+func (c *Client) readServer(ctx context.Context, serverID int64) (server, error) {
+	if err := checkID(serverID); err != nil {
 		return server{}, err
 	}
 	var answer struct {
 		Server server `json:"server"`
 	}
-	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/servers/%d", id), nil, &answer); err != nil {
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/servers/%d", serverID), nil, &answer); err != nil {
 		if errors.Is(err, errNotFound) {
-			return server{}, fmt.Errorf("read server %s: %w", serverRef, ErrNoSuchServer)
+			return server{}, fmt.Errorf("read server %d: %w", serverID, ErrNoSuchServer)
 		}
-		return server{}, fmt.Errorf("read server %s: %w", serverRef, err)
+		return server{}, fmt.Errorf("read server %d: %w", serverID, err)
 	}
 	return answer.Server, nil
 }
 
+// ErrOtherServer is CheckServer's answer for a server that is not the
+// host's.
+var ErrOtherServer = errors.New("it is another server")
+
+// CheckServer makes sure the server is the host's: the host's underlay is
+// one of the server's addresses in the project's private networks, and its
+// public address is the server's public IPv4. A host names its server
+// itself, and fencing powers off the server its ID names; the project's
+// token may power off any server of the project.
+func (c *Client) CheckServer(ctx context.Context, serverID int64, underlay, publicAddress netip.Addr) error {
+	found, err := c.readServer(ctx, serverID)
+	if errors.Is(err, ErrNoSuchServer) {
+		// a server the project does not have is no server of the host
+		return fmt.Errorf("check server %d: %w: %w", serverID, err, ErrOtherServer)
+	}
+	if err != nil {
+		return fmt.Errorf("check server %d: %w", serverID, err)
+	}
+	var private []netip.Addr
+	for _, network := range found.PrivateNet {
+		if address, err := netip.ParseAddr(network.IP); err == nil {
+			private = append(private, address)
+		}
+	}
+	var public netip.Addr
+	if ipv4 := found.PublicNet.IPv4; ipv4 != nil {
+		public, _ = netip.ParseAddr(ipv4.IP) // an address that does not parse is no host's
+	}
+	switch {
+	case !slices.Contains(private, underlay):
+		return fmt.Errorf("server %d has the private addresses %v, not the host's underlay %s: %w",
+			serverID, private, underlay, ErrOtherServer)
+	case public != publicAddress:
+		return fmt.Errorf("server %d has the public address %s, not the host's %s: %w",
+			serverID, public, publicAddress, ErrOtherServer)
+	}
+	return nil
+}
+
 // RetiredLabel marks a server that clowderd recover took out of its
 // cluster. Its value is the serial of the retired host's certificate, so a
-// server set up anew, with a certificate of its own, is not retired.
+// server set up anew, with a certificate of its own, is not retired. The
+// agent of a retired host starts nothing: with another retired one it
+// would still have the old cluster's majority.
 const RetiredLabel = "clowder-retired"
 
 // SetRetired labels the server RetiredLabel with the host's certificate
 // serial and keeps its other labels: the API replaces all of them at once.
-func (c *Client) SetRetired(ctx context.Context, serverRef, serial string) error {
-	found, err := c.readServer(ctx, serverRef)
+func (c *Client) SetRetired(ctx context.Context, serverID int64, serial string) error {
+	found, err := c.readServer(ctx, serverID)
 	if err != nil {
 		return err
 	}
@@ -166,44 +212,19 @@ func (c *Client) SetRetired(ctx context.Context, serverRef, serial string) error
 	labels[RetiredLabel] = serial
 	body := map[string]map[string]string{"labels": labels}
 	if err := c.do(ctx, http.MethodPut, fmt.Sprintf("/servers/%d", found.ID), body, nil); err != nil {
-		return fmt.Errorf("label server %s %s: %w", serverRef, RetiredLabel, err)
+		return fmt.Errorf("label server %d %s: %w", serverID, RetiredLabel, err)
 	}
 	return nil
 }
 
 // RetiredSerial is the serial of the host certificate whose host recover
 // retired on the server; "" for a server it did not.
-func (c *Client) RetiredSerial(ctx context.Context, serverRef string) (string, error) {
-	found, err := c.readServer(ctx, serverRef)
+func (c *Client) RetiredSerial(ctx context.Context, serverID int64) (string, error) {
+	found, err := c.readServer(ctx, serverID)
 	if err != nil {
 		return "", err
 	}
 	return found.Labels[RetiredLabel], nil
-}
-
-// ServerAddresses are the server's IPv4 addresses: in the project's
-// private networks, and its public one.
-func (c *Client) ServerAddresses(ctx context.Context, serverRef string) ([]netip.Addr, error) {
-	found, err := c.readServer(ctx, serverRef)
-	if err != nil {
-		return nil, err
-	}
-	var texts []string
-	for _, network := range found.PrivateNet {
-		texts = append(texts, network.IP)
-	}
-	if public := found.PublicNet.IPv4; public != nil {
-		texts = append(texts, public.IP)
-	}
-	var addresses []netip.Addr
-	for _, text := range texts {
-		address, err := netip.ParseAddr(text)
-		if err != nil {
-			return nil, fmt.Errorf("server %s: address %q: %w", serverRef, text, err)
-		}
-		addresses = append(addresses, address)
-	}
-	return addresses, nil
 }
 
 // findFloatingIP looks the address up among the project's Floating IPs:
@@ -342,7 +363,11 @@ func (c *Client) send(ctx context.Context, method, path string, encoded []byte, 
 	if err != nil {
 		return err // the network, which may pass
 	}
-	defer func() { _ = response.Body.Close() }() // read only
+	defer func() {
+		// read to the end, so the connection can carry the next request
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxErrorBody))
+		_ = response.Body.Close()
+	}()
 	if response.StatusCode >= http.StatusMultipleChoices {
 		return readError(response)
 	}
@@ -390,7 +415,7 @@ func readError(response *http.Response) *apiError {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	_ = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&failure) // the status says enough without it
+	_ = json.NewDecoder(io.LimitReader(response.Body, maxErrorBody)).Decode(&failure) // the status says enough without it
 	answer := &apiError{status: statusCode(response.StatusCode), code: failure.Error.Code, message: failure.Error.Message}
 	if reset, err := strconv.ParseInt(response.Header.Get("RateLimit-Reset"), 10, 64); err == nil {
 		answer.reset = max(0, time.Until(time.Unix(reset, 0)))
@@ -407,14 +432,13 @@ func (s statusCode) Error() string { return fmt.Sprintf("HTTP %d", int(s)) }
 var errNotFound error = statusCode(http.StatusNotFound)
 
 // ErrNoSuchServer is the answer for a server the project does not have, or
-// a server ref that is no server ID.
+// an ID that names no server.
 var ErrNoSuchServer = errors.New("the project has no such server")
 
-// serverID reads a ServerRef as Hetzner's server ID.
-func serverID(serverRef string) (int64, error) {
-	id, err := strconv.ParseInt(serverRef, 10, 64)
-	if err != nil || id <= 0 {
-		return 0, fmt.Errorf("server ref %q is not a Hetzner server ID: %w", serverRef, ErrNoSuchServer)
+// checkID refuses an ID no server has; 0 is a host's missing one.
+func checkID(serverID int64) error {
+	if serverID <= 0 {
+		return fmt.Errorf("server ID %d: %w", serverID, ErrNoSuchServer)
 	}
-	return id, nil
+	return nil
 }

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/hoster"
+	"github.com/webcodingcat/clowder/internal/hetzner"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -24,7 +24,7 @@ const (
 	askTimeout = 2 * time.Second
 	// powerOffTries is how often the leader tries to power a server off
 	// before it gives the fence up; each try retries the API's busy answers
-	// itself (the hoster's client).
+	// itself (hetzner.Client).
 	powerOffTries = 3
 	// powerOffPause is the pause after the first failed try; it doubles.
 	powerOffPause = 5 * time.Second
@@ -35,7 +35,7 @@ const (
 	// fenceAgain is how long the leader waits before it fences a host again
 	// that it could not power off; a user's fence-confirm need not wait.
 	fenceAgain = 5 * time.Minute
-	// powerOnAgain is how long the leader waits before it asks the hoster
+	// powerOnAgain is how long the leader waits before it asks Hetzner
 	// again to power on a server it could not.
 	powerOnAgain = 30 * time.Second
 )
@@ -61,7 +61,6 @@ type FenceParts struct {
 	Cluster    Cluster
 	Propose    Propose
 	Open       Open
-	Connect    ConnectHoster
 	Heard      *Heard
 	Ask        AskSilence
 	Self       state.HostID
@@ -232,7 +231,7 @@ func (f *fencer) fence(ctx context.Context, copied *state.State, now time.Time) 
 			continue
 		}
 		started = true
-		f.Logger.Warn("fencing a failed host", "host", host.Name, "server", host.ServerRef)
+		f.Logger.Warn("fencing a failed host", "host", host.Name, "server", host.ServerID)
 		_, err := commit(ctx, f.Propose, state.KindStartOperation, state.StartOperation{
 			Kind: state.OperationFenceHost, Locks: []string{state.HostLock(id)}, Fence: &state.HostFence{Host: id},
 		})
@@ -261,8 +260,9 @@ func needsFence(copied *state.State, id state.HostID) bool {
 }
 
 // whyNotFence says why a failed host may not be fenced now, "" if it may:
-//   - the hoster can power it off: there is one, and it checked the host's
-//     server ref (a wrong ref would power off another server);
+//   - Hetzner can power it off: cluster.yaml brought the token, and the
+//     leader checked the host's server (a wrong ID would power off
+//     another server);
 //   - a majority of the voters stays active without it: when more hosts
 //     fail at once, the network is the likelier cause, and powering off
 //     hosts would not help;
@@ -280,10 +280,10 @@ func (f *fencer) whyNotFence(copied *state.State, host *state.Host, now time.Tim
 		}
 	}
 	switch {
-	case copied.Config.Revision == 0 || copied.Config.Spec.Hoster.Type == "":
-		return "the cluster has no hoster to power it off"
-	case host.ServerRef == "" || !host.ServerRefChecked:
-		return "the hoster has not confirmed its server ref"
+	case copied.Config.Revision == 0:
+		return "no cluster.yaml brought the Hetzner token to power it off"
+	case !host.ServerChecked:
+		return "Hetzner has not confirmed its server"
 	case copied.HostLocked(host.ID):
 		return "an operation holds it"
 	case !majority(active, total):
@@ -324,7 +324,7 @@ func (f *fencer) step(ctx context.Context, copied *state.State, operation *state
 // before each try: a leader cut off from the others must not power off a
 // host the others still run.
 func (f *fencer) powerOff(ctx context.Context, copied *state.State, operation *state.Operation, host *state.Host) error {
-	client, err := OpenHoster(copied, f.Open, f.Connect)
+	client, err := OpenHetzner(copied, f.Open)
 	if err == nil {
 		err = f.tryPowerOff(ctx, client, host)
 	}
@@ -352,7 +352,7 @@ func (f *fencer) powerOff(ctx context.Context, copied *state.State, operation *s
 // included, so a fence that cannot power off holds the loop at most
 // powerOffTries times powerOffTimeout and the pauses (about two and a half
 // minutes). Meanwhile no beats are watched; only one fence runs anyway.
-func (f *fencer) tryPowerOff(ctx context.Context, client hoster.Hoster, host *state.Host) error {
+func (f *fencer) tryPowerOff(ctx context.Context, client *hetzner.Client, host *state.Host) error {
 	pause := f.pause
 	var err error
 	for try := 1; try <= powerOffTries; try++ {
@@ -360,7 +360,7 @@ func (f *fencer) tryPowerOff(ctx context.Context, client hoster.Hoster, host *st
 			return err
 		}
 		tryCtx, cancel := context.WithTimeout(ctx, powerOffTimeout)
-		err = client.PowerOff(tryCtx, host.ServerRef)
+		err = client.PowerOff(tryCtx, host.ServerID)
 		cancel()
 		if err == nil || try == powerOffTries {
 			break
@@ -432,8 +432,8 @@ func (f *fencer) powerOn(ctx context.Context, copied *state.State, now time.Time
 			continue
 		case copied.HostLocked(id) || f.poweredOn[id] || now.Before(f.powerOnAfter[id]):
 			continue
-		case copied.Config.Spec.Hoster.Type == "" || host.ServerRef == "" || !host.ServerRefChecked:
-			// a user confirmed the fence; a ref the hoster did not confirm may
+		case copied.Config.Revision == 0 || !host.ServerChecked:
+			// a user confirmed the fence; a server Hetzner did not confirm may
 			// name another server, so the user powers it on (host-fenced)
 			continue
 		case host.Flapping(now):
@@ -444,10 +444,10 @@ func (f *fencer) powerOn(ctx context.Context, copied *state.State, now time.Time
 			}
 			continue
 		}
-		client, err := OpenHoster(copied, f.Open, f.Connect)
+		client, err := OpenHetzner(copied, f.Open)
 		if err == nil {
-			powerCtx, cancel := context.WithTimeout(ctx, hosterTimeout)
-			err = client.PowerOn(powerCtx, host.ServerRef)
+			powerCtx, cancel := context.WithTimeout(ctx, hetznerTimeout)
+			err = client.PowerOn(powerCtx, host.ServerID)
 			cancel()
 		}
 		if err != nil {

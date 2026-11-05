@@ -321,7 +321,7 @@ func waitForSetup(t *testing.T, server host) {
 }
 
 // bootstrap makes the test the user, its recovery key in a file, and
-// fills in cluster.yaml from the module's outputs, with the hoster token
+// fills in cluster.yaml from the module's outputs, with the Hetzner token
 // and the registry's login encrypted, then applies it.
 func bootstrap(t *testing.T, server host, tofu outputs) {
 	keyFile := filepath.Join(workDir, "bootstrap-key")
@@ -350,13 +350,13 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	}
 	// as bootstrapped: the CLI finds the credentials by the name
 	config.Name = bootstrapped.Config.Name
-	config.Hoster = clusterspec.Hoster{Type: "hetzner", Token: "hoster.token", API: os.Getenv("HCLOUD_ENDPOINT")}
+	config.Hetzner = clusterspec.Hetzner{Token: "hetzner.token", API: os.Getenv("HCLOUD_ENDPOINT")}
 	password := pushPrivateImage(t, server)
 	registryPassword := yamlpath.Key(yamlpath.Key("registries", registry), "password")
 	config.Registries = map[string]clusterspec.Registry{
 		registry: {Username: registryUser, Password: clusterspec.SecretRef(registryPassword)},
 	}
-	setClusterSecrets(t, map[string]string{"hoster.token": os.Getenv("HCLOUD_TOKEN"), registryPassword: password})
+	setClusterSecrets(t, map[string]string{"hetzner.token": os.Getenv("HCLOUD_TOKEN"), registryPassword: password})
 	writeConfig(t, config, bootstrapped.Encrypted)
 	checkNothingPersonal(t, tofu.BootstrapKey.Value, os.Getenv("HCLOUD_TOKEN"), password)
 
@@ -365,13 +365,13 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	}
 	mustClowder(t, "cluster", "apply")
 	// another token is named, its value not
-	setClusterSecrets(t, map[string]string{"hoster.token": "another token"})
+	setClusterSecrets(t, map[string]string{"hetzner.token": "another token"})
 	writeConfig(t, config, bootstrapped.Encrypted)
-	if diff := mustClowder(t, "cluster", "diff"); diff != "the secret hoster.token differs\n" {
+	if diff := mustClowder(t, "cluster", "diff"); diff != "the secret hetzner.token differs\n" {
 		t.Errorf("diff after the token changed:\n%s", diff)
 	}
 	// encrypted anew, the same token is no change
-	setClusterSecrets(t, map[string]string{"hoster.token": os.Getenv("HCLOUD_TOKEN")})
+	setClusterSecrets(t, map[string]string{"hetzner.token": os.Getenv("HCLOUD_TOKEN")})
 	writeConfig(t, config, bootstrapped.Encrypted)
 	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "nothing to apply") {
 		t.Errorf("diff after the token was encrypted anew:\n%s", diff)
@@ -568,7 +568,7 @@ func rekeyAndDecrypt(t *testing.T, server host, recoveryKey string) {
 }
 
 // refuseSecretsOutOfPlace applies what the cluster must refuse: a Secret in
-// clear, in a file and on stdin, and a value of cluster.yaml (the hoster's
+// clear, in a file and on stdin, and a value of cluster.yaml (the Hetzner
 // token) copied into a Secret, which a container would then read.
 func refuseSecretsOutOfPlace(t *testing.T) {
 	t.Helper()
@@ -584,7 +584,7 @@ func refuseSecretsOutOfPlace(t *testing.T) {
 		!strings.Contains(err.Error(), "write its value encrypted") {
 		t.Errorf("a Secret in clear on stdin: %v", err)
 	}
-	block, err := clowderWithInput(strings.NewReader("the hoster's token"), "secret", "encrypt", "--cluster-yaml")
+	block, err := clowderWithInput(strings.NewReader("the Hetzner token"), "secret", "encrypt", "--cluster-yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

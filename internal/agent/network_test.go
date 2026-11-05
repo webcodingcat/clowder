@@ -55,7 +55,7 @@ func TestTheWantedNetworkHasEveryOtherHostAsAPeer(t *testing.T) {
 
 func TestOneHostHasNoPeers(t *testing.T) {
 	wanted, known := readWantedNetwork(agenttest.NewCluster(t), 0)
-	if !known || len(wanted.mesh.Peers) != 0 || len(wanted.ruleset.Peers) != 0 || len(wanted.ruleset.ClusterHosts) != 1 {
+	if !known || len(wanted.mesh.Peers) != 0 || len(wanted.ruleset.Peers) != 0 || len(wanted.ruleset.ClusterHosts) != 2 {
 		t.Errorf("one host: %+v", wanted)
 	}
 }

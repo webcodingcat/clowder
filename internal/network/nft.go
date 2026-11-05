@@ -18,7 +18,7 @@ var (
 	Resolver = netip.MustParseAddr("169.254.77.53")
 	// Overlay holds the node addresses.
 	Overlay = clusterspec.Overlay
-	// metadataService is the hoster's metadata API: its user data holds the
+	// metadataService is Hetzner's metadata API: its user data holds the
 	// bootstrap key, so neither containers nor the host's own processes
 	// (Traefik in the host's network) may reach it.
 	metadataService = netip.MustParseAddr("169.254.169.254")
@@ -40,8 +40,8 @@ type Ruleset struct {
 	// ClusterHosts are the underlay and public addresses of every host,
 	// sorted.
 	ClusterHosts []netip.Addr
-	// PrivateNetwork is the hoster's private network between the hosts;
-	// the zero value when they share none.
+	// PrivateNetwork is the Hetzner private network between the hosts;
+	// the zero value before the first cluster apply names it.
 	PrivateNetwork netip.Prefix
 	// Peers are the other hosts this one has a WireGuard interface to,
 	// sorted.
@@ -104,7 +104,7 @@ const forwardMark = 0x200
 // address (forwards): to the node address of the stack's host, through its
 // WireGuard interface, where Docker publishes the port to the container. A
 // port of a stack on this host is Docker's alone. Every host has these
-// rules; the hoster sends the Floating IP to one, and the others need them
+// rules; Hetzner sends the Floating IP to one, and the others need them
 // for their containers. Such a container's connection leaves from this
 // host's node address (hairpin): an answer to its bridge address would go
 // to a bridge of the same network on the stack's host.

@@ -146,7 +146,7 @@ func imageUserData(t *testing.T) string {
 	return "#cloud-config\n" + string(config)
 }
 
-// serverStatusByID is the status of a server at the hoster.
+// serverStatusByID is the status of a server at Hetzner.
 func serverStatusByID(t *testing.T, id int64) string {
 	t.Helper()
 	var answer struct {

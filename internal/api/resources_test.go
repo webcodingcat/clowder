@@ -140,7 +140,7 @@ func TestASecretTakesOnlyAValueEncryptedForIt(t *testing.T) {
 	cluster := newTestCluster(t)
 	client := cluster.client(cluster.userCertificate("alice"), testVersion, 0)
 	for forID, want := range map[string]string{
-		secretvalue.Cluster: "the value is for cluster, not for default/token", // the hoster's token, copied
+		secretvalue.Cluster: "the value is for cluster, not for default/token", // the Hetzner token, copied
 		"shop/token":        "the value is for shop/token, not for default/token",
 	} {
 		result, err := client.ApplyResources(context.Background(), ApplyRequest{Resources: []resource.Object{

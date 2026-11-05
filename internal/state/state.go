@@ -35,7 +35,7 @@ type State struct {
 	Keys   *ClusterKeys  `json:"keys,omitempty"`
 	Config ClusterConfig `json:"config"`
 	// ClusterSecrets are the values of cluster.yaml, by their names
-	// (clusterspec.SecretPlaces): the hoster's token, the registries'
+	// (clusterspec.SecretPlaces): the Hetzner token, the registries'
 	// passwords, the alert channels'. A digest each, so a diff tells a
 	// changed value from one encrypted anew.
 	ClusterSecrets map[string]SealedSecret `json:"cluster_secrets,omitempty"`
@@ -60,7 +60,7 @@ type State struct {
 	// with the hosts that have still to forget it as a DRBD peer.
 	Forgetting map[HostID][]HostID `json:"forgetting,omitempty"`
 	// Ingress is the host that should hold the Floating IP; the leader keeps
-	// the hoster's routing in line with it.
+	// Hetzner's routing in line with it.
 	Ingress *HostID `json:"ingress,omitempty"`
 	// ACMEAccount is the cluster's account at the ACME directory; the
 	// leader makes it at its first order.
@@ -147,18 +147,20 @@ var Phases = []HostPhase{Joining, Passive, Active, Draining, Failed, Fencing, Fe
 
 // Host is one member of the cluster.
 type Host struct {
-	ID        HostID `json:"id"`
-	Name      string `json:"name"`
-	ServerRef string `json:"server_ref,omitempty"` // the hoster's ID of the server
-	// ServerRefChecked says that the leader asked the hoster: the server
-	// has the host's addresses (hoster.CheckServerRef). Only then does the
+	ID   HostID `json:"id"`
+	Name string `json:"name"`
+	// ServerID is the Hetzner Cloud server the host runs on.
+	ServerID int64 `json:"server_id"`
+	// ServerChecked says that the leader asked Hetzner: the server has the
+	// host's addresses (hetzner.Client.CheckServer). Only then does the
 	// Floating IP go to the host, and only then may it be fenced; a host
 	// names its server itself.
-	ServerRefChecked bool       `json:"server_ref_checked,omitempty"`
-	Underlay         netip.Addr `json:"underlay"`
-	// PublicAddress is where users reach the host's API when the underlay is
-	// a private network.
-	PublicAddress netip.Addr `json:"public_address,omitzero"`
+	ServerChecked bool `json:"server_checked,omitempty"`
+	// Underlay is the host's address in the Hetzner private network.
+	Underlay netip.Addr `json:"underlay"`
+	// PublicAddress is the server's public IPv4, where users reach the
+	// host's API.
+	PublicAddress netip.Addr `json:"public_address"`
 	WGPublicKey   string     `json:"wg_public_key"`
 	// CertificateSerial is the host certificate; removing the host revokes it,
 	// so a removed host leaves Raft and the API at once.

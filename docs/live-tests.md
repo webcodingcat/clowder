@@ -144,7 +144,7 @@ reads within a step.
 1. The setup makes the first host and deletes its key file.
 2. The user bootstraps (its credentials go to `/work/config`, mode 600, not to the
    developer's config directory), fills in `cluster.yaml` from the module's outputs and
-   applies it, with the hoster token and the registry's password encrypted (`secret
+   applies it, with the Hetzner token and the registry's password encrypted (`secret
    encrypt --cluster-yaml`). The cluster directory holds `cluster.yaml` alone, with no
    value in clear. `cluster diff` names a changed token, by name only, and nothing for the
    same token encrypted anew. The recovery key goes to `/work/recovery-key`. The host
@@ -171,7 +171,7 @@ reads within a step.
 3. With an open token and the CA it proved, a join is refused that names a server of the
    project outside the private network (a server the test makes through HLab's Cloud
    API), as it does not come from that server's address, and one that names a joined
-   host's server. No host comes of it. That the hoster's addresses must match the
+   host's server. No host comes of it. That the server's addresses at Hetzner must match the
    host's is a unit test (`agent/join_test.go`): a request comes from the test's own
    address here.
 
@@ -212,7 +212,7 @@ The stack `shop` lives from the first step to the last.
 1. A stack runs from the private registry with a replicated and a plain volume, a secret
    file and a secret variable, applied as resources (`clowder apply -f`), each secret
    encrypted with `secret encrypt`: the password in the stack's file, the token on stdin.
-   A Secret in clear, in a file and on stdin, and the hoster's token as a Secret are
+   A Secret in clear, in a file and on stdin, and the Hetzner token as a Secret are
    refused. `secret rekey` of the stack's files and of `cluster.yaml` changes nothing the
    cluster keeps (`unchanged`, no container recreated), and `secret decrypt` reads a value
    back with the recovery key.
@@ -322,7 +322,7 @@ replicas) and `scratch` (replicas 0) run.
    and is `active` again.
 2. The same host, cut off from every network (`isolate`): fenced again, the same checks.
    The fault is removed once it is fenced, as it would outlive the power cycle.
-3. The hoster's API answers 503 and the host freezes: it is `failed`, and for two minutes
+3. Hetzner's API answers 503 and the host freezes: it is `failed`, and for two minutes
    nothing fails over. Then the API answers again, the test powers the server off as a
    user who checks, and `host fence-confirm` lets `keeper` run elsewhere. Meanwhile the
    alert `fencing-blocked` is open.

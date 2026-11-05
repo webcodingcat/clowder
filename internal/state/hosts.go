@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
@@ -57,14 +59,31 @@ func checkNewHost(host Host) error {
 	// the nft rules and WireGuard's endpoints are IPv4
 	case !host.Underlay.Is4():
 		return fmt.Errorf("host %s has no IPv4 underlay address", host.Name)
-	case host.PublicAddress.IsValid() && !host.PublicAddress.Is4():
-		return fmt.Errorf("host %s: the public address %s is not IPv4", host.Name, host.PublicAddress)
+	case !host.PublicAddress.Is4():
+		return fmt.Errorf("host %s has no IPv4 public address", host.Name)
+	// the Floating IP and fencing act on the server
+	case host.ServerID <= 0:
+		return fmt.Errorf("host %s has no server ID", host.Name)
 	case host.WGPublicKey == "":
 		return fmt.Errorf("host %s has no WireGuard key", host.Name)
 	case host.CertificateSerial == "":
 		return fmt.Errorf("host %s has no certificate serial", host.Name)
 	case host.CertificateNotAfter.IsZero():
 		return fmt.Errorf("host %s: the certificate has no expiry", host.Name)
+	}
+	return nil
+}
+
+// checkUnderlay makes sure the host's underlay is in cluster.yaml's
+// private network: the hosts reach each other there, and the containers'
+// boundaries close it.
+func checkUnderlay(config clusterspec.Config, host *Host) error {
+	network, err := netip.ParsePrefix(config.PrivateNetwork)
+	if err != nil {
+		return nil // no cluster.yaml yet: Check lets no other value in
+	}
+	if !network.Contains(host.Underlay) {
+		return fmt.Errorf("host %s has the underlay %s, outside private_network %s", host.Name, host.Underlay, network)
 	}
 	return nil
 }
@@ -484,8 +503,8 @@ func applyReportPeerForgotten(s *State, cmd Command, payload ReportPeerForgotten
 }
 
 // SetIngress records the host that should hold the Floating IP. Only an
-// active host with a checked ServerRef can: the hoster routes the address
-// to a server by that ID.
+// active host with a checked server can: Hetzner routes the address to a
+// server by its ID.
 type SetIngress struct {
 	Host HostID `json:"host"`
 }
@@ -497,8 +516,8 @@ func applySetIngress(s *State, _ Command, payload SetIngress) (func(), error) {
 		return nil, fmt.Errorf("no host %d", payload.Host)
 	case host.Phase != Active:
 		return nil, fmt.Errorf("host %s is %s, not active", host.Name, host.Phase)
-	case !host.ServerRefChecked:
-		return nil, fmt.Errorf("host %s has no checked server ref", host.Name)
+	case !host.ServerChecked:
+		return nil, fmt.Errorf("host %s has no checked server", host.Name)
 	}
 	id := payload.Host
 	return func() { s.Ingress = &id }, nil

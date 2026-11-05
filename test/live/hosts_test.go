@@ -276,7 +276,7 @@ func checkThreeVoters(hosts []clusterHost) error {
 }
 
 // TestJoin checks who a join refuses: an unknown, used or expired token, a
-// server of another and a server ref that a host has; and that the
+// server of another and a server that a host has; and that the
 // bootstrap key opens nothing any more.
 func TestJoin(t *testing.T) {
 	_, tofu := baseline(t)
@@ -374,13 +374,22 @@ func serversOfOthers(t *testing.T, tofu outputs) {
 	})
 	joined := tofu.Hosts.Value[firstJoining]
 	// the test's requests come from the lab's address: a join naming the
-	// stranger's server is refused for that, before the hoster is asked
-	for _, test := range []struct{ what, serverRef, underlay, want string }{
-		{"a stranger's server", strconv.FormatInt(created.Server.ID, 10), "10.0.0.250", "the request comes from " + labAddress},
+	// stranger's server is refused for that, before Hetzner is asked
+	joinedID, err := strconv.ParseInt(joined.ServerID, 10, 64)
+	if err != nil {
+		t.Fatalf("the module's server_id %q: %v", joined.ServerID, err)
+	}
+	for _, test := range []struct {
+		what     string
+		serverID int64
+		underlay string
+		want     string
+	}{
+		{"a stranger's server", created.Server.ID, "10.0.0.250", "the request comes from " + labAddress},
 		// an underlay of its own: the state names the first thing a host has twice
-		{"a host's server", joined.ServerID, "10.0.0.251", "has the server ref " + joined.ServerID + " already"},
+		{"a host's server", joinedID, "10.0.0.251", "has the server " + joined.ServerID + " already"},
 	} {
-		_, err := cluster.Join(context.Background(), joinRequest(t, test.serverRef, test.underlay))
+		_, err := cluster.Join(context.Background(), joinRequest(t, test.serverID, test.underlay))
 		var statusError *api.StatusError
 		if !errors.As(err, &statusError) || statusError.Status != http.StatusForbidden || !strings.Contains(err.Error(), test.want) {
 			t.Errorf("%s: want a refusal with %q, got %v", test.what, test.want, err)
@@ -394,7 +403,7 @@ func serversOfOthers(t *testing.T, tofu outputs) {
 }
 
 // joinRequest is a host named intruder with keys of its own.
-func joinRequest(t *testing.T, serverRef, underlay string) api.JoinRequest {
+func joinRequest(t *testing.T, serverID int64, underlay string) api.JoinRequest {
 	t.Helper()
 	key, err := pki.NewKey()
 	if err != nil {
@@ -405,7 +414,8 @@ func joinRequest(t *testing.T, serverRef, underlay string) api.JoinRequest {
 		t.Fatal(err)
 	}
 	return api.JoinRequest{
-		Name: "intruder", Underlay: netip.MustParseAddr(underlay), ServerRef: serverRef,
+		Name: "intruder", Underlay: netip.MustParseAddr(underlay), PublicAddress: netip.MustParseAddr("192.0.2.250"),
+		ServerID:    serverID,
 		PublicKey:   key.Public().(ed25519.PublicKey),
 		WGPublicKey: base64.StdEncoding.EncodeToString(wireGuardKey.PublicKey().Bytes()),
 	}

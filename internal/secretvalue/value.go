@@ -83,7 +83,7 @@ func Encrypt(value Value, recipients ...age.Recipient) (string, error) {
 }
 
 // OpenFor opens the value found at a place, want: a Secret's ID or Cluster.
-// It refuses a value meant for another place, such as the hoster's token
+// It refuses a value meant for another place, such as the Hetzner token
 // copied into a Secret.
 func OpenFor(armored, want string, identities ...age.Identity) (Value, error) {
 	opened, err := Open(armored, identities...)

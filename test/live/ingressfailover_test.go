@@ -164,7 +164,7 @@ func httpSeesClient(t *testing.T, fip string) {
 
 // floatingIPLeaves counts the packets that leave a host with the Floating
 // IP as source while during runs, in a table of its own: only the ingress
-// host may send them (the hoster routes the address to it alone).
+// host may send them (Hetzner routes the address to it alone).
 func floatingIPLeaves(t *testing.T, server host, fip string, during func()) int {
 	t.Helper()
 	server.must(t, "nft add table ip fipprobe && nft add chain ip fipprobe out "+

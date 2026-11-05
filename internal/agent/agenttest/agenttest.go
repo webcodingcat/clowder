@@ -426,18 +426,19 @@ func NewCluster(t *testing.T) *Cluster {
 		Keys:         state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
 		BootstrapKey: state.Sealed("j"),
 		Host: state.Host{
-			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
-			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
+			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), PublicAddress: netip.MustParseAddr("198.51.100.2"),
+			ServerID: 40, WGPublicKey: "wg", CertificateSerial: "s0", CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
 	cluster.Apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
 		Spec: clusterspec.Config{
-			Name: "prod", Endpoints: []string{"10.0.0.2"},
-			Hoster:         clusterspec.Hoster{Type: "hetzner", Token: "hoster.token"},
+			Name: "prod", Endpoints: []string{"198.51.100.2"},
+			Hetzner:        clusterspec.Hetzner{Token: "hetzner.token"},
+			PrivateNetwork: "10.0.0.0/16",
 			Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.10"},
 			StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 		},
-		Secrets: map[string]state.SealedSecret{"hoster.token": {Value: state.Sealed("t"), Digest: "d"}},
+		Secrets: map[string]state.SealedSecret{"hetzner.token": {Value: state.Sealed("t"), Digest: "d"}},
 	})
 	cluster.Put(resource.KindVolume, "db", resource.VolumeSpec{Class: "fast", Size: 1 << 30, Replicas: 0})
 	cluster.Put(resource.KindStack, "shop", UsingDB(stackspec.Service{}))
@@ -455,8 +456,9 @@ func (c *Cluster) AddHost(id state.HostID) {
 	})
 	c.Apply(state.KindAddHost, state.LeaderActor, state.AddHost{Token: token, Host: state.Host{
 		ID: id, Name: "node" + strconv.Itoa(int(id)), Underlay: netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
-		WGPublicKey: "wg", CertificateSerial: "s" + strconv.Itoa(int(id)), CertificateNotAfter: time.Now().AddDate(1, 0, 0),
-		ServerRef: "srv-" + strconv.Itoa(int(id)), ServerRefChecked: true,
+		PublicAddress: netip.AddrFrom4([4]byte{198, 51, 100, byte(id + 2)}),
+		WGPublicKey:   "wg", CertificateSerial: "s" + strconv.Itoa(int(id)), CertificateNotAfter: time.Now().AddDate(1, 0, 0),
+		ServerID: 40 + int64(id), ServerChecked: true,
 	}})
 	c.Apply(state.KindSetHostPhase, state.LeaderActor, state.SetHostPhase{Host: id, Phase: state.Active})
 }

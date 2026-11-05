@@ -60,7 +60,7 @@ const (
 	KindFinishOperation      = "finish-operation"
 	KindAddJoinToken         = "add-join-token"
 	KindAddHost              = "add-host"
-	KindConfirmServerRef     = "confirm-server-ref"
+	KindConfirmServer        = "confirm-server"
 	KindSetHostVoter         = "set-host-voter"
 	KindReportPeerForgotten  = "report-peer-forgotten"
 	KindSetCopySynced        = "set-copy-synced"
@@ -153,7 +153,7 @@ var commandKinds = map[string]commandKind{
 	KindFinishOperation:      {"0.2.0", decoded(applyFinishOperation)},
 	KindAddJoinToken:         {"0.2.0", decoded(applyAddJoinToken)},
 	KindAddHost:              {"0.2.0", decoded(applyAddHost)},
-	KindConfirmServerRef:     {"0.2.0", decoded(applyConfirmServerRef)},
+	KindConfirmServer:        {"0.2.0", decoded(applyConfirmServer)},
 	KindSetHostVoter:         {"0.2.0", decoded(applySetHostVoter)},
 	KindReportPeerForgotten:  {"0.2.0", decoded(applyReportPeerForgotten)},
 	KindSetCopySynced:        {"0.2.0", decoded(applySetCopySynced)},

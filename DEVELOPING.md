@@ -16,7 +16,7 @@ the package you change. This file has the whole and the rules that hold everywhe
 | [What users write](docs/developing/specs.md) | namespaces and names, stack specs, rendering, cluster config and directory, encrypted values |
 | [The cluster](docs/developing/cluster.md) | cluster state, certificates, Raft and the data key, API and the CLI, placement |
 | [A host](docs/developing/host.md) | the agent, network, storage, containers, host check |
-| [Ingress, fencing, certificates, alerts and metrics](docs/developing/loops.md) | Traefik, hoster and ingress, fencing, certificates of the routes, alerts, metrics |
+| [Ingress, fencing, certificates, alerts and metrics](docs/developing/loops.md) | Traefik, Hetzner and ingress, fencing, certificates of the routes, alerts, metrics |
 | [Shipping](docs/developing/shipping.md) | packages and units, CI, releases |
 
 ## Getting started
@@ -106,14 +106,14 @@ What follows from there:
 
 | Word | Means |
 |---|---|
-| underlay | the network the hosts share at the hoster (private network or public addresses) |
+| underlay | the Hetzner private network the hosts share (`private_network`); a host's underlay is its address there |
 | node address | a host's address in the overlay (`network.NodeAddress`); on `clowder0`, reached by other hosts through WireGuard |
 | endpoint | an address in `endpoints` of `cluster.yaml`: an agent the CLI asks, at a host's public address; the CLI learns no others |
-| Floating IP | the cluster's one public address; the hoster routes it to the ingress host |
+| Floating IP | the cluster's one public address; Hetzner routes it to the ingress host |
 | leader | the Raft leader among the agents; it decides (placement, failover) and commits every write |
 | voter | a host that takes part in Raft's elections; others follow the log only |
 | quorum | a majority of the voters (Raft) or of a volume's copies (DRBD); without it, nothing changes |
-| fencing | powering a failed host off through the hoster's API before its stacks start elsewhere |
+| fencing | powering a failed host's server off through Hetzner's API before its stacks start elsewhere |
 | tiebreaker | a diskless DRBD member that gives a volume with two copies its third vote |
 | active, passive | phases of a host. Active: it takes and runs stacks and may vote; the first host starts active, a host that joins becomes active, and so does one back from `recovering`. Passive: the second host of a cluster that is not yet highly available; it waits without stacks and without a vote until a third host joins (`state.MinHAHosts`), then it becomes active too |
 | actor | who sent a command: `leader`, `host/<id>` or `user/<name>` |
@@ -160,13 +160,16 @@ The package layout is planned for the whole of v1; packages appear as the phases
   (rule `state-pure`) keeps `os`, `net/http`, randomness and `clusterdir` out, forbidigo
   the clock (`time.Now`, `time.Since`, `time.Until`).
 - **Decides**: `controller` (the leader's loops) writes Raft commands. It talks to external
-  services that only the leader uses (hoster API, ACME, Git remotes, alert channels), but it
-  never changes the host. One loop of it runs on every agent, not only on the leader:
-  `QuorumWatch`, which alerts while there is no leader, through the alerts' channels.
-  The clients of these services are separate packages: `hoster` (with `hoster/hetzner`),
-  `notify`, and `x/crypto/acme`. depguard keeps them out of the CLI, the state and the
-  scheduler. The agent starts the controller's loops, so `agent` imports `controller` and
-  never the other way round. The agent also uses `controller.Propose` for the commands it writes itself.
+  services that only the leader uses (Hetzner's API, ACME, Git remotes, alert channels),
+  but it never changes the host. One loop of it runs on every agent, not only on the
+  leader: `QuorumWatch`, which alerts while there is no leader, through the alerts'
+  channels. The clients of these services are separate packages: `hetzner` (the only
+  cloud clowder runs on, with no layer in between; `hetzner/hetznertest` fakes its API
+  for the tests), `notify`, and `x/crypto/acme`. depguard keeps them out of the CLI, the
+  state and the scheduler. The join, `clowderd recover` and the agent's start use
+  `hetzner` too. The agent starts the controller's loops, so `agent` imports
+  `controller` and never the other way round. The agent also uses `controller.Propose`
+  for the commands it writes itself.
 - **Changes the host**: `agent`, `supervisor`, `raftnode` (Raft over mTLS), `datakey` (the
   key file), `command` (host tools with a timeout) and the drivers `network`, `storage`,
   `docker`, `ingress` (Traefik's files; it renders, the agent writes). Within the agent,

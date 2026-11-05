@@ -1,5 +1,5 @@
 // Package yamlpath names a place in a YAML document the one way clowder
-// writes it: hoster.token, alerts.channels[0].url,
+// writes it: hetzner.token, alerts.channels[0].url,
 // registries["ghcr.io"].password. The names of the secrets in cluster.yaml
 // are such paths: internal/secretvalue builds them as it reads a file, and
 // clusterspec.SecretPlaces as it lists the places, so the two always agree.

@@ -28,9 +28,9 @@ import (
 //     (jointoken.ProofKey). The joining host trusts the CA only if the
 //     proof matches its token.
 //  2. POST /v1/join over TLS checked against that CA: the token itself, the
-//     host's name, addresses, server ref and public keys, a nonce and the
+//     host's name, addresses, server ID and public keys, a nonce and the
 //     time. Any agent takes it and hands it to the leader, which checks the
-//     token and the server ref, chooses the host's ID, issues its
+//     token and the server with Hetzner, chooses the host's ID, issues its
 //     certificate and commits add-host, which uses the token up. The answer
 //     carries the certificate, the data key and the other hosts.
 //
@@ -51,8 +51,8 @@ type JoinRequest struct {
 	Token         string     `json:"token"`
 	Name          string     `json:"name"`
 	Underlay      netip.Addr `json:"underlay"`
-	PublicAddress netip.Addr `json:"public_address,omitzero"`
-	ServerRef     string     `json:"server_ref"`
+	PublicAddress netip.Addr `json:"public_address"`
+	ServerID      int64      `json:"server_id"`
 	WGPublicKey   string     `json:"wg_public_key"`
 	// PublicKey is the host's own key (Ed25519), which its certificate is
 	// for; the private half never leaves the host.
@@ -89,7 +89,7 @@ type JoinPeer struct {
 }
 
 // Joins is the leader's side of a join, which the agent implements: it
-// checks the request against the state and the hoster, and commits it.
+// checks the request against the state and Hetzner, and commits it.
 type Joins interface {
 	// Join adds the host. A refusal is a *StatusError the joining host is
 	// shown (JoinRefused); any other error is the cluster's.
@@ -186,7 +186,7 @@ func (c *JoiningCluster) Join(ctx context.Context, request JoinRequest) (JoinAns
 
 // CheckJoinRequest refuses a request that is too old or too new, or that
 // is not whole: the checks of its form, in one place. The leader checks
-// the rest against the state (state.CheckJoiningHost) and the hoster.
+// the rest against the state (state.CheckJoiningHost) and Hetzner.
 func CheckJoinRequest(request JoinRequest, now time.Time) error {
 	if age := now.Sub(request.Time); age > joinMaxAge || age < -joinMaxAge {
 		return errors.New("the request is too old (or a clock is off by minutes)")
@@ -194,8 +194,8 @@ func CheckJoinRequest(request JoinRequest, now time.Time) error {
 	switch {
 	case len(request.Nonce) < 16:
 		return errors.New("the request has no nonce")
-	case request.Name == "" || !request.Underlay.IsValid() || request.ServerRef == "":
-		return errors.New("the request needs the host's name, underlay address and server ref")
+	case request.Name == "" || !request.Underlay.IsValid() || !request.PublicAddress.IsValid() || request.ServerID <= 0:
+		return errors.New("the request needs the host's name, its underlay address and public address, and its server ID")
 	case len(request.PublicKey) == 0 || request.WGPublicKey == "":
 		return errors.New("the request needs the host's public keys")
 	case len(request.PublicKey) != ed25519.PublicKeySize:
@@ -299,7 +299,7 @@ func (s *Server) join(w http.ResponseWriter, r *http.Request) {
 	s.answerJoin(w, answer, err)
 }
 
-// joinTimeout bounds a join on the leader: it asks the hoster and commits.
+// joinTimeout bounds a join on the leader: it asks Hetzner and commits.
 // The joining host waits joinClientTimeout, longer than the leader and the
 // agent that hands its request on.
 const (

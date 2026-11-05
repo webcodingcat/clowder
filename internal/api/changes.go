@@ -200,7 +200,7 @@ func (s *Server) putCommand(actor string, object resource.Object) (state.Command
 		}
 		id := names.ID(payload.Namespace, payload.Name)
 		// the value must be encrypted for this Secret: one copied from
-		// elsewhere, such as the hoster's token from cluster.yaml, would
+		// elsewhere, such as the Hetzner token from cluster.yaml, would
 		// otherwise reach a container
 		value, err := secretvalue.OpenFor(secret.Encrypted, id, identity)
 		if err != nil {

@@ -2,8 +2,8 @@
 
 clowder runs stacks of containers with Docker Compose on a few small hosts (about 4 GB of
 RAM). It replicates volumes with DRBD 9, keeps the client's real IP behind a Floating IP,
-places services by priority and fences failed hosts through the hoster's API. The first
-hoster is Hetzner Cloud.
+places services by priority and fences failed hosts through Hetzner Cloud's API. It runs
+on Hetzner Cloud, with a Hetzner private network between the hosts.
 
 **Status:** under construction. Three hosts and more work: hosts join, stacks move between
 them with their data, and a failed host is fenced and its stacks start elsewhere. Backups
@@ -24,7 +24,7 @@ release may need a cluster set up anew.
   with its data (`clowder stack move`, `clowder host drain`), its images pulled there
   first.
 - **Failover with fencing:** a host with stacks that the others stop hearing for 45 s is
-  powered off through the hoster, and its stacks start on a host with a synced copy of
+  powered off through Hetzner's API, and its stacks start on a host with a synced copy of
   their data, within about three minutes. The host is powered on again and takes stacks
   once its copies caught up; one that fails three times within an hour stays off until
   `clowder host enable`.
@@ -91,12 +91,12 @@ replaces the recovery key; then encrypt your files for it with
 once.
 
 The bootstrap writes `cluster.yaml` into the cluster directory. Fill it in from
-`tofu output cluster_yaml` in the module's directory, add the hoster's token, then run
+`tofu output cluster_yaml` in the module's directory (it brings `private_network`, the
+Floating IP and the storage classes), add the Hetzner project's API token, then run
 `clowder cluster apply`:
 
 ```yaml
-hoster:
-  type: hetzner
+hetzner:
   token: !secret |                 # clowder secret encrypt --cluster-yaml < token
     -----BEGIN AGE ENCRYPTED FILE-----
     ...
@@ -129,22 +129,22 @@ again (it lists every host): with the first host alone, the CLI cannot reach the
 while that host is down. `--connect-timeout` (default 5s) is how long it waits for an
 endpoint before it tries the next.
 
-The leader checks with the
-hoster that each host's server is its own, so give each cluster a Hetzner project of its
+The leader checks with
+Hetzner that each host's server is its own, so give each cluster a Hetzner project of its
 own. `clowder host drain` moves a host's stacks to the others for maintenance (its volume
 copies stay), and `clowder host remove` of a host that still has stacks or copies moves
 them off before it goes. A volume with `replicas: 0` holds throw-away data: it starts empty on
 the new host whenever its stack moves or fails over.
 
 A host that fails is powered off and its stacks start elsewhere: a volume with
-`replicas: 2` or `3` keeps its data, one with `replicas: 1` waits for its host. When the
-hoster's API cannot power the host off, nothing fails over and an alert says so; once you
+`replicas: 2` or `3` keeps its data, one with `replicas: 1` waits for its host. When
+Hetzner's API cannot power the host off, nothing fails over and an alert says so; once you
 know the server is off, `clowder host fence-confirm <host>` lets the stacks start
 elsewhere.
 
 When two of three hosts are gone for good, the cluster has no majority and decides
 nothing. As root on the host that is left, `clowderd recover --power-off` powers the
-others off through the hoster and labels their servers `clowder-retired`, so their agents
+others off through Hetzner's API and labels their servers `clowder-retired`, so their agents
 never start again, then goes on with this host alone. It runs the stacks with the data
 of its copies; a volume with no synced copy there waits for a restore. Join two new
 hosts as above, and set the retired servers up anew or delete them.
@@ -224,7 +224,7 @@ Good to know:
 | Binary | What it is | Platforms |
 |---|---|---|
 | `clowder` | the CLI | Linux, macOS, Windows |
-| `clowderd` | the agent on each host | Debian 13 (amd64) |
+| `clowderd` | the agent on each host | Debian 13 (amd64) on Hetzner Cloud servers in one project, with a Hetzner private network between them |
 
 Before `v1.0.0`, CLI and agents work together only within one minor version: update all
 hosts and the CLI together to a new minor version, host by host only to a patch release

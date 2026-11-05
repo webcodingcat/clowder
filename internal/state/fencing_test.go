@@ -109,10 +109,10 @@ func TestOnlyAFailedHostWithACheckedServerIsFenced(t *testing.T) {
 	c.refuse(KindStartOperation, LeaderActor, StartOperation{
 		Kind: "drain-host", Locks: []string{HostLock(1)}, Fence: &HostFence{Host: 1},
 	}, "a fence goes with fence-host")
-	c.state.Hosts[1].ServerRefChecked = false
+	c.state.Hosts[1].ServerChecked = false
 	c.refuse(KindStartOperation, LeaderActor, StartOperation{
 		Kind: OperationFenceHost, Locks: []string{HostLock(1)}, Fence: &HostFence{Host: 1},
-	}, "no checked server ref")
+	}, "no checked server")
 }
 
 func TestAFencedHostIsBackOnceItsCopiesCaughtUp(t *testing.T) {

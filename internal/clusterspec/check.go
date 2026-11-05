@@ -55,16 +55,14 @@ func Check(config Config) Problems {
 			report("endpoints: %q is neither an address nor a host name", endpoint)
 		}
 	}
-	problems = append(problems, checkHoster(config.Hoster)...)
-	if config.PrivateNetwork != "" {
-		network, err := netip.ParsePrefix(config.PrivateNetwork)
-		if err != nil || !network.Addr().Is4() || network != network.Masked() {
-			report("private_network %q is not an IPv4 network such as 10.0.0.0/16", config.PrivateNetwork)
-		}
-		for _, used := range ClowderRanges {
-			if err == nil && network.Overlaps(used) {
-				report("private_network %s overlaps clowder's %s", network, used)
-			}
+	problems = append(problems, checkHetzner(config.Hetzner)...)
+	network, err := netip.ParsePrefix(config.PrivateNetwork)
+	if err != nil || !network.Addr().Is4() || network != network.Masked() {
+		report("private_network %q is not an IPv4 network such as 10.0.0.0/16", config.PrivateNetwork)
+	}
+	for _, used := range ClowderRanges {
+		if err == nil && network.Overlaps(used) {
+			report("private_network %s overlaps clowder's %s", network, used)
 		}
 	}
 	if address, err := netip.ParseAddr(config.Ingress.FloatingIP); err != nil || !address.Is4() {
@@ -141,18 +139,15 @@ func validEndpoint(address string) bool {
 	return host != "" && !strings.ContainsAny(host, " /:")
 }
 
-// checkHoster: a known type, its token, and an API that is a full http or
-// https URL: the token goes there.
-func checkHoster(hoster Hoster) Problems {
+// checkHetzner: a token, and an API that is a full http or https URL: the
+// token goes there.
+func checkHetzner(hetzner Hetzner) Problems {
 	var problems Problems
-	if hoster.Type != "hetzner" {
-		problems = append(problems, fmt.Sprintf("hoster.type %q is not supported (hetzner)", hoster.Type))
+	if hetzner.Token == "" {
+		problems = append(problems, "hetzner.token: a value tagged !secret is required")
 	}
-	if hoster.Token == "" {
-		problems = append(problems, "hoster.token: a value tagged !secret is required")
-	}
-	if hoster.API != "" && !fullURL(hoster.API) {
-		problems = append(problems, fmt.Sprintf("hoster.api %q is not a full URL with http:// or https://", hoster.API))
+	if hetzner.API != "" && !fullURL(hetzner.API) {
+		problems = append(problems, fmt.Sprintf("hetzner.api %q is not a full URL with http:// or https://", hetzner.API))
 	}
 	return problems
 }

@@ -86,6 +86,13 @@ func applyConfig(s *State, _ Command, payload ApplyConfig) (func(), error) {
 		return nil, fmt.Errorf("cluster.yaml: %w", err)
 	}
 	spec := payload.Spec.WithDefaults()
+	for _, id := range slices.Sorted(maps.Keys(s.Hosts)) {
+		if host := s.Hosts[id]; host.Phase != Removed {
+			if err := checkUnderlay(spec, host); err != nil {
+				return nil, fmt.Errorf("cluster.yaml: %w", err)
+			}
+		}
+	}
 	for _, id := range slices.Sorted(maps.Keys(s.Stacks)) {
 		stack := s.Stacks[id]
 		if stack.Spec.Privileged() && !slices.Contains(spec.Stacks.Privileged, id) {

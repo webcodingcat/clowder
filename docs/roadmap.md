@@ -54,9 +54,9 @@ Then the join:
   opens once and expires; the state keeps only its hash.
 - The bootstrap key lets the first user in. After that it opens nothing, not even a
   proof of the CA. `join_keys` is gone from `cluster.yaml`.
-- The leader asks the hoster whether a joining host's server is its own: the server has
+- The leader asks Hetzner whether a joining host's server is its own: the server has
   the host's underlay as an address, and no server serves two hosts. It checks the first
-  host's server too, once `cluster.yaml` brings the hoster's token. Only a host with a
+  host's server too, once `cluster.yaml` brings the Hetzner token. Only a host with a
   checked server gets the Floating IP.
 - The leader keeps Raft's members. A second host waits passive. With the third, three
   hosts vote; from six hosts on, five vote.
@@ -107,7 +107,7 @@ Then failover:
   from it, fails no host. A failed host that is heard again is active again, but only
   the leader says so, never the host.
 - The leader fences a failed host that has stacks another host can take: it powers its
-  server off through the hoster, and only then do its stacks start elsewhere, on a host
+  server off through Hetzner's API, and only then do its stacks start elsewhere, on a host
   with a synced copy of their data. A host without such stacks, such as one drained and
   rebooting for maintenance, stays failed until it is heard again. Once the
   fence started (`fencing`), nothing stops it; a server that cannot be powered off leaves
@@ -120,8 +120,8 @@ Then failover:
   anew elsewhere.
 - A host that was away starts its stacks only once it holds the leader's commit index,
   and a new leader acts only once it has applied the log. Each stack comes up in a job of
-  its own. The hoster's API is asked again while it is busy.
-- The live tests fail hosts through HLab's faults: frozen, cut off, with the hoster's API
+  its own. Hetzner's API is asked again while it is busy.
+- The live tests fail hosts through HLab's faults: frozen, cut off, with Hetzner's API
   down, with an agent that crashes at once, and during a move (`TestFailover`,
   `TestNoFalseFailover`, `TestCrashingAgent`, `TestMoveInterrupted`).
 - The live tests found three older faults, now fixed: a deleted volume's DRBD minor went
@@ -166,7 +166,7 @@ The state changed with it, so a cluster of an earlier build must be set up anew.
 Then the way out when the majority is gone for good:
 
 - `clowderd recover --power-off`, as root on the host that is left, powers the other hosts
-  off through the hoster, labels their servers `clowder-retired` with their certificate's
+  off through Hetzner's API, labels their servers `clowder-retired` with their certificate's
   serial, and makes this host the only voter. It refuses while another host knows a
   leader or answers without saying, and asks for the cluster's name first.
 - The cluster keeps what that host holds: a volume with a synced copy there runs on, one
@@ -206,6 +206,25 @@ Code without a caller went then; each phase brings back what it needs:
 - phase 3: `backup:` in `cluster.yaml`, and resources owned by a GitOps source;
 - user management: more users per cluster, removing a user, revoking one certificate.
 
+Then the layer between clowder and its one cloud went: clowder runs on Hetzner Cloud,
+with a Hetzner private network between the hosts, and nothing else.
+
+- `internal/hetzner` is the client, called directly; the interface, the plugin switch
+  and the hand-made fakes of the tests are gone. The tests use a fake of the API
+  (`hetzner/hetznertest`) through the real client.
+- `cluster.yaml` has `hetzner: {token, api}` in place of `hoster: {type, token, api}`,
+  and `private_network` is required. A `cluster.yaml` with `hoster` or the older
+  `network` fails with the key that took its place.
+- A host has a server ID (`--server-id`, Hetzner's ID; it was `--server-ref`), an
+  underlay in `private_network`, which the state checks at each join and each
+  `cluster apply`, and a public address; all three are required. The leader's check of
+  a server takes the underlay among its private addresses and the public address as its
+  public IPv4.
+- The client reads each answer to its end, so its connections are used again.
+
+The state, the join request and `clowderd init`'s and `join`'s flags changed with it,
+so a cluster of an earlier build must be set up anew.
+
 Until `v1.0.0`, the state and `cluster.yaml` may change between releases without a way
 to upgrade a running cluster.
 
@@ -223,8 +242,8 @@ Phase 4 (comfort and operations):
 
 - A host that comes back after a fence resyncs all its copies at once, each at the
   resync limit's rate; the limit holds back only new copies meanwhile.
-- A failed host that is not fenced (it needs none, or there is no hoster, a server ref not
-  confirmed, the hoster's API down for good) keeps its copies counted: none is made anew
+- A failed host that is not fenced (it needs none, no `cluster.yaml` applied yet, a server
+  not confirmed, Hetzner's API down for good) keeps its copies counted: none is made anew
   elsewhere until a user runs `host fence-confirm`. The alert `fencing-blocked` says so.
 - A drained host that fails comes back active, not drained: its drain is lost; a user's
   remove is kept.
@@ -248,7 +267,7 @@ Phase 4 (comfort and operations):
   replacement joins first. If none can (examples/hetzner joins through its first host),
   the cluster stays at two; `clowderd recover --power-off` is the way out only when two
   are gone.
-- A retired host whose agent starts while the hoster's API does not answer starts as
+- A retired host whose agent starts while Hetzner's API does not answer starts as
   before, and two such hosts would have the old cluster's majority. recover tells the
   user to set retired servers up anew or delete them.
 - recover knows the hosts that this host's log knows. A host the others added after this

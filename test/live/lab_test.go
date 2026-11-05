@@ -31,7 +31,7 @@ import (
 // lab's network, and where the hosts reach them.
 const labAddress = "192.0.2.2"
 
-// cloud calls HLab's Cloud API, the hoster's API of the test's cluster, and
+// cloud calls HLab's Cloud API, Hetzner's API of the test's cluster, and
 // reads the answer into out (nil: none).
 func cloud(t *testing.T, method, path string, body, out any) {
 	t.Helper()

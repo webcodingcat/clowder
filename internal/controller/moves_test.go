@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
@@ -24,9 +23,9 @@ func addActiveHost(l *leader, id state.HostID) {
 		ID: token, Hash: strings.Repeat("ab", 32), TTL: time.Hour,
 	})
 	l.apply(state.KindAddHost, state.LeaderActor, state.AddHost{Token: token, Host: state.Host{
-		ID: id, Name: "node" + strconv.Itoa(int(id)), Underlay: netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
+		ID: id, Name: "node" + strconv.Itoa(int(id)), Underlay: underlayOf(id), PublicAddress: publicAddressOf(id),
 		WGPublicKey: "wg", CertificateSerial: "s" + strconv.Itoa(int(id)), CertificateNotAfter: time.Now().AddDate(1, 0, 0),
-		ServerRef: "srv-" + strconv.Itoa(int(id)), ServerRefChecked: true,
+		ServerID: 40 + int64(id), ServerChecked: true,
 	}})
 	l.apply(state.KindSetHostPhase, state.LeaderActor, state.SetHostPhase{Host: id, Phase: state.Active})
 	var report state.ReportHost

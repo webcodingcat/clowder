@@ -34,7 +34,7 @@ type JoinOptions struct {
 	Name          string
 	Underlay      netip.Addr
 	PublicAddress netip.Addr
-	ServerRef     string
+	ServerID      int64
 	// RaftPort and APIPort are fixed in a cluster; tests change them.
 	RaftPort int
 	APIPort  int
@@ -62,8 +62,7 @@ func Join(ctx context.Context, files Files, options JoinOptions, hostNetwork Hos
 	if _, err := os.Stat(files.hostFile()); err == nil {
 		return fmt.Errorf("%s exists: this host is part of a cluster", files.hostFile())
 	}
-	publicIsIPv4 := !options.PublicAddress.IsValid() || options.PublicAddress.Is4()
-	if !options.Underlay.Is4() || !publicIsIPv4 {
+	if !options.Underlay.Is4() || !options.PublicAddress.Is4() {
 		return errors.New("the underlay and the public address must be IPv4 addresses")
 	}
 	if err := checkHostName(options.Name); err != nil {
@@ -150,7 +149,7 @@ func askToJoin(ctx context.Context, files Files, options JoinOptions, saved *joi
 	}
 	answer, err := cluster.Join(ctx, api.JoinRequest{
 		Name: options.Name, Underlay: options.Underlay, PublicAddress: options.PublicAddress,
-		ServerRef: options.ServerRef, PublicKey: hostKey.Public().(ed25519.PublicKey),
+		ServerID: options.ServerID, PublicKey: hostKey.Public().(ed25519.PublicKey),
 		WGPublicKey: base64.StdEncoding.EncodeToString(wireGuardKey.PublicKey().Bytes()),
 	})
 	if err != nil {
@@ -159,7 +158,7 @@ func askToJoin(ctx context.Context, files Files, options JoinOptions, saved *joi
 	saved.CA, saved.Answer = cluster.CAPEM, &answer
 	saved.Host = &Host{
 		ID: answer.Host, Name: options.Name, NodeAddress: network.NodeAddress(answer.Host),
-		Underlay: options.Underlay, PublicAddress: options.PublicAddress, ServerRef: options.ServerRef,
+		Underlay: options.Underlay, PublicAddress: options.PublicAddress, ServerID: options.ServerID,
 		RaftPort: cmp.Or(options.RaftPort, RaftPort), APIPort: cmp.Or(options.APIPort, APIPort),
 	}
 	return files.writeJoining(*saved)

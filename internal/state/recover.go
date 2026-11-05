@@ -11,7 +11,7 @@ import (
 
 // RecoverRemap is clowderd recover's command, on the one host left of a
 // cluster that lost its majority for good: the other hosts were powered off
-// and marked retired at the hoster, and Raft runs with the survivor alone.
+// and labeled retired at Hetzner, and Raft runs with the survivor alone.
 // It makes the state fit (applyRecoverRemap).
 type RecoverRemap struct {
 	Survivor HostID `json:"survivor"`

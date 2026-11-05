@@ -22,12 +22,12 @@ import (
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/command"
 	"github.com/webcodingcat/clowder/internal/controller"
-	"github.com/webcodingcat/clowder/internal/hoster"
+	"github.com/webcodingcat/clowder/internal/hetzner"
 	"github.com/webcodingcat/clowder/internal/raftnode"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// recoverTimeout bounds each step of recover that waits on the hoster or
+// recoverTimeout bounds each step of recover that waits on Hetzner or
 // Raft: a power action, the new leader, the remap.
 const recoverTimeout = 3 * time.Minute
 
@@ -38,7 +38,6 @@ type RecoverParts struct {
 	Storage interface {
 		DropPeers(ctx context.Context, peers []int) error
 	}
-	Hoster controller.ConnectHoster
 	// Service runs systemctl's action ("stop", "start") on clowderd.service
 	Service func(ctx context.Context, action string) error
 	// KnowsLeader asks the agent at address (another host's underlay and API
@@ -60,7 +59,7 @@ func newRecover() *cobra.Command {
 		Use:   "recover --power-off",
 		Short: "Go on with this host alone when the others are gone for good (an emergency)",
 		Long: "For a cluster that lost the majority of its hosts for good: it powers every other host off\n" +
-			"through the hoster and marks its server clowder-retired, so it never takes part again, and\n" +
+			"through Hetzner's API and labels its server clowder-retired, so it never takes part again, and\n" +
 			"makes this host the cluster's only one, with the data of its volume copies. A volume with no\n" +
 			"synced copy here waits for a restore. Then join new hosts as for a new cluster.\n" +
 			"Never while the other hosts lead the cluster: use clowder host remove then.",
@@ -72,7 +71,6 @@ func newRecover() *cobra.Command {
 			files := Files{Dir: DefaultDir}
 			parts := RecoverParts{
 				Storage: hostStorage(files),
-				Hoster:  hoster.New,
 				KnowsLeader: func(ctx context.Context, address string, certificate tls.Certificate, ca *x509.Certificate) (bool, error) {
 					return api.KnowsLeader(ctx, address, certificate, ca, buildinfo.Version)
 				},
@@ -109,8 +107,8 @@ type recovery struct {
 //     answers without saying; a host it does not reach is named in step 3.
 //  3. It says what it does and asks (RecoverOptions).
 //  4. For each other host: the label clowder-retired, then the power off,
-//     both confirmed by the hoster. A server ref the leader never checked
-//     is checked first: the token may power off any server of the project.
+//     both confirmed by Hetzner. A server the leader never checked is
+//     checked first: the token may power off any server of the project.
 //  5. Raft with this host as its only voter (raftnode.Recover), then the
 //     command recover-remap, which this host commits as the new leader.
 //  6. DRBD without the other hosts (storage.Driver.DropPeers).
@@ -213,8 +211,8 @@ func hostsToRetire(current *state.State, self Host) ([]*state.Host, error) {
 	switch {
 	case len(gone) == 0 && current.RecoveredAt.IsZero():
 		return nil, errors.New("this host is the cluster's only one; there is nothing to recover")
-	case len(gone) > 0 && current.Config.Spec.Hoster.Type == "":
-		return nil, errors.New("cluster.yaml names no hoster: recover can power no host off")
+	case len(gone) > 0 && current.Config.Revision == 0:
+		return nil, errors.New("no cluster.yaml brought the Hetzner token: recover can power no host off")
 	}
 	return gone, nil
 }
@@ -270,7 +268,7 @@ func (r recovery) describe(current *state.State, gone []*state.Host, notReached 
 	fmt.Fprintf(&text, "Recover cluster %s with host %s alone. These hosts are powered off for good and their "+
 		"servers labeled clowder-retired:\n", current.Config.Spec.Name, r.host.Name)
 	for _, other := range gone {
-		fmt.Fprintf(&text, "  %s (server %s, %s)\n", other.Name, other.ServerRef, other.Phase)
+		fmt.Fprintf(&text, "  %s (server %d, %s)\n", other.Name, other.ServerID, other.Phase)
 	}
 	if len(notReached) > 0 {
 		fmt.Fprintf(&text, "Not reached, so not asked whether they lead: %s. Make sure they are down.\n",
@@ -305,7 +303,7 @@ func (r recovery) describe(current *state.State, gone []*state.Host, notReached 
 
 // retire labels each host's server clowder-retired and powers it off.
 func (r recovery) retire(ctx context.Context, current *state.State, gone []*state.Host) error {
-	client, err := controller.OpenHoster(current, r.credentials.dataKey.Open, r.parts.Hoster)
+	client, err := controller.OpenHetzner(current, r.credentials.dataKey.Open)
 	if err != nil {
 		return err
 	}
@@ -313,7 +311,7 @@ func (r recovery) retire(ctx context.Context, current *state.State, gone []*stat
 		if err := retireHost(ctx, client, other); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(r.options.Out, "Host %s (server %s) is off and retired.\n", other.Name, other.ServerRef); err != nil {
+		if _, err := fmt.Fprintf(r.options.Out, "Host %s (server %d) is off and retired.\n", other.Name, other.ServerID); err != nil {
 			return err
 		}
 	}
@@ -323,22 +321,18 @@ func (r recovery) retire(ctx context.Context, current *state.State, gone []*stat
 // retireHost labels the host's server with its certificate's serial and
 // powers it off. The label comes first: a server that is off but not
 // labeled could be switched on and join its old peers again.
-func retireHost(ctx context.Context, client hoster.Hoster, other *state.Host) error {
-	if other.ServerRef == "" {
-		return fmt.Errorf("host %s has no server ref: recover cannot make sure it is off for "+
-			"good (only a first host made without --server-ref has none); set the cluster up anew", other.Name)
-	}
+func retireHost(ctx context.Context, client *hetzner.Client, other *state.Host) error {
 	ctx, cancel := context.WithTimeout(ctx, recoverTimeout)
 	defer cancel()
-	if !other.ServerRefChecked {
-		if err := hoster.CheckServerRef(ctx, client, other.ServerRef, other.Underlay, other.PublicAddress); err != nil {
+	if !other.ServerChecked {
+		if err := client.CheckServer(ctx, other.ServerID, other.Underlay, other.PublicAddress); err != nil {
 			return fmt.Errorf("host %s: %w", other.Name, err)
 		}
 	}
-	if err := client.SetRetired(ctx, other.ServerRef, other.CertificateSerial); err != nil {
+	if err := client.SetRetired(ctx, other.ServerID, other.CertificateSerial); err != nil {
 		return fmt.Errorf("retire host %s: %w", other.Name, err)
 	}
-	if err := client.PowerOff(ctx, other.ServerRef); err != nil {
+	if err := client.PowerOff(ctx, other.ServerID); err != nil {
 		return fmt.Errorf("power host %s off: %w", other.Name, err)
 	}
 	return nil

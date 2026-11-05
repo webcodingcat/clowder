@@ -9,19 +9,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/clusterspec"
-	"github.com/webcodingcat/clowder/internal/hoster"
+	"github.com/webcodingcat/clowder/internal/hetzner/hetznertest"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
 // testFencer is the fencing loop of host 0 in a cluster of three voters;
-// hosts 1 and 2 have the checked servers 41 and 42 at fake. silences are
-// what the other voters say when asked: voter -> host -> silence; a voter
-// that is missing does not answer.
+// the hosts have the checked servers 40 to 42 at api. silences are what
+// the other voters say when asked: voter -> host -> silence; a voter that
+// is missing does not answer.
 type testFencer struct {
 	*fencer
 	l        *leader
-	fake     *fakeHoster
+	api      *hetznertest.API
 	clock    time.Time
 	silences map[state.HostID]map[state.HostID]time.Duration
 }
@@ -30,15 +29,16 @@ func newTestFencer(t *testing.T) *testFencer {
 	t.Helper()
 	l := newLeader(t, 100<<30)
 	withServers(l)
+	api := withHetzner(t, l, "t")
 	l.mu.Lock()
 	for _, host := range l.state.Hosts {
-		host.Voter, host.ServerRefChecked = true, true
+		host.Voter, host.ServerChecked = true, true
 	}
 	// host 1 runs shop: its failure needs a fence
 	one := state.HostID(1)
 	l.state.Stacks["default/shop"].Host = &one
 	l.mu.Unlock()
-	test := &testFencer{l: l, fake: &fakeHoster{}, clock: time.Now(), silences: map[state.HostID]map[state.HostID]time.Duration{}}
+	test := &testFencer{l: l, api: api, clock: time.Now(), silences: map[state.HostID]map[state.HostID]time.Duration{}}
 	heard := NewHeard()
 	heard.now = func() time.Time { return test.clock }
 	heard.started = test.clock
@@ -54,9 +54,6 @@ func newTestFencer(t *testing.T) *testFencer {
 			Cluster: l, Propose: l.propose, Heard: heard, Ask: ask, Self: 0, Conditions: NewConditions(),
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 			Open:   func(sealed state.Sealed) ([]byte, error) { return sealed, nil },
-			Connect: func(clusterspec.Hoster, string) (hoster.Hoster, error) {
-				return test.fake, nil
-			},
 		},
 		fenceAfter: map[state.HostID]time.Time{}, powerOnAfter: map[state.HostID]time.Time{},
 		poweredOn: map[state.HostID]bool{}, pause: time.Millisecond,
@@ -124,7 +121,7 @@ func TestAFailedHostThatAMajorityHearsAgainIsActive(t *testing.T) {
 	f := newTestFencer(t)
 	f.l.mu.Lock()
 	f.l.state.Hosts[1].Phase = state.Failed
-	f.l.state.Hosts[1].ServerRefChecked = false // so it is not fenced meanwhile
+	f.l.state.Hosts[1].ServerChecked = false // so it is not fenced meanwhile
 	f.l.mu.Unlock()
 	f.Heard.Beat(1)
 	f.silences[2] = map[state.HostID]time.Duration{1: FailAfter}
@@ -156,12 +153,12 @@ func TestAFailedHostIsPoweredOffFencedAndPoweredOnAgain(t *testing.T) {
 	f.l.mu.Unlock()
 	f.pass(t) // shop runs elsewhere: the fence is over
 	f.pass(t) // powers on
-	if want := []string{"off 41", "on 41"}; !slices.Equal(f.fake.powered, want) {
-		t.Errorf("power actions %v, want %v", f.fake.powered, want)
+	if want := []string{"poweroff 41", "poweron 41"}; !slices.Equal(f.api.Changes(), want) {
+		t.Errorf("power actions %v, want %v", f.api.Changes(), want)
 	}
 	f.pass(t) // once
-	if len(f.fake.powered) != 2 {
-		t.Errorf("power actions %v", f.fake.powered)
+	if len(f.api.Changes()) != 2 {
+		t.Errorf("power actions %v", f.api.Changes())
 	}
 	f.l.Read(func(current *state.State) {
 		if current.HostLocked(1) {
@@ -172,7 +169,7 @@ func TestAFailedHostIsPoweredOffFencedAndPoweredOnAgain(t *testing.T) {
 
 func TestAHostThatCannotBePoweredOffStaysFailed(t *testing.T) {
 	f := newTestFencer(t)
-	f.fake.powerFails = errors.New("the API is down")
+	f.api.FailActions(41, 2*powerOffTries)
 	f.l.apply(state.KindSetHostPhase, state.LeaderActor, state.SetHostPhase{Host: 1, Phase: state.Failed})
 	f.pass(t)
 	if err := f.fencer.pass(context.Background()); err != nil {
@@ -181,12 +178,12 @@ func TestAHostThatCannotBePoweredOffStaysFailed(t *testing.T) {
 	if phase := f.phase(1); phase != state.Failed {
 		t.Errorf("phase %s, want failed", phase)
 	}
-	if len(f.fake.powered) != powerOffTries {
-		t.Errorf("power actions %v", f.fake.powered)
+	if len(f.api.Changes()) != powerOffTries {
+		t.Errorf("power actions %v", f.api.Changes())
 	}
 	f.pass(t) // no new fence right away
-	if phase := f.phase(1); phase != state.Failed || len(f.fake.powered) != powerOffTries {
-		t.Errorf("phase %s, power actions %v", phase, f.fake.powered)
+	if phase := f.phase(1); phase != state.Failed || len(f.api.Changes()) != powerOffTries {
+		t.Errorf("phase %s, power actions %v", phase, f.api.Changes())
 	}
 	if _, blocked := f.Conditions.Since(fencingBlockedKey(1)); !blocked {
 		t.Error("no condition for the alert")
@@ -207,8 +204,8 @@ func TestNoHostIsFencedWhenSeveralFailedAtOnce(t *testing.T) {
 	if _, blocked := f.Conditions.Since(fencingBlockedKey(1)); !blocked {
 		t.Error("no condition for the alert")
 	}
-	if len(f.fake.powered) != 0 {
-		t.Errorf("power actions %v", f.fake.powered)
+	if len(f.api.Changes()) != 0 {
+		t.Errorf("power actions %v", f.api.Changes())
 	}
 }
 
@@ -223,8 +220,8 @@ func TestAHostFencedTooOftenStaysOff(t *testing.T) {
 	if phase := f.phase(1); phase != state.Disabled {
 		t.Errorf("phase %s, want disabled", phase)
 	}
-	if len(f.fake.powered) != 0 {
-		t.Errorf("power actions %v", f.fake.powered)
+	if len(f.api.Changes()) != 0 {
+		t.Errorf("power actions %v", f.api.Changes())
 	}
 }
 
@@ -261,7 +258,7 @@ func TestAHostWithoutAStackToTakeOverIsNotFenced(t *testing.T) {
 	f.l.state.Hosts[0].Phase = state.Draining
 	f.l.mu.Unlock()
 	f.pass(t)
-	if phase := f.phase(1); phase != state.Failed || len(f.fake.powered) != 0 {
-		t.Errorf("phase %s, power actions %v", phase, f.fake.powered)
+	if phase := f.phase(1); phase != state.Failed || len(f.api.Changes()) != 0 {
+		t.Errorf("phase %s, power actions %v", phase, f.api.Changes())
 	}
 }

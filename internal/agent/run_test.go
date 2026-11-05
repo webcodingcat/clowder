@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -24,8 +23,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/cli"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
-	"github.com/webcodingcat/clowder/internal/clusterspec"
-	"github.com/webcodingcat/clowder/internal/hoster"
+	"github.com/webcodingcat/clowder/internal/hetzner"
+	"github.com/webcodingcat/clowder/internal/hetzner/hetznertest"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/pki"
@@ -45,62 +44,17 @@ func freePort(t *testing.T) int {
 	return port
 }
 
-// fakeHoster is the hoster's API: it remembers where the Floating IP goes
-// and with which token it was asked, and knows the private addresses of
-// its servers.
-type fakeHoster struct {
-	mu      sync.Mutex
-	token   string
-	target  string
-	servers map[string][]netip.Addr
-	// retired is what RetiredSerial answers for every server
-	retired string
-}
-
-func (f *fakeHoster) ServerAddresses(_ context.Context, serverRef string) ([]netip.Addr, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	addresses, ok := f.servers[serverRef]
-	if !ok {
-		return nil, fmt.Errorf("no server %s", serverRef)
-	}
-	return addresses, nil
-}
-
-func (f *fakeHoster) connect(_ clusterspec.Hoster, token string) (hoster.Hoster, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.token = token
-	return f, nil
-}
-
-func (f *fakeHoster) FloatingIPTarget(context.Context, netip.Addr) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.target, nil
-}
-
-func (f *fakeHoster) AssignFloatingIP(_ context.Context, _ netip.Addr, serverRef string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.target = serverRef
-	return nil
-}
-
 // waitForTarget fails the test unless the Floating IP comes to the server.
-func (f *fakeHoster) waitForTarget(t *testing.T, serverRef, token string) {
+func waitForTarget(t *testing.T, project *hetznertest.API, ip netip.Addr, serverID int64) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		f.mu.Lock()
-		target, usedToken := f.target, f.token
-		f.mu.Unlock()
-		if target == serverRef && usedToken == token {
+		if project.FloatingIPTarget(ip) == serverID {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Errorf("the Floating IP is not on server %s with token %q", serverRef, token)
+	t.Errorf("the Floating IP %s is not on server %d", ip, serverID)
 }
 
 // fakeNetwork stands in for the host's network and remembers the rules and
@@ -263,7 +217,7 @@ func initTestHost(t *testing.T) (files Files, raftPort, apiPort int) {
 	raftPort, apiPort = freePort(t), freePort(t)
 	err := Init(context.Background(), files, InitOptions{
 		BootstrapKey: testBootstrapKey, Name: "node0", Underlay: loopback, PublicAddress: netip.MustParseAddr("127.0.0.2"),
-		ServerRef: "1000001", NodeAddress: loopback, RaftPort: raftPort, APIPort: apiPort,
+		ServerID: 1000001, NodeAddress: loopback, RaftPort: raftPort, APIPort: apiPort,
 	}, &fakeNetwork{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -324,7 +278,6 @@ func TestRunEndsAtItsStartWhenAPartFailsAndLeavesNothingOpen(t *testing.T) {
 			want := test.prepare(t, &files, hostNetwork, apiPort)
 			parts := HostParts{
 				Network: hostNetwork, Storage: &agenttest.Storage{Dir: t.TempDir()}, Docker: hostDocker,
-				Hoster: (&fakeHoster{}).connect,
 			}
 			err := Run(context.Background(), files, parts, logger)
 			if err == nil || !strings.Contains(err.Error(), want) {
@@ -359,7 +312,7 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	// address is another than its underlay; users reach the API there
 	err := Init(context.Background(), files, InitOptions{
 		BootstrapKey: testBootstrapKey, Name: "node0", Underlay: loopback,
-		PublicAddress: netip.MustParseAddr("127.0.0.2"), ServerRef: "1000001",
+		PublicAddress: netip.MustParseAddr("127.0.0.2"), ServerID: 1000001,
 		NodeAddress: loopback, RaftPort: freePort(t), APIPort: apiPort,
 	}, hostNetwork, logger)
 	if err != nil {
@@ -383,8 +336,11 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	stopped := make(chan error, 1)
 	hostStorage := &agenttest.Storage{Dir: t.TempDir()}
 	hostDocker := &agenttest.Docker{}
-	hostHoster := &fakeHoster{servers: map[string][]netip.Addr{"1000001": {loopback, netip.MustParseAddr("127.0.0.2")}}}
-	parts := HostParts{Network: hostNetwork, Storage: hostStorage, Docker: hostDocker, Hoster: hostHoster.connect}
+	project := hetznertest.New(t, "CHANGE-ME")
+	project.AddServer(1000001, loopback, netip.MustParseAddr("127.0.0.2"))
+	floatingIP := netip.MustParseAddr("203.0.113.10")
+	project.RouteFloatingIP(floatingIP, 0)
+	parts := HostParts{Network: hostNetwork, Storage: hostStorage, Docker: hostDocker}
 	go func() { stopped <- Run(ctx, files, parts, logger) }()
 	stopAgent := sync.OnceValue(func() error {
 		stop()
@@ -457,25 +413,27 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 	if !errors.Is(err, api.ErrBootstrapped) || offer != nil {
 		t.Errorf("the bootstrap key after the bootstrap: %v, %v", offer, err)
 	}
-	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err == nil || !strings.Contains(err.Error(), "hoster") {
+	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err == nil || !strings.Contains(err.Error(), "hetzner") {
 		t.Errorf("diff of the unfinished cluster.yaml: %q, %v", out, err)
 	}
-	// finished with the hoster's token, encrypted by the cluster's recipients
-	finish := func(token string, extra string) {
+	// finished with the Hetzner token, encrypted by the cluster's
+	// recipients; the hosts' private network is the loopback's here
+	finish := func(token string, privateNetwork string) {
 		t.Helper()
 		block, err := clowderWithInput(t, token+"\n", "--cluster", dir, "secret", "encrypt", "--cluster-yaml")
 		if err != nil {
 			t.Fatal(err)
 		}
-		finished := string(written) + "hoster:\n  type: hetzner\n  token: " + block +
-			"ingress:\n  floating_ip: 203.0.113.10\nstorage_classes:\n  fast: {pool: vg-fast/thin}\n" + extra
+		finished := string(written) + "hetzner:\n  api: " + project.URL + "\n  token: " + block +
+			"private_network: " + privateNetwork + "\n" +
+			"ingress:\n  floating_ip: 203.0.113.10\nstorage_classes:\n  fast: {pool: vg-fast/thin}\n"
 		if err := os.WriteFile(config, []byte(finished), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	finish("CHANGE-ME", "")
+	finish("CHANGE-ME", "127.0.0.0/8")
 	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "never applied") ||
-		!strings.Contains(out, "the secret hoster.token differs") {
+		!strings.Contains(out, "the secret hetzner.token differs") {
 		t.Errorf("diff before the first apply: %q, %v", out, err)
 	}
 
@@ -488,7 +446,7 @@ func TestAFirstHostAndItsFirstUser(t *testing.T) {
 		return ruleset.FloatingIP == netip.MustParseAddr("203.0.113.10")
 	})
 	// and the leader routes it to this host's server, with the token opened
-	hostHoster.waitForTarget(t, "1000001", "CHANGE-ME")
+	waitForTarget(t, project, floatingIP, 1000001)
 	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "nothing to apply") {
 		t.Errorf("diff after apply: %q, %v", out, err)
 	}
@@ -535,15 +493,15 @@ spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
 	hostDocker.WaitFor(t, "down default_shop")
 	hostStorage.WaitFor(t, "remove "+lv)
 	// the same token encrypted anew is no change; the private network is
-	finish("CHANGE-ME", "private_network: 10.0.0.0/16\n")
+	finish("CHANGE-ME", "127.0.0.0/16")
 	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "private_network") ||
 		strings.Contains(out, "secret") {
 		t.Errorf("diff after a change of cluster.yaml: %q, %v", out, err)
 	}
-	// and now a new hoster token as well: diff names both
-	finish("new", "private_network: 10.0.0.0/16\n")
+	// and now a new Hetzner token as well: diff names both
+	finish("new", "127.0.0.0/16")
 	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "private_network") ||
-		!strings.Contains(out, "the secret hoster.token differs") {
+		!strings.Contains(out, "the secret hetzner.token differs") {
 		t.Errorf("diff after both changed: %q, %v", out, err)
 	}
 	out, err = clowder(t, "--cluster", dir, "cluster", "status")
@@ -560,11 +518,7 @@ spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
 	if err != nil {
 		t.Fatal(err)
 	}
-	setRetiredLabel := func(serial string) {
-		hostHoster.mu.Lock()
-		defer hostHoster.mu.Unlock()
-		hostHoster.retired = serial
-	}
+	setRetiredLabel := func(serial string) { project.SetLabel(1000001, hetzner.RetiredLabel, serial) }
 	setRetiredLabel(pki.Serial(credentials.certificate.Leaf))
 	parts.Network = &fakeNetwork{interfaceFails: true}
 	if err := Run(context.Background(), files, parts, logger); !errors.Is(err, ErrRetired) {
@@ -576,20 +530,4 @@ spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
 	if err := Run(context.Background(), files, parts, logger); err == nil || errors.Is(err, ErrRetired) {
 		t.Errorf("the agent of a server set up anew: %v", err)
 	}
-}
-
-// PowerOff and PowerOn are never needed here: one host is never fenced.
-func (f *fakeHoster) PowerOff(context.Context, string) error { return errors.New("not in this test") }
-
-func (f *fakeHoster) PowerOn(context.Context, string) error { return errors.New("not in this test") }
-
-// SetRetired is clowderd recover's, never needed here.
-func (f *fakeHoster) SetRetired(context.Context, string, string) error {
-	return errors.New("not in this test")
-}
-
-func (f *fakeHoster) RetiredSerial(context.Context, string) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.retired, nil
 }

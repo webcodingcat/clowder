@@ -155,8 +155,8 @@ func (s *State) HostLocked(id HostID) bool {
 }
 
 // checkFence holds a fence-host operation to its host: it locks the host,
-// which is failed, and whose server is checked (the hoster powers off the
-// server a ServerRef names). Only a fence-host operation names a fence.
+// which is failed, and whose server is checked (Hetzner powers off the
+// server its ServerID names). Only a fence-host operation names a fence.
 func (s *State) checkFence(payload StartOperation) error {
 	fence := payload.Fence
 	switch {
@@ -175,8 +175,8 @@ func (s *State) checkFence(payload StartOperation) error {
 		return fmt.Errorf("no host %d", fence.Host)
 	case host.Phase != Failed:
 		return fmt.Errorf("host %s is %s, not failed", host.Name, host.Phase)
-	case !host.ServerRefChecked:
-		return fmt.Errorf("host %s has no checked server ref", host.Name)
+	case !host.ServerChecked:
+		return fmt.Errorf("host %s has no checked server", host.Name)
 	}
 	return nil
 }

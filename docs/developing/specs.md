@@ -117,10 +117,10 @@ on a host (`compose.Render`).
   (`WithDefaults`) and `Check`, which lists every problem. The state reads it, so it does
   no I/O.
 - **Secrets in `cluster.yaml`** stand at their places, encrypted and tagged `!secret`
-  (Encrypted values, below): the hoster's token, the registries' passwords, the alert
+  (Encrypted values, below): the Hetzner token, the registries' passwords, the alert
   channels' URLs and passwords, the heartbeat's URL.
   `clusterspec.SecretPlaces` lists these places, the one list of them. In `Config` a
-  secret is its name (`SecretRef`), which is its path (`hoster.token`,
+  secret is its name (`SecretRef`), which is its path (`hetzner.token`,
   `alerts.channels[0].webhook`):
   `Check` holds each name to its place, so no CLI can name a secret otherwise than the
   state expects.
@@ -128,7 +128,9 @@ on a host (`compose.Render`).
   working directory). `Load` takes the values out of `cluster.yaml`
   (`secretvalue.Extract`), checks that the places they came from are exactly
   `SecretPlaces` (a `!secret` elsewhere, or a place in clear, is an error), decodes the
-  rest strictly and keeps the values apart, still encrypted (`Directory.Encrypted`). It
+  rest strictly and keeps the values apart, still encrypted (`Directory.Encrypted`). A
+  top-level key an earlier release read (`replacedKeys`: `hoster`, `network`) fails with
+  the key that took its place, not only as an unknown field. It
   does not run `Check`: the commands that need only the name and the endpoints (`secret
   encrypt`) work with the `cluster.yaml` the bootstrap writes, which is not complete yet.
   `cluster apply` and `diff` run it. `Schema` makes the JSON schema of `cluster.yaml` from
@@ -175,7 +177,7 @@ in a file someone could change), and only the cluster opens them.
   is refused as written by a newer clowder.
 - **Before decoding.** yaml.v3 decodes an unknown tag as a string in places, and turning
   YAML into JSON drops it. So `Extract` reads the node tree first: it takes each value out
-  by its path (`internal/yamlpath`: `hoster.token`, `alerts.channels[0].webhook`,
+  by its path (`internal/yamlpath`: `hetzner.token`, `alerts.channels[0].webhook`,
   `registries["ghcr.io"].password`), puts the path in its place as a plain string, and the
   caller decodes as before. It knows paths, not kinds of files: which paths may hold a
   value, the caller checks.

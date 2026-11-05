@@ -37,20 +37,20 @@ func TestTheExampleDirectoryLoadsWithItsValuesApart(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := directory.Config
-	if config.Name != "prod" || config.Ingress.FloatingIP != "198.51.100.7" || config.Hoster.Token != "hoster.token" {
+	if config.Name != "prod" || config.Ingress.FloatingIP != "198.51.100.7" || config.Hetzner.Token != "hetzner.token" {
 		t.Errorf("config: %+v", config)
 	}
 	if config.StorageClasses["any"].Fallback[0] != "fast" || config.Priorities.Categories["high"] != 700 {
 		t.Errorf("classes or priorities: %+v %+v", config.StorageClasses, config.Priorities)
 	}
 	want := []string{
-		"alerts.channels[0].webhook", "hoster.token", `registries["ghcr.io"].password`,
+		"alerts.channels[0].webhook", "hetzner.token", `registries["ghcr.io"].password`,
 	}
 	if got := slices.Sorted(maps.Keys(directory.Encrypted)); !slices.Equal(got, want) {
 		t.Errorf("values %q", got)
 	}
-	if !strings.Contains(directory.Encrypted["hoster.token"], "dG9rZW4=") {
-		t.Errorf("the hoster token's armor: %q", directory.Encrypted["hoster.token"])
+	if !strings.Contains(directory.Encrypted["hetzner.token"], "dG9rZW4=") {
+		t.Errorf("the Hetzner token's armor: %q", directory.Encrypted["hetzner.token"])
 	}
 	if problems := clusterspec.Check(config); len(problems) > 0 {
 		t.Errorf("the example does not pass Check: %v", problems)
@@ -84,6 +84,18 @@ func TestMisspeltKeysAreRefused(t *testing.T) {
 	dir := withConfig(t, func(content string) string { return strings.Replace(content, "endpoints:", "endpoint:", 1) })
 	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "endpoint") {
 		t.Errorf("want an error about endpoint, got %v", err)
+	}
+}
+
+func TestAKeyOfAnEarlierReleaseSaysWhatTookItsPlace(t *testing.T) {
+	for _, test := range []struct{ old, earlier, want string }{
+		{"hetzner:\n", "hoster:\n  type: hetzner\n", "line 3: hoster is gone; write hetzner, with its token and api"},
+		{"private_network:", "network:", "network is gone; write private_network"},
+	} {
+		dir := withConfig(t, func(content string) string { return strings.Replace(content, test.old, test.earlier, 1) })
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("%s: got %v, want %q", test.earlier, err, test.want)
+		}
 	}
 }
 

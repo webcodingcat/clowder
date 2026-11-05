@@ -69,7 +69,7 @@ func TestTheReservationsAndTheSystemReserveHaveDefaults(t *testing.T) {
 	}
 }
 
-func TestTheHostersAPIIsAFullURL(t *testing.T) {
+func TestHetznersAPIIsAFullURL(t *testing.T) {
 	for api, valid := range map[string]bool{
 		"":                             true,
 		"https://api.hetzner.cloud/v1": true,
@@ -78,8 +78,8 @@ func TestTheHostersAPIIsAFullURL(t *testing.T) {
 		"ftp://api.example.com":        false,
 		"https:///v1":                  false,
 	} {
-		hoster := Hoster{Type: "hetzner", Token: "hoster.token", API: api}
-		if problems := checkHoster(hoster); (len(problems) == 0) != valid {
+		hetzner := Hetzner{Token: "hetzner.token", API: api}
+		if problems := checkHetzner(hetzner); (len(problems) == 0) != valid {
 			t.Errorf("api %q: valid %v, problems %v", api, valid, problems)
 		}
 	}
@@ -88,6 +88,7 @@ func TestTheHostersAPIIsAFullURL(t *testing.T) {
 func TestThePrivateNetworkIsAnIPv4NetworkOutsideClowders(t *testing.T) {
 	for network, problem := range map[string]string{
 		"10.0.0.0/16":  "",
+		"":             "is not an IPv4 network",
 		"10.0.0.1/16":  "is not an IPv4 network",
 		"fd00::/8":     "is not an IPv4 network",
 		"10.77.0.0/16": "overlaps clowder's 10.77.0.0/24",
@@ -108,7 +109,7 @@ func TestThePrivateNetworkIsAnIPv4NetworkOutsideClowders(t *testing.T) {
 func TestCheckReportsEveryProblem(t *testing.T) {
 	config := Config{
 		Endpoints:      []string{"10.0.0.1:99999"},
-		Hoster:         Hoster{Type: "aws", API: "api.example.com/v1"},
+		Hetzner:        Hetzner{API: "api.example.com/v1"},
 		PrivateNetwork: "10.77.0.0/16",
 		Ingress:        Ingress{FloatingIP: "2001:db8::1"},
 		StorageClasses: map[string]StorageClass{
@@ -134,8 +135,8 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 	}
 	want := []string{
 		`acme.directory "acme.example.com"`, `acme.email "ops"`, `"../ca.pem" is not a path`, `renew_before "soon"`,
-		"name is required", `"10.0.0.1:99999"`, `hoster.type "aws"`, "hoster.token",
-		`hoster.api "api.example.com/v1" is not a full URL`,
+		"name is required", `"10.0.0.1:99999"`, "hetzner.token",
+		`hetzner.api "api.example.com/v1" is not a full URL`,
 		"private_network 10.77.0.0/16 overlaps clowder's 10.77.0.0/24", "not an IPv4 address", `pool "nopool"`, `reserve "95%"`,
 		`falls back to "slow"`, "storage class empty", "resync_rate", "top: 2000",
 		`default "medium"`, `"Monitoring" is not <namespace>/<stack>`, "reservations.memory", "reservations.cpus",

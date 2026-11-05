@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bufio"
-	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -27,7 +26,7 @@ func printHosts(out io.Writer, hosts []api.HostInfo) error {
 			voter = "yes"
 		}
 		_, _ = fmt.Fprintf(table, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			host.ID, host.Name, host.Phase, voter, host.Underlay, cmp.Or(host.PublicAddress, "-"), host.Version)
+			host.ID, host.Name, host.Phase, voter, host.Underlay, host.PublicAddress, host.Version)
 	}
 	return table.Flush()
 }

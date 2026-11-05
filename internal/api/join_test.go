@@ -142,8 +142,8 @@ func TestAFollowerHandsAJoinToTheLeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := JoinRequest{
-		Name: "node2", Underlay: netip.MustParseAddr("10.0.0.4"), ServerRef: "42",
-		WGPublicKey: "wg", PublicKey: make([]byte, 32),
+		Name: "node2", Underlay: netip.MustParseAddr("10.0.0.4"), PublicAddress: netip.MustParseAddr("203.0.113.4"),
+		ServerID: 42, WGPublicKey: "wg", PublicKey: make([]byte, 32),
 	}
 	answer, err := found.Join(ctx, request)
 	if err != nil || answer.Host != 2 || answer.DataKey != "the data key" {
@@ -167,8 +167,8 @@ func TestAFollowerHandsAJoinToTheLeader(t *testing.T) {
 func TestAJoinRequestIsRecentAndWhole(t *testing.T) {
 	now := time.Now()
 	whole := JoinRequest{
-		Name: "node2", Underlay: netip.MustParseAddr("10.0.0.4"), ServerRef: "42", WGPublicKey: "wg",
-		PublicKey: make([]byte, 32), Nonce: make([]byte, 16), Time: now,
+		Name: "node2", Underlay: netip.MustParseAddr("10.0.0.4"), PublicAddress: netip.MustParseAddr("203.0.113.4"),
+		ServerID: 42, WGPublicKey: "wg", PublicKey: make([]byte, 32), Nonce: make([]byte, 16), Time: now,
 	}
 	if err := CheckJoinRequest(whole, now); err != nil {
 		t.Errorf("a whole request: %v", err)
@@ -176,7 +176,8 @@ func TestAJoinRequestIsRecentAndWhole(t *testing.T) {
 	for want, change := range map[string]func(*JoinRequest){
 		"too old":           func(request *JoinRequest) { request.Time = now.Add(-6 * time.Minute) },
 		"has no nonce":      func(request *JoinRequest) { request.Nonce = nil },
-		"server ref":        func(request *JoinRequest) { request.ServerRef = "" },
+		"server ID":         func(request *JoinRequest) { request.ServerID = 0 },
+		"public address":    func(request *JoinRequest) { request.PublicAddress = netip.Addr{} },
 		"public keys":       func(request *JoinRequest) { request.WGPublicKey = "" },
 		"underlay address":  func(request *JoinRequest) { request.Underlay = netip.Addr{} },
 		"clock is off by m": func(request *JoinRequest) { request.Time = now.Add(6 * time.Minute) },

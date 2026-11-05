@@ -66,10 +66,7 @@ func (c *cluster) addHost(host Host) {
 	c.t.Helper()
 	token := "token-" + strconv.Itoa(int(host.ID))
 	c.mustApply(KindAddJoinToken, UserActor("alice"), AddJoinToken{ID: token, Hash: testHash, TTL: time.Hour})
-	if host.ServerRef == "" {
-		host.ServerRef = "srv-" + strconv.Itoa(int(host.ID))
-	}
-	host.ServerRefChecked = true
+	host.ServerChecked = true
 	c.mustApply(KindAddHost, LeaderActor, AddHost{Token: token, Host: host})
 }
 
@@ -80,7 +77,9 @@ func testHost(id HostID) Host {
 	return Host{
 		ID:                  id,
 		Name:                "node" + strconv.Itoa(int(id)),
+		ServerID:            40 + int64(id),
 		Underlay:            netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
+		PublicAddress:       netip.AddrFrom4([4]byte{198, 51, 100, byte(id + 2)}),
 		WGPublicKey:         "wg-key",
 		CertificateSerial:   "serial-" + strconv.Itoa(int(id)),
 		CertificateNotAfter: testExpiry,
@@ -168,7 +167,7 @@ func TestBootstrapMakesHostZeroTheActiveVoter(t *testing.T) {
 	if host.Phase != Active || !host.Voter {
 		t.Errorf("host 0: %+v", host)
 	}
-	if string(c.state.BootstrapKey) != "bootstrap" || c.state.Keys == nil || host.ServerRefChecked {
+	if string(c.state.BootstrapKey) != "bootstrap" || c.state.Keys == nil || host.ServerChecked {
 		t.Errorf("keys: %+v %q, host %+v", c.state.Keys, c.state.BootstrapKey, host)
 	}
 	c.refuse(KindBootstrap, LeaderActor, Bootstrap{}, "bootstrapped already")
@@ -210,10 +209,11 @@ func TestAnEntryTheAgentCannotReadLeavesTheStateAndItsIndex(t *testing.T) {
 	}
 }
 
-func TestAHostHasIPv4Addresses(t *testing.T) {
+func TestAHostHasIPv4AddressesAndAServer(t *testing.T) {
 	for name, change := range map[string]func(*Host){
-		"no IPv4 underlay address":   func(host *Host) { host.Underlay = netip.MustParseAddr("2001:db8::2") },
-		"public address 2001:db8::3": func(host *Host) { host.PublicAddress = netip.MustParseAddr("2001:db8::3") },
+		"no IPv4 underlay address": func(host *Host) { host.Underlay = netip.MustParseAddr("2001:db8::2") },
+		"no IPv4 public address":   func(host *Host) { host.PublicAddress = netip.MustParseAddr("2001:db8::3") },
+		"no server ID":             func(host *Host) { host.ServerID = 0 },
 	} {
 		c := &cluster{t: t, state: &State{}}
 		host := testHost(0)
@@ -380,13 +380,11 @@ func TestOnlyAHostReportsAboutItself(t *testing.T) {
 	}
 }
 
-func TestTheIngressIsAnActiveHostWithACheckedServerRef(t *testing.T) {
+func TestTheIngressIsAnActiveHostWithACheckedServer(t *testing.T) {
 	c := newCluster(t)
-	c.refuse(KindSetIngress, LeaderActor, SetIngress{Host: 0}, "host node0 has no checked server ref")
+	c.refuse(KindSetIngress, LeaderActor, SetIngress{Host: 0}, "host node0 has no checked server")
 	c.refuse(KindSetIngress, LeaderActor, SetIngress{Host: 5}, "no host 5")
-	host := testHost(1)
-	host.ServerRef = "4711"
-	c.addHost(host)
+	c.addHost(testHost(1))
 	c.refuse(KindSetIngress, LeaderActor, SetIngress{Host: 1}, "host node1 is joining, not active")
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
 	c.mustApply(KindSetIngress, LeaderActor, SetIngress{Host: 1})
@@ -528,7 +526,8 @@ func TestAUsedCodeGoesAWhileAfterItExpired(t *testing.T) {
 func testConfig() clusterspec.Config {
 	return clusterspec.Config{
 		Name: "prod", Endpoints: []string{"10.0.0.2"},
-		Hoster:         clusterspec.Hoster{Type: "hetzner", Token: "hoster.token"},
+		Hetzner:        clusterspec.Hetzner{Token: "hetzner.token"},
+		PrivateNetwork: "10.0.0.0/16",
 		Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.11"},
 		StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 	}
@@ -541,7 +540,7 @@ func testVolumeSpec() resource.VolumeSpec {
 
 // testSecrets are the values testConfig names.
 func testSecrets() map[string]SealedSecret {
-	return map[string]SealedSecret{"hoster.token": {Value: Sealed("sealed"), Digest: "d-token"}}
+	return map[string]SealedSecret{"hetzner.token": {Value: Sealed("sealed"), Digest: "d-token"}}
 }
 
 func TestApplyConfigCountsRevisionsAndReplacesTheSecrets(t *testing.T) {
@@ -570,10 +569,10 @@ func TestApplyConfigCountsRevisionsAndReplacesTheSecrets(t *testing.T) {
 	if c.state.Config.Revision != 2 || len(c.state.RegistryLogins()) != 1 {
 		t.Errorf("config %+v, logins %v", c.state.Config, c.state.RegistryLogins())
 	}
-	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig()}, "hoster.token: the value is missing")
+	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig()}, "hetzner.token: the value is missing")
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{
-		Spec: testConfig(), Secrets: map[string]SealedSecret{"hoster.token": {Value: Sealed("sealed")}},
-	}, "hoster.token: the value has no digest")
+		Spec: testConfig(), Secrets: map[string]SealedSecret{"hetzner.token": {Value: Sealed("sealed")}},
+	}, "hetzner.token: the value has no digest")
 	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Secrets: secrets}, "name is required")
 }
 

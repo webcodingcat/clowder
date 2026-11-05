@@ -5,7 +5,7 @@
 //
 // Traefik runs in the host network. Every host has the Floating IP on its
 // interface, held or not, so Traefik binds it on every host and at boot;
-// the hoster routes the address to one host only.
+// Hetzner routes the address to one host only.
 package ingress
 
 import (

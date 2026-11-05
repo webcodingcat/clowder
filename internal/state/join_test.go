@@ -1,6 +1,7 @@
 package state
 
 import (
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -12,7 +13,7 @@ import (
 // joiningHost is host 1 as the leader adds it with the token "t1".
 func joiningHost() AddHost {
 	host := testHost(1)
-	host.ServerRef, host.ServerRefChecked = "srv-1", true
+	host.ServerChecked = true
 	return AddHost{Token: "t1", Host: host}
 }
 
@@ -29,7 +30,7 @@ func TestATokenOpensOnceUntilItExpires(t *testing.T) {
 		t.Errorf("an expired token: %v", err)
 	}
 	c.mustApply(KindAddHost, LeaderActor, joiningHost())
-	if host := c.state.Hosts[1]; host.Phase != Joining || host.Voter || !host.ServerRefChecked {
+	if host := c.state.Hosts[1]; host.Phase != Joining || host.Voter || !host.ServerChecked {
 		t.Errorf("host 1: %+v", host)
 	}
 	if _, ok := c.state.JoinTokens["t1"]; ok {
@@ -37,7 +38,7 @@ func TestATokenOpensOnceUntilItExpires(t *testing.T) {
 	}
 	second := joiningHost()
 	second.Host = testHost(2)
-	second.Host.ServerRef, second.Host.ServerRefChecked = "srv-2", true
+	second.Host.ServerChecked = true
 	c.refuse(KindAddHost, LeaderActor, second, "it is unknown, or a host joined with it")
 	second.Token = "never-made"
 	c.refuse(KindAddHost, LeaderActor, second, "it is unknown")
@@ -82,7 +83,9 @@ func TestOnlyTheLeaderAddsAHostThatIsNew(t *testing.T) {
 	for want, change := range map[string]func(*AddHost){
 		"host ID 0 is taken":              func(add *AddHost) { add.Host.ID = 0 },
 		"host ID 32 is not between":       func(add *AddHost) { add.Host.ID = MaxHosts },
-		"has no checked server ref":       func(add *AddHost) { add.Host.ServerRefChecked = false },
+		"has no checked server":           func(add *AddHost) { add.Host.ServerChecked = false },
+		"has no server ID":                func(add *AddHost) { add.Host.ServerID = 0 },
+		"has no IPv4 public address":      func(add *AddHost) { add.Host.PublicAddress = netip.Addr{} },
 		"a host is named node0 already":   func(add *AddHost) { add.Host.Name = "node0" },
 		"has the underlay 10.0.0.2":       func(add *AddHost) { add.Host.Underlay = testHost(0).Underlay },
 		"serial serial-0 is used already": func(add *AddHost) { add.Host.CertificateSerial = "serial-0" },
@@ -95,26 +98,39 @@ func TestOnlyTheLeaderAddsAHostThatIsNew(t *testing.T) {
 	}
 }
 
-func TestAServerRefBelongsToOneHost(t *testing.T) {
+func TestAServerBelongsToOneHost(t *testing.T) {
 	c := newCluster(t)
-	c.state.Hosts[0].ServerRef = "srv-0"
 	c.mustApply(KindAddJoinToken, UserActor("alice"), AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
 	add := joiningHost()
-	add.Host.ServerRef = "srv-0"
-	c.refuse(KindAddHost, LeaderActor, add, "host node0 has the server ref srv-0 already")
+	add.Host.ServerID = 40
+	c.refuse(KindAddHost, LeaderActor, add, "host node0 has the server 40 already")
 
-	c.refuse(KindConfirmServerRef, LeaderActor, ConfirmServerRef{Host: 0, ServerRef: "srv-9"}, `has the server ref "srv-0", not "srv-9"`)
-	c.refuse(KindConfirmServerRef, HostActor(0), ConfirmServerRef{Host: 0, ServerRef: "srv-0"}, "only the leader does")
-	c.mustApply(KindConfirmServerRef, LeaderActor, ConfirmServerRef{Host: 0, ServerRef: "srv-0"})
-	if !c.state.Hosts[0].ServerRefChecked {
-		t.Error("host 0's server ref is not checked")
+	c.refuse(KindConfirmServer, LeaderActor, ConfirmServer{Host: 0, ServerID: 49}, "has the server 40, not 49")
+	c.refuse(KindConfirmServer, HostActor(0), ConfirmServer{Host: 0, ServerID: 40}, "only the leader does")
+	c.mustApply(KindConfirmServer, LeaderActor, ConfirmServer{Host: 0, ServerID: 40})
+	if !c.state.Hosts[0].ServerChecked {
+		t.Error("host 0's server is not checked")
 	}
-	if err := c.apply(KindConfirmServerRef, LeaderActor, ConfirmServerRef{Host: 0, ServerRef: "srv-0"}); err != nil {
+	if err := c.apply(KindConfirmServer, LeaderActor, ConfirmServer{Host: 0, ServerID: 40}); err != nil {
 		t.Errorf("confirming twice: %v", err)
 	}
 	c.mustApply(KindAddHost, LeaderActor, joiningHost())
-	c.state.Hosts[1].ServerRef, c.state.Hosts[1].ServerRefChecked = "srv-0", false
-	c.refuse(KindConfirmServerRef, LeaderActor, ConfirmServerRef{Host: 1, ServerRef: "srv-0"}, "the same server ref srv-0")
+	c.state.Hosts[1].ServerID, c.state.Hosts[1].ServerChecked = 40, false
+	c.refuse(KindConfirmServer, LeaderActor, ConfirmServer{Host: 1, ServerID: 40}, "the same server 40")
+}
+
+func TestAnUnderlayIsInThePrivateNetwork(t *testing.T) {
+	c := newCluster(t)
+	c.mustApply(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.mustApply(KindAddJoinToken, UserActor("alice"), AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
+	add := joiningHost()
+	add.Host.Underlay = netip.MustParseAddr("192.168.0.3")
+	c.refuse(KindAddHost, LeaderActor, add, "host node1 has the underlay 192.168.0.3, outside private_network 10.0.0.0/16")
+
+	config := testConfig()
+	config.PrivateNetwork = "10.1.0.0/16"
+	c.refuse(KindApplyConfig, UserActor("alice"), ApplyConfig{Spec: config, Secrets: testSecrets()},
+		"host node0 has the underlay 10.0.0.2, outside private_network 10.1.0.0/16")
 }
 
 func TestTheBootstrapKeyOpensOnlyUntilTheUserIsIn(t *testing.T) {

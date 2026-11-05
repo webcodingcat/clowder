@@ -23,7 +23,7 @@ func TestTheBootstrapsClusterYAMLLoadsAndNamesWhatIsMissing(t *testing.T) {
 		t.Errorf("config %+v, values %v", config, directory.Encrypted)
 	}
 	problems := clusterspec.Check(config).Error()
-	for _, missing := range []string{"hoster.token", "floating_ip", "storage_classes"} {
+	for _, missing := range []string{"hetzner.token", "private_network", "floating_ip", "storage_classes"} {
 		if !strings.Contains(problems, missing) {
 			t.Errorf("Check does not name %s:\n%s", missing, problems)
 		}

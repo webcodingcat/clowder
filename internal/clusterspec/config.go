@@ -31,13 +31,12 @@ type Config struct {
 	// reaches the cluster only while an endpoint answers: list every host,
 	// and add each that joins. The agents never read them.
 	Endpoints []string `yaml:"endpoints" json:"endpoints" jsonschema:"required,minItems=1"`
-	Hoster    Hoster   `yaml:"hoster" json:"hoster" jsonschema:"required"`
+	Hetzner   Hetzner  `yaml:"hetzner" json:"hetzner" jsonschema:"required"`
 	// Registries are the logins for private image registries, by host.
 	Registries map[string]Registry `yaml:"registries,omitempty" json:"registries,omitempty"`
-	// PrivateNetwork is the hoster's private network the hosts share, as a
-	// CIDR; containers may not reach it. Empty when the hosts reach each
-	// other over their public addresses.
-	PrivateNetwork string                  `yaml:"private_network,omitempty" json:"private_network,omitempty"`
+	// PrivateNetwork is the Hetzner private network the hosts share, as a
+	// CIDR: each host's underlay is in it. Containers may not reach it.
+	PrivateNetwork string                  `yaml:"private_network" json:"private_network" jsonschema:"required"`
 	Ingress        Ingress                 `yaml:"ingress" json:"ingress" jsonschema:"required"`
 	StorageClasses map[string]StorageClass `yaml:"storage_classes" json:"storage_classes" jsonschema:"required"`
 	Replication    Replication             `yaml:"replication,omitempty" json:"replication,omitempty"`
@@ -139,19 +138,18 @@ func (p Priorities) withDefaults() Priorities {
 	return defaults
 }
 
-// Hoster is the cloud the hosts run in; Type picks the plugin, like the
-// types of alert channels.
-type Hoster struct {
-	Type  string    `yaml:"type" json:"type" jsonschema:"required,enum=hetzner"`
+// Hetzner is the Hetzner Cloud project the hosts run in.
+type Hetzner struct {
+	// Token is the project's API token.
 	Token SecretRef `yaml:"token" json:"token" jsonschema:"required"`
-	// API is the full URL of the hoster's API when it is not the hoster's
+	// API is the full URL of Hetzner Cloud's API when it is not Hetzner's
 	// own (a test lab).
 	API string `yaml:"api,omitempty" json:"api,omitempty"`
 }
 
 // SecretRef is the name of a secret: where cluster.yaml has a value tagged
 // !secret, the CLI puts the value's place there (SecretPlaces), so the name
-// is the path, such as hoster.token. "" is no secret.
+// is the path, such as hetzner.token. "" is no secret.
 type SecretRef string
 
 // Registry is the login for a private image registry; only the password is

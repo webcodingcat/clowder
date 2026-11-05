@@ -93,9 +93,9 @@ type Host struct {
 	Name        string       `json:"name"`
 	NodeAddress netip.Addr   `json:"node_address"`
 	Underlay    netip.Addr   `json:"underlay"`
-	// PublicAddress is where users reach the API when the underlay is private.
-	PublicAddress netip.Addr `json:"public_address,omitzero"`
-	ServerRef     string     `json:"server_ref,omitempty"`
+	// PublicAddress is where users reach the API.
+	PublicAddress netip.Addr `json:"public_address"`
+	ServerID      int64      `json:"server_id"`
 	RaftPort      int        `json:"raft_port"`
 	APIPort       int        `json:"api_port"`
 }

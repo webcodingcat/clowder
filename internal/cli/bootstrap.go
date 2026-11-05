@@ -92,8 +92,8 @@ func newBootstrap(g *globals) *cobra.Command {
 				return err
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s is the user of cluster %s. Next:\n"+
-				"  1. fill in cluster.yaml: the hoster with its token (clowder secret encrypt --cluster-yaml),\n"+
-				"     the Floating IP, the storage classes\n"+
+				"  1. fill in cluster.yaml: hetzner with its token (clowder secret encrypt --cluster-yaml),\n"+
+				"     the private network, the Floating IP, the storage classes\n"+
 				"  2. clowder cluster apply\n", user, flags.name)
 			return err
 		},

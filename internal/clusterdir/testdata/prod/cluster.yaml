@@ -1,7 +1,6 @@
 name: prod
 endpoints: [203.0.113.10, 203.0.113.11]
-hoster:
-  type: hetzner
+hetzner:
   token: !secret |
     -----BEGIN AGE ENCRYPTED FILE-----
     dG9rZW4=

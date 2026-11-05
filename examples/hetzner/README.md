@@ -7,10 +7,11 @@ DRBD 9 from LINBIT and `clowderd` from clowder's APT repository, prepares the ho
 it with `clowderd check` and runs `clowderd init` on the first host and `clowderd join` on
 the others. How to use it is in the main [README](../../README.md#getting-started-on-hetzner-cloud).
 
-- **One Hetzner project per cluster.** The hoster's token in `cluster.yaml` may power off
-  and on any server of its project, and fencing does. Keep other servers out of the
+- **One Hetzner project per cluster.** The token in `cluster.yaml`'s `hetzner` may power
+  off and on any server of its project, and fencing does. Keep other servers out of the
   cluster's project. A joining host names its server itself; the leader checks with
-  Hetzner that the server's private address is the host's, and takes no server twice.
+  Hetzner that the server's private and public addresses are the host's, and takes no
+  server twice.
 - **The Cloud firewall is the only filter** in front of SSH and clowder's API (port 7443):
   `admin_cidrs` names who reaches them. It takes no `0.0.0.0/0`. HTTP and HTTPS are open to
   everyone (Traefik, and the ACME CA's checks); a port your stacks publish opens with
@@ -28,7 +29,7 @@ the others. How to use it is in the main [README](../../README.md#getting-starte
   opens once and expires (an hour by default, `--ttl` up to a day), so a host made later
   needs a new one; once a host has joined, its token may go. The second host waits
   passive; with the third, all three run stacks and vote. Joins need the applied
-  `cluster.yaml`, as the leader checks the server with the hoster's token. A host that
+  `cluster.yaml`, as the leader checks the server with its Hetzner token. A host that
   stays `joining` in `clowder host list` never got the cluster's answer: remove it with
   `clowder host remove`, put a new token into its `/etc/clowder/join-token` and reboot it.
 - **To replace a host**, add the new one to `hosts`, wait until it is active, then

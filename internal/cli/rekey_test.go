@@ -121,8 +121,8 @@ func TestRekeyRefusesAValueOutsideASecret(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := filepath.Join(t.TempDir(), "hoster.yaml")
-	if err := os.WriteFile(other, []byte("hoster:\n  token: "+block), 0o600); err != nil {
+	other := filepath.Join(t.TempDir(), "hetzner.yaml")
+	if err := os.WriteFile(other, []byte("hetzner:\n  token: "+block), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err = run(t, "--cluster", cluster, "secret", "rekey", "-f", other)
@@ -152,7 +152,7 @@ func TestDecryptNamesAValueOutOfPlaceAndFails(t *testing.T) {
 func TestRekeyAndDecryptTakeClusterYAMLsValuesByPath(t *testing.T) {
 	cluster := startCluster(t)
 	var content strings.Builder
-	content.WriteString("hoster:\n")
+	content.WriteString("hetzner:\n")
 	entries := []struct{ key, value string }{{"token", "the token"}, {"note", "error: not one"}, {"padded", " x "}}
 	for _, entry := range entries {
 		block, err := runWithInput(t, entry.value, "--cluster", cluster, "secret", "encrypt", "--cluster-yaml")
@@ -170,7 +170,7 @@ func TestRekeyAndDecryptTakeClusterYAMLsValuesByPath(t *testing.T) {
 	}
 	out, err := runWithInput(t, "", "secret", "decrypt", "--identity", recoveryKeyFile(), "-f", path)
 	// a value that starts like a marker, or with a space, shows in base64
-	want := "hoster.note\tbase64:ZXJyb3I6IG5vdCBvbmU=\nhoster.padded\tbase64:IHgg\nhoster.token\tthe token\n"
+	want := "hetzner.note\tbase64:ZXJyb3I6IG5vdCBvbmU=\nhetzner.padded\tbase64:IHgg\nhetzner.token\tthe token\n"
 	if err != nil || out != want {
 		t.Errorf("decrypt: %v\n%q, want %q", err, out, want)
 	}

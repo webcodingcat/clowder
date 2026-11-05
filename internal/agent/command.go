@@ -18,7 +18,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/command"
 	"github.com/webcodingcat/clowder/internal/docker"
-	"github.com/webcodingcat/clowder/internal/hoster"
 	"github.com/webcodingcat/clowder/internal/jointoken"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/pki"
@@ -40,17 +39,19 @@ func NewRoot() *cobra.Command {
 // hostFlags are the flags init and join share: who the host is. Its name
 // in the cluster is its hostname, by which DRBD names it in a resource.
 type hostFlags struct {
-	underlay, publicAddress, serverRef string
-	start                              bool
+	underlay, publicAddress string
+	serverID                int64
+	start                   bool
 }
 
 func (f *hostFlags) add(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&f.underlay, "underlay", "", "the host's address in the network between the hosts")
-	cmd.Flags().StringVar(&f.publicAddress, "public-address", "",
-		"where users reach the API, if the underlay is a private network")
-	cmd.Flags().StringVar(&f.serverRef, "server-ref", "", "the hoster's ID of this server")
+	cmd.Flags().StringVar(&f.underlay, "underlay", "", "the server's address in the Hetzner private network")
+	cmd.Flags().StringVar(&f.publicAddress, "public-address", "", "the server's public IPv4, where users reach the API")
+	cmd.Flags().Int64Var(&f.serverID, "server-id", 0, "the Hetzner Cloud ID of this server")
 	cmd.Flags().BoolVar(&f.start, "start", true, "enable and start clowderd.service afterwards")
-	_ = cmd.MarkFlagRequired("underlay") // the flag exists; this cannot fail
+	for _, name := range []string{"underlay", "public-address", "server-id"} {
+		_ = cmd.MarkFlagRequired(name) // the flags exist; this cannot fail
+	}
 }
 
 // parse reads the hostname and the addresses.
@@ -61,10 +62,8 @@ func (f *hostFlags) parse() (name string, underlay, publicAddress netip.Addr, er
 	if underlay, err = netip.ParseAddr(f.underlay); err != nil {
 		return "", underlay, publicAddress, fmt.Errorf("--underlay: %w", err)
 	}
-	if f.publicAddress != "" {
-		if publicAddress, err = netip.ParseAddr(f.publicAddress); err != nil {
-			return "", underlay, publicAddress, fmt.Errorf("--public-address: %w", err)
-		}
+	if publicAddress, err = netip.ParseAddr(f.publicAddress); err != nil {
+		return "", underlay, publicAddress, fmt.Errorf("--public-address: %w", err)
 	}
 	return name, underlay, publicAddress, nil
 }
@@ -89,7 +88,7 @@ func newInit() *cobra.Command {
 		Short: "Make this host the first of a new cluster (from cloud-init)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			options := InitOptions{ServerRef: flags.serverRef}
+			options := InitOptions{ServerID: flags.serverID}
 			var err error
 			if options.Name, options.Underlay, options.PublicAddress, err = flags.parse(); err != nil {
 				return err
@@ -119,7 +118,7 @@ func newJoin() *cobra.Command {
 		Short: "Make this host a member of a cluster, with a join token (from cloud-init)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			options := JoinOptions{Via: via, ServerRef: flags.serverRef}
+			options := JoinOptions{Via: via, ServerID: flags.serverID}
 			var err error
 			if options.Name, options.Underlay, options.PublicAddress, err = flags.parse(); err != nil {
 				return err
@@ -176,14 +175,12 @@ func hostStorage(files Files) storage.Driver {
 	}
 }
 
-// hostParts are the host's real network, storage and Docker, and the
-// hoster's real API.
+// hostParts are the host's real network, storage and Docker.
 func hostParts(files Files) HostParts {
 	return HostParts{
 		Network: hostNetwork(files),
 		Storage: hostStorage(files),
 		Docker:  docker.NewClient(docker.Socket),
-		Hoster:  hoster.New,
 	}
 }
 

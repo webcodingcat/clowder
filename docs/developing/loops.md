@@ -1,8 +1,8 @@
 # Ingress, fencing, certificates, alerts and metrics
 
 Part of [DEVELOPING.md](../../DEVELOPING.md): Traefik on every host, and the leader's
-loops that talk to the world outside: the hoster (Floating IP, fencing), ACME, the alert
-channels.
+loops that talk to the world outside: Hetzner Cloud (Floating IP, fencing), ACME, the
+alert channels.
 
 ## Traefik (`internal/ingress`, `agent/traefik.go`)
 
@@ -56,21 +56,24 @@ channels.
 - Golden files in `internal/ingress/testdata`; `bin/dev test-tools` checks the Compose file
   with Debian's docker-compose.
 
-## Hoster and ingress (`internal/hoster`, `internal/controller`)
+## Hetzner and ingress (`internal/hetzner`, `internal/controller`)
 
-- `cluster.yaml` names the hoster in a section of its own, chosen by `type` like the
-  alert channels: `hoster: {type: hetzner, token: !secret ...}`, and `api`
-  for a lab's API instead of the hoster's (a full `http://` or `https://` URL: the token
-  goes there).
-- `hoster.Hoster` is what clowder asks of a hoster: where the Floating IP is routed, route
-  it, a server's private addresses, power a server off and on (fencing). A
-  server is its `ServerRef`, the hoster's ID that `clowderd init` and `join --server-ref`
-  record. A host names it itself, so `hoster.CheckServerRef` makes sure one of the
-  server's private addresses is the host's underlay (`ErrOtherServer` if not): the join
-  checks it, the Floating IP's loop the first host's. `SetRetired` and `RetiredSerial` are the
-  label `clowder-retired` of a server `clowderd recover` took out of the cluster, with the
-  serial of the retired host's certificate; the leader never uses them. `hoster.New` picks the plugin.
-- `hoster/hetzner` is a small client of the Hetzner Cloud API on `net/http`: the official
+clowder runs on Hetzner Cloud only, with a Hetzner private network between the hosts: no
+layer stands between it and Hetzner's API.
+
+- `cluster.yaml` has the project's token in `hetzner: {token: !secret ...}`, and `api`
+  for a lab's API instead of Hetzner's (a full `http://` or `https://` URL: the token
+  goes there). `private_network` is the private network's range; every host's underlay
+  is in it, which the state checks at each join and each `cluster apply`.
+- `hetzner.Client` is what clowder asks of Hetzner: where the Floating IP is routed, route
+  it, check a server, power a server off and on (fencing). A server is its `ServerID`,
+  which `clowderd init` and `join --server-id` record. A host names it itself, so
+  `Client.CheckServer` makes sure the server's private address is the host's underlay
+  and its public IPv4 the host's public address (`ErrOtherServer` if not): the join
+  checks it, the Floating IP's loop the first host's. `SetRetired` and `RetiredSerial`
+  are the label `clowder-retired` of a server `clowderd recover` took out of the
+  cluster, with the serial of the retired host's certificate; the leader never uses them.
+- It is a small client on `net/http`: the official
   SDK would bring Prometheus' client and more into clowderd. It finds the Floating IP among
   the project's (the API cannot look one up by its address) and waits for each action to
   finish. It sends a request again, up to `attempts` times with a growing wait and jitter,
@@ -78,25 +81,30 @@ channels.
   or `locked`, or the network fails: one busy moment of the API must not hold up a fence.
   Every request clowder sends may go twice (a read, an assignment to the same server, a
   power action on a server in that state, the same labels). `SetRetired` reads the
-  server's labels and writes them back with its own, as the API replaces all at once. Its
+  server's labels and writes them back with its own, as the API replaces all at once. It
+  reads every answer to its end, so the connection carries the next request. Its
   errors carry the API's message, never the token.
+- `hetzner/hetznertest` is a fake of the API for the tests of the packages that use the
+  client: servers, Floating IPs, power actions that finish at once, labels, and what the
+  requests changed. A test names it in `hetzner.api`, so the real client talks to it.
 - `controller.RunFloatingIP` (`floatingip.go`) acts only on the leader. The ingress host (`State.Ingress`,
-  `set-ingress`) is the recorded one while it is active and has a server ref, so the
+  `set-ingress`) is the recorded one while it is active, so the
   Floating IP never switches back by itself; otherwise the first of
   `ingress.preferred_hosts` that can, else the one with the lowest ID that can. A host
-  whose server ref the hoster has not confirmed yet is checked first
-  (`confirm-server-ref`); one that fails the check gets no Floating IP. At a change
-  of the state and every 30 s it asks the hoster where the Floating IP is and routes it to
+  whose server Hetzner has not confirmed yet is checked first
+  (`confirm-server`); one that fails the check gets no Floating IP. At a change
+  of the state and every 30 s it asks Hetzner where the Floating IP is and routes it to
   the ingress host when it is elsewhere (moved by hand, or a new ingress host); it reads
   the API at most once per 30 s, about 120 of Hetzner's 3600 requests an hour. Before it
   routes the address, it confirms its lead (`VerifyLeader`): a leader cut off from the
   others must not take the address back from the host the new leader routed it to.
 - Every host has the Floating IP on its public interface, held or not (`clowderd check`
-  requires it): the hoster routes it to one host only, so whatever binds it (published
+  requires it): Hetzner routes it to one host only, so whatever binds it (published
   ports, Traefik) can bind it on every host and at boot.
-- Only the leader's loops call the hoster: the controller opens the token from the state
-  and makes the client (`HostParts.Hoster`, a fake in the tests). depguard keeps `hoster`
-  out of the CLI, the state and the scheduler.
+- The leader's loops, the leader's side of a join, `clowderd recover` and the agent's
+  start call Hetzner: each opens the token from the state and makes the client
+  (`controller.OpenHetzner`). depguard keeps `hetzner` out of the CLI, the state and the
+  scheduler.
 - **clowder's ports** lie in 7400-7499, which `stackspec.ReservedPort` keeps from the stacks:
   Raft 7400 and the API 7443 (node address and underlay), `/metrics` 7444 and Traefik's
   internal entrypoint 7480 (node address), the ACME challenges 7445 and Traefik's health
@@ -104,7 +112,7 @@ channels.
 
 ## Fencing (`controller/health.go`, `controller/fencing.go`, `agent/health.go`)
 
-A host that fails is powered off through the hoster before any of its stacks or volumes
+A host that fails is powered off through Hetzner's API before any of its stacks or volumes
 start elsewhere: until then it is the only one that runs them, and it may still write.
 
 - **Beats.** Every agent tells every voter every `BeatInterval` that it is alive
@@ -127,8 +135,8 @@ start elsewhere: until then it is the only one that runs them, and it may still 
   maintenance) or whose stacks no other host could take gains nothing from a power cycle:
   it stays failed, with its alert, and is active again once a majority hears it.
 - **Fenced** (`fencer.fence`, `fencer.step`): the leader starts a fence-host operation for
-  the first failed host that may be fenced (`whyNotFence`): the cluster has a hoster, the
-  hoster confirmed the host's server ref, no operation holds the host, a majority of the
+  the first failed host that may be fenced (`whyNotFence`): `cluster.yaml` brought the
+  Hetzner token, Hetzner confirmed the host's server, no operation holds the host, a majority of the
   voters stays active without it (more hosts failed at once points to the network, and
   powering hosts off would not help), and the last try to power it off is `fenceAgain`
   ago. One host at a time: the next waits until the operation is over. The start makes the
@@ -139,7 +147,7 @@ start elsewhere: until then it is the only one that runs them, and it may still 
   `clowder host fence-confirm` lets a user say the server is off. The operation ends
   once the host's stacks run elsewhere, or after `StepTime`.
 - **Back** (`fencer.powerOn`, `agent/recovery.go`): a fenced host whose operation is over
-  is powered on, once per fence and leader, if the hoster confirmed its server ref (after
+  is powered on, once per fence and leader, if Hetzner confirmed its server (after
   a user's `fence-confirm` it may not have: then the user powers it on). It boots, starts
   nothing (no container runs after a boot, and `stacks.Runner` runs none on a host that is
   not `KeepsStacks`), catches up with the leader (cluster.md, Raft), and reports itself
@@ -151,7 +159,7 @@ start elsewhere: until then it is the only one that runs them, and it may still 
   `clowder host enable`. A host whose agent crashes at once after each start is fenced
   once and stays `fenced`, as it never reports: no reboot loop.
 - **Voters keep their vote** while they are down (cluster.md, Raft, step 4).
-- `fencing_test.go` runs the loop against the fake leader and a fake hoster: the majority,
+- `fencing_test.go` runs the loop against the fake leader and the fake API: the majority,
   a host that is back, the fence through to power on, a power-off that fails, several
   hosts down at once, the brake.
 

@@ -59,7 +59,7 @@ func newTestAlerts(t *testing.T) (*Alerts, *leader, *fakeChannel, *fakeChannel) 
 	l.apply(state.KindApplyConfig, state.UserActor("alice"), state.ApplyConfig{
 		Spec: config,
 		Secrets: map[string]state.SealedSecret{
-			"hoster.token":               {Value: state.Sealed("t"), Digest: "d"},
+			"hetzner.token":              {Value: state.Sealed("t"), Digest: "d"},
 			"alerts.channels[0].url":     {Value: state.Sealed("h"), Digest: "d"},
 			"alerts.channels[1].webhook": {Value: state.Sealed("d"), Digest: "d"},
 		},

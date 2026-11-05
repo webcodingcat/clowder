@@ -245,13 +245,13 @@ func TestClusterYAMLsValuesCountTowardsTheClustersSize(t *testing.T) {
 	c := newCluster(t)
 	// 64 values of 64 KiB are the 4 MiB the cluster may hold
 	full := withRegistries(63, resource.MaxSecretBytes)
-	full.Secrets["hoster.token"] = SealedSecret{Value: sealedOf(resource.MaxSecretBytes), Digest: "d"}
+	full.Secrets["hetzner.token"] = SealedSecret{Value: sealedOf(resource.MaxSecretBytes), Digest: "d"}
 	c.mustApply(KindApplyConfig, UserActor("alice"), full)
 	c.refuse(KindPutResource, UserActor("alice"),
 		putResource(resource.KindSecret, "default", "token", SealedSecret{Value: sealedOf(1), Digest: "d"}),
 		"secret default/token: the secrets of the cluster would be larger than 4194304 bytes")
 	over := withRegistries(64, resource.MaxSecretBytes)
-	over.Secrets["hoster.token"] = SealedSecret{Value: sealedOf(1), Digest: "d"}
+	over.Secrets["hetzner.token"] = SealedSecret{Value: sealedOf(1), Digest: "d"}
 	c.refuse(KindApplyConfig, UserActor("alice"), over, "the secrets of the cluster would be larger than 4194304 bytes")
 	big := withRegistries(1, resource.MaxSecretBytes+1)
 	c.refuse(KindApplyConfig, UserActor("alice"), big, "registries.r0.password is larger than 65536 bytes")

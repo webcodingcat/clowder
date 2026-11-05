@@ -237,13 +237,15 @@ func bootstrappedState(t *testing.T) *state.State {
 		Keys:         state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
 		BootstrapKey: state.Sealed("join"),
 		Host: state.Host{
-			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
+			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
+			PublicAddress: netip.MustParseAddr("203.0.113.2"), WGPublicKey: "wg", CertificateSerial: "s0",
 			CertificateNotAfter: notAfter,
 		},
 	})
 	// written in: the tests need host 1, not its join
 	current.Hosts[1] = &state.Host{
-		ID: 1, Name: "node1", Underlay: netip.MustParseAddr("10.0.0.3"), WGPublicKey: "wg", CertificateSerial: "s1",
+		ID: 1, Name: "node1", ServerID: 41, Underlay: netip.MustParseAddr("10.0.0.3"),
+		PublicAddress: netip.MustParseAddr("203.0.113.3"), WGPublicKey: "wg", CertificateSerial: "s1",
 		CertificateNotAfter: notAfter, Phase: state.Joining,
 	}
 	apply(2, state.KindAddUser, state.AddUser{Name: "alice", Serial: "a1", NotAfter: notAfter, RecoveryRecipient: "age1recovery"})
@@ -573,13 +575,12 @@ func TestTheClientStartsWithTheEndpointThatAnsweredLast(t *testing.T) {
 	}
 }
 
-func TestTheHostsShowThePublicAddressWhereThereIsOne(t *testing.T) {
+func TestTheHostsShowTheirAddresses(t *testing.T) {
 	current := &state.State{Hosts: map[state.HostID]*state.Host{
 		0: {ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), PublicAddress: netip.MustParseAddr("203.0.113.10")},
-		1: {ID: 1, Name: "node1", Underlay: netip.MustParseAddr("198.51.100.3")},
 	}}
 	hosts := hostInfos(current)
-	if hosts[0].PublicAddress != "203.0.113.10" || hosts[1].PublicAddress != "" {
+	if hosts[0].Underlay != "10.0.0.2" || hosts[0].PublicAddress != "203.0.113.10" {
 		t.Errorf("hosts %+v", hosts)
 	}
 }

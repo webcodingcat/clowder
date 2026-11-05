@@ -113,7 +113,8 @@ func startCluster(t *testing.T) string {
 		Keys:         state.ClusterKeys{CACertificate: ca.CertificatePEM(), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
 		BootstrapKey: state.Sealed("join"),
 		Host: state.Host{
-			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
+			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
+			PublicAddress: netip.MustParseAddr("203.0.113.2"), WGPublicKey: "wg", CertificateSerial: "s0",
 			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
@@ -310,17 +311,16 @@ func TestTheConnectTimeoutMustBePositive(t *testing.T) {
 	}
 }
 
-func TestHostListShowsThePublicAddressOrADash(t *testing.T) {
+func TestHostListShowsTheAddresses(t *testing.T) {
 	var out bytes.Buffer
 	hosts := []api.HostInfo{
 		{ID: 0, Name: "node0", Phase: "active", Underlay: "10.0.0.2", PublicAddress: "203.0.113.10"},
-		{ID: 1, Name: "node1", Phase: "active", Underlay: "198.51.100.3"},
 	}
 	if err := printHosts(&out, hosts); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 3 || strings.Fields(lines[1])[5] != "203.0.113.10" || strings.Fields(lines[2])[5] != "-" {
+	if len(lines) != 2 || strings.Fields(lines[1])[4] != "10.0.0.2" || strings.Fields(lines[1])[5] != "203.0.113.10" {
 		t.Errorf("host list:\n%s", out.String())
 	}
 }

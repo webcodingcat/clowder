@@ -26,7 +26,7 @@ func SecretPlaces(config Config) []SecretPlace {
 			places = append(places, SecretPlace{Path: path, Name: name})
 		}
 	}
-	add(yamlpath.Key(yamlpath.Key("", "hoster"), "token"), config.Hoster.Token)
+	add(yamlpath.Key(yamlpath.Key("", "hetzner"), "token"), config.Hetzner.Token)
 	for _, host := range slices.Sorted(maps.Keys(config.Registries)) {
 		registry := yamlpath.Key(yamlpath.Key("", "registries"), host)
 		add(yamlpath.Key(registry, "password"), config.Registries[host].Password)

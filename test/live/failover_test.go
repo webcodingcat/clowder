@@ -40,7 +40,7 @@ const failoverVolumeSize = "256M"
 // enables it. The steps count the fences of one host, so they run in order:
 //   - the leader's host freezes (a kernel that hangs): fenced by the others;
 //   - the same host, cut off from every network: fenced again;
-//   - the hoster's API is down: nothing fails over until a user confirms the
+//   - Hetzner's API is down: nothing fails over until a user confirms the
 //     fence, which is the third, so the host stays off (disabled);
 //   - another host, cut off for a while and back: either back without a
 //     fence, or fenced, never both.
@@ -81,7 +81,7 @@ func TestFailover(t *testing.T) {
 			failsOver(t, hosts, "keeper", target, start, "second")
 			waitBack(t, hosts, target, "keeper")
 		}},
-		{"without the hoster's API nothing fails over, until a user confirms the fence", func(t *testing.T) {
+		{"without Hetzner's API nothing fails over, until a user confirms the fence", func(t *testing.T) {
 			moveTo(t, "keeper", target)
 			volumeSteady(t, hosts, "keeper")
 			writeProof(t, hosts[target], "keeper", "third")
@@ -670,7 +670,7 @@ func serverOf(t *testing.T, name string) (id int64, status string) {
 	return answer.Servers[0].ID, answer.Servers[0].Status
 }
 
-// serverStatus is the status of the host's server at the hoster: running,
+// serverStatus is the status of the host's server at Hetzner: running,
 // off, ...
 func serverStatus(t *testing.T, name string) string {
 	t.Helper()

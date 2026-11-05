@@ -346,7 +346,7 @@ join_cluster() {
 # enter_cluster: clowderd check, then clowderd init with the bootstrap key or
 # clowderd join with the join token, once.
 enter_cluster() {
-  local class_volume pools=() host=() underlay public_address server_ref
+  local class_volume pools=() host=() underlay public_address server_id
   for class_volume in ${VOLUMES}; do
     pools+=(--pool "vg-${class_volume%%=*}/thin")
   done
@@ -363,9 +363,9 @@ enter_cluster() {
   # not stop the script
   underlay="$(private_address)"
   public_address="$(metadata public-ipv4)"
-  server_ref="$(metadata instance-id)"
+  server_id="$(metadata instance-id)"
   # the host's name in the cluster is its hostname, the server's name
-  host=(--underlay "${underlay}" --public-address "${public_address}" --server-ref "${server_ref}")
+  host=(--underlay "${underlay}" --public-address "${public_address}" --server-id "${server_id}")
   if [[ -f "${TOKEN_FILE}" ]]; then
     join_cluster "${host[@]}"
   else

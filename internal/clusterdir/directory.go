@@ -74,6 +74,9 @@ func Load(dir string) (*Directory, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
 	}
+	if err := checkReplacedKeys(documents[0].Node); err != nil {
+		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
+	}
 	var config clusterspec.Config
 	if err := decodeStrict(extracted, &config); err != nil {
 		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
@@ -100,6 +103,37 @@ func checkSecretPlaces(config clusterspec.Config, encrypted map[string]string) e
 	for _, path := range slices.Sorted(maps.Keys(encrypted)) {
 		if !places[path] {
 			problems = append(problems, fmt.Sprintf("%s: !secret is not allowed here", path))
+		}
+	}
+	if len(problems) > 0 {
+		return problems
+	}
+	return nil
+}
+
+// replacedKeys are top-level keys of cluster.yaml that earlier releases
+// read, with what took their place: a cluster.yaml written for one of them
+// fails with the way forward, not only with an unknown field.
+var replacedKeys = map[string]string{
+	"hoster":  "hetzner, with its token and api (there is no type any more)",
+	"network": "private_network",
+}
+
+// checkReplacedKeys refuses a document that has one of replacedKeys.
+func checkReplacedKeys(document *yaml.Node) error {
+	mapping := document
+	if mapping.Kind == yaml.DocumentNode && len(mapping.Content) == 1 {
+		mapping = mapping.Content[0]
+	}
+	if mapping.Kind != yaml.MappingNode {
+		return nil // decodeStrict says what is wrong
+	}
+	var problems clusterspec.Problems
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		key := mapping.Content[index].Value
+		if replacement, ok := replacedKeys[key]; ok {
+			problems = append(problems, fmt.Sprintf("line %d: %s is gone; write %s",
+				mapping.Content[index].Line, key, replacement))
 		}
 	}
 	if len(problems) > 0 {

@@ -170,7 +170,7 @@ func retiredStartsNothing(t *testing.T, retired host, name string) {
 	}
 }
 
-// serverLabels are the labels of the host's server at the hoster.
+// serverLabels are the labels of the host's server at Hetzner.
 func serverLabels(t *testing.T, name string) map[string]string {
 	t.Helper()
 	id, _ := serverOf(t, name)

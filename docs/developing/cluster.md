@@ -32,7 +32,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | the members loop | `set-host-phase` (joining, passive, active; removed for a host that left), `set-host-voter` |
   | the placement, the stack's host | `put-volume`, `set-stack-status`, `set-stack-wait-reason`, `set-pushed-out`, `start-operation` (a move) |
   | the moves loop | `put-volume`, `set-stack-status`, `advance-operation`, `extend-operation`, `roll-back-operation`, `finish-operation` |
-  | the Floating IP's loop | `confirm-server-ref`, `set-ingress` |
+  | the Floating IP's loop | `confirm-server`, `set-ingress` |
   | the ACME loop | `put-acme-account`, `put-acme-challenge`, `delete-acme-challenge`, `put-certificate`, `delete-certificate` |
   | the fencing loop | `set-host-phase` (failed, active again; fenced or back to failed for its operation; disabled), `start-operation`, `advance-operation`, `finish-operation` (a fence) |
   | the alerts | `put-alert`, `resolve-alert` |
@@ -223,7 +223,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | `active` | `draining` and back | user | `host drain`, `host undrain` |
   | `active`, `draining`, `recovering` | `failed` | fencing loop | a majority of the voters has not heard it for `FailAfter` |
   | `failed` | `active` | fencing loop | a majority heard it again within `backWithin`; never the host itself |
-  | `failed` | `fencing` | the operation's start | `start-operation` of a fence, in the same command; only a failed host with a checked server ref and a stack another host can take (`needsFence`) |
+  | `failed` | `fencing` | the operation's start | `start-operation` of a fence, in the same command; only a failed host with a checked server and a stack another host can take (`needsFence`) |
   | `fencing` | `fenced` | the operation | its server is off: the time joins `FencedAt`, the host's copies are no longer synced, the operation records the host's stacks |
   | `fencing` | `failed` | the operation | `PowerOff` failed `powerOffTries` times; the operation fails |
   | `failed` | `fenced` | user | `host fence-confirm`, after the user checked the server is off |
@@ -313,9 +313,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   user, valid names (`internal/names`), volumes with 0 to 3 replicas and a DRBD minor
   exactly when replicated (a pending volume has neither copy nor minor), one copy per host,
   one stack per volume, nothing deleted that a stack names, a removed host's certificate
-  revoked, no name, underlay, server ref or certificate of a host twice among the hosts
-  that are not removed (`CheckJoiningHost`), and every joined host's server ref checked
-  with the hoster.
+  revoked, no name, underlay, server or certificate of a host twice among the hosts
+  that are not removed (`CheckJoiningHost`), every host with a server ID and an IPv4
+  underlay and public address, each underlay in `private_network` once `cluster.yaml`
+  names it, and every joined host's server checked with Hetzner.
 - **Revocations.** `Revoked` holds each revoked certificate with when it expires, which the
   state knows from the command that recorded the certificate (`AddUser`, `RecoverUser`,
   the host's `CertificateNotAfter`); `revoke` puts it there. The list grows only there, so
@@ -325,10 +326,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **Secrets** arrive sealed (`Sealed`, age for the data key); `state` never sees them in
   clear. Those of `cluster.yaml` are `ClusterSecrets`, by name (`clusterspec.SecretPlaces`),
   each with a digest; the namespaces' are `Secrets`. Readers find a value through the
-  spec, never by taking a name apart: `ClusterSecret(config.Hoster.Token)`,
+  spec, never by taking a name apart: `ClusterSecret(config.Hetzner.Token)`,
   `RegistryLogins` (the user from the spec, the password sealed). Until the first
-  `apply-config` the config is revision 0 with an empty spec; the loops that need a hoster
-  or a Floating IP find none and wait. init's bootstrap key is `BootstrapKey`, sealed,
+  `apply-config` the config is revision 0 with an empty spec; the loops that need the
+  Hetzner token or a Floating IP find none and wait. init's bootstrap key is `BootstrapKey`, sealed,
   until `add-user` drops it. A stack names at most `MaxStackSecrets`. Who can read a
   secret: API, below.
 - **Join tokens** (`internal/jointoken`): an ID and a 256-bit secret. `add-join-token`
@@ -436,7 +437,7 @@ still has current copies of its volumes. `clowderd recover --power-off` makes it
 alone, only on a human's word. The danger is the hosts that went: switched on again, two
 of them would still have the old Raft configuration's majority and their copies DRBD's
 quorum, elect a leader and fence the host that recovered. So `Recover` takes them out
-at the hoster, in this order, each step safe to run again after a failure:
+at Hetzner, in this order, each step safe to run again after a failure:
 
 1. It stops `clowderd.service` and reads the state from the log on disk
    (`raftnode.ReadState`): the hosts to retire are every one but this that is not removed.
@@ -452,8 +453,8 @@ at the hoster, in this order, each step safe to run again after a failure:
    cluster's name (`--yes` for scripts). Until here nothing changed, and a refusal starts
    the agent again.
 4. Per host: the label `clowder-retired` with the serial of the host's certificate
-   (`hoster.SetRetired`), then the power off, both confirmed by the hoster; the label
-   first, as a server that is off but not labeled could come back. A server ref the
+   (`hetzner.Client.SetRetired`), then the power off, both confirmed by Hetzner; the
+   label first, as a server that is off but not labeled could come back. A server the
    leader never checked is checked first.
 5. Raft with this host as the only voter (`raftnode.Recover`); the member opens on its own
    and commits `recover-remap` as the leader. The API forwards no such command.
@@ -484,7 +485,7 @@ revoked, its ID free once this host forgot it) and fits the rest to what this ho
 
 A retired host's agent ends at its start (host.md, `checkRetired`): the label names its
 certificate. A server set up anew gets a certificate of its own and starts, label or
-not. Should the hoster's API not answer at the start, a retired host starts as before
+not. Should Hetzner's API not answer at the start, a retired host starts as before
 (a known risk, roadmap): recover tells the user to set such servers up anew or delete
 them.
 
@@ -669,7 +670,7 @@ them.
 
 - **A Secret's value** the agent that takes the request opens with the cluster's age key
   (`openValue`) and refuses unless it was encrypted for the Secret's ID: a value copied
-  from another Secret or from `cluster.yaml` (the hoster's token, which a container would
+  from another Secret or from `cluster.yaml` (the Hetzner token, which a container would
   then read) does not pass. Then `sealSecret` as before.
 - **Who can read a secret:**
   - whoever holds the recovery key: every value in the files is encrypted for it too;
@@ -741,18 +742,18 @@ them.
   lowest free ID, issues the host's certificate, checks the host against the state
   (`CheckJoiningHost`), that the request comes from the host's underlay or public address
   (`JoinRequest.Source`, which the agent that took it sets from the connection), and
-  its server with the hoster (`hoster.CheckServerRef`: the server has the host's
-  addresses), and commits `add-host`. The hoster vouches for addresses, the source for
+  its server with Hetzner (`hetzner.Client.CheckServer`: the server has the host's
+  addresses), and commits `add-host`. Hetzner vouches for addresses, the source for
   the host that has them: without it, whoever holds a token could name another server
   of the project, which fencing would later power off. A refusal
   says why: only the holder of an open token's secret gets that far, and the token stays
   open for another try. The answer carries the certificate, the data key and the other
   hosts, for the host's first WireGuard interfaces (A host, Join).
-- **The server ref** decides which server fencing powers off and where the Floating IP
-  goes, and the hoster's token may act on every server of its project. A joined host's
-  is checked as it joins; the first host's, which init takes from the metadata service,
-  the Floating IP's loop checks once `cluster.yaml` brings the hoster's token
-  (`confirm-server-ref`). Only a host with a checked one holds the Floating IP
+- **The server ID** decides which server fencing powers off and where the Floating IP
+  goes, and the Hetzner token may act on every server of its project. A joined host's
+  server is checked as it joins; the first host's, whose ID init takes from the metadata
+  service, the Floating IP's loop checks once `cluster.yaml` brings the token
+  (`confirm-server`). Only a host with a checked server holds the Floating IP
   (`set-ingress`).
 
 ### Codes from a host

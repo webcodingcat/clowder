@@ -17,6 +17,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/agent/agenttest"
 	"github.com/webcodingcat/clowder/internal/api"
+	"github.com/webcodingcat/clowder/internal/hetzner/hetznertest"
 	"github.com/webcodingcat/clowder/internal/jointoken"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/pki"
@@ -24,13 +25,12 @@ import (
 )
 
 // joinTest is a leader's joiner over agenttest's cluster, with a real CA
-// and a hoster whose server 42 is 10.0.0.4 and whose server 43 is a
-// stranger's.
+// and a Hetzner project whose server 40 is node0's, 42 has 10.0.0.4 and
+// 198.51.100.4, and 43 is a stranger's.
 type joinTest struct {
 	t       *testing.T
 	cluster *agenttest.Cluster
 	joiner  *joiner
-	hoster  *fakeHoster
 	key     ed25519.PrivateKey
 }
 
@@ -50,25 +50,32 @@ func newJoinTest(t *testing.T) *joinTest {
 		t.Fatal(err)
 	}
 	cluster.State.Keys.CACertificate, cluster.State.Keys.CAKey = ca.CertificatePEM(), sealed
-	sealedToken, err := cluster.Keys.Seal([]byte("the hoster's token"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cluster.State.ClusterSecrets["hoster.token"] = state.SealedSecret{Value: sealedToken, Digest: "d"}
-	cluster.State.Hosts[0].ServerRef = "40"
-	hoster := &fakeHoster{servers: map[string][]netip.Addr{
-		"40": {netip.MustParseAddr("10.0.0.2")},
-		"42": {netip.MustParseAddr("10.0.0.4")},
-		"43": {netip.MustParseAddr("10.0.0.99")},
-	}}
+	setHetznerToken(t, cluster, "the Hetzner token")
+	project := hetznertest.New(t, "the Hetzner token")
+	project.AddServer(40, netip.MustParseAddr("10.0.0.2"), netip.MustParseAddr("198.51.100.2"))
+	project.AddServer(42, netip.MustParseAddr("10.0.0.4"), netip.MustParseAddr("198.51.100.4"))
+	project.AddServer(43, netip.MustParseAddr("10.0.0.99"), netip.MustParseAddr("198.51.100.99"))
+	cluster.State.Config.Spec.Hetzner.API = project.URL
 	key, err := pki.NewKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return &joinTest{
-		t: t, cluster: cluster, hoster: hoster, key: key,
-		joiner: &joiner{cluster: cluster, propose: cluster.Propose, dataKey: cluster.Keys, connect: hoster.connect},
+		t: t, cluster: cluster, key: key,
+		joiner: &joiner{cluster: cluster, propose: cluster.Propose, dataKey: cluster.Keys},
 	}
+}
+
+// setHetznerToken seals the token as cluster.yaml's hetzner.token.
+func setHetznerToken(t *testing.T, cluster *agenttest.Cluster, token string) {
+	t.Helper()
+	sealed, err := cluster.Keys.Seal([]byte(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cluster.Lock()
+	defer cluster.Unlock()
+	cluster.State.ClusterSecrets["hetzner.token"] = state.SealedSecret{Value: sealed, Digest: "d"}
 }
 
 // token opens a join token.
@@ -90,7 +97,8 @@ func (j *joinTest) request(token string) api.JoinRequest {
 		j.t.Fatal(err)
 	}
 	return api.JoinRequest{
-		Token: token, Name: "node2", Underlay: netip.MustParseAddr("10.0.0.4"), ServerRef: "42",
+		Token: token, Name: "node2", Underlay: netip.MustParseAddr("10.0.0.4"),
+		PublicAddress: netip.MustParseAddr("198.51.100.4"), ServerID: 42,
 		WGPublicKey: "wg-2", PublicKey: j.key.Public().(ed25519.PublicKey), Nonce: nonce, Time: time.Now(),
 		Source: netip.MustParseAddr("10.0.0.4"),
 	}
@@ -123,7 +131,7 @@ func TestALeaderAddsAHostWithAnOpenTokenAndItsOwnServer(t *testing.T) {
 	}
 	j.cluster.Read(func(current *state.State) {
 		host := current.Hosts[1]
-		if host == nil || host.Phase != state.Joining || !host.ServerRefChecked || host.CertificateSerial != pki.Serial(certificate) {
+		if host == nil || host.Phase != state.Joining || !host.ServerChecked || host.CertificateSerial != pki.Serial(certificate) {
 			t.Errorf("host 1: %+v", host)
 		}
 		if _, open := current.JoinTokens[token.ID]; open {
@@ -157,7 +165,7 @@ func TestAJoinIsTakenOnceAndOnlyWhenRecent(t *testing.T) {
 	j := newJoinTest(t)
 	token := j.token()
 	request := j.request(token.String())
-	request.ServerRef = "43" // refused, so the token stays open for the replay
+	request.ServerID = 43 // refused, so the token stays open for the replay
 	j.refused(request, "another server")
 	j.refused(request, "the request was sent before")
 	old := j.request(token.String())
@@ -169,24 +177,27 @@ func TestAJoinWithTheServerOfAnotherIsRefused(t *testing.T) {
 	j := newJoinTest(t)
 	token := j.token()
 	stranger := j.request(token.String())
-	stranger.ServerRef = "43"
-	j.refused(stranger, "server 43 has the addresses [10.0.0.99], not the host's 10.0.0.4: it is another server")
+	stranger.ServerID = 43
+	j.refused(stranger, "server 43 has the private addresses [10.0.0.99], not the host's underlay 10.0.0.4: it is another server")
 	// the addresses of another server of the project, from somewhere else:
-	// the hoster would vouch for them
+	// Hetzner would vouch for them
 	elsewhere := j.request(token.String())
 	elsewhere.Underlay, elsewhere.Source = netip.MustParseAddr("10.0.0.99"), netip.MustParseAddr("192.0.2.7")
-	elsewhere.ServerRef = "43"
+	elsewhere.PublicAddress, elsewhere.ServerID = netip.MustParseAddr("198.51.100.99"), 43
 	j.refused(elsewhere, "the request comes from 192.0.2.7, not from the host's underlay 10.0.0.99")
 	public := j.request(token.String())
-	public.PublicAddress, public.Source = netip.MustParseAddr("198.51.100.4"), netip.MustParseAddr("198.51.100.4")
-	j.refused(public, "not the host's 198.51.100.4")
+	public.PublicAddress, public.Source = netip.MustParseAddr("198.51.100.5"), netip.MustParseAddr("198.51.100.5")
+	j.refused(public, "server 42 has the public address 198.51.100.4, not the host's 198.51.100.5")
 	taken := j.request(token.String())
-	taken.ServerRef = "40"
-	j.refused(taken, "host node0 has the server ref 40 already")
+	taken.ServerID = 40
+	j.refused(taken, "host node0 has the server 40 already")
 	unknown := j.request(token.String())
-	unknown.ServerRef = "44"
-	if _, err := j.joiner.Join(context.Background(), unknown); err == nil || errors.As(err, new(*api.StatusError)) {
-		t.Errorf("a hoster that cannot answer is no refusal: %v", err)
+	unknown.ServerID = 44
+	j.refused(unknown, "the project has no such server: it is another server")
+	setHetznerToken(t, j.cluster, "a token Hetzner refuses")
+	if _, err := j.joiner.Join(context.Background(), j.request(token.String())); err == nil ||
+		errors.As(err, new(*api.StatusError)) {
+		t.Errorf("an API that cannot answer is no refusal: %v", err)
 	}
 	j.cluster.Read(func(current *state.State) {
 		if _, open := current.JoinTokens[token.ID]; !open || len(current.Hosts) != 1 {
@@ -218,7 +229,8 @@ func (j *joinTest) joinedFiles(key ed25519.PrivateKey) Files {
 		CA: string(j.cluster.State.Keys.CACertificate), Answer: &answer,
 		Host: &Host{
 			ID: answer.Host, Name: "node2", NodeAddress: network.NodeAddress(answer.Host),
-			Underlay: netip.MustParseAddr("10.0.0.4"), ServerRef: "42", RaftPort: RaftPort, APIPort: APIPort,
+			Underlay: netip.MustParseAddr("10.0.0.4"), PublicAddress: netip.MustParseAddr("198.51.100.4"),
+			ServerID: 42, RaftPort: RaftPort, APIPort: APIPort,
 		},
 	}
 	if err := files.writeJoining(saved); err != nil {
@@ -227,11 +239,19 @@ func (j *joinTest) joinedFiles(key ed25519.PrivateKey) Files {
 	return files
 }
 
+// node2Options are what cloud-init gives node2's clowderd join.
+func node2Options() JoinOptions {
+	return JoinOptions{
+		Name: "node2", Underlay: netip.MustParseAddr("10.0.0.4"), PublicAddress: netip.MustParseAddr("198.51.100.4"),
+		ServerID: 42,
+	}
+}
+
 func TestAJoinGoesOnFromItsAnswerAndKeepsTheMeshForTheFirstStart(t *testing.T) {
 	j := newJoinTest(t)
 	files := j.joinedFiles(j.key)
 	// no agent to join through: with the answer in join.json, Join asks the cluster nothing
-	options := JoinOptions{Name: "node2", Underlay: netip.MustParseAddr("10.0.0.4"), ServerRef: "42"}
+	options := node2Options()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if err := Join(context.Background(), files, options, &fakeNetwork{interfaceFails: true}, logger); err == nil {
 		t.Fatal("a join whose interface did not come up")
@@ -270,8 +290,7 @@ func TestAJoinTakesNoCertificateForAnotherKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	files := j.joinedFiles(other)
-	options := JoinOptions{Name: "node2", Underlay: netip.MustParseAddr("10.0.0.4"), ServerRef: "42"}
-	err = Join(context.Background(), files, options, &fakeNetwork{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err = Join(context.Background(), files, node2Options(), &fakeNetwork{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err == nil || !strings.Contains(err.Error(), "not for this host's key") {
 		t.Errorf("a certificate for another key: %v", err)
 	}

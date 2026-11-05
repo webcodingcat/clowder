@@ -16,7 +16,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/datakey"
-	"github.com/webcodingcat/clowder/internal/hoster"
+	"github.com/webcodingcat/clowder/internal/hetzner"
 	"github.com/webcodingcat/clowder/internal/jointoken"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/pki"
@@ -31,7 +31,6 @@ type joiner struct {
 	}
 	propose controller.Propose
 	dataKey *datakey.Key
-	connect controller.ConnectHoster
 
 	// mu takes one join at a time: two at once would choose the same free
 	// ID, and the second be refused for what is no fault of its own
@@ -48,7 +47,7 @@ type joiner struct {
 // is taken (api.CheckJoinRequest), on either side of the leader's clock.
 const joinNonceKept = 15 * time.Minute
 
-// Join checks a request against the state and the hoster, and adds the
+// Join checks a request against the state and Hetzner, and adds the
 // host. A refusal says why, and the token stays open for another try.
 // Someone who has only a token's ID learns whether the token is open, and
 // nothing more (state.ErrJoinTokenRefused); the other reasons need the
@@ -74,7 +73,7 @@ func (j *joiner) Join(ctx context.Context, request api.JoinRequest) (api.JoinAns
 	}
 	if current.Config.Revision == 0 {
 		return api.JoinAnswer{}, api.JoinRefused(errors.New(
-			"the cluster has no cluster.yaml yet: apply it first, the leader checks the host's server with the hoster"))
+			"the cluster has no cluster.yaml yet: apply it first, the leader checks the host's server with its Hetzner token"))
 	}
 	open, err := current.CheckJoinToken(token.ID, now)
 	if err != nil {
@@ -94,12 +93,12 @@ func (j *joiner) Join(ctx context.Context, request api.JoinRequest) (api.JoinAns
 		return api.JoinAnswer{}, err
 	}
 	host := state.Host{
-		ID: id, Name: request.Name, ServerRef: request.ServerRef, Underlay: request.Underlay,
+		ID: id, Name: request.Name, ServerID: request.ServerID, Underlay: request.Underlay,
 		PublicAddress: request.PublicAddress, WGPublicKey: request.WGPublicKey,
 		CertificateSerial: pki.Serial(certificate), CertificateNotAfter: certificate.NotAfter,
 	}
-	// The state's checks come first: they refuse a server ref that another
-	// host has, without asking the hoster.
+	// The state's checks come first: they refuse a server that another host
+	// has, without asking Hetzner.
 	if err := current.CheckJoiningHost(host); err != nil {
 		return api.JoinAnswer{}, api.JoinRefused(err)
 	}
@@ -110,7 +109,7 @@ func (j *joiner) Join(ctx context.Context, request api.JoinRequest) (api.JoinAns
 	if err := j.checkServer(ctx, current, host); err != nil {
 		return api.JoinAnswer{}, err
 	}
-	host.ServerRefChecked = true
+	host.ServerChecked = true
 	cmd, err := state.NewCommand(state.KindAddHost, time.Time{}, state.LeaderActor,
 		state.AddHost{Token: token.ID, Host: host})
 	if err != nil {
@@ -129,15 +128,12 @@ func (j *joiner) Join(ctx context.Context, request api.JoinRequest) (api.JoinAns
 }
 
 // comesFromHost tells whether a request came from one of the host's own
-// addresses. The hoster vouches that the addresses a host names are its
+// addresses. Hetzner vouches that the addresses a host names are its
 // server's, not that the host is that server; without this check, whoever
 // holds a token could name another server of the project, which fencing
 // would later power off.
 func comesFromHost(source netip.Addr, host state.Host) bool {
-	if source == host.Underlay {
-		return true
-	}
-	return host.PublicAddress.IsValid() && source == host.PublicAddress
+	return source == host.Underlay || source == host.PublicAddress
 }
 
 // firstSeen records a nonce and tells whether it is new; the caller holds mu.
@@ -181,16 +177,16 @@ func (j *joiner) issue(current *state.State, request api.JoinRequest, id state.H
 	return certificatePEM, certificate, nil
 }
 
-// checkServer asks the hoster whether the server ref is the host's
-// (hoster.CheckServerRef). A server of another is a refusal; a hoster that
-// does not answer is not.
+// checkServer asks Hetzner whether the server is the host's
+// (hetzner.Client.CheckServer). A server of another is a refusal; an API
+// that does not answer is not.
 func (j *joiner) checkServer(ctx context.Context, current *state.State, host state.Host) error {
-	client, err := controller.OpenHoster(current, j.dataKey.Open, j.connect)
+	client, err := controller.OpenHetzner(current, j.dataKey.Open)
 	if err != nil {
 		return fmt.Errorf("check the server of %s: %w", host.Name, err)
 	}
-	err = hoster.CheckServerRef(ctx, client, host.ServerRef, host.Underlay, host.PublicAddress)
-	if errors.Is(err, hoster.ErrOtherServer) {
+	err = client.CheckServer(ctx, host.ServerID, host.Underlay, host.PublicAddress)
+	if errors.Is(err, hetzner.ErrOtherServer) {
 		return api.JoinRefused(err)
 	}
 	return err

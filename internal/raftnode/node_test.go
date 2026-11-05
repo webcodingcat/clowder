@@ -109,7 +109,8 @@ func bootstrapCommand(t *testing.T) state.Command {
 		Keys:         state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
 		BootstrapKey: state.Sealed("join"),
 		Host: state.Host{
-			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), WGPublicKey: "wg", CertificateSerial: "s0",
+			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
+			PublicAddress: netip.MustParseAddr("198.51.100.2"), WGPublicKey: "wg", CertificateSerial: "s0",
 			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
