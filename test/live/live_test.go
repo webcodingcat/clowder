@@ -452,6 +452,7 @@ func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 		t.Fatal(err)
 	}
 	before := stackInfo(t, "shop").generation // 0 before the first apply
+	digestsBefore := secretDigests(t)
 	// the file starts with the stack and its volumes; the password after
 	// them is encrypted anew each time
 	previous, _ := os.ReadFile(stackFile("shop"))
@@ -466,8 +467,10 @@ func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 		t.Fatal(err)
 	}
 	t.Logf("clowder apply -f - (api-token):\n%s", output)
+	applied := appliedSecrets(output)
 	// the secrets before the stack, as apply orders a directory
-	mustClowder(t, "apply", "-f", stackDir("shop"))
+	output = mustClowder(t, "apply", "-f", stackDir("shop"))
+	applied = append(applied, appliedSecrets(output)...)
 	// a changed spec is the stack's next generation; a change of secrets
 	// alone keeps it
 	want := before
@@ -489,8 +492,34 @@ func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 		t.Errorf("generation %d after the apply, want %d", generation, want)
 	}
 	waitRunning(t, "shop", generation)
-	digests := secretDigests(t)
+	// a change of secrets alone keeps the generation, so the waits above
+	// pass on a seed's copy from before the apply: wait until it has the
+	// changed secrets too
+	var digests map[string]string
+	eventually(t, time.Minute, "the changed secrets in the seed's state", func() error {
+		digests = secretDigests(t)
+		for _, name := range applied {
+			if digests[name] == digestsBefore[name] {
+				return fmt.Errorf("secret %s has its old digest", name)
+			}
+		}
+		return nil
+	})
 	waitSecrets(t, "shop", map[string]string{"password": digests["password"], "api-token": digests["api-token"]})
+}
+
+// appliedSecrets are the secrets that an apply's output names as applied,
+// changed or new; an unchanged one keeps its digest.
+func appliedSecrets(output string) []string {
+	var names []string
+	for _, line := range strings.Split(output, "\n") {
+		if name, ok := strings.CutPrefix(strings.TrimSpace(line), "Secret default/"); ok {
+			if name, ok = strings.CutSuffix(name, ": applied"); ok {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
 }
 
 // runStack applies the stack and checks the container: its image from the
