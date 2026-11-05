@@ -149,7 +149,7 @@ func TestARestartPullsAndRecreatesOnce(t *testing.T) {
 	docker.Listed = shopContainer("") // as compose up left it
 	docker.Unlock()
 
-	cluster.Apply(state.KindRestartStack, state.CLIActor, state.RestartStack{Namespace: "default", Name: "shop"})
+	cluster.Apply(state.KindRestartStack, state.CLIActor("admin"), state.RestartStack{Namespace: "default", Name: "shop"})
 	if status := cluster.Stack("shop").Status; status != state.StackStarting {
 		t.Errorf("a restarted stack is %s", status)
 	}

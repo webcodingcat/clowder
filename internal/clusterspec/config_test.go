@@ -123,7 +123,6 @@ func TestThePrivateNetworkIsAnIPv4NetworkOutsideClowders(t *testing.T) {
 
 func TestCheckReportsEveryProblem(t *testing.T) {
 	config := Config{
-		Endpoints:      []string{"10.0.0.1:99999"},
 		Hetzner:        Hetzner{API: "api.example.com/v1"},
 		PrivateNetwork: "10.77.0.0/16",
 		Ingress:        Ingress{FloatingIP: "2001:db8::1"},
@@ -150,7 +149,7 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 	}
 	want := []string{
 		`acme.directory "acme.example.com"`, `acme.email "ops"`, `"../ca.pem" is not a path`, `renew_before "soon"`,
-		"name is required", `"10.0.0.1:99999"`, "hetzner.token",
+		"hetzner.token",
 		`hetzner.api "api.example.com/v1" is not a full URL`,
 		"private_network 10.77.0.0/16 overlaps clowder's 10.77.0.0/24", "not an IPv4 address", `pool "nopool"`, `reserve "95%"`,
 		`falls back to "slow"`, "storage class empty", "resync_rate", "top: 2000",

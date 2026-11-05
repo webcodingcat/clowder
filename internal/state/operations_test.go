@@ -18,11 +18,11 @@ import (
 func lockCluster(t *testing.T) *cluster {
 	t.Helper()
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, CLIActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
 	c.addHost(testHost(1))
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
 	c.runningShop(nil)
-	c.mustApply(KindPutResource, CLIActor, putResource(resource.KindVolume, "default", "data", testVolumeSpec()))
+	c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "data", testVolumeSpec()))
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: c.placedData()})
 	return c
 }
@@ -64,7 +64,7 @@ var lockCases = []lockCase{
 		free:    true,
 	},
 	{
-		name: "a user asks to move a stack", kind: KindRequestMove, actor: CLIActor, lock: "stack/default/shop",
+		name: "a user asks to move a stack", kind: KindRequestMove, actor: cliActor, lock: "stack/default/shop",
 		payload: func(*cluster, uint64) any { return RequestMove{Namespace: "default", Name: "shop", To: 1} },
 	},
 	{
@@ -75,7 +75,7 @@ var lockCases = []lockCase{
 		free: true,
 	},
 	{
-		name: "a user changes a stack", kind: KindPutResource, actor: CLIActor, lock: "stack/default/shop",
+		name: "a user changes a stack", kind: KindPutResource, actor: cliActor, lock: "stack/default/shop",
 		payload: func(*cluster, uint64) any {
 			spec := shopSpec()
 			spec.Services["cache"] = stackspec.Service{Image: "x"}
@@ -83,19 +83,19 @@ var lockCases = []lockCase{
 		},
 	},
 	{
-		name: "a user deletes a stack", kind: KindDeleteResource, actor: CLIActor, lock: "stack/default/shop",
+		name: "a user deletes a stack", kind: KindDeleteResource, actor: cliActor, lock: "stack/default/shop",
 		payload: func(*cluster, uint64) any {
 			return DeleteResource{Kind: resource.KindStack, Namespace: "default", Name: "shop", Owner: OwnerCLI}
 		},
 	},
 	{
-		name: "a user deletes a volume", kind: KindDeleteResource, actor: CLIActor, lock: "volume/default/data",
+		name: "a user deletes a volume", kind: KindDeleteResource, actor: cliActor, lock: "volume/default/data",
 		payload: func(*cluster, uint64) any {
 			return DeleteResource{Kind: resource.KindVolume, Namespace: "default", Name: "data", Owner: OwnerCLI}
 		},
 	},
 	{
-		name: "a user restarts a stack", kind: KindRestartStack, actor: CLIActor, lock: "stack/default/shop",
+		name: "a user restarts a stack", kind: KindRestartStack, actor: cliActor, lock: "stack/default/shop",
 		payload: func(*cluster, uint64) any { return RestartStack{Namespace: "default", Name: "shop"} },
 	},
 	{
@@ -165,7 +165,6 @@ var unlockedKinds = map[string]string{
 	KindDeleteACMEChallenge:  "an ACME challenge",
 	KindPutCertificate:       "a route's certificate",
 	KindDeleteCertificate:    "a route's certificate",
-	KindFinishBootstrap:      "the bootstrap's end",
 	KindSetCLICutoff:         "the CLI's cutoff",
 	KindSetRecoveryRecipient: "the recovery key",
 	KindPutAlert:             "an alert",
@@ -237,9 +236,9 @@ func TestOnlyTheOperationThatHoldsALockChangesWhatItGuards(t *testing.T) {
 func TestOnlyTheLeaderActsForAnOperation(t *testing.T) {
 	c := lockCluster(t)
 	holder := c.startOperation("host/1")
-	c.refuse(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Draining, Operation: holder},
+	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Draining, Operation: holder},
 		"only the leader runs operations")
-	c.refuse(KindStartOperation, CLIActor, StartOperation{Kind: "test", Locks: []string{"host/0"}},
+	c.refuse(KindStartOperation, cliActor, StartOperation{Kind: "test", Locks: []string{"host/0"}},
 		"only the leader")
 	c.refuse(KindFinishOperation, HostActor(1), FinishOperation{ID: holder}, "only the leader")
 }
@@ -284,7 +283,7 @@ func TestAnOperationAdvancesOnlyByTheOwnerOfItsStep(t *testing.T) {
 	// the leader runs the first step and hands the second to host 1
 	c.refuse(KindAdvanceOperation, HostActor(1), AdvanceOperation{ID: operation, FromStep: 0, Step: 1, Owner: &one},
 		"leader runs its step 1, not host/1")
-	c.refuse(KindAdvanceOperation, CLIActor, AdvanceOperation{ID: operation, FromStep: 0, Step: 1},
+	c.refuse(KindAdvanceOperation, cliActor, AdvanceOperation{ID: operation, FromStep: 0, Step: 1},
 		"leader runs its step 1, not cli")
 	c.refuse(KindAdvanceOperation, LeaderActor, AdvanceOperation{ID: operation, FromStep: 2, Step: 3},
 		"at step 0, no longer 2")
@@ -347,7 +346,7 @@ func TestALeaderCommandPlannedOnAnOlderStateIsRefused(t *testing.T) {
 	c.putShop(shopSpec())
 	planned = c.index
 	deleteShop := DeleteResource{Kind: resource.KindStack, Namespace: "default", Name: "shop", Owner: OwnerCLI}
-	c.mustApply(KindDeleteResource, CLIActor, deleteShop)
+	c.mustApply(KindDeleteResource, cliActor, deleteShop)
 	c.refuse(KindSetStackStatus, LeaderActor, place(planned), "no stack default/shop")
 	c.refuse(KindSetPushedOut, LeaderActor, pushOut(planned), "no stack default/shop")
 
@@ -393,5 +392,5 @@ func TestTheLeaderGivesAHostOnlyToAStackThatHasNone(t *testing.T) {
 func (c *cluster) putBlog() {
 	c.t.Helper()
 	blog := stackspec.Spec{Services: map[string]stackspec.Service{"web": {Image: "x"}}}
-	c.mustApply(KindPutResource, CLIActor, putResource(resource.KindStack, "default", "blog", blog))
+	c.mustApply(KindPutResource, cliActor, putResource(resource.KindStack, "default", "blog", blog))
 }

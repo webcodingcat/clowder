@@ -3,7 +3,6 @@ package clusterspec
 import (
 	"fmt"
 	"maps"
-	"net"
 	"net/mail"
 	"net/netip"
 	"net/url"
@@ -41,20 +40,6 @@ func Check(config Config) Problems {
 		problems = append(problems, fmt.Sprintf(format, args...))
 	}
 
-	switch {
-	case config.Name == "":
-		report("name is required")
-	case !names.Valid(config.Name): // the CLI keeps the credentials in a directory of this name
-		report("name %q: %s", config.Name, names.Rule)
-	}
-	if len(config.Endpoints) == 0 {
-		report("endpoints: at least one address is required")
-	}
-	for _, endpoint := range config.Endpoints {
-		if !validEndpoint(endpoint) {
-			report("endpoints: %q is neither an address nor a host name", endpoint)
-		}
-	}
 	problems = append(problems, checkHetzner(config.Hetzner)...)
 	network, err := netip.ParsePrefix(config.PrivateNetwork)
 	if err != nil || !network.Addr().Is4() || network != network.Masked() {
@@ -121,22 +106,6 @@ func Check(config Config) Problems {
 		report("%s names %d files; at most %d are allowed", FileName, len(files), maxFiles)
 	}
 	return problems
-}
-
-// validEndpoint accepts an IP address or a host name, each with an optional
-// port.
-func validEndpoint(address string) bool {
-	host := address
-	if splitHost, port, err := net.SplitHostPort(address); err == nil {
-		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
-			return false
-		}
-		host = splitHost
-	}
-	if _, err := netip.ParseAddr(host); err == nil {
-		return true
-	}
-	return host != "" && !strings.ContainsAny(host, " /:")
 }
 
 // checkHetzner: a token, and an API that is a full http or https URL: the

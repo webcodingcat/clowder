@@ -133,29 +133,30 @@ on a host (`compose.Render`).
   (`secretvalue.Extract`), checks that the places they came from are exactly
   `SecretPlaces` (a `!secret` elsewhere, or a place in clear, is an error), decodes the
   rest strictly and keeps the values apart, still encrypted (`Directory.Encrypted`). A
-  top-level key an earlier release read (`replacedKeys`: `hoster`, `network`) fails with
-  the key that took its place, not only as an unknown field. It
-  does not run `Check`: the commands that need only the name and the endpoints (`secret
-  encrypt`) work with the `cluster.yaml` the bootstrap writes, which is not complete yet.
-  `cluster apply` and `diff` run it. `Schema` makes the JSON schema of `cluster.yaml` from
+  top-level key an earlier release read (`replacedKeys`: `hoster`, `network`, `name`,
+  `endpoints`) fails with what took its place, not only as an unknown field: the
+  cluster's name comes from `clowderd init`, the endpoints from the credentials, so
+  nothing has two sources. It does not run `Check`, as a `cluster.yaml` is written bit
+  by bit (`secret encrypt --cluster-yaml` before the rest); `cluster apply` and `diff`
+  run it. `Schema` makes the JSON schema of `cluster.yaml` from
   the Go types; it lives here so the state does not link the schema library. Editors with
   the yaml-language-server need `customTags: ["!secret scalar"]`.
-- `Create` writes the `cluster.yaml` of `cluster bootstrap`: name, endpoint, the bootstrap
-  key encrypted, and as comments what the first `cluster apply` still needs.
-- **The credentials** (`credentials.go`) are not in the cluster directory, which a team
-  shares in a repository, but in the user's config directory
-  (`os.UserConfigDir()/clowder/clusters/<name>/credentials.yaml`, `CredentialsPath`): the
-  CLI's key and certificate, and the cluster's CA, which the CLI trusts. Whoever holds them
-  controls the cluster, as with kubeadm's `admin.conf`. Plain YAML, read strictly (the
-  `user` of an earlier build is refused), 0600 in a directory of 0700, as SSH keeps its
-  keys. `<name>` is `cluster.yaml`'s `name`, so `clusterspec.Check` holds it to
-  `names.Valid`: it becomes a directory. One file per cluster. The tests point
-  `XDG_CONFIG_HOME` (and `HOME`, `AppData`) at a temporary directory.
-- **`cluster bootstrap`** checks first (`CheckBootstrap`) that it writes over neither a
-  `cluster.yaml` nor credentials of a cluster of the same name (`--force` replaces those),
-  since once the CLI has its first certificate a bootstrap cannot be repeated. It writes the
-  credentials before the cluster directory: `cluster.yaml` can be written by hand, the
-  user's key cannot be had again.
+- **The credentials** (`internal/clientconfig`) are not in the cluster directory, which a
+  team shares in a repository, but in the user's own file, as kubectl's kubeconfig:
+  `--config`, else `$CLOWDER_CONFIG`, else `~/.clowder/config` (`Path`). It holds
+  `contexts`, each the way into one cluster (`name`, `endpoints`, `ca`, `certificate`,
+  `key`), and `current_context`. Unlike a kubeconfig, a context holds it all, with no
+  clusters and users joined by name, and lists several endpoints. The keys are
+  snake_case, as every file of clowder's that is no resource. Whoever holds a context
+  controls its cluster, as with kubeadm's `admin.conf`. Plain YAML, read strictly and
+  checked (`Parse`: every context complete, its endpoints addresses or host names, the
+  names unique, the current one there), written whole or not at all, 0600 in a directory
+  of 0700, as SSH keeps its keys (`Write`). A missing or empty file reads as empty, so
+  the first `config import` writes it. A context's name is the user's own; `Add` refuses
+  one that is taken, `Put` replaces it in its place, `Delete` removes it, and the first
+  becomes the current one. The errors (`ErrNoCurrentContext`, `ErrNoContext`,
+  `ErrContextTaken`) name no flag: the CLI says what to do about them. The tests point
+  `HOME` (and `USERPROFILE`) or `$CLOWDER_CONFIG` at a temporary directory.
 - **Files next to `cluster.yaml`** (`acme.ca`): `clusterspec.FileNames` lists those it
   names, by paths relative to it and written with `/` (the CLI runs on Windows too), and
   `Check` refuses
@@ -195,6 +196,6 @@ in a file someone could change), and only the cluster opens them.
   YAML does, and checks the lines it found against the value YAML read before it cuts.
   Golden file: `testdata/rewrite.yaml`, `bin/dev test ./internal/secretvalue -update`.
 - `Block` writes a value as it stands after its key: `!secret |` and the armor below,
-  indented; `secret encrypt` and the bootstrap's `cluster.yaml` write it.
+  indented; `secret encrypt` writes it.
 - No error message carries a value: `Open` drops json's messages, which quote the text
   they choke on.

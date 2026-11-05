@@ -11,7 +11,7 @@ clowder is built in phases; each ends with live tests on HLab
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
 | 2 | three hosts: replication, failover with fencing | done, passes the live tests |
-| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | planned |
+| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: step 1 done, step 2 next |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -283,6 +283,13 @@ It is built on the branch `phase-2b` and goes to `main` only once it is whole.
 
 ### Step 1: access the way of kubeadm
 
+Done on `phase-2b` (lint and unit tests green, the full review loop over it; the live
+tests come after step 5). Beyond the plan below: `clowder config delete-context`, and
+`config import --as <name>` (not `--context`, which picks the context a command uses)
+with `--replace` for renewed credentials; a new cluster has no recovery key until the
+first `clowder recovery rotate`, and `GET /v1/encryption` answers 409 until then;
+`test/live` follows already, as lint builds it. Step 2 starts from here.
+
 - **No bootstrap.** `clowderd init` makes the cluster as now; the first credentials come
   over SSH, as kubeadm's `admin.conf` does: `ssh root@<host> clowderd credentials`. The
   CA is trusted through SSH. Gone: the bootstrap key (`examples/hetzner`'s
@@ -318,14 +325,16 @@ It is built on the branch `phase-2b` and goes to `main` only once it is whole.
   endpoints, the CA, the key and the certificate; `current_context` picks one. The CLI
   reads `--config`, else `$CLOWDER_CONFIG`, else `~/.clowder/config` (as
   `~/.kube/config`), with `--context` for another context in one call and `clowder
-  config use-context|get-contexts`. `clowderd credentials` prints a file with one
-  context, so one file from the host is all a user needs. `clowder config import <file>
-  [--context <name>]` adds it to the user's file: kubectl has no such command, and
-  merging by hand is where keys get lost. A context's name is the user's own, as in a
-  kubeconfig: the cluster's name without `--context`, and a name already taken needs
-  one. The file is YAML, its keys snake_case as every file of clowder's that is no
-  resource (`current_context`, not kubeconfig's `current-context`). It lives in a
-  portable package the CLI may import; `clusterdir`'s credentials go.
+  config use-context|get-contexts|delete-context`. `clowderd credentials` prints a file
+  with one context, so one file from the host is all a user needs. `clowder config
+  import <file> [--as <name>] [--replace]` adds it to the user's file: kubectl has no
+  such command, and merging by hand is where keys get lost. A context's name is the
+  user's own, as in a kubeconfig: the cluster's name without `--as` (not `--context`,
+  which picks the context a command uses), and a name already taken needs another, or
+  `--replace` for renewed credentials. The file is YAML, its keys snake_case as every
+  file of clowder's that is no resource (`current_context`, not kubeconfig's
+  `current-context`). It lives in a portable package the CLI may import; `clusterdir`'s
+  credentials go.
 - **The cluster's name is optional,** as kubeadm's `clusterName`: `clowderd init
   --cluster-name <name>`, `clowder-cluster` without it. It is kept in the state, shown by
   `cluster status`, and names the context of new credentials; it checks nothing.
@@ -659,8 +668,9 @@ Phase 4 (comfort and operations):
   remove is kept.
 - A disabled voter keeps its vote until it is removed: with more than three hosts, an
   active host that does not vote does not take its place.
-- The CLI learns no hosts from the cluster: the user keeps `endpoints` in `cluster.yaml`
-  current after each join and remove, or the CLI cannot reach the cluster while the
+- The CLI learns no hosts from the cluster: `clowderd credentials` writes the hosts of the
+  time into the context's `endpoints`, and after joins and removes the user fetches new
+  credentials or edits the endpoints, or the CLI cannot reach the cluster while the
   endpoints it lists are down.
 - A published port whose stack moved while the agent of the ingress host was down keeps
   its connections to the old host until they end: the agent forgets connections only
@@ -713,8 +723,8 @@ kubeadm's `admin.conf`. What a removed host keeps is the open point.
   closes it. Until then, wipe a removed host's disk.
 - The CLI checks an agent's certificate against the CA, not against the revocations, as
   kubectl does: a removed host could answer it as the cluster, with recipients of its own
-  for `secret encrypt`. The agents refuse it, but only the CLI's `endpoints` keep the CLI
-  from asking it, so remove a host's address from `endpoints` as the host goes. With the
+  for `secret encrypt`. The agents refuse it, but only the endpoints of the CLI's context
+  keep the CLI from asking it, so remove a host's address from them as the host goes. With the
   CA's key on such a host, no list the CLI pinned would help; `cluster rotate-keys`
   closes this too.
 - Whoever holds the CLI's credentials can check a guessed value against a secret's

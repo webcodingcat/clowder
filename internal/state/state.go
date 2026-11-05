@@ -39,9 +39,10 @@ type State struct {
 	// passwords, the alert channels'. A digest each, so a diff tells a
 	// changed value from one encrypted anew.
 	ClusterSecrets map[string]SealedSecret `json:"cluster_secrets,omitempty"`
-	// BootstrapKey is init's key, sealed, until the bootstrap gave the CLI
-	// its first certificate; then it is gone (FinishBootstrap).
-	BootstrapKey Sealed `json:"bootstrap_key,omitempty"`
+	// ClusterName is the name clowderd init gave the cluster, as kubeadm's
+	// clusterName: cluster status shows it, alerts and new credentials
+	// carry it. It checks nothing.
+	ClusterName string `json:"cluster_name"`
 	// JoinTokens are the tokens a host may join with, by ID, until one
 	// joins with it or it expires.
 	JoinTokens map[string]JoinToken `json:"join_tokens,omitempty"`

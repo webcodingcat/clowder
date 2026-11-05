@@ -13,24 +13,25 @@ import (
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
-// Bootstrap starts the cluster: the keys init made, its bootstrap key
-// (sealed) and the first host.
+// Bootstrap starts the cluster (clowderd init): the keys init made, the
+// cluster's name and the first host.
 type Bootstrap struct {
-	Keys         ClusterKeys `json:"keys"`
-	BootstrapKey Sealed      `json:"bootstrap_key"`
-	Host         Host        `json:"host"`
+	Keys        ClusterKeys `json:"keys"`
+	ClusterName string      `json:"cluster_name"`
+	Host        Host        `json:"host"`
 }
 
-// applyBootstrap makes the first host the cluster. The bootstrap key lets
-// the CLI in, once (applyFinishBootstrap drops it); hosts join with tokens.
+// applyBootstrap makes the first host the cluster. The CLI's first
+// credentials come from root on it (clowderd credentials); hosts join with
+// tokens.
 func applyBootstrap(s *State, _ Command, payload Bootstrap) (func(), error) {
 	switch {
 	case s.Keys != nil:
 		return nil, errors.New("the cluster is bootstrapped already")
 	case len(payload.Keys.CACertificate) == 0 || len(payload.Keys.CAKey) == 0 || len(payload.Keys.AgeIdentity) == 0:
 		return nil, errors.New("the keys are incomplete")
-	case len(payload.BootstrapKey) == 0:
-		return nil, errors.New("the bootstrap key is missing")
+	case !names.Valid(payload.ClusterName):
+		return nil, fmt.Errorf("cluster name %q: %s", payload.ClusterName, names.Rule)
 	case payload.Host.ID != 0:
 		return nil, fmt.Errorf("the first host has ID 0, not %d", payload.Host.ID)
 	}
@@ -42,7 +43,7 @@ func applyBootstrap(s *State, _ Command, payload Bootstrap) (func(), error) {
 	keys := payload.Keys
 	return func() {
 		s.Keys = &keys
-		s.BootstrapKey = payload.BootstrapKey
+		s.ClusterName = payload.ClusterName
 		s.Hosts[host.ID] = &host
 		s.Namespaces[names.Default] = &Namespace{Meta: Meta{Name: names.Default, Generation: 1}}
 	}, nil

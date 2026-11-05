@@ -3,17 +3,12 @@
 # class), in one private network behind one Cloud firewall, and the
 # cluster's Floating IP. cloud-init writes setup.sh and its settings; setup.sh
 # prepares a host and runs clowderd init (the first) or clowderd join (the
-# others, each with a join token from clowder host join-token).
+# others, each with a join token from clowder host join-token). The user's
+# first credentials come from root on the first host, over SSH
+# (clowderd credentials).
 
 provider "hcloud" {
   # the token comes from HCLOUD_TOKEN
-}
-
-resource "random_password" "bootstrap" {
-  # the key that lets the user in, once: the only defense of the bootstrap
-  # route, so long, and plain enough for YAML, a shell and a file
-  length  = 48
-  special = false
 }
 
 resource "hcloud_ssh_key" "admin" {
@@ -151,8 +146,8 @@ resource "hcloud_volume_attachment" "class" {
   automount = false
 }
 
-# The hosts that join: the same as the first, with a join token instead of
-# the bootstrap key, through the first host.
+# The hosts that join: the same as the first, with a join token, through the
+# first host.
 
 resource "hcloud_volume" "joining" {
   for_each = local.joining_volumes
@@ -227,10 +222,10 @@ locals {
         path = "/etc/clowder-setup.env", permissions = "0600",
         content = join("\n", concat(local.common_settings, [
           "VOLUMES='${join(" ", [for name, volume in hcloud_volume.class : "${name}=${volume.id}"])}'",
+          "CLUSTER_NAME='${var.cluster_name}'",
           "",
         ]))
       },
-      { path = "/etc/clowder/bootstrap-key", permissions = "0600", content = "${random_password.bootstrap.result}\n" },
     ])
     runcmd = local.setup_commands
   })}"

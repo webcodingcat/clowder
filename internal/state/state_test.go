@@ -31,10 +31,9 @@ var testTime = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 // testExpiry is when the tests' certificates expire.
 var testExpiry = testTime.AddDate(10, 0, 0)
 
-// finishBootstrap is the command that ends the bootstrap.
-func finishBootstrap() FinishBootstrap {
-	return FinishBootstrap{RecoveryRecipient: "age1recovery"}
-}
+// cliActor is the CLI of the tests, with the name every certificate gets
+// without one.
+var cliActor = CLIActor("admin")
 
 // cluster is a state under test with its next Raft index.
 type cluster struct {
@@ -48,9 +47,9 @@ func newCluster(t *testing.T) *cluster {
 	t.Helper()
 	c := &cluster{t: t, state: &State{}}
 	c.mustApply(KindBootstrap, LeaderActor, Bootstrap{
-		Keys:         ClusterKeys{CACertificate: []byte("ca"), CAKey: Sealed("key"), AgeIdentity: Sealed("age")},
-		BootstrapKey: Sealed("bootstrap"),
-		Host:         testHost(0),
+		Keys:        ClusterKeys{CACertificate: []byte("ca"), CAKey: Sealed("key"), AgeIdentity: Sealed("age")},
+		ClusterName: "prod",
+		Host:        testHost(0),
 	})
 	return c
 }
@@ -59,7 +58,7 @@ func newCluster(t *testing.T) *cluster {
 func (c *cluster) addHost(host Host) {
 	c.t.Helper()
 	token := "token-" + strconv.Itoa(int(host.ID))
-	c.mustApply(KindAddJoinToken, CLIActor, AddJoinToken{ID: token, Hash: testHash, TTL: time.Hour})
+	c.mustApply(KindAddJoinToken, cliActor, AddJoinToken{ID: token, Hash: testHash, TTL: time.Hour})
 	host.ServerChecked = true
 	c.mustApply(KindAddHost, LeaderActor, AddHost{Token: token, Host: host})
 }
@@ -161,15 +160,35 @@ func TestBootstrapMakesHostZeroTheActiveVoter(t *testing.T) {
 	if host.Phase != Active || !host.Voter {
 		t.Errorf("host 0: %+v", host)
 	}
-	if string(c.state.BootstrapKey) != "bootstrap" || c.state.Keys == nil || host.ServerChecked {
-		t.Errorf("keys: %+v %q, host %+v", c.state.Keys, c.state.BootstrapKey, host)
+	if c.state.ClusterName != "prod" || c.state.Keys == nil || host.ServerChecked {
+		t.Errorf("cluster %q, keys %+v, host %+v", c.state.ClusterName, c.state.Keys, host)
 	}
 	c.refuse(KindBootstrap, LeaderActor, Bootstrap{}, "bootstrapped already")
 }
 
+func TestTheClusterNameIsADNSLabel(t *testing.T) {
+	c := &cluster{t: t, state: &State{}}
+	c.refuse(KindBootstrap, LeaderActor, Bootstrap{
+		Keys:        ClusterKeys{CACertificate: []byte("ca"), CAKey: Sealed("key"), AgeIdentity: Sealed("age")},
+		ClusterName: "Prod Cluster",
+		Host:        testHost(0),
+	}, `cluster name "Prod Cluster"`)
+}
+
+func TestCLIActorsCarryTheirName(t *testing.T) {
+	if actor := CLIActor("alice"); actor != "cli/alice" || !IsCLIActor(actor) {
+		t.Errorf("CLIActor(alice) = %q", actor)
+	}
+	for _, actor := range []string{"cli", "cli/", "host/0", LeaderActor, ""} {
+		if IsCLIActor(actor) {
+			t.Errorf("%q counts as the CLI", actor)
+		}
+	}
+}
+
 func TestNothingButTheBootstrapRunsOnAnEmptyState(t *testing.T) {
 	state := &State{}
-	cmd, err := NewCommand(KindFinishBootstrap, testTime, CLIActor, finishBootstrap())
+	cmd, err := NewCommand(KindSetRecoveryRecipient, testTime, cliActor, SetRecoveryRecipient{Recipient: "age1recovery"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,9 +232,9 @@ func TestAHostHasIPv4AddressesAndAServer(t *testing.T) {
 		host := testHost(0)
 		change(&host)
 		c.refuse(KindBootstrap, LeaderActor, Bootstrap{
-			Keys:         ClusterKeys{CACertificate: []byte("ca"), CAKey: Sealed("key"), AgeIdentity: Sealed("age")},
-			BootstrapKey: Sealed("bootstrap"),
-			Host:         host,
+			Keys:        ClusterKeys{CACertificate: []byte("ca"), CAKey: Sealed("key"), AgeIdentity: Sealed("age")},
+			ClusterName: "prod",
+			Host:        host,
 		}, name)
 	}
 }
@@ -294,8 +313,8 @@ func TestAMoveCheckedAgainstAnOldPhaseIsRefused(t *testing.T) {
 	c.addHost(testHost(1))
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
 	// one CLI drained the host after another one checked "active"
-	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Draining, From: Active})
-	c.refuse(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Failed, From: Active},
+	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Draining, From: Active})
+	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Failed, From: Active},
 		"is draining now, no longer active")
 }
 
@@ -307,14 +326,14 @@ func TestHostPhasesMoveOnlyAsAllowed(t *testing.T) {
 		actor  string
 		reason string // empty: allowed
 	}{
-		{"leader drains", Active, Draining, CLIActor, ""},
+		{"leader drains", Active, Draining, cliActor, ""},
 		{"leader undrains", Draining, Active, LeaderActor, ""},
 		{"leader declares failed", Active, Failed, LeaderActor, ""},
 		{"leader takes a failed host back", Failed, Active, LeaderActor, ""},
 		{"a failed host cannot take itself back", Failed, Active, HostActor(1), "only the leader"},
 		{"a recovering host fails again", Recovering, Failed, LeaderActor, ""},
 		{"only its operation moves a fencing host", Fencing, Fenced, LeaderActor, "only its fence-host operation"},
-		{"a user enables a disabled host", Disabled, Fenced, CLIActor, ""},
+		{"a user enables a disabled host", Disabled, Fenced, cliActor, ""},
 		{"leader fences", Failed, Fenced, LeaderActor, ""},
 		{"host recovers", Fenced, Recovering, HostActor(1), ""},
 		{"host is up to date", Recovering, Active, HostActor(1), ""},
@@ -387,20 +406,9 @@ func TestTheIngressIsAnActiveHostWithACheckedServer(t *testing.T) {
 	}
 }
 
-func TestTheBootstrapEndsOnceAndBringsTheRecoveryKey(t *testing.T) {
-	c := newCluster(t)
-	c.refuse(KindFinishBootstrap, CLIActor, FinishBootstrap{}, "recovery key's recipient")
-	c.mustApply(KindFinishBootstrap, CLIActor, finishBootstrap())
-	if c.state.RecoveryRecipient != "age1recovery" || c.state.BootstrapKey != nil || c.state.InBootstrap() {
-		t.Errorf("recovery recipient %q, bootstrap key %q", c.state.RecoveryRecipient, c.state.BootstrapKey)
-	}
-	// a second bootstrap at the same time does not get in
-	c.refuse(KindFinishBootstrap, CLIActor, finishBootstrap(), "bootstrapped already")
-}
-
 func TestTheCLICutoffMovesOnlyForwardAndOnlyByAHost(t *testing.T) {
 	c := newCluster(t)
-	c.refuse(KindSetCLICutoff, CLIActor, SetCLICutoff{Cutoff: testTime}, "only a host")
+	c.refuse(KindSetCLICutoff, cliActor, SetCLICutoff{Cutoff: testTime}, "only a host")
 	c.refuse(KindSetCLICutoff, HostActor(0), SetCLICutoff{}, "no time")
 	c.mustApply(KindSetCLICutoff, HostActor(0), SetCLICutoff{Cutoff: testTime})
 	if !c.state.CLICutoff.Equal(testTime) {
@@ -431,9 +439,12 @@ func TestARevocationGoesAWhileAfterItsCertificateExpired(t *testing.T) {
 
 func TestANewRecoveryKeyReplacesTheOld(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindFinishBootstrap, CLIActor, finishBootstrap())
-	c.refuse(KindSetRecoveryRecipient, CLIActor, SetRecoveryRecipient{Recipient: "AGE-SECRET-KEY-1X"}, "no age key")
-	c.mustApply(KindSetRecoveryRecipient, CLIActor, SetRecoveryRecipient{Recipient: "age1second"})
+	if c.state.RecoveryRecipient != "" {
+		t.Errorf("a new cluster has the recovery recipient %q", c.state.RecoveryRecipient)
+	}
+	c.mustApply(KindSetRecoveryRecipient, cliActor, SetRecoveryRecipient{Recipient: "age1recovery"})
+	c.refuse(KindSetRecoveryRecipient, cliActor, SetRecoveryRecipient{Recipient: "AGE-SECRET-KEY-1X"}, "no age key")
+	c.mustApply(KindSetRecoveryRecipient, cliActor, SetRecoveryRecipient{Recipient: "age1second"})
 	if c.state.RecoveryRecipient != "age1second" {
 		t.Errorf("recovery recipient %q", c.state.RecoveryRecipient)
 	}
@@ -441,7 +452,6 @@ func TestANewRecoveryKeyReplacesTheOld(t *testing.T) {
 
 func testConfig() clusterspec.Config {
 	return clusterspec.Config{
-		Name: "prod", Endpoints: []string{"10.0.0.2"},
 		Hetzner:        clusterspec.Hetzner{Token: "hetzner.token"},
 		PrivateNetwork: "10.0.0.0/16",
 		Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.11"},
@@ -472,24 +482,24 @@ func TestApplyConfigCountsRevisionsAndReplacesTheSecrets(t *testing.T) {
 	secrets := testSecrets()
 	secrets[`registries["ghcr.io"].password`] = SealedSecret{Value: Sealed("pw"), Digest: "d3"}
 	secrets["registries.localhost.password"] = SealedSecret{Value: Sealed("pw2"), Digest: "d4"}
-	c.mustApply(KindApplyConfig, CLIActor, ApplyConfig{Spec: config, Secrets: secrets})
+	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: secrets})
 	if login := c.state.RegistryLogins()["ghcr.io"]; login.Username != "robot" || string(login.Password) != "pw" {
 		t.Errorf("login %+v", login)
 	}
 
 	delete(config.Registries, "localhost")
-	c.refuse(KindApplyConfig, CLIActor, ApplyConfig{Spec: config, Secrets: secrets},
+	c.refuse(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: secrets},
 		"a value for registries.localhost.password, which cluster.yaml does not name")
 	delete(secrets, "registries.localhost.password")
-	c.mustApply(KindApplyConfig, CLIActor, ApplyConfig{Spec: config, Secrets: secrets})
+	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: secrets})
 	if c.state.Config.Revision != 2 || len(c.state.RegistryLogins()) != 1 {
 		t.Errorf("config %+v, logins %v", c.state.Config, c.state.RegistryLogins())
 	}
-	c.refuse(KindApplyConfig, CLIActor, ApplyConfig{Spec: testConfig()}, "hetzner.token: the value is missing")
-	c.refuse(KindApplyConfig, CLIActor, ApplyConfig{
+	c.refuse(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig()}, "hetzner.token: the value is missing")
+	c.refuse(KindApplyConfig, cliActor, ApplyConfig{
 		Spec: testConfig(), Secrets: map[string]SealedSecret{"hetzner.token": {Value: Sealed("sealed")}},
 	}, "hetzner.token: the value has no digest")
-	c.refuse(KindApplyConfig, CLIActor, ApplyConfig{Secrets: secrets}, "name is required")
+	c.refuse(KindApplyConfig, cliActor, ApplyConfig{Secrets: secrets}, "storage_classes: at least one class is required")
 }
 
 func TestTheFilesNamedInClusterYAMLComeWithIt(t *testing.T) {
@@ -497,9 +507,9 @@ func TestTheFilesNamedInClusterYAMLComeWithIt(t *testing.T) {
 	config := testConfig()
 	config.ACME.CA = "pebble.pem"
 	ca := testCertificatePEM(t)
-	c.refuse(KindApplyConfig, CLIActor, ApplyConfig{Spec: config, Secrets: testSecrets()},
+	c.refuse(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: testSecrets()},
 		"file pebble.pem is named in cluster.yaml but missing")
-	c.mustApply(KindApplyConfig, CLIActor, ApplyConfig{
+	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{
 		Spec: config, Secrets: testSecrets(), Files: map[string][]byte{"pebble.pem": ca, "other.pem": ca},
 	})
 	files := c.state.Config.Files
@@ -644,9 +654,9 @@ func TestAWaitReasonChangesNothingElse(t *testing.T) {
 
 func TestAVolumeRecordKeepsItsInvariantsAndOwnMinor(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, CLIActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
 	for _, name := range []string{"pgdata", "cache"} {
-		c.mustApply(KindPutResource, CLIActor, putResource(resource.KindVolume, "default", name, testVolumeSpec()))
+		c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", name, testVolumeSpec()))
 	}
 	minor := 5
 	volume := *c.state.Volumes["default/pgdata"]
@@ -684,12 +694,12 @@ func TestAVolumeRecordKeepsItsInvariantsAndOwnMinor(t *testing.T) {
 
 func TestOnlyACopysHostMarksItsGenerationInitialized(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, CLIActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
 	c.addHost(testHost(1))
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
 	spec := testVolumeSpec()
 	spec.Replicas = 2
-	c.mustApply(KindPutResource, CLIActor, putResource(resource.KindVolume, "default", "pgdata", spec))
+	c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "pgdata", spec))
 	c.refuse(KindSetVolumeInitialized, HostActor(0), SetVolumeInitialized{Volume: "default/pgdata", DataGeneration: 1},
 		"host/0 has no copy")
 	minor := 5
@@ -727,12 +737,12 @@ func TestOnlyACopysHostMarksItsGenerationInitialized(t *testing.T) {
 
 func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, CLIActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
 	c.addHost(testHost(1))
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
 	spec := testVolumeSpec()
 	spec.Replicas = 2
-	c.mustApply(KindPutResource, CLIActor, putResource(resource.KindVolume, "default", "pgdata", spec))
+	c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "pgdata", spec))
 	minor := 5
 	volume := *c.state.Volumes["default/pgdata"]
 	volume.Minor, volume.Status = &minor, VolumeOK
@@ -764,14 +774,14 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	c.refuse(KindForgetCopy, HostActor(1), ForgetCopy{Copy: want[0]}, "no retired copy")
 
 	// a deleted volume retires its copies
-	c.mustApply(KindDeleteResource, CLIActor,
+	c.mustApply(KindDeleteResource, cliActor,
 		DeleteResource{Kind: resource.KindVolume, Namespace: "default", Name: "pgdata", Owner: OwnerCLI})
 	if !slices.Contains(c.state.Retired, RetiredCopy{Volume: "default/pgdata", DataGeneration: 2, Host: 0}) {
 		t.Errorf("retired %v after the delete", c.state.Retired)
 	}
 	// its minor stays taken while a host still has a retired copy: the
 	// copy's resource has it there
-	c.mustApply(KindPutResource, CLIActor, putResource(resource.KindVolume, "default", "other", spec))
+	c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "other", spec))
 	other := *c.state.Volumes["default/other"]
 	other.Minor, other.Status = &minor, VolumeOK
 	other.Copies = []VolumeCopy{{Host: 0, Class: "fast"}}
@@ -810,7 +820,7 @@ func TestTheAuditKeepsTheLastEntries(t *testing.T) {
 func TestSnapshotsGiveTheSameState(t *testing.T) {
 	c := newCluster(t)
 	c.addHost(testHost(1))
-	c.mustApply(KindFinishBootstrap, CLIActor, finishBootstrap())
+	c.mustApply(KindSetRecoveryRecipient, cliActor, SetRecoveryRecipient{Recipient: "age1recovery"})
 	c.mustApply(KindSetCLICutoff, HostActor(0), SetCLICutoff{Cutoff: testTime})
 	c.putShop(shopSpec())
 
@@ -849,9 +859,9 @@ func TestTwoAgentsApplyingTheSameLogAgree(t *testing.T) {
 	for _, c := range []*cluster{first, second} {
 		c.addHost(testHost(1))
 		c.addHost(testHost(2))
-		c.mustApply(KindFinishBootstrap, CLIActor, finishBootstrap())
+		c.mustApply(KindSetRecoveryRecipient, cliActor, SetRecoveryRecipient{Recipient: "age1recovery"})
 		c.mustApply(KindSetCLICutoff, HostActor(0), SetCLICutoff{Cutoff: testTime})
-		_ = c.apply(KindFinishBootstrap, CLIActor, finishBootstrap()) // refused on both
+		_ = c.apply(KindSetRecoveryRecipient, cliActor, SetRecoveryRecipient{Recipient: "no age key"}) // refused on both
 	}
 	if first.encoded() != second.encoded() {
 		t.Errorf("the states differ:\n%s\n%s", first.encoded(), second.encoded())
@@ -887,7 +897,7 @@ func gzipped(t *testing.T, plain []byte) []byte {
 func TestRemovingAHostRevokesItsCertificate(t *testing.T) {
 	c := newCluster(t)
 	c.addHost(testHost(1))
-	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Removed})
+	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed})
 	want := Revocation{At: testTime, NotAfter: testExpiry}
 	if revocation := c.state.Revoked[testHost(1).CertificateSerial]; revocation != want {
 		t.Errorf("the removed host's certificate is not revoked: %v", c.state.Revoked)
@@ -896,13 +906,13 @@ func TestRemovingAHostRevokesItsCertificate(t *testing.T) {
 
 func TestTheLastHostThatRunsStacksStays(t *testing.T) {
 	c := newCluster(t)
-	c.refuse(KindSetHostPhase, CLIActor, SetHostPhase{Host: 0, Phase: Removed}, "the last that runs stacks")
-	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 0, Phase: Draining})
+	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 0, Phase: Removed}, "the last that runs stacks")
+	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 0, Phase: Draining})
 	c.refuse(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 0, Phase: Removed}, "the last that runs stacks")
 
 	// with a second active host, either may go, but not both
 	c.addHost(testHost(1))
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
-	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 0, Phase: Removed})
-	c.refuse(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Removed}, "the last that runs stacks")
+	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 0, Phase: Removed})
+	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed}, "the last that runs stacks")
 }

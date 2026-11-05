@@ -300,7 +300,7 @@ func (s *Server) internalChanges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, each := range batch.Changes {
-		if each.Command != nil && (each.Command.Actor != state.CLIActor || !changeKinds[each.Command.Kind]) {
+		if each.Command != nil && (!state.IsCLIActor(each.Command.Actor) || !changeKinds[each.Command.Kind]) {
 			writeError(w, http.StatusForbidden, fmt.Errorf("a batch carries only the CLI's %v, not %s as %s",
 				slices.Sorted(maps.Keys(changeKinds)), each.Command.Kind, each.Command.Actor))
 			return

@@ -23,15 +23,7 @@ const FileName = "cluster.yaml"
 // how the cluster state stores the file: a Go field may be renamed, its tags
 // never.
 type Config struct {
-	// Name of the cluster, shown by the CLI; it finds the user's credentials
-	// by it.
-	Name string `yaml:"name" json:"name" jsonschema:"required"`
-	// Endpoints are the addresses of the agents the CLI asks, in turn: the
-	// hosts' public addresses. It learns no others from the cluster, so it
-	// reaches the cluster only while an endpoint answers: list every host,
-	// and add each that joins. The agents never read them.
-	Endpoints []string `yaml:"endpoints" json:"endpoints" jsonschema:"required,minItems=1"`
-	Hetzner   Hetzner  `yaml:"hetzner" json:"hetzner" jsonschema:"required"`
+	Hetzner Hetzner `yaml:"hetzner" json:"hetzner" jsonschema:"required"`
 	// Registries are the logins for private image registries, by host.
 	Registries map[string]Registry `yaml:"registries,omitempty" json:"registries,omitempty"`
 	// PrivateNetwork is the Hetzner private network the hosts share, as a

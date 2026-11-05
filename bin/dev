@@ -22,7 +22,7 @@
 #   live up [--lab <n>] [<tag>]  package, make the hosts' image unless it is
 #             current (live image), start lab n (default 1) unless it runs,
 #             make the first host with examples/hetzner from the image,
-#             bootstrap its cluster and have two more hosts join (test/live:
+#             set up its cluster and have two more hosts join (test/live:
 #             TestSetup).
 #             With a tag, on a checkout of it, the release without the test
 #             hook: the image is made anew from the release, the host
@@ -574,7 +574,7 @@ import_image() {
 
 # up_lab [<tag>]: Make the first host in the lab of use_test_lab, started
 # unless it runs, from the hosts' image (prepare_live made it); TestSetup
-# bootstraps its cluster and has two more hosts join, with OpenTofu copied
+# sets up its cluster and has two more hosts join, with OpenTofu copied
 # to /work/bin. The registry and the mail server run on until bin/dev live
 # down. With a tag, on that release instead of dist/.
 # Globals:

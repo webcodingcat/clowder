@@ -121,9 +121,9 @@ type Server struct {
 	// does not wait for them
 	streams    context.Context
 	endStreams context.CancelFunc
-	// the routes without a certificate count their tries, each pair for
-	// itself, so that strangers at the bootstrap do not block a join
-	bootstraps, joins limiter
+	// the join's routes come without a certificate, so they count their
+	// tries
+	joins limiter
 	// warnedVersions are the callers' versions checkVersion has warned
 	// about, so the log says it once
 	warnedVersions sync.Map
@@ -173,8 +173,6 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("GET /v1/internal/leader", pki.RoleHost, server.knownLeader)
 	server.handle("POST /v1/internal/beats", pki.RoleHost, server.localBeat)
 	server.handle("GET /v1/internal/beats/{id}", pki.RoleHost, server.localSilence)
-	server.handleOpen("GET /v1/bootstrap", limited(&server.bootstraps, server.bootstrapOffer))
-	server.handleOpen("POST /v1/bootstrap", limited(&server.bootstraps, server.bootstrap))
 	server.handleOpen("GET /v1/join", limited(&server.joins, server.joinOffer))
 	server.handleOpen("POST /v1/join", limited(&server.joins, server.join))
 	return server
@@ -254,13 +252,17 @@ func (s *Server) handle(pattern string, role pki.Role, handler http.HandlerFunc)
 			writeError(w, http.StatusGatewayTimeout, err)
 			return
 		}
+		// the audit: who of the CLI asked for a change, on the agent it
+		// reached; the Raft command carries the same actor
+		if role == pki.RoleCLI && r.Method != http.MethodGet {
+			s.config.Logger.Info("a CLI request", "actor", actorOf(identity), "method", r.Method, "path", r.URL.Path)
+		}
 		handler(w, r.WithContext(context.WithValue(r.Context(), identityKey{}, identity)))
 	})
 }
 
 // handleOpen registers a route callers reach without a certificate: the
-// bootstrap, which proves itself with the bootstrap key instead, and the
-// join, which proves itself with a join token.
+// join, which proves itself with a join token instead.
 func (s *Server) handleOpen(pattern string, handler http.HandlerFunc) {
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		if s.checkVersion(w, r) {
@@ -348,7 +350,7 @@ func actorOf(identity pki.Identity) string {
 	if identity.Role == pki.RoleHost {
 		return state.HostActor(state.HostID(identity.HostID))
 	}
-	return state.CLIActor
+	return state.CLIActor(identity.Name)
 }
 
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
@@ -356,7 +358,7 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	leaderID, hasLeader := s.config.Cluster.Leader()
 	s.config.Cluster.Read(func(current *state.State) {
 		status = Status{
-			Name: current.Config.Spec.Name, Revision: current.Config.Revision,
+			Name: current.ClusterName, Revision: current.Config.Revision,
 			Index: current.Index, Hosts: hostInfos(current),
 		}
 		if leader, ok := current.Hosts[leaderID]; hasLeader && ok {
@@ -585,11 +587,9 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 }
 
 // cliKinds are the commands a follower may forward for the CLI: exactly
-// those the CLI routes of the API and the bootstrap make; a kind joins when
-// its route does.
+// those the CLI routes of the API make; a kind joins when its route does.
 var cliKinds = map[string]bool{
 	state.KindApplyConfig: true, state.KindSetHostPhase: true, state.KindRestartStack: true, state.KindRequestMove: true,
-	state.KindFinishBootstrap:      true,
 	state.KindSetRecoveryRecipient: true,
 	state.KindAddJoinToken:         true,
 }
@@ -610,8 +610,8 @@ var hostKinds = map[string]bool{
 // outside: the leader's own commands (placements, the ingress) are made on
 // the leader. A host may forward for the CLI, whose certificate ended at
 // the first agent; it may never speak for another host or for the leader.
-// The cluster has no users, so there is no name a host could forge: root
-// on any host holds every key anyway.
+// It names the CLI's actor (cli/<name>) and could name another: the name
+// grants nothing, and root on any host holds every key anyway.
 func (s *Server) internalPropose(w http.ResponseWriter, r *http.Request) {
 	// not strict, unlike the CLI's requests: the agent that forwards may be
 	// of the next release, and a command may carry fields this one does not
@@ -622,7 +622,7 @@ func (s *Server) internalPropose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	caller := actorOf(identityOf(r))
-	allowed := (cmd.Actor == state.CLIActor && cliKinds[cmd.Kind]) ||
+	allowed := (state.IsCLIActor(cmd.Actor) && cliKinds[cmd.Kind]) ||
 		(cmd.Actor == caller && hostKinds[cmd.Kind])
 	if !allowed {
 		writeError(w, http.StatusForbidden, fmt.Errorf("%s may not send %s as %s", caller, cmd.Kind, cmd.Actor))

@@ -52,11 +52,11 @@ func newEncrypt(g *globals) *cobra.Command {
 				}
 				place = names.ID(namespace, name)
 			}
-			client, _, err := g.connect()
+			client, err := g.connect()
 			if err != nil {
 				return err
 			}
-			recipients, _, err := clusterRecipients(cmd.Context(), client)
+			recipients, err := clusterRecipients(cmd.Context(), client)
 			if err != nil {
 				return err
 			}
@@ -99,24 +99,22 @@ func secretName(text string) (namespace, name string, err error) {
 }
 
 // clusterRecipients asks the cluster whom every value is encrypted for: its
-// own key and the recovery key.
-func clusterRecipients(ctx context.Context, client *api.Client) ([]age.Recipient, api.Encryption, error) {
+// own key and the recovery key. A new cluster without a recovery key
+// answers 409 with what to do (api's errNoRecoveryKey).
+func clusterRecipients(ctx context.Context, client *api.Client) ([]age.Recipient, error) {
 	var encryption api.Encryption
 	if err := client.Get(ctx, "/v1/encryption", &encryption); err != nil {
-		return nil, encryption, err
-	}
-	if encryption.Recovery == "" {
-		return nil, encryption, errors.New("the cluster has no recovery key")
+		return nil, err
 	}
 	var recipients []age.Recipient
 	for _, text := range []string{encryption.Cluster, encryption.Recovery} {
 		recipient, err := age.ParseX25519Recipient(text)
 		if err != nil {
-			return nil, encryption, fmt.Errorf("the cluster's recipients: %w", err)
+			return nil, fmt.Errorf("the cluster's recipients: %w", err)
 		}
 		recipients = append(recipients, recipient)
 	}
-	return recipients, encryption, nil
+	return recipients, nil
 }
 
 // readValue reads the value to encrypt: asked for without echo on a

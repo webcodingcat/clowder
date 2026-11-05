@@ -80,17 +80,16 @@ func (l *leader) apply(kind, actor string, payload any) {
 func newLeader(t *testing.T, poolSize int64) *leader {
 	l := &leader{t: t, state: &state.State{}, changed: make(chan struct{})}
 	l.apply(state.KindBootstrap, state.LeaderActor, state.Bootstrap{
-		Keys:         state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
-		BootstrapKey: state.Sealed("j"),
+		Keys:        state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
+		ClusterName: "prod",
 		Host: state.Host{
 			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
 			PublicAddress: netip.MustParseAddr("198.51.100.2"), WGPublicKey: "wg",
 			CertificateSerial: "s0", CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
-	l.apply(state.KindApplyConfig, state.CLIActor, state.ApplyConfig{
+	l.apply(state.KindApplyConfig, state.CLIActor("admin"), state.ApplyConfig{
 		Spec: clusterspec.Config{
-			Name: "prod", Endpoints: []string{"198.51.100.2"},
 			Hetzner:        clusterspec.Hetzner{Token: "hetzner.token"},
 			PrivateNetwork: "10.0.0.0/16",
 			Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.10"},
@@ -117,7 +116,7 @@ func putResource(l *leader, kind, name string, spec any) {
 	if err != nil {
 		l.t.Fatal(err)
 	}
-	l.apply(state.KindPutResource, state.CLIActor, state.PutResource{
+	l.apply(state.KindPutResource, state.CLIActor("admin"), state.PutResource{
 		Kind: kind, Namespace: "default", Name: name, Owner: state.OwnerCLI, Spec: encoded,
 	})
 }
@@ -125,7 +124,7 @@ func putResource(l *leader, kind, name string, spec any) {
 // deleteResource deletes a resource of the namespace default.
 func deleteResource(l *leader, kind, name string) {
 	l.t.Helper()
-	l.apply(state.KindDeleteResource, state.CLIActor, state.DeleteResource{
+	l.apply(state.KindDeleteResource, state.CLIActor("admin"), state.DeleteResource{
 		Kind: kind, Namespace: "default", Name: name, Owner: state.OwnerCLI,
 	})
 }

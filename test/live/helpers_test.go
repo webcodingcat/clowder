@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/api"
+	"github.com/webcodingcat/clowder/internal/clientconfig"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
@@ -37,7 +38,6 @@ type outputs struct {
 	PublicAddress  struct{ Value string }                `json:"public_address"`
 	PrivateAddress struct{ Value string }                `json:"private_address"`
 	FloatingIP     struct{ Value string }                `json:"floating_ip"`
-	BootstrapKey   struct{ Value string }                `json:"bootstrap_key"`
 	ClusterYAML    struct{ Value map[string]any }        `json:"cluster_yaml"`
 	Hosts          struct{ Value map[string]moduleHost } `json:"hosts"`
 }
@@ -197,20 +197,15 @@ func mustClowder(t *testing.T, args ...string) string {
 func clusterDir() string { return filepath.Join(workDir, "cluster") }
 
 // cliEnvironment is the CLI's environment: the test's cluster directory,
-// and a config directory of the test's own for the credentials, so a run
-// neither finds nor overwrites those of the developer.
+// and a credentials file of the test's own, so a run neither finds nor
+// overwrites those of the developer.
 func cliEnvironment() []string {
-	return append(os.Environ(), "CLOWDER_CLUSTER="+clusterDir(), "XDG_CONFIG_HOME="+configDir())
+	return append(os.Environ(), "CLOWDER_CLUSTER="+clusterDir(), clientconfig.EnvVar+"="+credentialsFile())
 }
 
-func configDir() string { return filepath.Join(workDir, "config") }
-
-// credentialsFile is where the CLI keeps the test's credentials for the
-// cluster live, as clusterdir.CredentialsPath lays it out below the config
-// directory.
-func credentialsFile() string {
-	return filepath.Join(configDir(), "clowder", "clusters", "live", "credentials.yaml")
-}
+// credentialsFile is the test's credentials file, as ~/.clowder/config is
+// the user's.
+func credentialsFile() string { return filepath.Join(workDir, "clowder-config") }
 
 // stackDir is the directory of a stack's resources: outside the cluster
 // directory, which apply refuses.

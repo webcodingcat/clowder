@@ -44,7 +44,7 @@ func newApplyResources(g *globals) *cobra.Command {
 			slices.SortStableFunc(objects, func(a, b resource.Object) int {
 				return cmp.Compare(applyRank(a.Kind), applyRank(b.Kind))
 			})
-			client, _, err := g.connect()
+			client, err := g.connect()
 			if err != nil {
 				return err
 			}
@@ -102,7 +102,7 @@ func newGet(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			client, _, err := g.connect()
+			client, err := g.connect()
 			if err != nil {
 				return err
 			}
@@ -171,7 +171,7 @@ func newDelete(g *globals) *cobra.Command {
 				}
 				refs = []resource.Ref{{Kind: selection.kind, Namespace: selection.namespace, Name: selection.name}}
 			}
-			client, _, err := g.connect()
+			client, err := g.connect()
 			if err != nil {
 				return err
 			}

@@ -38,7 +38,7 @@ func TestTheTLSCheckLetsOnlyHostsOfTheCAThrough(t *testing.T) {
 	_, expired := hostAt(t, ca, 3, time.Now().Add(-leafLifetime-time.Hour))
 	_, notYetValid := hostAt(t, ca, 4, time.Now().Add(2*clockSkew))
 	_, user := issued(t, func(public ed25519.PublicKey) ([]byte, error) {
-		return ca.IssueCLI(public, time.Now())
+		return ca.IssueCLI(public, "alice", time.Now())
 	})
 	otherCA, err := NewCA("prod", time.Now())
 	if err != nil {
@@ -138,7 +138,7 @@ func TestHostsTalkThroughTheTLSConfigsAndOthersDoNot(t *testing.T) {
 	}
 
 	user := tlsCertificate(issued(t, func(public ed25519.PublicKey) ([]byte, error) {
-		return ca.IssueCLI(public, time.Now())
+		return ca.IssueCLI(public, "alice", time.Now())
 	}))
 	otherCA, err := NewCA("prod", time.Now())
 	if err != nil {

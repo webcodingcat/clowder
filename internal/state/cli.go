@@ -7,42 +7,20 @@ import (
 	"time"
 )
 
-// CLIActor is the CLI. A cluster has no users: whoever holds a CLI
-// certificate and cluster.yaml controls it, as with kubeadm's admin.conf.
-const CLIActor = "cli"
+// cliActorPrefix starts the actor of every CLI certificate.
+const cliActorPrefix = "cli/"
 
-// revokedKept is how long a revoked certificate stays on the list after it
-// expired: a host whose clock runs behind still takes it for valid.
-const revokedKept = 7 * 24 * time.Hour
-
-// FinishBootstrap ends the bootstrap: the CLI has its first certificate,
-// and the bootstrap key opens nothing from now on. Only a cluster in its
-// bootstrap takes it, so two bootstraps at once cannot both get in.
-type FinishBootstrap struct {
-	// RecoveryRecipient is the public half of the recovery key the
-	// bootstrap made (State.RecoveryRecipient).
-	RecoveryRecipient string `json:"recovery_recipient"`
+// CLIActor is the CLI with the name in its certificate, for the audit. A
+// cluster has no users: the name grants nothing, and whoever holds a CLI
+// certificate controls the cluster, as with kubeadm's admin.conf.
+func CLIActor(name string) string {
+	return cliActorPrefix + name
 }
 
-func applyFinishBootstrap(s *State, _ Command, payload FinishBootstrap) (func(), error) {
-	switch {
-	case !s.InBootstrap():
-		return nil, errors.New("the cluster is bootstrapped already")
-	case !strings.HasPrefix(payload.RecoveryRecipient, "age1"):
-		return nil, errors.New("the recovery key's recipient is no age key (age1...)")
-	}
-	return func() {
-		// the key is in the user data, the OpenTofu state and the metadata
-		// service; from now on it opens nothing
-		s.BootstrapKey = nil
-		s.RecoveryRecipient = payload.RecoveryRecipient
-	}, nil
-}
-
-// InBootstrap tells whether the cluster waits for its CLI: it has its first
-// host, and the bootstrap key still opens.
-func (s *State) InBootstrap() bool {
-	return s.Keys != nil && len(s.BootstrapKey) > 0
+// IsCLIActor tells whether an actor is the CLI, whatever its name: the
+// name grants nothing, so nothing here checks it (pki does, at issue).
+func IsCLIActor(actor string) bool {
+	return strings.HasPrefix(actor, cliActorPrefix) && len(actor) > len(cliActorPrefix)
 }
 
 // SetCLICutoff refuses every CLI certificate issued before Cutoff
@@ -93,6 +71,10 @@ func (s *State) serialInUse(serial string) bool {
 	}
 	return false
 }
+
+// revokedKept is how long a revoked certificate stays on the list after it
+// expired: a host whose clock runs behind still takes it for valid.
+const revokedKept = 7 * 24 * time.Hour
 
 // revoke puts a certificate on the revocation list. The list grows only
 // here, so here it also drops the certificates that expired more than

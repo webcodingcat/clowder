@@ -19,7 +19,7 @@ func newAlert(g *globals) *cobra.Command {
 		Short: "Send a test alert to every channel of cluster.yaml",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			client, _, err := g.connect()
+			client, err := g.connect()
 			if err != nil {
 				return err
 			}

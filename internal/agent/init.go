@@ -25,11 +25,16 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
+// DefaultClusterName names a cluster that init is given no name for, as
+// kubeadm's clusterName is kubernetes without one.
+const DefaultClusterName = "clowder-cluster"
+
 // InitOptions are what cloud-init gives clowderd init.
 type InitOptions struct {
-	// BootstrapKey is the key OpenTofu made; it lets the user in, once.
-	BootstrapKey string
-	Name         string
+	// ClusterName names the cluster, as kubeadm's clusterName; it checks
+	// nothing.
+	ClusterName string
+	Name        string
 	// Underlay is the server's address in the Hetzner private network.
 	Underlay netip.Addr
 	// PublicAddress is the server's public IPv4, where users reach the API.
@@ -65,11 +70,13 @@ func Init(ctx context.Context, files Files, options InitOptions, hostNetwork Hos
 		return fmt.Errorf("%s exists: this host was part of a cluster, or an init failed halfway "+
 			"(to start anew, remove all of %s)", files.raftDir(), files.Dir)
 	}
-	if options.BootstrapKey == "" || options.Name == "" || options.ServerID <= 0 {
-		return errors.New("init needs the bootstrap key, the host's name and its server ID")
+	if options.Name == "" || options.ServerID <= 0 {
+		return errors.New("init needs the host's name and its server ID")
 	}
-	if len(options.BootstrapKey) < pki.MinBootstrapKeyLength {
-		return fmt.Errorf("the bootstrap key has fewer than %d characters", pki.MinBootstrapKeyLength)
+	// the state takes only a DNS label (applyBootstrap); refused there,
+	// init would stop halfway
+	if !names.Valid(options.ClusterName) {
+		return fmt.Errorf("cluster name %q: %s", options.ClusterName, names.Rule)
 	}
 	// the state takes only a DNS label (checkNewHost); refused there, init
 	// would stop halfway
@@ -91,14 +98,14 @@ func Init(ctx context.Context, files Files, options InitOptions, hostNetwork Hos
 	}
 	host.RaftPort = cmp.Or(host.RaftPort, RaftPort)
 	host.APIPort = cmp.Or(host.APIPort, APIPort)
-	keys, hostEntry, err := createKeys(files, host)
+	keys, hostEntry, err := createKeys(files, options.ClusterName, host)
 	if err != nil {
 		return err
 	}
 	if err := hostNetwork.SetUpInterface(ctx, host.NodeAddress); err != nil {
 		return err
 	}
-	if err := bootstrapRaft(ctx, files, host, keys, hostEntry, options.BootstrapKey, logger); err != nil {
+	if err := bootstrapRaft(ctx, files, host, keys, hostEntry, options.ClusterName, logger); err != nil {
 		return err
 	}
 	// host.json last: a host with it has everything else
@@ -108,10 +115,10 @@ func Init(ctx context.Context, files Files, options InitOptions, hostNetwork Hos
 // createKeys makes the cluster's keys and this host's, writes the host's to
 // disk and returns what goes into the state. The functions it calls say in
 // their errors what failed.
-func createKeys(files Files, host Host) (state.ClusterKeys, state.Host, error) {
+func createKeys(files Files, clusterName string, host Host) (state.ClusterKeys, state.Host, error) {
 	var keys state.ClusterKeys
 	now := time.Now()
-	ca, err := pki.NewCA(host.Name, now)
+	ca, err := pki.NewCA(clusterName, now)
 	if err != nil {
 		return keys, state.Host{}, err
 	}
@@ -196,7 +203,7 @@ func (f Files) writeKeys(caPEM, certificatePEM, hostKeyPEM []byte, wireGuardKey 
 
 // bootstrapRaft starts the Raft group and writes the bootstrap command.
 func bootstrapRaft(ctx context.Context, files Files, host Host, keys state.ClusterKeys, entry state.Host,
-	bootstrapKey string, logger *slog.Logger,
+	clusterName string, logger *slog.Logger,
 ) error {
 	credentials, err := files.readCredentials()
 	if err != nil {
@@ -216,12 +223,8 @@ func bootstrapRaft(ctx context.Context, files Files, host Host, keys state.Clust
 	if err := waitForLead(ctx, node); err != nil {
 		return err
 	}
-	sealedKey, err := credentials.dataKey.Seal([]byte(bootstrapKey))
-	if err != nil {
-		return err
-	}
 	cmd, err := state.NewCommand(state.KindBootstrap, time.Now(), state.HostActor(host.ID),
-		state.Bootstrap{Keys: keys, BootstrapKey: sealedKey, Host: entry})
+		state.Bootstrap{Keys: keys, ClusterName: clusterName, Host: entry})
 	if err != nil {
 		return err
 	}

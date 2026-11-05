@@ -13,7 +13,7 @@ import (
 
 func newCluster(g *globals) *cobra.Command {
 	cluster := &cobra.Command{Use: "cluster", Short: "The cluster as a whole"}
-	cluster.AddCommand(newStatus(g), newBootstrap(g), newApply(g), newDiff(g), newSchema())
+	cluster.AddCommand(newStatus(g), newApply(g), newDiff(g), newSchema())
 	return cluster
 }
 
@@ -23,7 +23,7 @@ func newStatus(g *globals) *cobra.Command {
 		Short: "Show the cluster, its leader and its hosts",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			client, _, err := g.connect()
+			client, err := g.connect()
 			if err != nil {
 				return err
 			}
@@ -80,11 +80,15 @@ func newApply(g *globals) *cobra.Command {
 		Short: "Send cluster.yaml to the cluster",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			client, directory, err := g.connect()
+			directory, err := g.loadDirectory()
 			if err != nil {
 				return err
 			}
 			apply, err := localApply(directory, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			client, err := g.connect()
 			if err != nil {
 				return err
 			}
@@ -110,11 +114,15 @@ func newDiff(g *globals) *cobra.Command {
 			"anew with the same value is no change.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			client, directory, err := g.connect()
+			directory, err := g.loadDirectory()
 			if err != nil {
 				return err
 			}
 			apply, err := localApply(directory, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			client, err := g.connect()
 			if err != nil {
 				return err
 			}

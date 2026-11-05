@@ -218,7 +218,8 @@ func hostsToRetire(current *state.State, self Host) ([]*state.Host, error) {
 }
 
 // ask refuses while another host knows a leader or answers without saying,
-// then says what recover does and asks for the cluster's name.
+// then says what recover does and asks for this host's name: whoever types
+// it knows which host goes on alone.
 func (r recovery) ask(ctx context.Context, current *state.State, gone []*state.Host, remap state.Command) error {
 	var notReached []string
 	for _, other := range gone {
@@ -241,14 +242,14 @@ func (r recovery) ask(ctx context.Context, current *state.State, gone []*state.H
 	if _, err := io.WriteString(r.options.Out, text); err != nil || r.options.Yes {
 		return err
 	}
-	if _, err := fmt.Fprintf(r.options.Out, "This cannot be undone. Type the cluster's name to go on: "); err != nil {
+	if _, err := fmt.Fprintf(r.options.Out, "This cannot be undone. Type this host's name to go on: "); err != nil {
 		return err
 	}
 	line, err := bufio.NewReader(r.options.In).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) { // at EOF the line is what was typed
 		return fmt.Errorf("read the confirmation: %w", err)
 	}
-	if strings.TrimSpace(line) != current.Config.Spec.Name {
+	if strings.TrimSpace(line) != r.host.Name {
 		return errors.New("not confirmed; nothing changed")
 	}
 	return nil
@@ -266,7 +267,7 @@ func (r recovery) describe(current *state.State, gone []*state.Host, notReached 
 	}
 	var text strings.Builder
 	fmt.Fprintf(&text, "Recover cluster %s with host %s alone. These hosts are powered off for good and their "+
-		"servers labeled clowder-retired:\n", current.Config.Spec.Name, r.host.Name)
+		"servers labeled clowder-retired:\n", current.ClusterName, r.host.Name)
 	for _, other := range gone {
 		fmt.Fprintf(&text, "  %s (server %d, %s)\n", other.Name, other.ServerID, other.Phase)
 	}

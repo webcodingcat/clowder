@@ -9,6 +9,7 @@ package live
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -140,7 +141,7 @@ const baselineConfigFile = "baseline-config.json"
 
 // baseline checks where every scenario starts, so each runs alone and in any
 // order (bin/dev live run -run <test>): the hosts that bin/dev live up made,
-// its cluster bootstrapped with a leader and cluster.yaml applied as
+// its cluster set up with a leader and cluster.yaml applied as
 // TestSetup left it, the first host active and the others drained (so
 // stacks start on the first), three voters, no stack or volume in any
 // namespace, and no fault in the lab. A scenario that fails leaves what it
@@ -152,7 +153,7 @@ func baseline(t *testing.T) (host, outputs) {
 	watchHost(t, server)
 	want, err := os.ReadFile(filepath.Join(workDir, baselineConfigFile))
 	if err != nil {
-		t.Fatalf("the cluster is not bootstrapped (bin/dev live up does it): %v", err)
+		t.Fatalf("the cluster is not set up (bin/dev live up does it): %v", err)
 	}
 	server.must(t, "test -e "+setupMarker+" && systemctl is-active clowderd")
 	if status := clusterStatus(t); strings.Contains(status, "leader none") {
@@ -245,7 +246,7 @@ func resourcesInAllNamespaces(t *testing.T, kind string) []string {
 	return names
 }
 
-// TestSetup makes the first host, bootstraps its cluster and has two more
+// TestSetup makes the first host, sets up its cluster and has two more
 // hosts join: the baseline of the other scenarios. bin/dev live up runs it,
 // once per cluster.
 func TestSetup(t *testing.T) {
@@ -254,7 +255,7 @@ func TestSetup(t *testing.T) {
 	watchHost(t, server)
 	runSteps(t, []step{
 		{"the setup makes the first host", func(t *testing.T) { waitForSetup(t, server) }},
-		{"the user bootstraps and applies the cluster", func(t *testing.T) { bootstrap(t, server, tofu) }},
+		{"the user gets credentials over SSH and applies the cluster", func(t *testing.T) { setUpCluster(t, server, tofu) }},
 		{"two hosts join with a token each", growToThreeHosts},
 		{"each host starts fresh, with a DRBD module for its kernel", hostsStartFresh},
 	})
@@ -314,27 +315,30 @@ func hostsStartFresh(t *testing.T) {
 func waitForSetup(t *testing.T, server host) {
 	eventually(t, setupDeadline, "clowder-setup done", server.setupReached(setupMarker))
 	server.must(t, "systemctl is-active clowderd")
-	if _, err := server.run("test -e /etc/clowder/bootstrap-key"); err == nil {
-		t.Error("the bootstrap key file is still on the host")
-	}
 	checkMemory(t, server, "idle")
 }
 
-// bootstrap gives the test the CLI's first credentials, its recovery key in a file, and
-// fills in cluster.yaml from the module's outputs, with the Hetzner token
-// and the registry's login encrypted, then applies it.
-func bootstrap(t *testing.T, server host, tofu outputs) {
-	keyFile := filepath.Join(workDir, "bootstrap-key")
-	if err := os.WriteFile(keyFile, []byte(tofu.BootstrapKey.Value), 0o600); err != nil {
+// setUpCluster gives the test the CLI's first credentials from root on the
+// first host, as over SSH, and the recovery key in a file; then it fills in
+// cluster.yaml from the module's outputs, with the Hetzner token and the
+// registry's login encrypted, and applies it.
+func setUpCluster(t *testing.T, server host, tofu outputs) {
+	// gone before, so a step run again starts as the first time: import
+	// refuses a context that is there, --recovery-out a file
+	for _, path := range []string{credentialsFile(), filepath.Join(workDir, "recovery-key")} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(clusterDir(), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	mustClowder(t, "cluster", "bootstrap", "--name", "live", "--endpoint", tofu.PublicAddress.Value,
-		"--key-file", keyFile, "--recovery-out", filepath.Join(workDir, "recovery-key"))
-	bootstrapped, err := clusterdir.Load(clusterDir())
-	if err != nil {
+	// stdout alone: must's output has the command's stderr too
+	issued := server.must(t, "clowderd credentials 2>/dev/null")
+	if _, err := clowderWithInput(strings.NewReader(issued), "config", "import", "-"); err != nil {
 		t.Fatal(err)
 	}
-	checkNothingPersonal(t, tofu.BootstrapKey.Value)
+	mustClowder(t, "recovery", "rotate", "--recovery-out", filepath.Join(workDir, "recovery-key"))
 
 	// the module's part of cluster.yaml, read strictly into the real type, so a
 	// renamed field fails here and not only in the cluster
@@ -348,8 +352,6 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	if err := decoder.Decode(&config); err != nil {
 		t.Fatalf("the module's cluster_yaml: %v", err)
 	}
-	// as bootstrapped: the CLI finds the credentials by the name
-	config.Name = bootstrapped.Config.Name
 	config.Hetzner = clusterspec.Hetzner{Token: "hetzner.token", API: os.Getenv("HCLOUD_ENDPOINT")}
 	password := pushPrivateImage(t, server)
 	registryPassword := yamlpath.Key(yamlpath.Key("registries", registry), "password")
@@ -357,8 +359,8 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 		registry: {Username: registryUser, Password: clusterspec.SecretRef(registryPassword)},
 	}
 	setClusterSecrets(t, map[string]string{"hetzner.token": os.Getenv("HCLOUD_TOKEN"), registryPassword: password})
-	writeConfig(t, config, bootstrapped.Encrypted)
-	checkNothingPersonal(t, tofu.BootstrapKey.Value, os.Getenv("HCLOUD_TOKEN"), password)
+	writeConfig(t, config, nil)
+	checkNothingPersonal(t, os.Getenv("HCLOUD_TOKEN"), password)
 
 	// HLab's API is plain http: the CLI warns about it, on stderr before the diff
 	httpWarning := "warning: hetzner.api is set: clowder uses " + os.Getenv("HCLOUD_ENDPOINT") +
@@ -369,13 +371,13 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	mustClowder(t, "cluster", "apply")
 	// another token is named, its value not
 	setClusterSecrets(t, map[string]string{"hetzner.token": "another token"})
-	writeConfig(t, config, bootstrapped.Encrypted)
+	writeConfig(t, config, nil)
 	if diff := mustClowder(t, "cluster", "diff"); diff != httpWarning+"the secret hetzner.token differs\n" {
 		t.Errorf("diff after the token changed:\n%s", diff)
 	}
 	// encrypted anew, the same token is no change
 	setClusterSecrets(t, map[string]string{"hetzner.token": os.Getenv("HCLOUD_TOKEN")})
-	writeConfig(t, config, bootstrapped.Encrypted)
+	writeConfig(t, config, nil)
 	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "nothing to apply") {
 		t.Errorf("diff after the token was encrypted anew:\n%s", diff)
 	}
@@ -385,10 +387,10 @@ func bootstrap(t *testing.T, server host, tofu outputs) {
 	}
 }
 
-// checkNothingPersonal checks what the bootstrap leaves where a repository
+// checkNothingPersonal checks what the setup leaves where a repository
 // would hold it: cluster.yaml alone in the cluster directory, none of the
-// values in clear; the credentials are in the user's config directory, for
-// the user alone.
+// values in clear; the credentials are in the user's own file, for the
+// user alone.
 func checkNothingPersonal(t *testing.T, values ...string) {
 	t.Helper()
 	entries, err := os.ReadDir(clusterDir())

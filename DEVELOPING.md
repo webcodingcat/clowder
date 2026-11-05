@@ -13,7 +13,7 @@ the package you change. This file has the whole and the rules that hold everywhe
 
 | File | Sections |
 |---|---|
-| [What users write](docs/developing/specs.md) | namespaces and names, stack specs, rendering, cluster config and directory, encrypted values |
+| [What users write](docs/developing/specs.md) | namespaces and names, stack specs, rendering, cluster config and directory, the CLI's credentials, encrypted values |
 | [The cluster](docs/developing/cluster.md) | cluster state, certificates, Raft and the data key, API and the CLI, placement |
 | [A host](docs/developing/host.md) | the agent, network, storage, containers, host check |
 | [Ingress, fencing, certificates, alerts and metrics](docs/developing/loops.md) | Traefik, Hetzner and ingress, fencing, certificates of the routes, alerts, metrics |
@@ -108,7 +108,8 @@ What follows from there:
 |---|---|
 | underlay | the Hetzner private network the hosts share (`private_network`); a host's underlay is its address there |
 | node address | a host's address in the overlay (`network.NodeAddress`); on `clowder0`, reached by other hosts through WireGuard |
-| endpoint | an address in `endpoints` of `cluster.yaml`: an agent the CLI asks, at a host's public address; the CLI learns no others |
+| endpoint | an address in `endpoints` of a context in the CLI's credentials file (`clientconfig`): an agent the CLI asks, at a host's public address or one in front of the hosts; the CLI tries them in turn and learns no others |
+| context | the way into one cluster in the CLI's credentials file (`~/.clowder/config`), as in a kubeconfig: endpoints, the CA, the CLI's key and certificate; `current_context` picks one |
 | Floating IP | the cluster's one public address; Hetzner routes it to the ingress host |
 | leader | the Raft leader among the agents; it decides (placement, failover) and commits every write |
 | voter | a host that takes part in Raft's elections; others follow the log only |
@@ -116,8 +117,8 @@ What follows from there:
 | fencing | powering a failed host's server off through Hetzner's API before its stacks start elsewhere |
 | tiebreaker | a diskless DRBD member that gives a volume with two copies its third vote |
 | active, passive | phases of a host. Active: it takes and runs stacks and may vote; the first host starts active, a host that joins becomes active, and so does one back from `recovering`. Passive: the second host of a cluster that is not yet highly available; it waits without stacks and without a vote until a third host joins (`state.MinHAHosts`), then it becomes active too |
-| actor | who sent a command: `leader`, `host/<id>` or `cli`; the cluster has no users, whoever holds the CLI's credentials controls it (as kubeadm's `admin.conf`). A host is trusted as fully as the CLI: it holds the data key and the CA's key, forwards the CLI's commands as `cli` and prints credentials for root (`clowderd credentials`), so a compromised host is a compromised cluster |
-| channel, owner | the way a resource came in: `cli` (`clowder apply`) or, later, a GitOps source; a resource's owner is the channel that made it, and only that channel changes it |
+| actor | who sent a command: `leader`, `host/<id>` or `cli/<name>`, the name in the CLI's certificate (`state.CLIActor`, `state.IsCLIActor`). The cluster has no users: the name is for the audit and grants nothing, and whoever holds a CLI certificate controls the cluster (as kubeadm's `admin.conf`). A host is trusted as fully as the CLI: it holds the data key and the CA's key, forwards the CLI's commands with their actor (and could name another) and prints credentials for root (`clowderd credentials`), so a compromised host is a compromised cluster |
+| channel, owner | the way a resource came in: `cli` (`clowder apply`, whatever the certificate's name) or, later, a GitOps source; a resource's owner is the channel that made it, and only that channel changes it. `cli` names three things apart: this channel, the role of a CLI certificate (its organizational unit) and the prefix of the CLI's actor |
 | sealed | encrypted with the cluster's data key before it goes into the state |
 | generation | of a resource: counts the changes of its spec; an apply that changes nothing does not count |
 | data generation | of a volume: part of its LV's name; grows with each new, empty LV (a volume of replicas 0 that moves, fails over or starts anew after a recover); restores (phase 3) will raise it too |
@@ -132,7 +133,7 @@ What follows from there:
 
 | Binary | Package | Runs on | Does |
 |---|---|---|---|
-| `clowder` | `cmd/clowder`, `internal/cli` | Linux, macOS, Windows | the user's CLI: reads the cluster directory, talks to an agent over mTLS |
+| `clowder` | `cmd/clowder`, `internal/cli` | Linux, macOS, Windows | the user's CLI: reads its credentials file and the cluster directory, talks to an agent over mTLS |
 | `clowderd` | `cmd/clowderd`, `internal/agent` | Linux | the agent (`run`, systemd service `clowderd`) and the host commands `check`, `init`, `join`, `credentials`, `recover` |
 
 `cmd/clowderd` has the build constraint `linux`. Both get their version from
@@ -144,7 +145,8 @@ What follows from there:
 The package layout is planned for the whole of v1; packages appear as the phases add them.
 
 - **Portable**: `cli`, `api`, `clusterspec` (`cluster.yaml`'s types and checks),
-  `clusterdir` (the cluster directory's files), `secretvalue` (values tagged
+  `clusterdir` (the cluster directory's files), `clientconfig` (the CLI's credentials
+  file and its contexts), `secretvalue` (values tagged
   `!secret`), `yamlpath` (the names of places in YAML), `pki`, `jointoken` (the tokens
   hosts join with),
   `compose`, `units`,

@@ -23,6 +23,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/buildinfo"
+	"github.com/webcodingcat/clowder/internal/clientconfig"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/pki"
@@ -81,7 +82,7 @@ func (h *oneHost) WaitCommitted(context.Context, uint64) error { return nil }
 // recoveryKeyFile is where startCluster puts the cluster's recovery key, in
 // the test's home.
 func recoveryKeyFile() string {
-	return filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "recovery-key")
+	return filepath.Join(os.Getenv("HOME"), "recovery-key")
 }
 
 // startCluster runs an agent's API with one host and writes a cluster
@@ -110,8 +111,8 @@ func startCluster(t *testing.T) string {
 
 	current := &state.State{}
 	cmd, err := state.NewCommand(state.KindBootstrap, time.Now(), state.LeaderActor, state.Bootstrap{
-		Keys:         state.ClusterKeys{CACertificate: ca.CertificatePEM(), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
-		BootstrapKey: state.Sealed("join"),
+		Keys:        state.ClusterKeys{CACertificate: ca.CertificatePEM(), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
+		ClusterName: "test",
 		Host: state.Host{
 			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
 			PublicAddress: netip.MustParseAddr("203.0.113.2"), WGPublicKey: "wg", CertificateSerial: "s0",
@@ -173,37 +174,40 @@ func startCluster(t *testing.T) string {
 	t.Cleanup(server.Close)
 
 	dir := t.TempDir()
-	// no secret in it: these commands need only the cluster's name and endpoints
+	// no secret in it: the commands of these tests do not apply it
 	config := clusterspec.Config{
-		Name: "test", Endpoints: []string{server.Listener.Addr().String()},
 		Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.11"},
 		StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 	}
 	writeYAML(t, filepath.Join(dir, clusterdir.ConfigFile), config)
 
 	cliCertificate, cliKey := issue(func(public ed25519.PublicKey) ([]byte, error) {
-		return ca.IssueCLI(public, time.Now())
+		return ca.IssueCLI(public, "alice", time.Now())
 	})
-	finish, err := state.NewCommand(state.KindFinishBootstrap, time.Now(), state.CLIActor,
-		state.FinishBootstrap{RecoveryRecipient: recovery.Recipient().String()})
+	rotate, err := state.NewCommand(state.KindSetRecoveryRecipient, time.Now(), state.CLIActor("alice"),
+		state.SetRecoveryRecipient{Recipient: recovery.Recipient().String()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := host.Propose(context.Background(), finish); err != nil {
+	if _, err := host.Propose(context.Background(), rotate); err != nil {
 		t.Fatal(err)
 	}
 	home := t.TempDir() // no credentials of the developer join in
 	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_CONFIG_HOME", home)
-	t.Setenv("AppData", home)
+	t.Setenv("USERPROFILE", home) // the home on Windows
+	t.Setenv(clientconfig.EnvVar, "")
 	if err := os.WriteFile(recoveryKeyFile(), []byte(recovery.String()+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err = clusterdir.WriteCredentials(config.Name, clusterdir.Credentials{
+	var credentials clientconfig.Config
+	err = credentials.Add(clientconfig.Context{
+		Name: "test", Endpoints: []string{server.Listener.Addr().String()},
 		CA: string(ca.CertificatePEM()), Certificate: string(cliCertificate), Key: string(cliKey),
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := clientconfig.Write(filepath.Join(home, ".clowder", "config"), credentials); err != nil {
 		t.Fatal(err)
 	}
 	return dir

@@ -1,36 +1,48 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"time"
 
 	"filippo.io/age"
 
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Credentials come from root on a host, as kubeadm's admin.conf does:
-// clowderd credentials makes a key and asks its own agent, with the host's
-// certificate, for a CLI certificate (POST /v1/internal/credentials). The
-// cluster lists no CLI certificates; with RevokeOlder, the agent also
-// commits the new certificate's start as the cutoff (set-cli-cutoff), and
-// every agent refuses the CLI certificates issued before it.
+// Credentials come from root on a host, as kubeadm's admin.conf does, the
+// first ones too: clowderd credentials makes a key and asks its own agent,
+// with the host's certificate, for a CLI certificate (POST
+// /v1/internal/credentials). The CA is trusted through SSH. The cluster
+// lists no CLI certificates; with RevokeOlder, the agent also commits the
+// new certificate's start as the cutoff (set-cli-cutoff), and every agent
+// refuses the CLI certificates issued before it.
 
-// CredentialsRequest asks for a CLI certificate for a public key.
+// CredentialsRequest asks for a CLI certificate for a public key, with a
+// name for the audit (pki.DefaultCLIName without one).
 type CredentialsRequest struct {
 	PublicKey   []byte `json:"public_key"` // Ed25519
+	Name        string `json:"name"`
 	RevokeOlder bool   `json:"revoke_older"`
 }
 
-// CredentialsAnswer is the new CLI certificate and the CA to trust.
+// CredentialsAnswer is the new CLI certificate and the CA to trust, with
+// what names the context: the cluster's name and the endpoints.
 type CredentialsAnswer struct {
 	CACertificate string `json:"ca_certificate"`
 	Certificate   string `json:"certificate"`
+	ClusterName   string `json:"cluster_name"`
+	// Endpoints are the public addresses of the hosts that are not
+	// removed, as the state knows them now.
+	Endpoints []string `json:"endpoints"`
 }
 
 // internalCredentials issues a CLI certificate for root on a host, and
@@ -50,7 +62,12 @@ func (s *Server) internalCredentials(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	certificatePEM, err := ca.IssueCLI(ed25519.PublicKey(request.PublicKey), time.Now())
+	name := cmp.Or(request.Name, pki.DefaultCLIName)
+	if !names.Valid(name) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("CLI name %q: %s", name, names.Rule))
+		return
+	}
+	certificatePEM, err := ca.IssueCLI(ed25519.PublicKey(request.PublicKey), name, time.Now())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -84,10 +101,40 @@ func (s *Server) internalCredentials(w http.ResponseWriter, r *http.Request) {
 		s.config.Logger.Warn("CLI certificates issued before the new one are refused from now on",
 			"host", identityOf(r).Name, "cutoff", certificate.NotBefore)
 	}
-	s.config.Logger.Info("issued a CLI certificate", "host", identityOf(r).Name)
-	writeJSON(w, http.StatusOK, CredentialsAnswer{
-		CACertificate: string(ca.CertificatePEM()), Certificate: string(certificatePEM),
+	s.config.Logger.Info("issued a CLI certificate", "host", identityOf(r).Name, "actor", state.CLIActor(name))
+	answer := CredentialsAnswer{CACertificate: string(ca.CertificatePEM()), Certificate: string(certificatePEM)}
+	s.config.Cluster.Read(func(current *state.State) {
+		answer.ClusterName = current.ClusterName
+		// without a port: the client adds the API's (Address). A host that
+		// is down now may be back later, and costs the CLI its connect
+		// timeout once per command (the client starts with the endpoint
+		// that answered last), so every host that is not removed counts.
+		for _, id := range slices.Sorted(maps.Keys(current.Hosts)) {
+			if host := current.Hosts[id]; host.Phase != state.Removed {
+				answer.Endpoints = append(answer.Endpoints, host.PublicAddress.String())
+			}
+		}
 	})
+	writeJSON(w, http.StatusOK, answer)
+}
+
+// authority opens the cluster CA from the state with the data key.
+func (s *Server) authority() (*pki.CA, error) {
+	var keys *state.ClusterKeys
+	s.config.Cluster.Read(func(current *state.State) {
+		if current.Keys != nil {
+			copied := *current.Keys
+			keys = &copied
+		}
+	})
+	if keys == nil {
+		return nil, state.ErrNotBootstrapped
+	}
+	keyPEM, err := s.config.Keys.Open(keys.CAKey)
+	if err != nil {
+		return nil, fmt.Errorf("open the CA key: %w", err)
+	}
+	return pki.LoadCA(keys.CACertificate, keyPEM)
 }
 
 // cliCutoffPassed tells whether a CLI certificate that starts at notBefore

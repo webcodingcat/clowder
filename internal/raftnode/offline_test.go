@@ -32,7 +32,7 @@ func TestTheStateIsReadOnlyWhileTheAgentIsStopped(t *testing.T) {
 	if err := node.raft.Snapshot().Error(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := node.Propose(ctx, finishBootstrap(t)); err != nil {
+	if _, err := node.Propose(ctx, setRecovery(t)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ReadState(dir); err == nil || !strings.Contains(err.Error(), "stop clowderd.service first") {
@@ -71,7 +71,7 @@ func TestARecoveredMemberLeadsAloneWithItsState(t *testing.T) {
 	if _, err := nodes[0].Propose(ctx, bootstrapCommand(t)); err != nil {
 		t.Fatal(err)
 	}
-	index, err := nodes[0].Propose(ctx, finishBootstrap(t))
+	index, err := nodes[0].Propose(ctx, setRecovery(t))
 	if err != nil {
 		t.Fatal(err)
 	}

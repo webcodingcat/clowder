@@ -1,7 +1,7 @@
-// Package clusterdir reads a cluster directory (cluster.yaml, whose types
-// and checks are clusterspec's, with its values encrypted in it) and the
-// user's credentials, which live apart from it in the user's config
-// directory. It is portable (Linux, macOS, Windows).
+// Package clusterdir reads a cluster directory: cluster.yaml, whose types
+// and checks are clusterspec's, with its values encrypted in it. The
+// user's credentials live apart from it (clientconfig). It is portable
+// (Linux, macOS, Windows).
 package clusterdir
 
 import (
@@ -39,9 +39,14 @@ type Directory struct {
 // Find returns the cluster directory: the flag if set, else $CLOWDER_CLUSTER,
 // else the working directory if it holds a cluster.yaml.
 func Find(flag string) (string, error) {
-	dir, err := Target(flag)
-	if err != nil || flag != "" || os.Getenv(EnvVar) != "" {
-		return dir, err
+	for _, candidate := range []string{flag, os.Getenv(EnvVar)} {
+		if candidate != "" {
+			return candidate, nil
+		}
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("find the cluster directory: %w", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ConfigFile)); err != nil {
 		return "", fmt.Errorf("no cluster directory: use --cluster, set %s or run where %s is",
@@ -53,9 +58,9 @@ func Find(flag string) (string, error) {
 // Load reads cluster.yaml in dir: it takes the values tagged !secret out,
 // checks that they stand exactly where cluster.yaml may hold a secret
 // (clusterspec.SecretPlaces), and decodes the rest strictly. It does not
-// run clusterspec.Check: a cluster.yaml that is not complete yet, as the
-// bootstrap writes it, still names the cluster for the commands that need
-// only its name and endpoints. cluster apply and diff check it.
+// run clusterspec.Check: a cluster.yaml is written bit by bit, the values
+// that secret encrypt --cluster-yaml prints before the rest. cluster apply
+// and diff check it.
 func Load(dir string) (*Directory, error) {
 	content, err := os.ReadFile(filepath.Join(dir, ConfigFile))
 	if err != nil {
@@ -115,8 +120,10 @@ func checkSecretPlaces(config clusterspec.Config, encrypted map[string]string) e
 // read, with what took their place: a cluster.yaml written for one of them
 // fails with the way forward, not only with an unknown field.
 var replacedKeys = map[string]string{
-	"hoster":  "hetzner, with its token and api (there is no type any more)",
-	"network": "private_network",
+	"hoster":    "write hetzner, with its token and api (there is no type any more)",
+	"network":   "write private_network",
+	"name":      "clowderd init --cluster-name names the cluster",
+	"endpoints": "your credentials name the endpoints (clowder config get-contexts)",
 }
 
 // checkReplacedKeys refuses a document that has one of replacedKeys.
@@ -132,7 +139,7 @@ func checkReplacedKeys(document *yaml.Node) error {
 	for index := 0; index+1 < len(mapping.Content); index += 2 {
 		key := mapping.Content[index].Value
 		if replacement, ok := replacedKeys[key]; ok {
-			problems = append(problems, fmt.Sprintf("line %d: %s is gone; write %s",
+			problems = append(problems, fmt.Sprintf("line %d: %s is gone; %s",
 				mapping.Content[index].Line, key, replacement))
 		}
 	}

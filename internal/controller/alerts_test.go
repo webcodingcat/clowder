@@ -56,7 +56,7 @@ func newTestAlerts(t *testing.T) (*Alerts, *leader, *fakeChannel, *fakeChannel) 
 		{Type: "webhook", URL: "alerts.channels[0].url"},
 		{Type: "discord", Webhook: "alerts.channels[1].webhook", MinSeverity: clusterspec.SeverityCritical},
 	}}
-	l.apply(state.KindApplyConfig, state.CLIActor, state.ApplyConfig{
+	l.apply(state.KindApplyConfig, state.CLIActor("admin"), state.ApplyConfig{
 		Spec: config,
 		Secrets: map[string]state.SealedSecret{
 			"hetzner.token":              {Value: state.Sealed("t"), Digest: "d"},
@@ -166,7 +166,7 @@ func TestTheConditionsOfGoneStacksAndHostsAreForgotten(t *testing.T) {
 	}
 	deleteResource(l, resource.KindStack, "shop")
 	withServers(l) // the last host that runs stacks cannot go
-	l.apply(state.KindSetHostPhase, state.CLIActor, state.SetHostPhase{Host: 0, Phase: state.Removed})
+	l.apply(state.KindSetHostPhase, state.CLIActor("admin"), state.SetHostPhase{Host: 0, Phase: state.Removed})
 	alerts.pass(context.Background())
 	for _, key := range []string{shop, node0} {
 		if _, held := alerts.conditions.Since(key); held || alerts.conditions.Seen(key) {

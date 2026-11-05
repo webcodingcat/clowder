@@ -16,14 +16,18 @@ the others. How to use it is in the main [README](../../README.md#getting-starte
   `admin_cidrs` names who reaches them. It takes no `0.0.0.0/0`. HTTP and HTTPS are open to
   everyone (Traefik, and the ACME CA's checks); a port your stacks publish opens with
   `published_ports` (`["udp/9987"]`).
-- **The bootstrap key** gives the CLI its first credentials, once (`clowder cluster bootstrap`); after
-  that it opens nothing. It is in the OpenTofu state and the first server's user data,
-  which root reads from cloud-init's cache and the metadata service hands to any process
-  that reaches it. Once `clowderd` runs, its rules close the service to the host and its
-  containers, but at boot cloud-init reads it before `clowderd` starts. So bootstrap
-  soon after the first host is up. The setup reads the service once, keeps what it needs
-  in `/var/lib/clowder-setup` (the private networks only once they list an address),
-  and deletes its own copy of the key in `/etc/clowder`.
+- **The first credentials** come over SSH from root on the first host, as kubeadm's
+  `admin.conf` does: `ssh root@<public_address> clowderd credentials | clowder config
+  import -`. SSH is what you trust the cluster's CA by; nothing secret is in the first
+  host's user data. `cluster_name` names the cluster (`clowderd init --cluster-name`),
+  and so the context of the credentials; `name` is the first host's name and the prefix
+  of the module's resources at Hetzner, which the cluster never sees.
+- **The user data** of a joining host holds its join token, which root reads from
+  cloud-init's cache and the metadata service hands to any process that reaches it.
+  Once `clowderd` runs, its rules close the service to the host and its containers.
+  The setup reads the service once, keeps what it needs in `/var/lib/clowder-setup`
+  (the private networks only once they list an address), and deletes its own copy of
+  the token in `/etc/clowder`.
 - **More hosts** join with a token each: `clowder host join-token` prints one, which goes
   into `join_tokens` under the host's name, and the host's name into `hosts`. A token
   opens once and expires (an hour by default, `--ttl` up to a day), so a host made later

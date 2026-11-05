@@ -75,10 +75,23 @@ func (s *Server) cluster(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) encryption(w http.ResponseWriter, _ *http.Request) {
 	identity, recovery, err := s.recipients()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeError(w, recipientsStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, Encryption{Cluster: identity.Recipient().String(), Recovery: recovery.String()})
+}
+
+// errNoRecoveryKey is the answer of a new cluster before its first
+// clowder recovery rotate: nothing can be encrypted for it yet.
+var errNoRecoveryKey = errors.New("the cluster has no recovery key yet: make one with clowder recovery rotate")
+
+// recipientsStatus is the status for an error of recipients: a cluster
+// without a recovery key is a state the user ends, not a fault.
+func recipientsStatus(err error) int {
+	if errors.Is(err, errNoRecoveryKey) {
+		return http.StatusConflict
+	}
+	return http.StatusInternalServerError
 }
 
 // recipients are the cluster's age key, which opens the values, and the
@@ -91,7 +104,7 @@ func (s *Server) recipients() (*age.X25519Identity, *age.X25519Recipient, error)
 	var recovery string
 	s.config.Cluster.Read(func(current *state.State) { recovery = current.RecoveryRecipient })
 	if recovery == "" {
-		return nil, nil, errors.New("the cluster has no recovery key")
+		return nil, nil, errNoRecoveryKey
 	}
 	recoveryRecipient, err := age.ParseX25519Recipient(recovery)
 	if err != nil {
@@ -134,7 +147,7 @@ func (s *Server) rekey(w http.ResponseWriter, r *http.Request) {
 	}
 	identity, recoveryRecipient, err := s.recipients()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeError(w, recipientsStatus(err), err)
 		return
 	}
 	answer := RekeyAnswer{Values: make([]string, len(request.Values))}
@@ -213,7 +226,7 @@ func (s *Server) clusterIdentity() (*age.X25519Identity, error) {
 		}
 	})
 	if sealed == nil {
-		return nil, errors.New("the cluster is not bootstrapped yet")
+		return nil, state.ErrNotBootstrapped
 	}
 	opened, err := s.config.Keys.Open(sealed)
 	if err != nil {

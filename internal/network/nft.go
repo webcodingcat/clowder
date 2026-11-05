@@ -18,8 +18,8 @@ var (
 	Resolver = netip.MustParseAddr("169.254.77.53")
 	// Overlay holds the node addresses.
 	Overlay = clusterspec.Overlay
-	// metadataService is Hetzner's metadata API: its user data holds the
-	// bootstrap key, so neither containers nor the host's own processes
+	// metadataService is Hetzner's metadata API: a joining host's user data
+	// holds its join token, so neither containers nor the host's own processes
 	// (Traefik in the host's network) may reach it.
 	metadataService = netip.MustParseAddr("169.254.169.254")
 )

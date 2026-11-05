@@ -37,7 +37,7 @@ func TestTheExampleDirectoryLoadsWithItsValuesApart(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := directory.Config
-	if config.Name != "prod" || config.Ingress.FloatingIP != "198.51.100.7" || config.Hetzner.Token != "hetzner.token" {
+	if config.Ingress.FloatingIP != "198.51.100.7" || config.Hetzner.Token != "hetzner.token" {
 		t.Errorf("config: %+v", config)
 	}
 	if config.StorageClasses["any"].Fallback[0] != "fast" || config.Priorities.Categories["high"] != 700 {
@@ -81,16 +81,20 @@ func TestASecretStandsOnlyWhereOneMay(t *testing.T) {
 }
 
 func TestMisspeltKeysAreRefused(t *testing.T) {
-	dir := withConfig(t, func(content string) string { return strings.Replace(content, "endpoints:", "endpoint:", 1) })
-	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "endpoint") {
-		t.Errorf("want an error about endpoint, got %v", err)
+	dir := withConfig(t, func(content string) string {
+		return strings.Replace(content, "private_network:", "privat_network:", 1)
+	})
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "privat_network") {
+		t.Errorf("want an error about privat_network, got %v", err)
 	}
 }
 
 func TestAKeyOfAnEarlierReleaseSaysWhatTookItsPlace(t *testing.T) {
 	for _, test := range []struct{ old, earlier, want string }{
-		{"hetzner:\n", "hoster:\n  type: hetzner\n", "line 3: hoster is gone; write hetzner, with its token and api"},
+		{"hetzner:\n", "hoster:\n  type: hetzner\n", "line 1: hoster is gone; write hetzner, with its token and api"},
 		{"private_network:", "network:", "network is gone; write private_network"},
+		{"hetzner:\n", "name: prod\nhetzner:\n", "name is gone; clowderd init --cluster-name names the cluster"},
+		{"hetzner:\n", "endpoints: [203.0.113.10]\nhetzner:\n", "endpoints is gone; your credentials name the endpoints"},
 	} {
 		dir := withConfig(t, func(content string) string { return strings.Replace(content, test.old, test.earlier, 1) })
 		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), test.want) {
@@ -126,7 +130,7 @@ func TestTheSchemaDescribesClusterYAML(t *testing.T) {
 	if err := json.Unmarshal(encoded, &schema); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"name", "endpoints", "storage_classes", "priorities", "alerts", "private_network", "registries"} {
+	for _, key := range []string{"hetzner", "storage_classes", "priorities", "alerts", "private_network", "registries"} {
 		if _, ok := schema.Properties[key]; !ok {
 			t.Errorf("schema lacks %s", key)
 		}

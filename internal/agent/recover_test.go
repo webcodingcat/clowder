@@ -46,7 +46,7 @@ func lostCluster(t *testing.T) (Files, *hetznertest.API) {
 	loopback := netip.MustParseAddr("127.0.0.1")
 	files := Files{Dir: t.TempDir()}
 	err := Init(context.Background(), files, InitOptions{
-		BootstrapKey: testBootstrapKey, Name: "node0", Underlay: loopback,
+		ClusterName: testClusterName, Name: "node0", Underlay: loopback,
 		PublicAddress: netip.MustParseAddr("198.51.100.2"), ServerID: 1000001,
 		NodeAddress: loopback, RaftPort: freePort(t), APIPort: freePort(t),
 	}, &fakeNetwork{}, logger)
@@ -89,9 +89,8 @@ func lostCluster(t *testing.T) (Files, *hetznertest.API) {
 			t.Fatalf("%s: %v", kind, err)
 		}
 	}
-	commit(state.KindApplyConfig, state.CLIActor, state.ApplyConfig{
+	commit(state.KindApplyConfig, state.CLIActor("admin"), state.ApplyConfig{
 		Spec: clusterspec.Config{
-			Name: "prod", Endpoints: []string{"198.51.100.2"},
 			Hetzner:        clusterspec.Hetzner{Token: "hetzner.token", API: project.URL},
 			PrivateNetwork: "127.0.0.0/8",
 			Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.10"},
@@ -103,7 +102,7 @@ func lostCluster(t *testing.T) (Files, *hetznertest.API) {
 		name := "node" + string(rune('0'+id))
 		underlay, public := netip.AddrFrom4([4]byte{127, 0, 0, byte(id + 2)}), netip.AddrFrom4([4]byte{198, 51, 100, byte(id + 2)})
 		project.AddServer(40+int64(id), underlay, public)
-		commit(state.KindAddJoinToken, state.CLIActor, state.AddJoinToken{
+		commit(state.KindAddJoinToken, state.CLIActor("admin"), state.AddJoinToken{
 			ID: name, Hash: strings.Repeat("ab", 32), TTL: time.Hour,
 		})
 		commit(state.KindAddHost, state.LeaderActor, state.AddHost{Token: name, Host: state.Host{
@@ -133,7 +132,7 @@ func TestRecoverRetiresTheOthersAndGoesOnAlone(t *testing.T) {
 	driver := &recordedStorage{}
 	var service []string
 	var out bytes.Buffer
-	options := RecoverOptions{In: strings.NewReader("prod\n"), Out: &out}
+	options := RecoverOptions{In: strings.NewReader("node0\n"), Out: &out}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if err := Recover(context.Background(), files, recoverParts(driver, &service), options, logger); err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
@@ -146,7 +145,7 @@ func TestRecoverRetiresTheOthersAndGoesOnAlone(t *testing.T) {
 	if !slices.Equal(service, []string{"stop", "start"}) || len(driver.dropped) != 1 || !slices.Equal(driver.dropped[0], []int{1, 2}) {
 		t.Errorf("service %q, dropped peers %v", service, driver.dropped)
 	}
-	for _, text := range []string{"node1 (server 41, active)", "Type the cluster's name", "only host now"} {
+	for _, text := range []string{"node1 (server 41, active)", "Type this host's name", "Recover cluster prod", "only host now"} {
 		if !strings.Contains(out.String(), text) {
 			t.Errorf("the output lacks %q:\n%s", text, out.String())
 		}
@@ -181,12 +180,12 @@ func TestRecoverChangesNothingWhenItIsRefused(t *testing.T) {
 		name, answer, want string
 		knows              knowsLeader
 	}{
-		{"another host knows a leader", "prod\n", "host node2 knows a leader", knowsIf(2, nil)},
+		{"another host knows a leader", "node0\n", "host node2 knows a leader", knowsIf(2, nil)},
 		{
-			"another host answers without saying", "prod\n", "host node1 answers, but not whether it knows a leader",
+			"another host answers without saying", "node0\n", "host node1 answers, but not whether it knows a leader",
 			knowsIf(-1, errors.New("certificate refused")),
 		},
-		{"the cluster's name is not typed", "test\n", "not confirmed", knowsIf(-1, nil)},
+		{"the host's name is not typed", "prod\n", "not confirmed", knowsIf(-1, nil)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			files, project := lostCluster(t)

@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"net/http"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -86,7 +87,7 @@ func TestRevokeOlderLocksOutEveryCLICertificateBeforeTheNewOne(t *testing.T) {
 	// issued an hour before: certificates start a clock skew back, and one of
 	// the same second would stay valid
 	stolen := cluster.certificate(func(public ed25519.PublicKey) ([]byte, error) {
-		return cluster.ca.IssueCLI(public, time.Now().Add(-time.Hour))
+		return cluster.ca.IssueCLI(public, "alice", time.Now().Add(-time.Hour))
 	})
 	// the follower's fake state does not follow the leader's: it applies the
 	// cutoff a moment after the leader, and only then answers
@@ -176,17 +177,57 @@ func TestTheCLIRotatesTheRecoveryKey(t *testing.T) {
 	}
 }
 
-func TestTheBootstrapTakesOnlySoManyTries(t *testing.T) {
+func TestCredentialsNameTheCLIAndTheCluster(t *testing.T) {
 	cluster := newTestCluster(t)
 	cluster.withRealCA()
-	for try := range triesPerSender + 1 {
-		request, err := http.NewRequest(http.MethodGet, "https://"+cluster.endpoint(0)+"/v1/bootstrap", nil)
+	host := cluster.client(cluster.hostCertificate(0), testVersion, 0)
+	key, err := pki.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ask := func(name string) (CredentialsAnswer, error) {
+		var answer CredentialsAnswer
+		err := host.Act(context.Background(), "/v1/internal/credentials",
+			CredentialsRequest{PublicKey: key.Public().(ed25519.PublicKey), Name: name}, &answer)
+		return answer, err
+	}
+	for name, want := range map[string]string{"": pki.DefaultCLIName, "alice": "alice"} {
+		answer, err := ask(name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// the test's join keys are not really sealed, so every offer fails
-		// with 500; this test checks only which tries get 429
-		err = send(uncheckedClient(DefaultConnectTimeout), request, &BootstrapOffer{})
+		certificate, err := pki.ParseCertificate([]byte(answer.Certificate))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if certificate.Subject.CommonName != want || certificate.Subject.OrganizationalUnit[0] != string(pki.RoleCLI) {
+			t.Errorf("name %q: the certificate's subject is %v", name, certificate.Subject)
+		}
+		if lifetime := time.Until(certificate.NotAfter); lifetime < 364*24*time.Hour || lifetime > 366*24*time.Hour {
+			t.Errorf("name %q: the certificate lasts %v, not a year", name, lifetime)
+		}
+		// every host that is not removed, in the order of their IDs
+		if answer.ClusterName != "prod" || !slices.Equal(answer.Endpoints, []string{"203.0.113.2", "203.0.113.3"}) {
+			t.Errorf("name %q: cluster %q, endpoints %v", name, answer.ClusterName, answer.Endpoints)
+		}
+	}
+	if _, err := ask("Alice Smith"); statusOf(err) != http.StatusBadRequest {
+		t.Errorf("a name that is no DNS label: want 400, got %v", err)
+	}
+}
+
+func TestTheJoinTakesOnlySoManyTries(t *testing.T) {
+	cluster := newTestCluster(t)
+	cluster.withRealCA()
+	for try := range triesPerSender + 1 {
+		request, err := http.NewRequest(http.MethodGet, "https://"+cluster.endpoint(0)+"/v1/join?token=unknown", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set(VersionHeader, testVersion)
+		// no token is open, so every offer fails; this test checks only
+		// which tries get 429
+		err = send(uncheckedClient(DefaultConnectTimeout), request, &JoinOffer{})
 		switch {
 		case try < triesPerSender && statusOf(err) == http.StatusTooManyRequests:
 			t.Fatalf("try %d was refused under the limit", try+1)

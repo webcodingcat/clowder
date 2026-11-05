@@ -51,7 +51,7 @@ func (f *fakeJoins) refuse(why error) {
 func (c *testCluster) openToken(token jointoken.Token) {
 	c.t.Helper()
 	for _, cluster := range c.clusters {
-		cmd, err := state.NewCommand(state.KindAddJoinToken, time.Now(), state.CLIActor,
+		cmd, err := state.NewCommand(state.KindAddJoinToken, time.Now(), state.CLIActor("admin"),
 			state.AddJoinToken{ID: token.ID, Hash: token.Hash(), TTL: time.Hour})
 		if err != nil {
 			c.t.Fatal(err)
@@ -223,24 +223,4 @@ func TestARefusedRemovalMovesNoLead(t *testing.T) {
 			t.Error("the lead moved for a removal that was refused")
 		}
 	})
-}
-
-func TestTheBootstrapKeyProvesNothingOnceTheClusterHasItsUser(t *testing.T) {
-	cluster := newTestCluster(t)
-	cluster.withRealCA()
-	var offer BootstrapOffer
-	request, err := http.NewRequest(http.MethodGet, "https://"+cluster.endpoint(0)+"/v1/bootstrap", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set(VersionHeader, testVersion)
-	if err := send(uncheckedClient(DefaultConnectTimeout), request, &offer); err != nil {
-		t.Fatal(err)
-	}
-	if !offer.Bootstrapped || len(offer.Proof) != 0 {
-		t.Errorf("offer %+v", offer)
-	}
-	if _, err := FindCluster(context.Background(), cluster.endpoint(0), DefaultConnectTimeout, []byte("join"), testVersion); !errors.Is(err, ErrBootstrapped) {
-		t.Errorf("a bootstrap after the user: %v", err)
-	}
 }

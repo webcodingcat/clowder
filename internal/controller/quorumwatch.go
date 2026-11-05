@@ -98,7 +98,7 @@ func (w *QuorumWatch) tell(event string, now time.Time) bool {
 		return true
 	}
 	message := notify.Message{
-		Cluster: config.Name, Event: event, Key: "no-leader/" + w.host, Kind: "no-leader",
+		Cluster: copied.ClusterName, Event: event, Key: "no-leader/" + w.host, Kind: "no-leader",
 		Severity: clusterspec.SeverityCritical, Subject: "no quorum as seen from " + w.host,
 		Text: fmt.Sprintf("For %v or more %s has known no leader: a majority of the voters is out of its reach. "+
 			"While there is no leader, no host is fenced, no stack fails over, the leader's alerts are silent and "+

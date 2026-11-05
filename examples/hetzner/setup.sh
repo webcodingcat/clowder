@@ -8,8 +8,8 @@
 # clowder-setup.service runs it at every boot until it has finished (the
 # marker), so it may reboot in between; every step can run again, and what a
 # prepared image holds already is skipped. Its settings come from
-# /etc/clowder-setup.env, the bootstrap key (the first host) or the join token
-# (the others) from a root-only file; cloud-init writes them
+# /etc/clowder-setup.env (the first host's with the cluster's name), the join
+# token (the others) from a root-only file; cloud-init writes them
 # (examples/hetzner).
 #
 # With PREPARE_ONLY=yes in the settings it prepares an image instead: the
@@ -23,7 +23,6 @@ shopt -s inherit_errexit
 export DEBIAN_FRONTEND=noninteractive
 
 readonly SETTINGS=/etc/clowder-setup.env
-readonly KEY_FILE=/etc/clowder/bootstrap-key
 readonly TOKEN_FILE=/etc/clowder/join-token
 readonly STATE_DIR=/var/lib/clowder-setup
 readonly MARKER="${STATE_DIR}/done"
@@ -79,7 +78,7 @@ volume_device() {
 
 # metadata <path> [<pattern>]: Print a value of Hetzner's metadata service,
 # read once and kept from then on: once clowderd runs, its nft rules close the
-# service to the host (the user data holds the bootstrap key), and the setup
+# service to the host (a joining host's user data holds its token), and the setup
 # runs again at a boot until its marker exists. An answer that is empty or
 # does not match the pattern (an extended regex) fails and is not kept: until
 # Hetzner has attached the private network, private-networks is [], and a
@@ -343,8 +342,8 @@ join_cluster() {
   done
 }
 
-# enter_cluster: clowderd check, then clowderd init with the bootstrap key or
-# clowderd join with the join token, once.
+# enter_cluster: clowderd check, then clowderd init with the cluster's name
+# or clowderd join with the join token, once.
 enter_cluster() {
   local class_volume pools=() host=() underlay public_address server_id
   for class_volume in ${VOLUMES}; do
@@ -369,7 +368,7 @@ enter_cluster() {
   if [[ -f "${TOKEN_FILE}" ]]; then
     join_cluster "${host[@]}"
   else
-    clowderd init "${host[@]}" --bootstrap-key-file "${KEY_FILE}"
+    clowderd init "${host[@]}" --cluster-name "${CLUSTER_NAME}"
   fi
 }
 
@@ -394,9 +393,8 @@ main() {
   configure_floating_ip
   wait_for 600 "the time sync" time_synchronized
   enter_cluster
-  # the key is in the cluster's state now (sealed), until the user is in;
   # the token is used up
-  rm -f "${KEY_FILE}" "${TOKEN_FILE}"
+  rm -f "${TOKEN_FILE}"
   touch "${MARKER}"
   log "done"
 }

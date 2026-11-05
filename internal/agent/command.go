@@ -20,7 +20,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/jointoken"
 	"github.com/webcodingcat/clowder/internal/network"
-	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/storage"
 )
 
@@ -82,18 +81,17 @@ func (f *hostFlags) startService(ctx context.Context) error {
 
 func newInit() *cobra.Command {
 	var flags hostFlags
-	var keyFile string
+	var clusterName string
 	initCommand := &cobra.Command{
 		Use:   "init",
 		Short: "Make this host the first of a new cluster (from cloud-init)",
-		Args:  cobra.NoArgs,
+		Long: "Makes this host the first of a new cluster. The first credentials come from root on it\n" +
+			"afterwards: ssh root@<host> clowderd credentials | clowder config import -",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			options := InitOptions{ServerID: flags.serverID}
+			options := InitOptions{ServerID: flags.serverID, ClusterName: clusterName}
 			var err error
 			if options.Name, options.Underlay, options.PublicAddress, err = flags.parse(); err != nil {
-				return err
-			}
-			if options.BootstrapKey, err = pki.ReadBootstrapKey(keyFile); err != nil {
 				return err
 			}
 			files := Files{Dir: DefaultDir}
@@ -104,9 +102,8 @@ func newInit() *cobra.Command {
 		},
 	}
 	flags.add(initCommand)
-	initCommand.Flags().StringVar(&keyFile, "bootstrap-key-file", "",
-		"a file with the cluster's bootstrap key (from OpenTofu); not a flag of its own, which /proc would show")
-	_ = initCommand.MarkFlagRequired("bootstrap-key-file") // the flag exists; this cannot fail
+	initCommand.Flags().StringVar(&clusterName, "cluster-name", DefaultClusterName,
+		"the cluster's name: cluster status shows it, alerts and new credentials carry it")
 	return initCommand
 }
 

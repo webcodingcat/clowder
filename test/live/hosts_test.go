@@ -24,7 +24,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/buildinfo"
-	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/clientconfig"
 	"github.com/webcodingcat/clowder/internal/jointoken"
 	"github.com/webcodingcat/clowder/internal/pki"
 )
@@ -242,19 +242,20 @@ func growToThreeHosts(t *testing.T) {
 			t.Errorf("%s does not reach the first host's API", name)
 		}
 	}
-	// the endpoints of the module's cluster_yaml, as a user takes them after
-	// the hosts joined: every host, so a scenario that cuts off the first host,
-	// the leader after TestSetup, still reaches the cluster through the others
-	endpoints, ok := tofu.ClusterYAML.Value["endpoints"].([]any)
-	if !ok || len(endpoints) != 3 {
-		t.Fatalf("the module's cluster_yaml has the endpoints %v, want all three hosts", tofu.ClusterYAML.Value["endpoints"])
+	// new credentials from the first host, as a user fetches them after the
+	// hosts joined: every host's public address is an endpoint, so a
+	// scenario that cuts off the first host, the leader after TestSetup,
+	// still reaches the cluster through the others
+	first := host{address: tofu.PublicAddress.Value}
+	issued := first.must(t, "clowderd credentials 2>/dev/null") // stdout alone
+	credentials, err := clientconfig.Parse([]byte(issued))
+	if err != nil {
+		t.Fatal(err)
 	}
-	changeConfig(t, func(config *clusterspec.Config) {
-		config.Endpoints = nil
-		for _, endpoint := range endpoints {
-			config.Endpoints = append(config.Endpoints, fmt.Sprint(endpoint))
-		}
-	})
+	if endpoints := credentials.Contexts[0].Endpoints; len(endpoints) != 3 {
+		t.Fatalf("the credentials name the endpoints %v, want all three hosts", endpoints)
+	}
+	writeCredentials(t, []byte(issued))
 	if err := os.WriteFile(filepath.Join(workDir, baselineConfigFile), clusterConfigJSON(t), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -276,24 +277,13 @@ func checkThreeVoters(hosts []clusterHost) error {
 }
 
 // TestJoin checks who a join refuses: an unknown, used or expired token, a
-// server of another and a server that a host has; and that the
-// bootstrap key opens nothing any more.
+// server of another and a server that a host has.
 func TestJoin(t *testing.T) {
 	_, tofu := baseline(t)
 	runSteps(t, []step{
-		{"the bootstrap key proves nothing after the bootstrap", func(t *testing.T) { bootstrapKeyIsSpent(t, tofu) }},
 		{"an unknown, used or expired token gets no proof", func(t *testing.T) { tokensThatDoNotOpen(t, tofu) }},
 		{"a server that is not the host's is refused", func(t *testing.T) { serversOfOthers(t, tofu) }},
 	})
-}
-
-// bootstrapKeyIsSpent asks for the bootstrap's offer with the key.
-func bootstrapKeyIsSpent(t *testing.T, tofu outputs) {
-	_, err := api.FindCluster(context.Background(), tofu.PublicAddress.Value, api.DefaultConnectTimeout,
-		[]byte(tofu.BootstrapKey.Value), buildinfo.Version)
-	if !errors.Is(err, api.ErrBootstrapped) {
-		t.Errorf("the bootstrap key after the bootstrap: %v", err)
-	}
 }
 
 // tokensThatDoNotOpen asks for the CA's proof with tokens that do not open.

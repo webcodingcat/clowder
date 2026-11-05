@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -184,6 +185,28 @@ func (c *JoiningCluster) Join(ctx context.Context, request JoinRequest) (JoinAns
 	return answer, nil
 }
 
+// uncheckedClient is for a joining host's first contact: there is nothing
+// to check the agent against yet, so the trust proof in its answer decides.
+func uncheckedClient(connectTimeout time.Duration) *http.Client {
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true, // the caller checks the trust proof
+		MinVersion:         tls.VersionTLS13,
+	}
+	return &http.Client{
+		Timeout:   answerTimeout,
+		Transport: endpointTransport(tlsConfig, connectTimeout),
+	}
+}
+
+// checkedClient talks without a certificate to agents of a CA a trust
+// proof made trustworthy.
+func checkedClient(ca *x509.Certificate, connectTimeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout:   answerTimeout,
+		Transport: endpointTransport(pki.ClientTLSToHosts(tls.Certificate{}, ca, nil), connectTimeout),
+	}
+}
+
 // CheckJoinRequest refuses a request that is too old or too new, or that
 // is not whole: the checks of its form, in one place. The leader checks
 // the rest against the state (state.CheckJoiningHost) and Hetzner.
@@ -260,7 +283,7 @@ func (s *Server) joinOffer(w http.ResponseWriter, r *http.Request) {
 	})
 	switch {
 	case caPEM == nil:
-		writeError(w, http.StatusServiceUnavailable, errors.New("the cluster is not bootstrapped yet"))
+		writeError(w, http.StatusServiceUnavailable, state.ErrNotBootstrapped)
 	case err != nil:
 		writeError(w, http.StatusForbidden, err)
 	default:

@@ -222,7 +222,7 @@ func (a *Alerts) pass(ctx context.Context) {
 			openAlerts[key] = *alert
 		}
 	})
-	a.notice(copied.Config.Spec, copied.Config.Revision, openAlerts, now)
+	a.notice(copied.ClusterName, copied.Config.Spec, copied.Config.Revision, openAlerts, now)
 	a.deliver(ctx, copied, now)
 }
 
@@ -240,7 +240,9 @@ func (a *Alerts) commitOrLog(ctx context.Context, kind string, payload any) bool
 // raised or got worse than the channels were told, a reminder, one
 // resolved. An alert that gets better (and worse again up to its peak)
 // sends nothing until its reminder or its all-clear.
-func (a *Alerts) notice(config clusterspec.Config, revision int64, open map[string]state.Alert, now time.Time) {
+func (a *Alerts) notice(clusterName string, config clusterspec.Config, revision int64, open map[string]state.Alert,
+	now time.Time,
+) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, key := range slices.Sorted(maps.Keys(open)) {
@@ -267,12 +269,12 @@ func (a *Alerts) notice(config clusterspec.Config, revision int64, open map[stri
 			peak = last.peak
 		}
 		a.noticed[key] = notice{alert: alert, peak: peak, at: now}
-		a.enqueue(config, revision, alert, event, alert.Severity, now)
+		a.enqueue(clusterName, config, revision, alert, event, alert.Severity, now)
 	}
 	for _, key := range slices.Sorted(maps.Keys(a.noticed)) {
 		if _, still := open[key]; !still {
 			last := a.noticed[key]
-			a.enqueue(config, revision, last.alert, notify.Resolved, last.peak, now)
+			a.enqueue(clusterName, config, revision, last.alert, notify.Resolved, last.peak, now)
 			delete(a.noticed, key)
 		}
 	}
@@ -280,12 +282,14 @@ func (a *Alerts) notice(config clusterspec.Config, revision int64, open map[stri
 
 // enqueue adds a message to the outbox of each channel that takes the
 // severity; the oldest go when it is full.
-func (a *Alerts) enqueue(config clusterspec.Config, revision int64, alert state.Alert, event, severity string, now time.Time) {
+func (a *Alerts) enqueue(clusterName string, config clusterspec.Config, revision int64, alert state.Alert,
+	event, severity string, now time.Time,
+) {
 	if config.Alerts == nil {
 		return
 	}
 	message := notify.Message{
-		Cluster: config.Name, Event: event, Key: alert.Key, Kind: alert.Kind, Severity: alert.Severity,
+		Cluster: clusterName, Event: event, Key: alert.Key, Kind: alert.Kind, Severity: alert.Severity,
 		Subject: alert.Subject, Text: alert.Message, Since: alert.Since,
 	}
 	for index, channel := range config.Alerts.Channels {
@@ -428,7 +432,7 @@ func (a *Alerts) Test(ctx context.Context) ([]TestResult, error) {
 		return nil, nil
 	}
 	message := notify.Message{
-		Cluster: config.Name, Event: notify.Test, Key: "test", Kind: "test", Severity: clusterspec.SeverityInfo,
+		Cluster: copied.ClusterName, Event: notify.Test, Key: "test", Kind: "test", Severity: clusterspec.SeverityInfo,
 		Subject: "test alert", Text: "clowder alert test: this channel gets the cluster's alerts.", Since: time.Now(),
 	}
 	var results []TestResult

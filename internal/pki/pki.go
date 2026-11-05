@@ -1,15 +1,16 @@
 // Package pki is the cluster's certificate authority. Hosts and the CLI
 // authenticate with certificates it issues (mTLS): hosts between agents and
-// for Raft, the CLI towards the agents. Keys are Ed25519. Hosts and the
-// bootstrap's CLI send only their public key; clowderd credentials makes
-// the CLI's key on a host and hands it over with the certificate, as
-// kubeadm does with admin.conf.
+// for Raft, the CLI towards the agents. Keys are Ed25519. Hosts send only
+// their public key; clowderd credentials makes the CLI's key on a host and
+// hands it over with the certificate, as kubeadm does with admin.conf.
 //
 // A host certificate ends by revocation, not by expiry: the cluster keeps
-// the revoked serials, and Verify takes them. CLI certificates end with
-// the cluster's cutoff (state.SetCLICutoff), which the API checks. The
-// long lifetimes spare hosts that stay powered off for months a renewal
-// they cannot do.
+// the revoked serials, and Verify takes them. Its long lifetime spares a
+// host that stays powered off for months a renewal it cannot do. A CLI
+// certificate lasts a year (cliLifetime), kubeadm's default for client
+// certificates, and ends sooner only with the cluster's cutoff
+// (state.SetCLICutoff), which the API checks: the user fetches a new one
+// from a host, as nothing renews it.
 package pki
 
 import (
@@ -26,16 +27,18 @@ import (
 	"math/big"
 	"net"
 	"net/netip"
-	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/webcodingcat/clowder/internal/names"
 )
 
 // Lifetimes of the certificates.
 const (
 	caLifetime   = 20 * 365 * 24 * time.Hour
 	leafLifetime = 10 * 365 * 24 * time.Hour
+	cliLifetime  = 365 * 24 * time.Hour
 	// clockSkew backdates certificates, so a host whose clock runs a little
 	// behind accepts them at once.
 	clockSkew = time.Hour
@@ -131,16 +134,21 @@ func (ca *CA) IssueHost(public crypto.PublicKey, id int, addresses []netip.Addr,
 	return ca.issue(template, public)
 }
 
-// CLIName is the name in every CLI certificate: the cluster has no users,
-// only the CLI.
-const CLIName = "cli"
+// DefaultCLIName names a CLI certificate whose holder gave no name, as
+// kubeadm's admin.conf is always kubernetes-admin.
+const DefaultCLIName = "admin"
 
-// IssueCLI issues a certificate the CLI presents.
-func (ca *CA) IssueCLI(public crypto.PublicKey, now time.Time) ([]byte, error) {
+// IssueCLI issues a certificate the CLI presents. The name is for the
+// audit only: it grants nothing, as every CLI certificate controls the
+// cluster.
+func (ca *CA) IssueCLI(public crypto.PublicKey, name string, now time.Time) ([]byte, error) {
+	if !names.Valid(name) {
+		return nil, fmt.Errorf("CLI name %q: %s", name, names.Rule)
+	}
 	template, err := newTemplate(pkix.Name{
-		CommonName:         CLIName,
+		CommonName:         name,
 		OrganizationalUnit: []string{string(RoleCLI)},
-	}, now, leafLifetime)
+	}, now, cliLifetime)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +177,7 @@ func HostName(id int) string {
 // Identity is who a verified certificate belongs to.
 type Identity struct {
 	Role Role
-	// Name is CLIName, or the host's name (host-<id>).
+	// Name is the CLI's name, or the host's name (host-<id>).
 	Name string
 	// HostID is set for hosts.
 	HostID int
@@ -203,7 +211,7 @@ func Verify(caCertificate, certificate *x509.Certificate, revoked func(serial st
 	}
 	switch identity.Role {
 	case RoleCLI:
-		if identity.Name != CLIName {
+		if !names.Valid(identity.Name) {
 			return Identity{}, fmt.Errorf("CLI certificate with the name %q", identity.Name)
 		}
 	case RoleHost:
@@ -271,42 +279,19 @@ func ParseCertificate(certificatePEM []byte) (*x509.Certificate, error) {
 	return certificate, nil
 }
 
-// TrustProof binds the CA certificate to the bootstrap key. The CLI and a
-// joining host have no CA to trust yet on first contact; the agent sends its
-// CA certificate with this proof, and only someone holding the bootstrap key
-// can make it.
-func TrustProof(bootstrapKey, caCertificatePEM []byte) []byte {
-	mac := hmac.New(sha256.New, bootstrapKey)
+// TrustProof binds the CA certificate to a proof key that the agent and
+// the caller share (a join token's, jointoken.ProofKey). A joining host has
+// no CA to trust yet on first contact; the agent sends its CA certificate
+// with this proof, and only someone holding the proof key can make it.
+func TrustProof(proofKey, caCertificatePEM []byte) []byte {
+	mac := hmac.New(sha256.New, proofKey)
 	mac.Write(caCertificatePEM)
 	return mac.Sum(nil)
 }
 
-// MinBootstrapKeyLength is the shortest bootstrap key taken. The key is the
-// only defense of the bootstrap until the CLI has its certificate, and the
-// offer's proof lets anyone try keys offline; OpenTofu's example makes 48
-// letters and digits, and a key chosen by hand must not be much weaker.
-const MinBootstrapKeyLength = 32
-
-// ReadBootstrapKey reads the bootstrap key from a file, without the line end
-// an editor or echo adds. clowderd init and clowder cluster bootstrap take
-// it from a file, never from the command line, where /proc and shell
-// histories would keep it.
-func ReadBootstrapKey(path string) (string, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read the bootstrap key: %w", err)
-	}
-	key := strings.TrimSpace(string(content))
-	if len(key) < MinBootstrapKeyLength {
-		return "", fmt.Errorf("read the bootstrap key: %s holds %d characters, fewer than %d",
-			path, len(key), MinBootstrapKeyLength)
-	}
-	return key, nil
-}
-
 // CheckTrustProof tells whether a proof matches the CA certificate.
-func CheckTrustProof(bootstrapKey, caCertificatePEM, proof []byte) bool {
-	return hmac.Equal(TrustProof(bootstrapKey, caCertificatePEM), proof)
+func CheckTrustProof(proofKey, caCertificatePEM, proof []byte) bool {
+	return hmac.Equal(TrustProof(proofKey, caCertificatePEM), proof)
 }
 
 // newTemplate fills in what every certificate has: a random serial and the

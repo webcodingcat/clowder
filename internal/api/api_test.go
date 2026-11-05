@@ -234,8 +234,8 @@ func bootstrappedState(t *testing.T) *state.State {
 		}
 	}
 	apply(1, state.KindBootstrap, state.Bootstrap{
-		Keys:         state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
-		BootstrapKey: state.Sealed("join"),
+		Keys:        state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
+		ClusterName: "prod",
 		Host: state.Host{
 			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
 			PublicAddress: netip.MustParseAddr("203.0.113.2"), WGPublicKey: "wg", CertificateSerial: "s0",
@@ -248,7 +248,7 @@ func bootstrappedState(t *testing.T) *state.State {
 		PublicAddress: netip.MustParseAddr("203.0.113.3"), WGPublicKey: "wg", CertificateSerial: "s1",
 		CertificateNotAfter: notAfter, Phase: state.Joining,
 	}
-	apply(2, state.KindFinishBootstrap, state.FinishBootstrap{RecoveryRecipient: "age1recovery"})
+	apply(2, state.KindSetRecoveryRecipient, state.SetRecoveryRecipient{Recipient: "age1recovery"})
 	return current
 }
 
@@ -277,7 +277,7 @@ func (c *testCluster) hostCertificate(id state.HostID) tls.Certificate {
 
 func (c *testCluster) cliCertificate() tls.Certificate {
 	return c.certificate(func(public ed25519.PublicKey) ([]byte, error) {
-		return c.ca.IssueCLI(public, time.Now())
+		return c.ca.IssueCLI(public, "alice", time.Now())
 	})
 }
 
@@ -326,7 +326,9 @@ func TestAFollowerForwardsWritesToTheLeader(t *testing.T) {
 		phase = current.Hosts[0].Phase
 		actor = current.Audit[len(current.Audit)-1].Actor
 	})
-	if phase != state.Draining || actor != state.CLIActor {
+	// the actor names the CLI certificate, also on the leader it was
+	// forwarded to
+	if phase != state.Draining || actor != "cli/alice" {
 		t.Errorf("leader's host 0 is %s, last actor %s", phase, actor)
 	}
 
@@ -369,7 +371,7 @@ func TestCallersAreCheckedOnEveryCall(t *testing.T) {
 	ctx := context.Background()
 	revoked := cluster.hostCertificate(1)
 	beforeCutoff := cluster.certificate(func(public ed25519.PublicKey) ([]byte, error) {
-		return cluster.ca.IssueCLI(public, time.Now().Add(-time.Hour))
+		return cluster.ca.IssueCLI(public, "alice", time.Now().Add(-time.Hour))
 	})
 	cluster.clusters[0].Read(func(current *state.State) {
 		current.Revoked[pki.Serial(revoked.Leaf)] = state.Revocation{At: time.Now(), NotAfter: revoked.Leaf.NotAfter}
@@ -440,7 +442,7 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 			true,
 		},
 		{
-			"the CLI's write it forwards", state.KindSetHostPhase, state.CLIActor,
+			"the CLI's write it forwards", state.KindSetHostPhase, state.CLIActor("alice"),
 			state.SetHostPhase{Host: 1, Phase: state.Active},
 			true,
 		},
@@ -460,8 +462,8 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 			false,
 		},
 		{
-			"a command as the leader", state.KindFinishBootstrap, state.LeaderActor,
-			state.FinishBootstrap{RecoveryRecipient: "age1mallory"},
+			"a command as the leader", state.KindSetRecoveryRecipient, state.LeaderActor,
+			state.SetRecoveryRecipient{Recipient: "age1mallory"},
 			false,
 		},
 		{
@@ -470,7 +472,7 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 			false,
 		},
 		{
-			"the leader's own work for the CLI", state.KindSetIngress, state.CLIActor,
+			"the leader's own work for the CLI", state.KindSetIngress, state.CLIActor("alice"),
 			state.SetIngress{Host: 0},
 			false,
 		},
@@ -606,7 +608,7 @@ func TestTheClientNamesAClusterOfAnotherCA(t *testing.T) {
 	client := NewClient([]string{cluster.servers[0].Listener.Addr().String()}, time.Second,
 		other.cliCertificate(), other.ca.Certificate, testVersion)
 	err := client.Get(context.Background(), "/v1/status", &Status{})
-	if err == nil || !strings.Contains(err.Error(), "belongs to another cluster than your credentials") {
+	if err == nil || !strings.Contains(err.Error(), "belongs to another cluster than your context") {
 		t.Errorf("read: %v", err)
 	}
 	if err := client.Stream(context.Background(), "/v1/watch?kind=stack&allNamespaces=true", io.Discard); err == nil ||

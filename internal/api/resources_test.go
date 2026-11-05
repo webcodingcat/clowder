@@ -331,7 +331,7 @@ func TestTheLeaderDecidesNotAFollowerThatIsBehind(t *testing.T) {
 func TestABatchCarriesOnlyTheCLIsResourceCommands(t *testing.T) {
 	cluster := newTestCluster(t)
 	host1 := cluster.client(cluster.hostCertificate(1), testVersion, 0)
-	cmd, err := state.NewCommand(state.KindSetRecoveryRecipient, time.Time{}, state.CLIActor,
+	cmd, err := state.NewCommand(state.KindSetRecoveryRecipient, time.Time{}, state.CLIActor("admin"),
 		state.SetRecoveryRecipient{Recipient: "age1mallory"})
 	if err != nil {
 		t.Fatal(err)
@@ -387,7 +387,7 @@ func (alwaysLeader) IsLeader() bool { return true }
 
 func mustCommand(t *testing.T, namespace string) *state.Command {
 	t.Helper()
-	cmd, err := state.NewCommand(state.KindPutResource, time.Time{}, state.CLIActor,
+	cmd, err := state.NewCommand(state.KindPutResource, time.Time{}, state.CLIActor("admin"),
 		state.PutResource{Kind: resource.KindNamespace, Name: namespace, Owner: state.OwnerCLI})
 	if err != nil {
 		t.Fatal(err)

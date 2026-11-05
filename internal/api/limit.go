@@ -9,9 +9,9 @@ import (
 )
 
 // How many tries an agent takes per minute at a route without a
-// certificate (the bootstrap, the join): per sender, so a stranger
-// cannot lock everybody out; in all, so many senders cannot keep the agent
-// busy: each such route works with the data key for anyone who asks.
+// certificate (the join's): per sender, so a stranger cannot lock
+// everybody out; in all, so many senders cannot keep the agent busy: each
+// such route works with the data key for anyone who asks.
 // Someone with many addresses can still block the route for minutes; no
 // data is at risk then.
 const (

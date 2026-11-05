@@ -9,7 +9,7 @@ those tools and from where the tools reach the hosts. Point `HLAB` at its wrappe
 ```bash
 export HLAB=/path/to/hlab/bin/hlab
 bin/dev live                        # every scenario in up to three labs at once, about 40 min
-bin/dev live up                     # package, image, lab 1: the first host, bootstrap, two more join
+bin/dev live up                     # package, image, lab 1: the first host, its cluster, two more join
 bin/dev live run                    # every scenario on lab 1's cluster
 bin/dev live run -run TestIngress   # one scenario; the flags go to go test
 bin/dev live run --lab 2 -run TestQuorum   # on lab 2, which a failed bin/dev live left
@@ -66,7 +66,7 @@ removed once it passed. A failed lab keeps its hosts for a look: `run --lab <n> 
   URL and SHA-256. With a tag there is no hook: `clowderd_version` names the release.
   The hosts start from the image, imported into the lab.
 - It copies OpenTofu's binary to `/work/bin`, for the tests that add and remove hosts.
-- It runs `TestSetup`, which bootstraps the cluster and has two more hosts join.
+- It runs `TestSetup`, which sets up the cluster and has two more hosts join.
 
 The registry and the mail server run until `bin/dev live down`; `run` refuses to start
 without them, since a new registry would not hold the test's image. `up` refuses while a
@@ -121,7 +121,7 @@ other; the first failure ends the scenario. Each step has a deadline (the consta
 `clowder-setup` and `clowderd`.
 
 Every scenario but `TestSetup` starts from the same baseline and checks it first
-(`baseline`): the first host set up and its agent active, the cluster bootstrapped with a
+(`baseline`): the first host set up and its agent active, the cluster with a
 leader, `cluster.yaml` applied and with the settings `TestSetup` gave it, the first host
 active and the joined ones drained, three voters, no stack or volume in any namespace, no
 fault in the lab and no dead server (HLab's `/status`); a host's clock that a paused VM left
@@ -141,9 +141,11 @@ reads within a step.
 
 ### `TestSetup` (run by `up`)
 
-1. The setup makes the first host and deletes its key file.
-2. The test bootstraps (the credentials go to `/work/config`, mode 600, not to the
-   developer's config directory), fills in `cluster.yaml` from the module's outputs and
+1. The setup makes the first host.
+2. The test takes the first credentials from root on it over SSH (`clowderd
+   credentials`, `clowder config import -`; they go to `/work/clowder-config` through
+   `$CLOWDER_CONFIG`, mode 600, not to the developer's `~/.clowder/config`), makes the
+   recovery key (`recovery rotate`), fills in `cluster.yaml` from the module's outputs and
    applies it, with the Hetzner token and the registry's password encrypted (`secret
    encrypt --cluster-yaml`). The cluster directory holds `cluster.yaml` alone, with no
    value in clear. `cluster diff` warns about HLab's `http` API and names a changed token,
@@ -155,20 +157,18 @@ reads within a step.
    `up` copies to `/work/bin`). The first waits `passive` without a vote; with the second,
    all three are active and vote. Each joined host has its `net.json` and reaches the
    first host's API over the private network. The test drains both, keeps their
-   tokens for `TestJoin` and takes the endpoints of the module's `cluster_yaml`, all
-   three hosts, into `cluster.yaml`, so a scenario that cuts off the first host, the leader
-   after the setup, still reaches the cluster.
+   tokens for `TestJoin` and fetches new credentials from the first host, whose endpoints
+   are all three hosts, so a scenario that cuts off the first host, the leader after the
+   setup, still reaches the cluster.
 4. Each host is a server of its own, whether it started from the image or from Debian's:
    cloud-init ran for a new instance, and no two hosts share an instance ID, a machine-id
    or an SSH host key. DRBD's module fits the running kernel.
 
 ### `TestJoin`
 
-1. The bootstrap key proves nothing any more: the offer has no proof, and the CLI stops
-   with "bootstrapped already".
-2. An unknown token, the token a host joined with and a token of a minute after its
+1. An unknown token, the token a host joined with and a token of a minute after its
    minute get no proof of the CA (403, each with why).
-3. With an open token and the CA it proved, a join is refused that names a server of the
+2. With an open token and the CA it proved, a join is refused that names a server of the
    project outside the private network (a server the test makes through HLab's Cloud
    API), as it does not come from that server's address, and one that names a joined
    host's server. No host comes of it. That the server's addresses at Hetzner must match the

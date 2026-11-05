@@ -34,7 +34,7 @@ func newResolveSplitBrain(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			client, _, err := g.connect()
+			client, err := g.connect()
 			if err != nil {
 				return err
 			}

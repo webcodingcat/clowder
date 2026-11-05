@@ -155,7 +155,7 @@ func (j *joiner) issue(current *state.State, request api.JoinRequest, id state.H
 	[]byte, *x509.Certificate, error,
 ) {
 	if current.Keys == nil {
-		return nil, nil, errors.New("the cluster is not bootstrapped yet")
+		return nil, nil, state.ErrNotBootstrapped
 	}
 	caKeyPEM, err := j.dataKey.Open(current.Keys.CAKey)
 	if err != nil {

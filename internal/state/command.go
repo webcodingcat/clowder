@@ -24,7 +24,7 @@ type Command struct {
 	// At is the leader's clock when it wrote the command; Apply uses it
 	// instead of reading the clock, so every agent gets the same state.
 	At time.Time `json:"at"`
-	// Actor is who asked: LeaderActor, HostActor or CLIActor.
+	// Actor is who asked: LeaderActor, HostActor or CLIActor (cli/<name>).
 	Actor   string          `json:"actor"`
 	Payload json.RawMessage `json:"payload"`
 }
@@ -41,7 +41,6 @@ const (
 	KindDeleteACMEChallenge  = "delete-acme-challenge"
 	KindPutCertificate       = "put-certificate"
 	KindDeleteCertificate    = "delete-certificate"
-	KindFinishBootstrap      = "finish-bootstrap"
 	KindSetCLICutoff         = "set-cli-cutoff"
 	KindSetRecoveryRecipient = "set-recovery-recipient"
 	KindPutResource          = "put-resource"
@@ -122,7 +121,6 @@ var commandKinds = map[string]commandKind{
 	KindDeleteACMEChallenge:  {"0.1.0", decoded(applyDeleteACMEChallenge)},
 	KindPutCertificate:       {"0.1.0", decoded(applyPutCertificate)},
 	KindDeleteCertificate:    {"0.1.0", decoded(applyDeleteCertificate)},
-	KindFinishBootstrap:      {"0.2.0", decoded(applyFinishBootstrap)},
 	KindSetCLICutoff:         {"0.2.0", decoded(applySetCLICutoff)},
 	KindSetRecoveryRecipient: {"0.1.0", decoded(applySetRecoveryRecipient)},
 	KindPutResource:          {"0.1.0", decoded(applyPutResource)},

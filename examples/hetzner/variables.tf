@@ -9,6 +9,19 @@ variable "name" {
   }
 }
 
+variable "cluster_name" {
+  type        = string
+  description = "The cluster's name (clowderd init --cluster-name): cluster status shows it, alerts and new credentials carry it."
+  default     = "clowder-cluster"
+  validation {
+    # clowderd init's rule (internal/names, Valid), checked here before a
+    # server is made; it also goes into setup.sh's settings, quoted for the
+    # shell
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", var.cluster_name))
+    error_message = "The cluster's name is lowercase letters, digits and -, at most 63, starting and ending with a letter or digit."
+  }
+}
+
 variable "hosts" {
   type        = list(string)
   description = "Names of the hosts that join the first one, each with a token in join_tokens."

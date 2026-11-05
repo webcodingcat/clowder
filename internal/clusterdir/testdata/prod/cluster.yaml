@@ -1,5 +1,3 @@
-name: prod
-endpoints: [203.0.113.10, 203.0.113.11]
 hetzner:
   token: !secret |
     -----BEGIN AGE ENCRYPTED FILE-----

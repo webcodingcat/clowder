@@ -30,7 +30,7 @@ func TestTheCLIRotatesTheRecoveryKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, _, err := (&globals{cluster: dir}).connect()
+	client, err := (&globals{}).connect()
 	if err != nil {
 		t.Fatal(err)
 	}

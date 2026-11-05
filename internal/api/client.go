@@ -319,7 +319,7 @@ func isForeignCA(err error) bool {
 // foreignCA says what a foreign CA most likely means, instead of x509's
 // words alone. The next endpoint is not tried: it belongs to the same cluster.
 func foreignCA(endpoint string, err error) error {
-	return fmt.Errorf("%s belongs to another cluster than your credentials: a cluster of the same name, "+
+	return fmt.Errorf("%s belongs to another cluster than your context: another cluster at that address, "+
 		"or one set up anew? (%w)", endpoint, err)
 }
 

@@ -30,7 +30,6 @@ const registryPassword = `registries["ghcr.io"].password`
 func (c *testCluster) testApply(token string) ClusterApply {
 	return ClusterApply{
 		Spec: clusterspec.Config{
-			Name: "test", Endpoints: []string{"10.0.0.2"},
 			Hetzner:        clusterspec.Hetzner{Token: "hetzner.token"},
 			PrivateNetwork: "10.0.0.0/16",
 			Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.11"},

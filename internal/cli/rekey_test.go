@@ -178,7 +178,7 @@ func TestRekeyAndDecryptTakeClusterYAMLsValuesByPath(t *testing.T) {
 
 func TestRekeyByClusterSplitsTheRequestsAndCountsAcrossThem(t *testing.T) {
 	cluster := startCluster(t)
-	client, _, err := (&globals{cluster: cluster}).connect()
+	client, err := (&globals{}).connect()
 	if err != nil {
 		t.Fatal(err)
 	}

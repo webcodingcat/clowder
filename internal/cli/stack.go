@@ -36,7 +36,7 @@ func newStackPs(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			client, _, err := g.connect()
+			client, err := g.connect()
 			if err != nil {
 				return err
 			}
@@ -72,7 +72,7 @@ func newStackLogs(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			client, _, err := g.connect()
+			client, err := g.connect()
 			if err != nil {
 				return err
 			}
@@ -102,7 +102,7 @@ func newStackRestart(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			client, _, err := g.connect()
+			client, err := g.connect()
 			if err != nil {
 				return err
 			}
@@ -134,7 +134,7 @@ func newStackMove(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			client, _, err := g.connect()
+			client, err := g.connect()
 			if err != nil {
 				return err
 			}

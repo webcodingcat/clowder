@@ -51,50 +51,61 @@ You need two things on your machine:
   everything and starts the agent; this takes about 5 minutes
   (`journalctl -u clowder-setup` shows how far it is).
 
-You work in two directories: the module's, which holds the OpenTofu state, and the
-**cluster directory** of your own, which `cluster bootstrap` makes and which you can share
-in a repository. Keep them apart: the state holds the bootstrap key in clear. Commands in
-the cluster directory find it themselves; elsewhere name it with `--cluster <directory>` or
-`CLOWDER_CLUSTER`.
-
 ```bash
 git clone --branch v0.1.0 https://github.com/webcodingcat/clowder.git
 cd clowder/examples/hetzner
 export HCLOUD_TOKEN=...
 tofu init
 tofu apply -var 'ssh_public_key=ssh-ed25519 AAAA...' -var 'admin_cidrs=["203.0.113.7/32"]'
-mkdir ~/prod && cd ~/prod      # the cluster directory
-clowder cluster bootstrap --name prod \
-  --endpoint "$(tofu -chdir=<module directory> output -raw public_address)" \
-  --key-file <(tofu -chdir=<module directory> output -raw bootstrap_key)
+ssh "root@$(tofu output -raw public_address)" clowderd credentials | clowder config import -
+clowder cluster status
+clowder recovery rotate        # the cluster's first recovery key, shown once
 ```
 
-`<(...)` hands the bootstrap key over without a file. Without Bash, write it to a file
-outside the cluster directory and delete it after the bootstrap. Until the bootstrap, the
-key lets anyone in who reaches the API; after it, it opens nothing.
+The **first credentials** come over SSH from root on the first host, as kubeadm's
+`admin.conf` does: `clowderd credentials` prints a CLI config with one context, named
+after the cluster (`cluster_name` of the module, `clowder-cluster` by default), and
+`clowder config import` adds it to yours. They hold the cluster's CA, so you trust the
+cluster as far as you trust the SSH connection: check the host's key on first contact,
+as for any new server (on the Hetzner console: `ssh-keygen -lf
+/etc/ssh/ssh_host_ed25519_key.pub`).
 
-The bootstrap shows the cluster's **recovery key** once and asks you to type its last 8
-characters (`--recovery-out <file>` writes it to a file instead). Keep it in your password
-manager and offline. If the cluster is lost, the recovery key still opens the values in
-your files (`secret decrypt`) and moves them to a new cluster (`secret rekey --identity`).
+The CLI keeps its credentials in `~/.clowder/config` (or `--config`, or
+`$CLOWDER_CONFIG`), as kubectl keeps `~/.kube/config`: contexts, each with the cluster's
+endpoints, its CA and your key and certificate. `clowder config get-contexts` lists them,
+`clowder config use-context <name>` switches, `--context <name>` picks one for a single
+command, and `clowder config delete-context <name>` removes one. A cluster has **no
+users**, as with kubeadm's `admin.conf`: whoever holds a context controls the cluster.
+`clowderd credentials --name <you>` puts your name into the certificate, for the audit and
+the agents' logs (`cli/<you>`); it grants nothing.
 
-A cluster has **no users**, as with kubeadm's `admin.conf`: whoever holds the credentials
-(in your config directory, `clowder/clusters/<name>/credentials.yaml`) and `cluster.yaml`
-controls the cluster.
+A CLI certificate lasts a **year**; from 30 days before its end every command warns.
+New credentials, or new ones after a lost laptop, come the same way from root on any host
+(the Hetzner console works without SSH): `clowder config import - --replace` puts them in
+place of the old ones, `--as <name>` adds them under another name.
+`clowderd credentials --revoke-older` also locks
+out every CLI certificate issued before the new one.
 
-More credentials, or new ones after a lost laptop, come from root on a host (the Hetzner
-console works without SSH): `clowderd credentials > credentials.yaml` prints them; put the
-file where the CLI looks for it. `clowderd credentials --revoke-older` also locks out every
-CLI certificate issued before the new one. `clowder recovery rotate` replaces the recovery
-key; then encrypt your files for it with `clowder secret rekey -f <directory>`.
+A new cluster has no **recovery key** yet, and nothing can be encrypted for it until it
+has one: `clowder recovery rotate` makes it, shows it
+once and asks you to type its last 8 characters (`--recovery-out <file>` writes it to a
+file instead). Keep it in your password manager and offline. If the cluster is lost, the
+recovery key still opens the values in your files (`secret decrypt`) and moves them to a
+new cluster (`secret rekey --identity`). `clowder recovery rotate` replaces it later too;
+then encrypt your files for the new one with `clowder secret rekey -f <directory>`.
+
+`cluster.yaml` lives in a **cluster directory** of your own, which you can share in a
+repository: no key is in it. Commands in the cluster directory find it themselves;
+elsewhere name it with `--cluster <directory>` or `CLOWDER_CLUSTER`. Keep it apart from the
+module's directory, whose OpenTofu state holds the join tokens.
 
 `hetzner.api` and `acme.directory` in `cluster.yaml` are for test labs: unset, clowder
 talks to Hetzner's API and Let's Encrypt over https. Set, they may be `http://`, and
 `cluster apply` and the leader's log warn about it.
 
-The bootstrap writes `cluster.yaml` into the cluster directory. Fill it in from
-`tofu output cluster_yaml` in the module's directory (it brings `private_network`, the
-Floating IP and the storage classes), add the Hetzner project's API token, then run
+Write `cluster.yaml` from `tofu output cluster_yaml` in the module's directory (it brings
+`private_network`, the Floating IP and the storage classes; `clowder cluster schema`
+describes every field), add the Hetzner project's API token, then run
 `clowder cluster apply`:
 
 ```yaml
@@ -105,11 +116,8 @@ hetzner:
     -----END AGE ENCRYPTED FILE-----
 ```
 
-`clowder cluster diff` shows what an apply would change. You can share the cluster
-directory in a repository: your own key and certificate are in your config directory
-(`~/.config/clowder/clusters/prod/` on Linux, `~/Library/Application Support/clowder/` on
-macOS, `%AppData%\clowder\` on Windows). The module's settings, such as the firewall, are
-in [its README](examples/hetzner/README.md).
+`clowder cluster diff` shows what an apply would change. The module's settings, such as
+the firewall, are in [its README](examples/hetzner/README.md).
 
 **More hosts** join with a token each, once `cluster.yaml` is applied:
 `clowder host join-token` prints one, which opens once and for an hour (`--ttl` up to a
@@ -125,11 +133,13 @@ cluster stays at three hosts or more: `clowder host remove` refuses to go below,
 replacement joins first, even for a host that is dead. `clowder host list` shows the
 hosts.
 
-The CLI reaches the cluster only through the `endpoints` of `cluster.yaml`, in turn, and
-learns no others. Once hosts have joined, take the endpoints of `tofu output cluster_yaml`
-again (it lists every host): with the first host alone, the CLI cannot reach the cluster
-while that host is down. `--connect-timeout` (default 5s) is how long it waits for an
-endpoint before it tries the next.
+The CLI reaches the cluster only through the `endpoints` of its context, in turn, and
+learns no others. `clowderd credentials` lists every host the cluster has at the time (or
+what `--endpoint` names, such as a load balancer in front of them): once hosts have joined,
+fetch new credentials or add their public addresses (`clowder host list`) to the context
+in `~/.clowder/config`; with the first host alone, the CLI cannot reach the cluster while
+that host is down. `--connect-timeout` (default 5s) is how long it waits for an endpoint
+before it tries the next.
 
 The leader checks with
 Hetzner that each host's server is its own, so give each cluster a Hetzner project of its

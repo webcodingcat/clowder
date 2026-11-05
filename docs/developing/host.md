@@ -10,15 +10,15 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   host with it has everything else.
 - **`clowderd init`** (from cloud-init) makes the first host: the CA, the data key, the
   cluster's age key, the host's certificate and WireGuard key, a Raft group with this host as
-  its only voter and the bootstrap command. Then it enables and starts `clowderd.service`.
-  It refuses a host that has a `raft/` directory. The bootstrap key comes from a file
-  (`--bootstrap-key-file`; `clowder cluster bootstrap --key-file` alike), never from the
-  command line, where `/proc` and shell histories keep it. `--underlay` is the server's
+  its only voter and the bootstrap command, with the cluster's name (`--cluster-name`,
+  `DefaultClusterName` without it, held to `names.Valid`; the CA is named after it).
+  Then it enables and starts `clowderd.service`. It refuses a host that has a `raft/`
+  directory. `--underlay` is the server's
   address in the Hetzner private network, `--public-address` its public IPv4, where users
   reach the API, and `--server-id` its Hetzner Cloud ID (the Floating IP and fencing);
   each is required, and goes into `host.json` and the state. The host's
-  name in the cluster is its hostname, by which DRBD names it in a resource. The
-  bootstrap key has at least `pki.MinBootstrapKeyLength` characters.
+  name in the cluster is its hostname, by which DRBD names it in a resource. The first
+  credentials come from `clowderd credentials` afterwards; init takes no key for them.
 - **`clowderd join`** (from cloud-init) makes a host a member of a cluster, with a join
   token from a file (`--token-file`) and an agent of the cluster to join through as `--via`; the other
   flags are init's. In this order:
@@ -34,11 +34,12 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   token used: `clowder host remove` it, and it joins anew with a new token. The leader
   adds the host to Raft as a non-voter at once, and moves it on once its agent runs and
   reports (The cluster, Raft). It refuses a host that has a `raft/` directory or `host.json`.
-- **`clowderd credentials [--revoke-older]`** (`agent/credentials.go`) prints a
-  `credentials.yaml` for the CLI, as `kubeadm kubeconfig user` does: it makes the key here
-  and asks its own agent, with the host's certificate, for the certificate
-  (`/v1/internal/credentials`, in [API and the CLI](cluster.md#credentials-from-a-host)).
-  The agent must run; `--revoke-older` also needs the cluster's leader.
+- **`clowderd credentials [--name <name>] [--endpoint <address>]... [--revoke-older]`**
+  (`agent/credentials.go`) prints a CLI config with one context, as `kubeadm kubeconfig
+  user` does: it makes the key here and asks its own agent, with the host's certificate,
+  for the certificate (`/v1/internal/credentials`, in [API and the
+  CLI](cluster.md#credentials-from-a-host)). The agent must run; `--revoke-older` also
+  needs the cluster's leader.
 - **`clowderd recover --power-off`** makes this host its cluster's only one when the others are
   gone for good: it powers them off and labels their servers `clowder-retired`
   ([Recover](cluster.md#recover-clowderd-recover-agentrecovergo)). It stops the agent while
@@ -229,8 +230,8 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   value changed, and every value changes seldom: a bool or a whole percent, rounded up, so a
   threshold trips early rather than late, and a small pool as early as a large one.
 - **Tests.** The package's test goes the whole way on 127.0.0.1: init, the agent with a
-  notify socket, the user's bootstrap, apply and diff, the Floating IP reaching the nft
-  rules, and a volume and a stack applied, listed and deleted; `Run` that fails at its
+  notify socket, the user's first credentials from the host, apply and diff, the
+  Floating IP reaching the nft rules, and a volume and a stack applied, listed and deleted; `Run` that fails at its
   start leaves nothing open; `restart_test.go`: the supervisor's restart rules. The fakes
   of Docker, the storage driver (which keeps each copy's state in memory), the volume
   reconciler and a cluster in memory are in `agent/agenttest`; the
@@ -304,8 +305,8 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
     `cluster.yaml`, which must not overlap `clusterspec.ClowderRanges`) and the overlay are
     dropped. The rules are IPv4 only: Docker gives the bridges no IPv6 (`daemon.json`).
   - `guard_out`: the host's own processes, Traefik in the host's network included, do not
-    reach the metadata API either; its user data holds the bootstrap key, and clowderd
-    never needs it. cloud-init reads it at boot in its network stage, before
+    reach the metadata API either; a joining host's user data holds its join token, and
+    clowderd never needs it. cloud-init reads it at boot in its network stage, before
     `network-online.target` and so before `clowderd.service` starts, and the table does
     not survive a reboot. The resolver's upstreams come from `/etc/resolv.conf`, not from
     there. A known limit: a tool that reads the service later, such as Hetzner's

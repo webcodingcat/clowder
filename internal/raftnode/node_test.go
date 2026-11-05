@@ -106,8 +106,8 @@ func command(t *testing.T, kind string, payload any) state.Command {
 
 func bootstrapCommand(t *testing.T) state.Command {
 	return command(t, state.KindBootstrap, state.Bootstrap{
-		Keys:         state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
-		BootstrapKey: state.Sealed("join"),
+		Keys:        state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
+		ClusterName: "prod",
 		Host: state.Host{
 			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
 			PublicAddress: netip.MustParseAddr("198.51.100.2"), WGPublicKey: "wg", CertificateSerial: "s0",
@@ -116,13 +116,13 @@ func bootstrapCommand(t *testing.T) state.Command {
 	})
 }
 
-// finishBootstrap is the command that ends the bootstrap; the cluster
-// takes it once.
-func finishBootstrap(t *testing.T) state.Command {
-	return command(t, state.KindFinishBootstrap, state.FinishBootstrap{RecoveryRecipient: "age1recovery"})
+// setRecovery is a command after the bootstrap that leaves a trace in the
+// state: the recovery recipient.
+func setRecovery(t *testing.T) state.Command {
+	return command(t, state.KindSetRecoveryRecipient, state.SetRecoveryRecipient{Recipient: "age1recovery"})
 }
 
-// recoveryRecipient is what finishBootstrap left in the node's state.
+// recoveryRecipient is what setRecovery left in the node's state.
 func recoveryRecipient(node *Node) string {
 	var recipient string
 	node.Read(func(current *state.State) { recipient = current.RecoveryRecipient })
@@ -145,15 +145,16 @@ func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
 	if err := node.raft.Snapshot().Error(); err != nil {
 		t.Fatal(err)
 	}
-	index, err := node.Propose(ctx, finishBootstrap(t))
+	index, err := node.Propose(ctx, setRecovery(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// a refused command comes back as the state's error
-	_, err = node.Propose(ctx, finishBootstrap(t))
+	_, err = node.Propose(ctx, command(t, state.KindSetRecoveryRecipient,
+		state.SetRecoveryRecipient{Recipient: "no age key"}))
 	var refused *state.Refused
 	if !errors.As(err, &refused) {
-		t.Errorf("want a refusal for a second end of the bootstrap, got %v", err)
+		t.Errorf("want a refusal for a recipient that is no age key, got %v", err)
 	}
 	if err := node.Close(); err != nil {
 		t.Fatal(err)
@@ -280,7 +281,7 @@ func TestThreeHostsReplicateOverMutualTLS(t *testing.T) {
 	if _, err := nodes[0].Propose(ctx, bootstrapCommand(t)); err != nil {
 		t.Fatal(err)
 	}
-	index, err := nodes[0].Propose(ctx, finishBootstrap(t))
+	index, err := nodes[0].Propose(ctx, setRecovery(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +298,7 @@ func TestThreeHostsReplicateOverMutualTLS(t *testing.T) {
 	if id, ok := nodes[2].Leader(); !ok || id != 0 {
 		t.Errorf("host 2 sees leader %d (%v)", id, ok)
 	}
-	if _, err := nodes[1].Propose(ctx, finishBootstrap(t)); err == nil {
+	if _, err := nodes[1].Propose(ctx, setRecovery(t)); err == nil {
 		t.Error("a follower committed a command")
 	}
 	if err := nodes[0].VerifyLeader(waitCtx); err != nil {
@@ -327,7 +328,7 @@ func TestOnlyHostsOfTheClusterGetIn(t *testing.T) {
 	defer func() { _ = node.Close() }()
 
 	cli := cluster.certificate(func(public ed25519.PublicKey) ([]byte, error) {
-		return cluster.ca.IssueCLI(public, time.Now())
+		return cluster.ca.IssueCLI(public, "alice", time.Now())
 	})
 	stranger := newTestCluster(t).hostCertificate(1)
 	for name, certificate := range map[string]tls.Certificate{"the CLI": cli, "another cluster's host": stranger} {

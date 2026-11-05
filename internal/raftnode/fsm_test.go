@@ -47,14 +47,14 @@ func TestAnEntryTheStateCannotReadHaltsTheFSM(t *testing.T) {
 		t.Fatalf("an unknown kind: %v, halted %v", unknown, halted(machine))
 	}
 	// nothing after it is applied, restored or written to a snapshot
-	if err := applyCommand(t, machine, 4, finishBootstrap(t)); err == nil {
+	if err := applyCommand(t, machine, 4, setRecovery(t)); err == nil {
 		t.Error("an entry after the halt was taken")
 	}
 	var index uint64
-	var inBootstrap bool
-	machine.read(func(current *state.State) { index, inBootstrap = current.Index, current.InBootstrap() })
-	if index != 2 || !inBootstrap {
-		t.Errorf("after the halt: index %d, in bootstrap %v", index, inBootstrap)
+	var recipient string
+	machine.read(func(current *state.State) { index, recipient = current.Index, current.RecoveryRecipient })
+	if index != 2 || recipient != "" {
+		t.Errorf("after the halt: index %d, recovery recipient %q", index, recipient)
 	}
 	if _, err := machine.Snapshot(); err == nil {
 		t.Error("a halted fsm wrote a snapshot")

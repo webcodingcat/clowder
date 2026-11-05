@@ -19,7 +19,7 @@ func joiningHost() AddHost {
 
 func TestATokenOpensOnceUntilItExpires(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddJoinToken, CLIActor, AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
+	c.mustApply(KindAddJoinToken, cliActor, AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
 	if token := c.state.JoinTokens["t1"]; token.Hash != testHash || !token.Expires.Equal(testTime.Add(time.Hour)) {
 		t.Errorf("token %+v", token)
 	}
@@ -49,24 +49,24 @@ func TestAJoinTokenHasLimits(t *testing.T) {
 	token := func(id string, ttl time.Duration) AddJoinToken {
 		return AddJoinToken{ID: id, Hash: testHash, TTL: ttl}
 	}
-	c.refuse(KindAddJoinToken, CLIActor, token("a", 59*time.Second), "a join token lives 1m0s to 24h0m0s")
-	c.refuse(KindAddJoinToken, CLIActor, token("a", 25*time.Hour), "a join token lives")
-	c.refuse(KindAddJoinToken, CLIActor, AddJoinToken{ID: "a", Hash: "short", TTL: time.Hour}, "no SHA-256")
-	c.refuse(KindAddJoinToken, CLIActor, token("", time.Hour), "has no ID")
+	c.refuse(KindAddJoinToken, cliActor, token("a", 59*time.Second), "a join token lives 1m0s to 24h0m0s")
+	c.refuse(KindAddJoinToken, cliActor, token("a", 25*time.Hour), "a join token lives")
+	c.refuse(KindAddJoinToken, cliActor, AddJoinToken{ID: "a", Hash: "short", TTL: time.Hour}, "no SHA-256")
+	c.refuse(KindAddJoinToken, cliActor, token("", time.Hour), "has no ID")
 	c.refuse(KindAddJoinToken, HostActor(0), token("a", time.Hour), "only the CLI does")
-	c.mustApply(KindAddJoinToken, CLIActor, token("a", time.Hour))
-	c.refuse(KindAddJoinToken, CLIActor, token("a", time.Hour), "exists already")
+	c.mustApply(KindAddJoinToken, cliActor, token("a", time.Hour))
+	c.refuse(KindAddJoinToken, cliActor, token("a", time.Hour), "exists already")
 	for index := 1; index < MaxJoinTokens; index++ {
-		c.mustApply(KindAddJoinToken, CLIActor, token("t"+string(rune('A'+index)), time.Hour))
+		c.mustApply(KindAddJoinToken, cliActor, token("t"+string(rune('A'+index)), time.Hour))
 	}
-	c.refuse(KindAddJoinToken, CLIActor, token("one-more", time.Hour), "32 join tokens are open already")
+	c.refuse(KindAddJoinToken, cliActor, token("one-more", time.Hour), "32 join tokens are open already")
 }
 
 func TestExpiredTokensGoAWhileAfter(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddJoinToken, CLIActor, AddJoinToken{ID: "old", Hash: testHash, TTL: time.Minute})
+	c.mustApply(KindAddJoinToken, cliActor, AddJoinToken{ID: "old", Hash: testHash, TTL: time.Minute})
 	later := testTime.Add(time.Minute + joinTokenKept + time.Second)
-	if _, err := c.applyAt(later, KindAddJoinToken, CLIActor,
+	if _, err := c.applyAt(later, KindAddJoinToken, cliActor,
 		AddJoinToken{ID: "new", Hash: testHash, TTL: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
@@ -77,8 +77,8 @@ func TestExpiredTokensGoAWhileAfter(t *testing.T) {
 
 func TestOnlyTheLeaderAddsAHostThatIsNew(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddJoinToken, CLIActor, AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
-	c.refuse(KindAddHost, CLIActor, joiningHost(), "only the leader does")
+	c.mustApply(KindAddJoinToken, cliActor, AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
+	c.refuse(KindAddHost, cliActor, joiningHost(), "only the leader does")
 	c.refuse(KindAddHost, HostActor(0), joiningHost(), "only the leader does")
 	for want, change := range map[string]func(*AddHost){
 		"host ID 0 is taken":              func(add *AddHost) { add.Host.ID = 0 },
@@ -100,7 +100,7 @@ func TestOnlyTheLeaderAddsAHostThatIsNew(t *testing.T) {
 
 func TestAServerBelongsToOneHost(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddJoinToken, CLIActor, AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
+	c.mustApply(KindAddJoinToken, cliActor, AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
 	add := joiningHost()
 	add.Host.ServerID = 40
 	c.refuse(KindAddHost, LeaderActor, add, "host node0 has the server 40 already")
@@ -121,15 +121,15 @@ func TestAServerBelongsToOneHost(t *testing.T) {
 
 func TestAnUnderlayIsInThePrivateNetwork(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, CLIActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
-	c.mustApply(KindAddJoinToken, CLIActor, AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
+	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.mustApply(KindAddJoinToken, cliActor, AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
 	add := joiningHost()
 	add.Host.Underlay = netip.MustParseAddr("192.168.0.3")
 	c.refuse(KindAddHost, LeaderActor, add, "host node1 has the underlay 192.168.0.3, outside private_network 10.0.0.0/16")
 
 	config := testConfig()
 	config.PrivateNetwork = "10.1.0.0/16"
-	c.refuse(KindApplyConfig, CLIActor, ApplyConfig{Spec: config, Secrets: testSecrets()},
+	c.refuse(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: testSecrets()},
 		"host node0 has the underlay 10.0.0.2, outside private_network 10.1.0.0/16")
 }
 
@@ -155,7 +155,7 @@ func TestAPassiveSecondHostMayGoBeforeTheClusterIsHighlyAvailable(t *testing.T) 
 	if c.state.HA {
 		t.Error("one active host and a passive one are highly available")
 	}
-	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Removed})
+	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed})
 }
 
 func TestAHighlyAvailableClusterKeepsThreeHosts(t *testing.T) {
@@ -164,13 +164,13 @@ func TestAHighlyAvailableClusterKeepsThreeHosts(t *testing.T) {
 	if !c.state.HA {
 		t.Fatal("three active hosts are not highly available")
 	}
-	c.refuse(KindSetHostPhase, CLIActor, SetHostPhase{Host: 2, Phase: Removed},
+	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 2, Phase: Removed},
 		"2 hosts would be left to run stacks, and a highly available cluster keeps 3; join a replacement first")
 	// a dead host too: a replacement joins first
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 2, Phase: Failed})
-	c.refuse(KindSetHostPhase, CLIActor, SetHostPhase{Host: 2, Phase: Removed}, "join a replacement first")
+	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 2, Phase: Removed}, "join a replacement first")
 	c.activeHost(3)
-	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 2, Phase: Removed})
+	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 2, Phase: Removed})
 	if !c.state.HA {
 		t.Error("the cluster is no longer highly available")
 	}
@@ -182,15 +182,15 @@ func TestAHostWithAStackOrACopyStays(t *testing.T) {
 	c.putShop(shopSpec())
 	host := HostID(1)
 	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{PlannedAt: c.index, ID: "default/shop", Status: StackStarting, Host: &host})
-	c.refuse(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Removed}, "host node1 still has stack default/shop")
-	c.mustApply(KindDeleteResource, CLIActor, DeleteResource{Kind: resource.KindStack, Namespace: "default", Name: "shop", Owner: OwnerCLI})
-	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Removed})
+	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed}, "host node1 still has stack default/shop")
+	c.mustApply(KindDeleteResource, cliActor, DeleteResource{Kind: resource.KindStack, Namespace: "default", Name: "shop", Owner: OwnerCLI})
+	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed})
 }
 
 func TestARemovedHostsIDIsFreeOnceEveryHostForgotIt(t *testing.T) {
 	c := newCluster(t)
 	c.activeHosts(3)
-	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 1, Phase: Removed})
+	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed})
 	if waiting := c.state.Forgetting[1]; !slices.Equal(waiting, []HostID{0, 2, 3}) {
 		t.Errorf("waiting for %v", waiting)
 	}
@@ -202,7 +202,7 @@ func TestARemovedHostsIDIsFreeOnceEveryHostForgotIt(t *testing.T) {
 	c.mustApply(KindReportPeerForgotten, HostActor(2), ReportPeerForgotten{Host: 2, Peer: 1})
 	// a host that is removed meanwhile forgets nothing any more
 	c.activeHost(4)
-	c.mustApply(KindSetHostPhase, CLIActor, SetHostPhase{Host: 3, Phase: Removed})
+	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 3, Phase: Removed})
 	if _, waiting := c.state.Forgetting[1]; waiting {
 		t.Errorf("still waiting for %v", c.state.Forgetting)
 	}
@@ -221,7 +221,7 @@ func TestARemovedHostsIDIsFreeOnceEveryHostForgotIt(t *testing.T) {
 func TestOnlyTheLeaderRecordsAVoter(t *testing.T) {
 	c := newCluster(t)
 	c.activeHosts(1)
-	c.refuse(KindSetHostVoter, CLIActor, SetHostVoter{Host: 1, Voter: true}, "only the leader does")
+	c.refuse(KindSetHostVoter, cliActor, SetHostVoter{Host: 1, Voter: true}, "only the leader does")
 	c.mustApply(KindSetHostVoter, LeaderActor, SetHostVoter{Host: 1, Voter: true})
 	if !c.state.Hosts[1].Voter {
 		t.Error("host 1 does not vote")

@@ -43,7 +43,7 @@ func newRekey(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			client, _, err := g.connect()
+			client, err := g.connect()
 			if err != nil {
 				return err
 			}
@@ -128,7 +128,7 @@ func rekeyByIdentity(cmd *cobra.Command, client *api.Client, identityFile string
 	if err != nil {
 		return nil, err
 	}
-	recipients, _, err := clusterRecipients(cmd.Context(), client)
+	recipients, err := clusterRecipients(cmd.Context(), client)
 	if err != nil {
 		return nil, err
 	}

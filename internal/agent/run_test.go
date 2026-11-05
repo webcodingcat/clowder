@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,9 +20,8 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/agent/agenttest"
-	"github.com/webcodingcat/clowder/internal/api"
-	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/cli"
+	"github.com/webcodingcat/clowder/internal/clientconfig"
 	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/hetzner"
 	"github.com/webcodingcat/clowder/internal/hetzner/hetznertest"
@@ -121,16 +121,6 @@ func (f *fakeNetwork) waitForRuleset(t *testing.T, want func(network.Ruleset) bo
 	t.Errorf("no such ruleset applied; the last ones: %v", f.rulesets)
 }
 
-// keyFile writes a bootstrap key into a file of its own, as the user keeps it.
-func keyFile(t *testing.T, key string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "bootstrap-key")
-	if err := os.WriteFile(path, []byte(key), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
 // waitForOutput runs the CLI up to 10 s until its output contains want.
 func waitForOutput(t *testing.T, want string, args ...string) {
 	t.Helper()
@@ -216,7 +206,7 @@ func initTestHost(t *testing.T) (files Files, raftPort, apiPort int) {
 	files = Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}
 	raftPort, apiPort = freePort(t), freePort(t)
 	err := Init(context.Background(), files, InitOptions{
-		BootstrapKey: testBootstrapKey, Name: "node0", Underlay: loopback, PublicAddress: netip.MustParseAddr("127.0.0.2"),
+		ClusterName: testClusterName, Name: "node0", Underlay: loopback, PublicAddress: netip.MustParseAddr("127.0.0.2"),
 		ServerID: 1000001, NodeAddress: loopback, RaftPort: raftPort, APIPort: apiPort,
 	}, &fakeNetwork{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
@@ -301,7 +291,7 @@ func TestRunEndsAtItsStartWhenAPartFailsAndLeavesNothingOpen(t *testing.T) {
 }
 
 // TestAFirstHostAndItsCLI goes the way of a new cluster: init on the host,
-// the agent running, the CLI's bootstrap, new credentials from the host,
+// the agent running, the first credentials from the host and new ones,
 // apply and diff.
 func TestAFirstHostAndItsCLI(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -312,14 +302,14 @@ func TestAFirstHostAndItsCLI(t *testing.T) {
 	// the public address is another loopback address, as a host's public
 	// address is another than its underlay; users reach the API there
 	err := Init(context.Background(), files, InitOptions{
-		BootstrapKey: testBootstrapKey, Name: "node0", Underlay: loopback,
+		ClusterName: testClusterName, Name: "node0", Underlay: loopback,
 		PublicAddress: netip.MustParseAddr("127.0.0.2"), ServerID: 1000001,
 		NodeAddress: loopback, RaftPort: freePort(t), APIPort: apiPort,
 	}, hostNetwork, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Init(context.Background(), files, InitOptions{BootstrapKey: testBootstrapKey, Name: "node0", Underlay: loopback},
+	if err := Init(context.Background(), files, InitOptions{ClusterName: testClusterName, Name: "node0", Underlay: loopback},
 		hostNetwork, logger); err == nil || !strings.Contains(err.Error(), "was part of a cluster") {
 		t.Errorf("a second init: %v", err)
 	}
@@ -358,96 +348,86 @@ func TestAFirstHostAndItsCLI(t *testing.T) {
 		t.Fatalf("systemd heard %q, %v", message[:n], err)
 	}
 
-	// the CLI's side: an empty cluster directory, a config directory
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_CONFIG_HOME", home)
+	// the CLI's side: a credentials file of its own, nothing in it yet
 	t.Setenv(clusterdir.EnvVar, "")
+	t.Setenv(clientconfig.EnvVar, filepath.Join(t.TempDir(), "config"))
 	dir := t.TempDir()
+	if _, err := clowder(t, "host", "list"); err == nil || !strings.Contains(err.Error(), "clowderd credentials") {
+		t.Errorf("the CLI without credentials: %v", err)
+	}
+	// root on the host prints the first credentials, as over SSH: the
+	// public addresses of the hosts as the endpoints, unless --endpoint
+	// names others (here the API's port, which a test cannot have fixed)
+	var printed bytes.Buffer
+	if err := printCredentials(context.Background(), &printed, files, CredentialsOptions{Name: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := clientconfig.Parse(printed.Bytes())
+	if err != nil || first.CurrentContext != testClusterName ||
+		!slices.Equal(first.Contexts[0].Endpoints, []string{"127.0.0.2"}) {
+		t.Fatalf("the printed credentials: %+v, %v", first, err)
+	}
 	endpoint := net.JoinHostPort("127.0.0.2", strconv.Itoa(apiPort))
+	printed.Reset()
+	err = printCredentials(context.Background(), &printed, files, CredentialsOptions{Name: "alice", Endpoints: []string{endpoint}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := clowderWithInput(t, printed.String(), "config", "import", "-"); err != nil {
+		t.Fatalf("import: %q, %v", out, err)
+	}
+	if _, err := clowder(t, "host", "list"); err != nil {
+		t.Errorf("the first credentials: %v", err)
+	}
+	// a new cluster has no recovery key: encrypting waits for the first
+	if _, err := clowderWithInput(t, "x\n", "secret", "encrypt", "--cluster-yaml"); err == nil ||
+		!strings.Contains(err.Error(), "recovery rotate") {
+		t.Errorf("encrypt without a recovery key: %v", err)
+	}
 	recoveryFile := filepath.Join(t.TempDir(), "recovery-key")
-	bootstrap := func(name, cluster, key string, more ...string) error {
-		_, err := clowder(t, append([]string{
-			"--cluster", cluster, "cluster", "bootstrap", "--name", name,
-			"--endpoint", endpoint, "--key-file", key,
-		}, more...)...)
-		return err
-	}
-
-	if err := bootstrap("test", dir, keyFile(t, "a-guess-that-is-long-enough-to-be-tried"), "--recovery-out", recoveryFile); err == nil ||
-		!strings.Contains(err.Error(), "cannot prove it knows the bootstrap key") {
-		t.Errorf("a wrong bootstrap key: %v", err)
-	}
-	theKey := keyFile(t, testBootstrapKey+"\n")
-	if err := bootstrap("test", dir, theKey); err == nil || !strings.Contains(err.Error(), "--recovery-out") {
+	if _, err := clowder(t, "recovery", "rotate"); err == nil || !strings.Contains(err.Error(), "--recovery-out") {
 		t.Errorf("no terminal and no --recovery-out: %v", err)
 	}
-	if err := bootstrap("test", dir, theKey, "--recovery-out", recoveryFile); err != nil {
+	if _, err := clowder(t, "recovery", "rotate", "--recovery-out", recoveryFile); err != nil {
 		t.Fatal(err)
 	}
 	if recovery, err := os.ReadFile(recoveryFile); err != nil || !strings.HasPrefix(string(recovery), "AGE-SECRET-KEY-1") {
 		t.Errorf("the recovery key: %q, %v", recovery, err)
 	}
-	if err := bootstrap("test", t.TempDir(), theKey, "--recovery-out", filepath.Join(t.TempDir(), "r")); err == nil ||
-		!strings.Contains(err.Error(), "--force") {
-		t.Errorf("a second bootstrap under the same name: %v", err)
-	}
-	secondRecovery := filepath.Join(t.TempDir(), "r")
-	if err := bootstrap("other", t.TempDir(), theKey, "--recovery-out", secondRecovery); err == nil ||
-		!strings.Contains(err.Error(), "bootstrapped already") {
-		t.Errorf("a second bootstrap: %v", err)
-	}
-	if _, err := os.Stat(secondRecovery); err == nil {
-		t.Error("a second bootstrap made a recovery key")
-	}
 
 	// root on the host hands out new credentials and, with --revoke-older,
-	// locks out the bootstrap's. A certificate of the same second as the
-	// new one stays valid (certificates count in seconds): wait for the next.
+	// locks out the first. A certificate of the same second as the new one
+	// stays valid (certificates count in seconds): wait for the next.
 	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second)))
-	var issued bytes.Buffer
-	if err := printCredentials(context.Background(), &issued, files, true); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := clowder(t, "--cluster", dir, "host", "list"); err == nil || !strings.Contains(err.Error(), "revoke-older") {
-		t.Errorf("the bootstrap's credentials after --revoke-older: %v", err)
-	}
-	credentialsPath, err := clusterdir.CredentialsPath("test")
+	printed.Reset()
+	err = printCredentials(context.Background(), &printed, files,
+		CredentialsOptions{Name: "bob", Endpoints: []string{endpoint}, RevokeOlder: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(credentialsPath, issued.Bytes(), 0o600); err != nil {
+	if _, err := clowder(t, "host", "list"); err == nil || !strings.Contains(err.Error(), "revoke-older") {
+		t.Errorf("the first credentials after --revoke-older: %v", err)
+	}
+	if _, err := clowderWithInput(t, printed.String(), "config", "import", "-", "--as", "bob"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := clowder(t, "--cluster", dir, "host", "list"); err != nil {
-		t.Errorf("the host's new credentials: %v", err)
+	if _, err := clowder(t, "config", "use-context", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := clowder(t, "cluster", "status"); err != nil || !strings.Contains(out, "cluster "+testClusterName) {
+		t.Errorf("the host's new credentials: %q, %v", out, err)
 	}
 
-	// cluster.yaml as the bootstrap wrote it, without the bootstrap key,
-	// which opens nothing any more: not even a proof of the CA
+	// cluster.yaml from scratch, with the Hetzner token encrypted by the
+	// cluster's recipients; the hosts' private network is the loopback's
 	config := filepath.Join(dir, clusterdir.ConfigFile)
-	written, err := os.ReadFile(config)
-	if err != nil || !strings.Contains(string(written), "name: test\n") ||
-		strings.Contains(string(written), testBootstrapKey) || strings.Contains(string(written), "BEGIN AGE") {
-		t.Fatalf("cluster.yaml: %q, %v", written, err)
-	}
-	offer, err := api.FindCluster(context.Background(), endpoint, api.DefaultConnectTimeout, []byte(testBootstrapKey), buildinfo.Version)
-	if !errors.Is(err, api.ErrBootstrapped) || offer != nil {
-		t.Errorf("the bootstrap key after the bootstrap: %v, %v", offer, err)
-	}
-	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err == nil || !strings.Contains(err.Error(), "hetzner") {
-		t.Errorf("diff of the unfinished cluster.yaml: %q, %v", out, err)
-	}
-	// finished with the Hetzner token, encrypted by the cluster's
-	// recipients; the hosts' private network is the loopback's here
 	finish := func(token string, privateNetwork string) {
 		t.Helper()
-		block, err := clowderWithInput(t, token+"\n", "--cluster", dir, "secret", "encrypt", "--cluster-yaml")
+		block, err := clowderWithInput(t, token+"\n", "secret", "encrypt", "--cluster-yaml")
 		if err != nil {
 			t.Fatal(err)
 		}
-		finished := string(written) + "hetzner:\n  api: " + project.URL + "\n  token: " + block +
+		finished := "hetzner:\n  api: " + project.URL + "\n  token: " + block +
 			"private_network: " + privateNetwork + "\n" +
 			"ingress:\n  floating_ip: 203.0.113.10\nstorage_classes:\n  fast: {pool: vg-fast/thin}\n"
 		if err := os.WriteFile(config, []byte(finished), 0o600); err != nil {

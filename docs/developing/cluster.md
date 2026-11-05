@@ -17,18 +17,21 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   tests check what the types cannot, that the checks change nothing: every command a test
   may see refused (`apply`, `changes`, `refuse`) is compared with the state before it.
 - **Commands.** A command has a kind, a payload of the type with the same name
-  (`FinishBootstrap`, `PutResource`, ...) and an actor (`leader`, `host/<id>`, `cli`) that
-  the API takes from the caller's certificate. The cluster has no users: whoever holds a
-  CLI certificate controls it, as with kubeadm's `admin.conf`. Which actor may send which kind is the API's check. The state
+  (`Bootstrap`, `PutResource`, ...) and an actor (`leader`, `host/<id>`, `cli/<name>`)
+  that the API takes from the caller's certificate (`IsCLIActor` takes any name). The
+  cluster has no users: the name is for the audit, and whoever holds a CLI certificate
+  controls the cluster, as with kubeadm's `admin.conf`. Which actor may send which kind
+  is the API's check. `bootstrap` (`Bootstrap`, `ErrNotBootstrapped`) is Raft's word for
+  the first command, which `clowderd init` writes; users have no bootstrap. The state
   checks only what it alone can tell: a host reports only about itself and never moves
   another host, and about a stack only while it runs there, without moving it.
 - **The commands in use so far,** by who sends them:
 
   | Who | Commands |
   |---|---|
-  | `clowderd init` | `bootstrap` |
+  | `clowderd init` | `bootstrap` (the keys, the cluster's name, the first host) |
   | `clowderd recover` | `recover-remap` |
-  | the CLI | `apply-config`, `finish-bootstrap` (the bootstrap's end), `set-recovery-recipient`, `set-host-phase` (host actions), `add-join-token`, `put-resource` and `delete-resource` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack`, `request-move` |
+  | the CLI | `apply-config`, `set-recovery-recipient`, `set-host-phase` (host actions), `add-join-token`, `put-resource` and `delete-resource` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack`, `request-move` |
   | root on a host | `set-cli-cutoff` (`clowderd credentials --revoke-older`, as that host) |
   | the leader, for a joining host | `add-host` |
   | the members loop | `set-host-phase` (joining, passive, active; removed for a host that left), `set-host-voter` |
@@ -333,9 +336,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   spec, never by taking a name apart: `ClusterSecret(config.Hetzner.Token)`,
   `RegistryLogins` (the user from the spec, the password sealed). Until the first
   `apply-config` the config is revision 0 with an empty spec; the loops that need the
-  Hetzner token or a Floating IP find none and wait. init's bootstrap key is `BootstrapKey`, sealed,
-  until `finish-bootstrap` drops it. A stack names at most `MaxStackSecrets`. Who can read a
-  secret: API, below.
+  Hetzner token or a Floating IP find none and wait. Until the first
+  `set-recovery-recipient` there is no `RecoveryRecipient`, and nothing can be encrypted
+  for the cluster (`GET /v1/encryption` says so). A stack names at most
+  `MaxStackSecrets`. Who can read a secret: API, below.
+- **The cluster's name** (`ClusterName`) comes from `clowderd init --cluster-name`, as
+  kubeadm's `clusterName`, and is held to `names.Valid`. `cluster status`, the alerts and
+  new credentials carry it; nothing is checked against it.
 - **Join tokens** (`internal/jointoken`): an ID and a 256-bit secret. `add-join-token`
   keeps only the secret's hash under the ID, with when it expires: the command's `At` plus
   its TTL (`MinJoinTokenTTL` to `MaxJoinTokenTTL`, at most `MaxJoinTokens` open).
@@ -354,19 +361,22 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 
 - The cluster CA issues host certificates (server and client, valid for the host's addresses)
   and CLI certificates (client). The role is the certificate's organizational unit, the
-  name its common name (`host-<id>` or `cli`).
-- Keys are Ed25519 and the CA signs public keys. Hosts' keys and the bootstrap's CLI key
-  never leave the machine that made them; `clowderd credentials` makes the CLI's key on a
-  host and hands it over in `credentials.yaml`, as kubeadm does with `admin.conf`.
-- Certificates end by revocation or the CLI's cutoff, not expiry: hosts may stay off for
-  months. `Verify` takes the revoked serials from the state, which keeps each until a while
-  after it expired; the API holds a CLI certificate's start (`Identity.NotBefore`) against
-  `State.CLICutoff`.
-- `TrustProof` (HMAC-SHA256 over the CA certificate) is how a CLI or a joining host trusts
-  the CA on first contact: with the bootstrap key or a join token's hash
-  (`jointoken.ProofKey`). A bootstrap key chosen by hand has at least
-  `MinBootstrapKeyLength` characters, as the offer lets anyone try keys offline until the
-  bootstrap.
+  name its common name: `host-<id>`, or the CLI's name (`clowderd credentials --name`,
+  `DefaultCLIName` without one, as kubeadm's `admin.conf` is `kubernetes-admin`), held to
+  `names.Valid`. A CLI name is for the audit and grants nothing.
+- Keys are Ed25519 and the CA signs public keys. Hosts' keys never leave the machine that
+  made them; `clowderd credentials` makes the CLI's key on a host and hands it over in a
+  CLI config, as kubeadm does with `admin.conf`.
+- A host certificate ends by revocation, not expiry: hosts may stay off for months
+  (`leafLifetime`). `Verify` takes the revoked serials from the state, which keeps each
+  until a while after it expired. A CLI certificate lasts `cliLifetime`, a year as
+  kubeadm's client certificates, or ends sooner with the CLI's cutoff: the API holds its
+  start (`Identity.NotBefore`) against `State.CLICutoff`. Nothing renews it; every CLI
+  command warns from `renewWarning` before its end (`cli/connect.go`), and the user
+  fetches a new one from a host, as with `kubeadm certs renew admin.conf`.
+- `TrustProof` (HMAC-SHA256 over the CA certificate) is how a joining host trusts the CA on
+  first contact: with a proof key, its join token's hash (`jointoken.ProofKey`). The CLI
+  needs none: its first credentials come over SSH with the CA in them.
 - `tls_test.go` puts both TLS configs before every peer they must refuse: none, the CLI, a
   host of another CA, a stranger showing a host's certificate behind its own, a revoked, an
   expired and a not yet valid host; and runs handshakes on 127.0.0.1.
@@ -457,8 +467,9 @@ at Hetzner, in this order, each step safe to run again after a failure:
    answers without saying (a refused certificate: the others may have removed this host;
    an answer that does not come in time); only a host that takes no connection at all
    (`api.ErrNotReached`) counts as gone, and step 3 names it.
-3. It shows what the remap will do, worked out on a copy of the state, and asks for the
-   cluster's name (`--yes` for scripts). Until here nothing changed, and a refusal starts
+3. It shows what the remap will do, worked out on a copy of the state, and asks for this
+   host's name, which says which host goes on alone (`--yes` for scripts). Until here
+   nothing changed, and a refusal starts
    the agent again.
 4. Per host: the label `clowder-retired` with the serial of the host's certificate
    (`hetzner.Client.SetRetired`), then the power off, both confirmed by Hetzner; the
@@ -516,8 +527,8 @@ them.
   (`waitForLeader`) instead of failing at once.
 - **Who speaks.** The actor of a command is the caller of the first agent; its time (`At`) is
   the leader's clock. `/v1/internal/propose` takes two things only: the CLI's command that a
-  follower forwards (`cliKinds`, exactly the kinds the CLI's routes and the bootstrap
-  make), and what a host commits as itself (`hostKinds`: its reports, and the cutoff of
+  follower forwards (`cliKinds`, exactly the kinds the CLI's routes make, with any CLI
+  actor), and what a host commits as itself (`hostKinds`: its reports, and the cutoff of
   `clowderd credentials --revoke-older`); `/v1/internal/changes` takes the CLI's resource
   commands only (Resources, below). The leader's own commands (placements, the ingress)
   are made on the leader and never come in from outside; a host never speaks for another
@@ -526,9 +537,12 @@ them.
   agent, so the leader cannot check that a forwarded command really came from the CLI. This
   is on purpose, as kubeadm's control plane trusts its own nodes: a host holds the data key,
   the CA's key and the whole Raft state, and root on a host can print credentials anyway
-  (`clowderd credentials`), so a host is trusted with everything. There are no users, so
-  there is no name a host could forge. The checks on the internal routes catch an agent's
-  bug, not a host that lies; what keeps strangers out is the CA, and removing a host
+  (`clowderd credentials`), so a host is trusted with everything. A host names the CLI's
+  actor (`cli/<name>`) and could name another; that is accepted, as the name grants
+  nothing. The agent that takes a CLI request logs its actor with every write (`a CLI
+  request`, in that agent's journal only); the record every agent keeps is the actor of
+  the Raft command and the state's `Audit`. The checks on the internal routes catch an
+  agent's bug, not a host that lies; what keeps strangers out is the CA, and removing a host
   revokes its certificate.
 - A refusal of the state is HTTP 409 with its reason; a write that did not commit is 503.
 - **JSON names.** What users write and read as resources (`resource.Object`, the specs and
@@ -554,8 +568,8 @@ them.
   `refused` (the state's no), `failed` (did not commit: no leader, no quorum; try again),
   and `not-tried` after a refusal or failure, since what follows usually needs it. No
   transaction: a repeat converges. They are the only way to change resources; every
-  user's change is the channel `cli`. Requests are read strictly, so a typo is an error,
-  not an empty request; the internal routes read leniently, as an agent of the next
+  user's change is the channel `cli`, whatever the certificate's name. Requests are read
+  strictly, so a typo is an error, not an empty request; the internal routes read leniently, as an agent of the next
   release may send fields this one does not know.
 - The agent that took the request turns each resource into its `put-resource`
   (`putCommand`): the spec read strictly (`resource.DecodeVolumeSpec`, a field the kind
@@ -601,14 +615,18 @@ them.
 
 ### The CLI
 
-- **The client** tries the endpoints of `cluster.yaml` in turn and trusts any host
+- **The client** tries the endpoints of the context in turn and trusts any host
   certificate of the cluster's CA, whatever name the endpoint has. A read goes on to the
   next endpoint after any network error; a write only if it never left (`httptrace`),
   since one that was sent may have committed without an answer.
 - **The endpoints** are all the CLI knows: it learns no other agents from the cluster, so
-  it reaches the cluster only while an endpoint answers. The bootstrap writes the first
-  host alone; the user adds each host that joins (`host list` shows its public address,
-  the module's `cluster_yaml` output lists every host).
+  it reaches the cluster only while an endpoint answers. A kubeconfig has one `server`,
+  and kubectl reaches several control-plane nodes only through a load balancer, a VIP or
+  DNS in front of them; clowder keeps a list, so a cluster needs nothing in front of it,
+  and whoever puts something there lists its one address. `clowderd credentials` writes
+  the public addresses of the hosts at the time (`CredentialsAnswer.Endpoints`), or what
+  `--endpoint` names; after joins and removes, the user fetches new credentials or edits
+  the endpoints (`host list` shows the public addresses).
 - **An endpoint that does not answer** costs little. One that has not connected within
   `--connect-timeout` (`api.DefaultConnectTimeout` without it), or not finished TLS
   within as long again, counts as unreachable: a host cut off drops the packets, and the
@@ -616,16 +634,21 @@ them.
   set up the connection and then hangs still holds a request for `answerTimeout`. The
   client starts each request with the endpoint that answered last (`inTurn`), so one
   that is down costs its timeout once per command, not once per request. Every client
-  that asks endpoints shares this transport (`endpointTransport`), bootstrap and recover
+  that asks endpoints shares this transport (`endpointTransport`), the join and recover
   included; `clowderd join`, which has no `--connect-timeout`, waits the default.
-- `endpoints` are for the CLI alone: it reads them from the file, so a change works
-  without `cluster apply`. They go to the cluster with the rest of `cluster.yaml`, so
-  `cluster diff` shows a change of them until the next apply; the agents ignore them.
-- **The CLI** finds the cluster directory (`--cluster`, `$CLOWDER_CLUSTER`, the working
-  directory) and by its `name` the user's credentials, then talks to the cluster with the
-  user's certificate. An agent whose certificate is of another CA than the credentials'
-  is named as such (`foreignCA`: a cluster of the same name, or set up anew) instead of
-  with x509's words alone: `cluster status|apply|diff|schema`,
+- **The CLI** reads its credentials file (`--config`, `$CLOWDER_CONFIG`,
+  `~/.clowder/config`; `clientconfig`, specs.md) and takes the context `--context`
+  names, else the current one (`globals.connect`); it warns from `renewWarning` before
+  the context's certificate ends. Only `cluster apply` and `cluster diff` read the
+  cluster directory (`--cluster`, `$CLOWDER_CLUSTER`, the working directory). `clowder
+  config get-contexts|use-context|delete-context|import` manage the file (`cli/config.go`;
+  `withHint` adds to `clientconfig`'s errors what to do). `import <file|->` adds the one
+  context that `clowderd credentials` prints, as kubectl has no merge and merging by hand
+  is where keys get lost: under the cluster's name or `--as` (not `--context`, which
+  picks the context a command uses), refusing a name that is taken, or with `--replace`
+  in the old one's place, as after a renewal. An agent whose certificate is of another
+  CA than the context's is named as such (`foreignCA`: another cluster at that address,
+  or one set up anew) instead of with x509's words alone: `cluster status|apply|diff|schema`,
   `host list|drain|undrain|remove`, `apply`, `get`, `delete`, `stack ps|logs|restart`.
 - **Exit codes**, the same for every command:
 
@@ -719,23 +742,8 @@ them.
   or is meant for another place shows as `error:` with the reason, and the command fails
   after printing every line.
 
-### The bootstrap and joining hosts
+### Joining hosts
 
-- **The CLI** has no certificate yet (`cluster bootstrap`). `GET /v1/bootstrap` gives
-  the CA certificate with a `pki.TrustProof` made with the bootstrap key, and the CLI
-  trusts the CA only if it matches its key (`api.FindCluster`). The offer also says
-  whether the bootstrap is over (`bootstrapped`): then it has no proof, as the key opens
-  nothing any more, and the CLI stops (`api.ErrBootstrapped`) before it makes a recovery
-  key, so nobody holds two and does not know which counts. Else it makes the recovery key
-  and hands it over: shown once with its last 8 characters typed back, or into a new file
-  (`--recovery-out`, for scripts); nothing has reached the cluster yet.
-  `POST /v1/bootstrap`, over TLS checked against that CA, carries the CLI's public key and
-  the recovery key's recipient with an HMAC of the bootstrap key and a time
-  (`bootstrapMaxAge`), each field after its length (`digest.WriteParts`); the state keeps
-  the recipient and drops the bootstrap key (`finish-bootstrap`). It works once; further
-  credentials come from root on a host (below). The CLI then writes the credentials
-  (`clusterdir.WriteCredentials`), checks that the cluster's recovery recipient is the key
-  it made, and writes `cluster.yaml` to fill in (`clusterdir.Create`).
 - **A host joins** with a token the CLI made (`clowder host join-token`, `api/join.go`,
   `agent/join.go`). `GET /v1/join?token=<id>` gives the CA certificate with a
   `pki.TrustProof` made with the token's hash while the token is open, and the host trusts
@@ -758,6 +766,9 @@ them.
   says why: only the holder of an open token's secret gets that far, and the token stays
   open for another try. The answer carries the certificate, the data key and the other
   hosts, for the host's first WireGuard interfaces (A host, Join).
+- **The join's routes come without a certificate,** so each agent takes at most
+  `triesPerSender` tries a minute per sender and `triesInAll` in all, in memory
+  (`api/limit.go`); then 429. A sender is its IPv4 address, or for IPv6 its /64.
 - **The server ID** decides which server fencing powers off and where the Floating IP
   goes, and the Hetzner token may act on every server of its project. A joined host's
   server is checked as it joins; the first host's, whose ID init takes from the metadata
@@ -767,35 +778,41 @@ them.
 
 ### Credentials from a host
 
-- **The cluster has no users,** as kubeadm's has none: whoever holds a CLI certificate and
-  `cluster.yaml` controls it. More credentials, or new ones after a lost laptop, come from
-  root on a host, as `kubeadm kubeconfig user` makes them.
+- **The cluster has no users,** as kubeadm's has none: whoever holds a CLI certificate
+  controls it. Every credential comes from root on a host, the first too, as kubeadm's
+  `admin.conf` and `kubeadm kubeconfig user`: `clowderd init` makes the cluster, then
+  `ssh root@<host> clowderd credentials | clowder config import -`. The CA is trusted
+  through SSH, so the first host's user data holds no secret and no route opens without
+  a certificate but the join's.
 - **`clowderd credentials`** (`agent/credentials.go`) makes the CLI's key on the host and
   asks its own agent, with the host's certificate, for a certificate
-  (`POST /v1/internal/credentials`, `api/credentials.go`): the agent opens the CA's key
-  from the state with the data key and issues it. The command prints `credentials.yaml`;
-  the key crosses SSH as kubeadm's `admin.conf` does.
+  (`POST /v1/internal/credentials`, `api/credentials.go`) with the name of `--name`: the
+  agent opens the CA's key from the state with the data key and issues it, and answers
+  with the cluster's name and the public addresses of the hosts that are not removed. The
+  command prints a CLI config with one context named after the cluster, those addresses
+  as its endpoints unless `--endpoint` names others; the key crosses SSH as kubeadm's
+  `admin.conf` does.
 - **`--revoke-older`** also commits `set-cli-cutoff` as that host, with the new
   certificate's start: from then on every agent refuses the CLI certificates that start
   before it (`Server.cliCutoffPassed`), a stolen laptop's included. It needs the leader;
   the certificate comes back only once the cutoff is committed and the host's own agent
   applied it; the other agents follow within moments. Certificates count in
   seconds, so one issued in the same second as the new one stays valid.
-- **The bootstrap's routes come without a certificate,** so each agent takes at most
-  `triesPerSender` tries a minute per sender and `triesInAll` in all, in memory
-  (`api/limit.go`); then 429. A sender is its IPv4 address, or for IPv6 its /64. The
-  join's routes are limited the same way, with a count of their own.
-- **`recovery rotate`** makes a new recovery key with the CLI's credentials alone: they
-  control the cluster anyway. The CLI makes the new key and hands it over as the bootstrap
-  does, then `POST /v1/recovery/rotate` commits `set-recovery-recipient`. Values encrypted
-  afterwards are for the new key; `secret rekey` brings the files to it. Old ciphertext,
-  in the Git history say, stays readable with the old key.
+- **`recovery rotate`** makes a recovery key with the CLI's credentials alone: they
+  control the cluster anyway. A new cluster has none, so it makes the first one too. The
+  CLI makes the key and hands it over (`handOverRecoveryKey`: shown once with its last 8
+  characters typed back, or into a new file with `--recovery-out`, for scripts; nothing
+  has reached the cluster yet), then `POST /v1/recovery/rotate` commits
+  `set-recovery-recipient`. Values encrypted afterwards are for the new key; `secret
+  rekey` brings the files to it. Old ciphertext, in the Git history say, stays readable
+  with the old key.
 
 ### Tests
 
 - The tests run real HTTPS servers: a follower forwarding to the leader, refused callers, the
-  CLI against an agent with a cluster directory and credentials in a temporary config
-  directory.
+  CLI against an agent with a cluster directory and a credentials file in a temporary
+  home. `agent/run_test.go` goes the whole way: init, the first credentials printed and
+  imported, the recovery key, new credentials with `--revoke-older`, apply and diff.
 
 ## Placement (`internal/scheduler`, `internal/controller`)
 
