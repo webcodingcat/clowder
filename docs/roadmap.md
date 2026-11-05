@@ -260,12 +260,12 @@ It is built on the branch `phase-2b` and goes to `main` only once it is whole.
 
 - Several sessions, one per step below, in this order. After each, lint and the unit
   tests are green.
-- Each step gets the full review loop (junior and senior) over what it changed: each
-  touches access, keys, the state or a format.
+- Each step gets the full review loop (junior and senior) over what it changed: steps
+  1 to 7 touch access, keys, the state or a format, step 8 much of the documentation.
 - After step 5, the live tests run once in between: by then access, configuration,
   secrets, roles and who may call what stand, and every host still holds the keys, so
   the cluster is a whole one, not a bridge. A fault found there is found under five
-  steps, not seven. `test/live`, `bin/dev live` and the lab of roles change for it,
+  steps, not eight. `test/live`, `bin/dev live` and the lab of roles change for it,
   before step 6.
 - At the end: the live tests over the whole phase, then a last review round over the
   whole, then the merge. The state and every format change, so a cluster of an earlier
@@ -582,6 +582,28 @@ Agreed with the operator before the plan.
   without its etcd: the workers hold the log but no key. The way back is a new
   cluster, the `SealedSecret`s sealed anew with the exported sealing key, and the data
   from phase 3's backups. A known gap; three control-plane hosts are the advice.
+
+### Step 8: clean up
+
+The last step, before the final live tests, so they run on what is merged.
+
+- **Old and dead code goes:** what phase 2b left without a caller (helpers of the
+  bootstrap, of the cluster directory, of `!secret` and of the recovery key, constants
+  and test fixtures nobody uses), and what was dead before. `deadcode` and
+  golangci-lint's `unused` find the candidates; each is checked by hand, as a test may
+  be its only caller.
+- **General tidying, without new behavior:** names and comments that still speak of
+  users, the bootstrap, `cluster.yaml` or the recovery key; the open points of the
+  reviews that are no behavior (the wiring of the loops in `agent/run.go`, comments
+  that contradict each other, long table cells).
+- **The plan for phase 3 and later:** this file says what stands, not how it came: the
+  history of phases 1 to 2b shrinks to what each built. Phases 3 and 4 and Known gaps
+  are checked against phase 2b (`ClusterConfiguration`, Secrets, roles, sealing key)
+  and written anew where they no longer fit: backup and restore with the sealing key,
+  GitOps that cannot answer the question before a new token, `cluster rotate-keys` for
+  the control plane only.
+- Review: the full loop (junior and senior), though nothing new behaves: the
+  documentation changes much, and a junior must understand it.
 
 ### The live tests (after step 5, and at the end)
 
