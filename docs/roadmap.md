@@ -11,7 +11,7 @@ clowder is built in phases; each ends with live tests on HLab
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
 | 2 | three hosts: replication, failover with fencing | done, passes the live tests |
-| 2b | access and host roles the way of kubeadm ([below](#phase-2b-access-and-host-roles-the-way-of-kubeadm)) | planned |
+| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | planned |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -243,34 +243,77 @@ earlier build must be set up anew, and credentials of an earlier build are refus
 Until `v1.0.0`, the state and `cluster.yaml` may change between releases without a way
 to upgrade a running cluster.
 
-## Phase 2b: access and host roles the way of kubeadm
+## Phase 2b: closer to Kubernetes
 
 Before phase 3, while the structure is still cheap to change, clowder moves closer to
 Kubernetes and kubeadm in how users get in, how long their certificates last, how the
 cluster's configuration and secrets come in, and which hosts hold the cluster's keys.
-clowder goes beyond Kubernetes only where it would otherwise lose a protection (the
-CLI's cutoff, the check of the Hetzner token).
+clowder goes beyond Kubernetes only where it would otherwise lose a protection or a
+function (the CLI's cutoff, the question before a new Hetzner token, a list of
+endpoints).
 
-Seven packages, in this order, each in a session of its own. Each that changes code
-changes the state or a file format, so a cluster of an earlier build is set up anew, and
-touches access, keys or a format, so it gets the full review loop (junior and senior).
-Packages 1 to 6 end with lint and the unit tests; package 7 runs the live tests once, on
-the whole phase.
+### How it is built
 
-### Package 1: CLI certificates and credentials
+One package, without states in between: no code that only bridges two steps (a
+bootstrap that writes the new credentials, a recovery key until the sealing key comes).
+It is built on the branch `phase-2b` and goes to `main` only once it is whole.
 
+- Several sessions, one per step below, in this order. After each, lint and the unit
+  tests are green.
+- Each step gets the full review loop (junior and senior) over what it changed: each
+  touches access, keys, the state or a format.
+- After step 5, the live tests run once in between: by then access, configuration,
+  secrets, roles and who may call what stand, and every host still holds the keys, so
+  the cluster is a whole one, not a bridge. A fault found there is found under five
+  steps, not seven. `test/live`, `bin/dev live` and the lab of roles change for it,
+  before step 6.
+- At the end: the live tests over the whole phase, then a last review round over the
+  whole, then the merge. The state and every format change, so a cluster of an earlier
+  build is set up anew.
+- Each step brings the documentation of what it changes along: DEVELOPING.md (Words:
+  actor, endpoint, sealed, voter, active and passive, and the three things `cli` names:
+  a certificate's role, the owner channel, the actor's prefix; Layers: `clusterdir` and
+  `secretvalue` go with their code), `docs/developing/`, the README and
+  `examples/hetzner`'s, and in this file Known gaps (each new limit below that says so;
+  step 1 rewrites the one about `endpoints` in `cluster.yaml`) and Keys of a removed
+  host (steps 3 and 6).
+- Two keys keep their words apart: the **data key** encrypts the secrets in the state
+  (DEVELOPING.md's "sealed" becomes "encrypted with the data key"), the **sealing key**
+  is the cluster's age key that a `SealedSecret` is encrypted for.
+
+### Step 1: access the way of kubeadm
+
+- **No bootstrap.** `clowderd init` makes the cluster as now; the first credentials come
+  over SSH, as kubeadm's `admin.conf` does: `ssh root@<host> clowderd credentials`. The
+  CA is trusted through SSH. Gone: the bootstrap key (`examples/hetzner`'s
+  `random_password`, the user data, `/etc/clowder/bootstrap-key`,
+  `--bootstrap-key-file`), `GET` and `POST /v1/bootstrap`, `finish-bootstrap`,
+  `MinBootstrapKeyLength`, the limit on the bootstrap's routes, `clowder cluster
+  bootstrap` and `clusterdir.Create`. `TrustProof` stays for join tokens; its key is
+  called the proof key, no longer the bootstrap key (`pki`, the docs). Why: the key
+  that let the first user in leaves the user data and the metadata service, which
+  closes the window at boot that the module's README describes, and a whole protocol
+  goes. The price is SSH, which `examples/hetzner` already opens to `admin_cidrs`. A
+  joining host's token stays in its user data: it opens once, expires within a day,
+  and from step 4 on allows only the roles it names.
 - **A name in each CLI certificate,** for the audit: `clowderd credentials --name
   <name>`, held to `names.Valid`, as `kubeadm kubeconfig user --client-name`. Without
   it the name is `admin`, as kubeadm's `admin.conf` is always `kubernetes-admin`. The
-  certificate's common name is the name; its organizational unit
-  stays `cli`. The actor of its commands becomes `cli/<name>`, in the agent's log and in
-  the Raft command. The name grants nothing: every CLI certificate controls the cluster,
-  and a resource's owner stays the channel `cli`. The cutoff (`--revoke-older`) stays the
-  only revocation, as Kubernetes cannot revoke client certificates at all.
-- **One year,** kubeadm's default for client certificates. Host certificates keep
-  `leafLifetime`, the CA `caLifetime`. From 30 days before the end, every CLI command
-  warns on stderr. A new certificate comes from `clowderd credentials` again (as
-  `kubeadm certs renew admin.conf`); the CLI does not renew itself.
+  certificate's common name is the name (`pki.Verify` no longer asks for `cli`); its
+  organizational unit stays `cli`. The actor of its commands becomes `cli/<name>`, in
+  the agent's log and in the Raft command; `state.IsCLIActor` takes the place of the
+  checks for `cli` (`api/server.go`, `api/changes.go`, `state/join.go`). The name
+  grants nothing: every CLI certificate controls the cluster, and a resource's owner
+  stays the channel `cli`. A host that forwards a command names the actor and could
+  name another; that is accepted, as the name grants nothing and from step 5 on only
+  control-plane hosts forward. The cutoff (`--revoke-older`) stays the only
+  revocation, as Kubernetes cannot revoke client certificates at all: it ends every CLI
+  certificate issued before it, so everyone fetches new credentials.
+- **One year,** kubeadm's default for client certificates, a lifetime of its own in
+  `pki` (whose package comment on long lifetimes changes with it). Host certificates
+  keep `leafLifetime`, the CA `caLifetime`. From 30 days before the end, every CLI
+  command warns on stderr. A new certificate comes from `clowderd credentials` again
+  (as `kubeadm certs renew admin.conf`); the CLI does not renew itself.
 - **The credentials work as a kubeconfig.** One file holds contexts, each with its
   endpoints, the CA, the key and the certificate; `current_context` picks one. The CLI
   reads `--config`, else `$CLOWDER_CONFIG`, else `~/.clowder/config` (as
@@ -280,148 +323,296 @@ the whole phase.
   [--context <name>]` adds it to the user's file: kubectl has no such command, and
   merging by hand is where keys get lost. A context's name is the user's own, as in a
   kubeconfig: the cluster's name without `--context`, and a name already taken needs
-  one.
+  one. The file is YAML, its keys snake_case as every file of clowder's that is no
+  resource (`current_context`, not kubeconfig's `current-context`). It lives in a
+  portable package the CLI may import; `clusterdir`'s credentials go.
 - **The cluster's name is optional,** as kubeadm's `clusterName`: `clowderd init
   --cluster-name <name>`, `clowder-cluster` without it. It is kept in the state, shown by
   `cluster status`, and names the context of new credentials; it checks nothing.
-- **`endpoints` leave `cluster.yaml`:** the credentials name the server, as a kubeconfig
-  does. Which addresses they list is the operator's choice: those of the control-plane
-  hosts, or one address in front of them (a Floating IP of their own, as kubeadm's
-  `--control-plane-endpoint`). `clowderd credentials` writes the public addresses of the
-  control-plane hosts at the time, or what `--endpoint` names. The CLI trusts any host
-  certificate of the CA, whatever the address, so both work. The known gap that the CLI
-  learns no hosts stays for the first way: after joins and removes, the user fetches new
-  credentials or edits the endpoints.
-- The CLI no longer finds its credentials through the cluster directory; until package 2,
-  only `cluster apply`, `diff` and the `secret` commands read `cluster.yaml`.
+- **The credentials name the endpoints.** A kubeconfig has one `server` per cluster,
+  and high availability is a load balancer, a VIP (kubeadm's `--control-plane-endpoint`)
+  or DNS in front of it; kubectl never tries another. clowder keeps a list and tries
+  each in turn, as now, so a cluster needs nothing in front of it; whoever puts one
+  there lists its one address. `clowderd credentials` writes the public addresses of
+  the control-plane hosts at the time (of every host until step 4 brings roles), or
+  what `--endpoint` names (repeatable). The CLI takes any host certificate of the CA,
+  whatever the address (step 5 narrows it to the control plane). The known gap that
+  the CLI learns no hosts stays for a list of hosts: after joins and removes, the user
+  fetches new credentials or edits the endpoints.
+- **`cluster.yaml` loses `name` and `endpoints`** in this step, so nothing has two
+  sources: the name comes from `clowderd init`, the endpoints from the credentials.
+  `clowderd recover` asks for the host's name instead of the cluster's.
 
-For the operator: the credentials move to `~/.clowder/config` in a new format,
-`endpoints` go from `cluster.yaml` into it, `clowderd credentials` takes a `--name`,
-`clowderd init` takes an optional `--cluster-name`, and the CLI's certificate is renewed
-once a year.
+For the operator: no bootstrap key; `ssh … clowderd credentials`, then `clowder config
+import`. The credentials live in `~/.clowder/config` and name the endpoints;
+`cluster.yaml` has no `name` and no `endpoints`; `clowderd init` takes an optional
+`--cluster-name`; the CLI's certificate is renewed once a year.
 
-### Package 2: configuration and secrets the way of Kubernetes
+### Step 2: the configuration as a resource
 
 - **`cluster.yaml` becomes a resource,** `kind: ClusterConfiguration`, as kubeadm's
   `ClusterConfiguration`: one per cluster, without a namespace, applied with `clowder
   apply -f` together with namespaces, secrets and stacks. Its fields are camelCase, as
   every resource's. `cluster apply` and `cluster diff` go (`apply --dry-run` and a
   `clowder diff -f`, as `kubectl diff`, take their place), and with them the cluster
-  directory: `--cluster`, `$CLOWDER_CLUSTER`, `clusterdir.Find` and `clusterdir.Create`.
-  clowder does not care where the files come from. Its `metadata.name` is always
-  `cluster`, as OpenShift names its configuration resources.
-- **No name check,** as Kubernetes checks none: `cluster.yaml`'s `name` goes (the
-  cluster's name comes from `clowderd init`, package 1), and `clowderd recover` asks for
-  the host's name instead of the cluster's. What the name guarded against, a configuration with another project's Hetzner token
-  (fencing would power off that project's servers), the token itself now shows: the
-  leader refuses a configuration whose token does not see the servers of every host
-  (`hetzner.Client.CheckServer`, as at a join).
+  directory: `--cluster`, `$CLOWDER_CLUSTER` and `clusterdir.Find`. clowder does not
+  care where the files come from. Its `metadata.name` is always `cluster`, as OpenShift
+  names its configuration resources. A cluster without one has no Hetzner token, no
+  ACME and no alerts, as after `init` today; once applied, it can be changed but not
+  deleted, as that would stop fencing and the Floating IP without a word.
+  `EndpointWarnings` and `warnEndpoints` go with it to the resource and keep warning
+  about `hetzner.api` and `acme.directory`, under a name that says so.
+- **`apply` works in the order of the files,** as kubectl does: a file from top to
+  bottom, a directory's files by name. `applyRank` goes. The request stays one, applied
+  whole or not at all; in it, each resource is checked against the state with the
+  resources above it applied, so a Secret the configuration names stands above it and
+  a namespace above its stacks. `delete -f` works from the bottom up.
+- **No name check,** as Kubernetes checks none: which cluster an apply reaches is the
+  context's, as with kubectl, and `cluster status` and `config get-contexts` show it.
+  The harm the name check kept off, a wrong Hetzner token, the question below keeps
+  off better.
 - **No files next to it:** `acme.ca` and an alert channel's `smtp.ca` stand in the
   resource as PEM, as Kubernetes' `caBundle` does. `clusterspec.FileNames`,
   `CheckFiles` and `ClusterConfig.Files` go.
-- **No secret values in it:** the Hetzner token, the registries' passwords and the
-  alert channels' URLs and passwords are Secrets in the namespace `clowder-system`, which
-  the configuration names, as the hcloud controller reads `kube-system/hcloud`. `apply`
-  refuses a configuration that names a Secret that does not exist, and a delete of a
-  Secret it names. `!secret`, `clusterspec.SecretPlaces` and the case of `cluster.yaml`
-  in `secret rekey` go.
-- **`Secret` and `SealedSecret`,** as in Kubernetes with Bitnami's sealed secrets. A
-  `Secret` carries its value in clear (`stringData`, `data`), or comes from `clowder
-  create secret <namespace>/<name> --from-literal|--from-file`; the CLI sends it over
-  mTLS and the cluster seals it. It does not belong in Git. A `SealedSecret` carries its
-  value encrypted for the cluster's age key and its own namespace and name (today's
-  `!secret` value), made by `clowder secret seal` as `kubeseal` makes one; it goes into
-  Git. Both end as the same sealed secret in the state; a stack or the configuration
-  names a Secret and does not care which way it came.
-- **No recovery key:** as with sealed secrets, the cluster's age key is exported and kept
-  offline: `clowderd sealing-key export`, as root on a host. `secret decrypt` and `secret
-  rekey` take that key in place of the recovery key. The recovery key, `recovery rotate`,
+- **No secret values in it:** the Hetzner token and the alert channels' URLs and
+  passwords are Secrets in the namespace `clowder-system`, which the configuration
+  names, as the hcloud controller reads `kube-system/hcloud`. `clowder-system` is
+  reserved: it always exists, cannot be deleted, and holds no stacks or volumes.
+  `apply` refuses a configuration that names a Secret that does not exist, and a delete
+  of a Secret it names. `!secret` in `cluster.yaml`, `clusterspec.SecretPlaces` and the
+  case of `cluster.yaml` in `secret rekey` go; a `Secret` keeps its `!secret` value
+  until step 3, so the Secrets of `clowder-system` have one way in meanwhile. Whoever
+  reads the token (`controller.OpenHetzner`, `checkRetired`) reads it from that Secret.
+- **Registry logins belong to a namespace,** as Kubernetes puts `imagePullSecrets` on a
+  namespace's default service account: the `Namespace` resource names Secrets of its
+  own that hold registry logins (`spec.imagePullSecrets`), each with the keys
+  `server`, `username` and `password`, and a stack's images are pulled with its
+  namespace's. As in Kubernetes, the names are not checked at apply (the Secrets live
+  in the namespace, so they come after it), and a missing one fails the pull, with the
+  reason in `get stacks`. `registries` leaves the configuration.
+- **A question before a new Hetzner token.** A server's ID is unique across Hetzner and
+  a token sees only its own project's servers, so a wrong token powers off no other
+  server: it reaches none of the cluster's, and fencing and the Floating IP stop. When
+  an apply changes the token (in the configuration or in the Secret it names; from
+  step 3 on `clowder create secret` alike), the CLI sends it as a dry run first. The
+  cluster checks the token once, with one request for the project's servers, and
+  answers what it found ("sees the servers of 3 of 3 hosts", "sees none", "could not
+  check"); the CLI shows it and asks, as `host remove` asks, then applies; `--yes` for
+  scripts. It never refuses: a token may be changed on purpose before its project is. No loop asks
+  Hetzner more often than now; a fencing or Floating IP call that a token is refused
+  for raises the alert `hetzner-token`. A GitOps source (phase 3) has nobody to ask:
+  only the alert tells.
+
+For the operator: `cluster.yaml` is a `ClusterConfiguration` applied with `clowder
+apply`, in the order of the files, without `registries`, with its CAs inline and its
+secrets as Secrets in `clowder-system`; registry logins go to the namespaces; a new
+Hetzner token is asked for.
+
+### Step 3: Secret and SealedSecret
+
+- **Two ways in,** as in Kubernetes with Bitnami's sealed secrets. A `Secret` carries its
+  value in clear (`stringData`, `data`), or comes from `clowder create secret
+  <namespace>/<name> --from-literal|--from-file`; the CLI sends it over mTLS and the
+  cluster encrypts it with the data key. It does not belong in Git. A `SealedSecret`
+  carries its value encrypted for the sealing key and its own namespace and name
+  (today's `!secret` value), made by `clowder secret seal` as `kubeseal` makes one: with
+  the sealing key's public half from the cluster (`GET /v1/encryption`), or offline
+  from a file (`--cert`, as kubeseal's) that `clowderd sealing-key export --public`
+  writes. It goes into Git. Both end as the same secret in the state; a stack, a
+  namespace or the configuration names a Secret and does not care which way it came.
+  `!secret` goes.
+- **The same value applied again changes nothing,** as now: the state compares the
+  value's digest, not the ciphertext, which differs at each seal. `get` and `diff` show
+  a secret's digest, never its value.
+- **No recovery key:** as with sealed secrets, the sealing key is exported and kept
+  offline: `clowderd sealing-key export`, as root on a host (a control-plane host from
+  step 4 on), right after `init`. `secret decrypt --identity` takes it in place of the
+  recovery key, and `secret rekey --identity` seals the values of files anew for the
+  cluster of the current context (or `--cert`) when the old one is lost, which is all
+  that is left of rekey with one recipient. The recovery key, `recovery rotate`,
   `/v1/recovery/rotate` and the second recipient of every value go. Whether phase 3's
-  backups keep the key too is decided there.
+  backups keep the sealing key too is decided there.
 
-For the operator: `cluster.yaml` is a `ClusterConfiguration` applied with `clowder apply`,
-without `name`, with its CAs inline and its secrets as Secrets in `clowder-system`; `!secret` values
-become `SealedSecret`s (`clowder secret seal`); the recovery key gives way to an exported
-sealing key.
+For the operator: `!secret` values become `SealedSecret`s (`clowder secret seal`), or
+`Secret`s that stay out of Git; the recovery key gives way to the sealing key, exported
+right after `init`.
 
-### Package 3: the first access as `kubeadm init`
+### Step 4: host roles
 
-- `clowderd init` makes the cluster as now; the first credentials come over SSH, as
-  kubeadm's `admin.conf` does: `ssh root@<host> clowderd credentials --name <name>`. The
-  CA is trusted through SSH.
-- Gone: the bootstrap key (`examples/hetzner`'s `random_password`, the user data,
-  `/etc/clowder/bootstrap-key`, `--bootstrap-key-file`), `GET` and `POST /v1/bootstrap`,
-  `finish-bootstrap`, `MinBootstrapKeyLength`, the limit on the bootstrap's routes,
-  and `clowder cluster bootstrap`. `TrustProof` stays for join tokens. The module's
-  output and the README take the place of the configuration the bootstrap wrote: a
-  `ClusterConfiguration` to apply.
+- **Three roles,** set with `--roles` at `clowderd init` (default `control-plane,worker,
+  ingress`) and `clowderd join` (default `worker,ingress`). A join token names the roles
+  it allows (`clowder host join-token --roles …`, default `worker,ingress`), and the
+  join picks from them: whoever reads a worker's token from its user data cannot join
+  as control plane. kubeadm needs a second secret for that (`--certificate-key`);
+  clowder's token opens once, so the roles in it are enough. Roles are fixed once a
+  host joined; to change them, the host is removed and joins anew (as `kubeadm reset`),
+  a known gap. `examples/hetzner` takes each host's roles, all three by default, so a
+  cluster of three is as today.
+  - `control-plane`: may vote in Raft, leads, serves the CLI's API, forwards the CLI's
+    commands, and runs `clowderd credentials`, `clowderd sealing-key export` and
+    `clowderd recover`.
+  - `worker`: runs stacks and holds volume copies.
+  - `ingress`: may take the Floating IP. Every host runs Traefik for its own stacks;
+    the ingress host's also takes what comes in on the Floating IP. TLS ends there;
+    the request goes on as HTTP through WireGuard to the stack host's Traefik, which
+    needs no TLS key (loops.md, Traefik).
+- **Voters are control-plane hosts:** 1, 3 or 5 of them by today's rule (`voterCount`
+  in `controller/members.go`), counted over the control-plane hosts. What counts for
+  `state.MinHAHosts`, `host remove`'s floor of three and the alert `no-ha` are the
+  control-plane hosts. The passive phase is only about the vote: the second
+  control-plane host waits for its vote until a third comes, as two voters would stop
+  Raft at the loss of either; it runs stacks meanwhile if it is a worker, as with one
+  voter that voter alone decides about workers, which is safe.
+- **One control-plane host is HA for the workers only,** the operator's choice: a
+  failed worker is fenced and its stacks move while the control-plane host lives; while
+  it is down, nothing is decided (no failover, no apply), and the stacks run on. A
+  worker that restarts meanwhile starts none of its stacks, as a host waits for the
+  leader's commit index before it starts any (and from step 6 on, their secrets come
+  from the control plane and are kept on no disk): a known gap. `no-ha` stays quiet
+  for a cluster that never had three control-plane hosts; it is about one that lost
+  them.
+- Hosts without the control plane follow the Raft log as non-voters, so the agent's
+  loops keep reading the state as now. They see every spec, which Kubernetes does not
+  show a node: a known gap.
+- The placement puts stacks and copies on workers only. A tiebreaker holds no data and
+  no load, so it may go on any host; a control-plane host without the worker role
+  needs DRBD for it, but no thin pool. Such a host runs no stacks, so its failure is
+  never fenced, as a host without stacks is not now; it keeps its vote.
+- A host certificate names its roles, and `host list` shows them.
+- Touches: `pki` (roles in the certificate), `jointoken` and the join (roles in the
+  token), `state` (a host's roles, `MinHAHosts`, the passive phase), `controller`
+  (members, placement, Floating IP), `scheduler`, `agent` (init, join), `clowderd`'s
+  flags, `examples/hetzner`.
+- In steps 4 and 5 every host still holds the data key; step 6 takes it from the
+  others.
 
-Why: no secret is left in the user data or the metadata service, which closes the window
-at boot that the module's README describes, and a whole protocol goes. The price is SSH,
-which `examples/hetzner` already opens to `admin_cidrs`.
+### Step 5: who may call what
 
-For the operator: no bootstrap key; `ssh … clowderd credentials`, then `clowder config
-import`, then `clowder apply` of the configuration.
+Every way into a host checks the caller's roles, so a worker that is taken over gets no
+further than its own stacks. Today any host certificate passes everywhere.
 
-### Package 4: control plane and workers – roles, join, Raft
+- **The routes,** checked by the server from the caller's certificate, with a test per
+  route (`api/server.go`). The CLI's routes answer on control-plane hosts only, and
+  `stack ps|logs` go from there to the stack's host, as now.
 
-- A host has the role control plane, worker, or both. Today every host has both; a
-  cluster of three stays so. Only a worker runs stacks and holds volume copies: a
-  control-plane host without the worker role runs none. `clowderd init` makes a host
-  with both roles, `--worker=false` one of the control plane only; `clowderd join` makes
-  a worker, `--control-plane` adds the control plane (and `--worker=false` drops the
-  worker). A control-plane join needs a token made with `clowder host join-token
-  --control-plane`; only its answer carries the data key. The token's role replaces
-  kubeadm's `--certificate-key`.
-- Only control-plane hosts hold the data key (and with it the CA's key and the cluster's
-  age key), vote in Raft (1, 3 or 5 of them, as now), lead, serve the CLI's API, and run
-  `clowderd credentials` and `clowderd recover`. The passive phase applies to them.
-- Workers follow the Raft log as non-voters, so the agent's loops keep reading the
-  state as now. They see every spec, which Kubernetes does not show a node, and the
-  secrets only sealed.
-- The placement places stacks and copies on workers only. A tiebreaker holds no data
-  and no load, so it may go on any host, a control-plane host without the worker role
-  too. High availability needs three voters and enough workers for the volumes' copies;
-  three hosts with both roles are enough.
+  | Route | Caller |
+  |---|---|
+  | the CLI's (`/v1/…` but `internal`) | a CLI certificate, on a control-plane host |
+  | `GET` and `POST /v1/join` | anyone with an open join token, as now (limited per sender) |
+  | `internal/propose` | any host for its own reports (`host/<id>`); a control-plane host for the CLI's commands and for `set-cli-cutoff` |
+  | `internal/changes`, `internal/hand-over`, `internal/join` | a control-plane host |
+  | `internal/credentials` | the agent's own host certificate only |
+  | `internal/stacks/…/ps|logs`, `internal/volumes/progress`, `internal/volumes/…/resolve-splitbrain`, `internal/alerts/failures` | a control-plane host |
+  | `internal/beats` (`POST`, and `GET …/{id}`: `AskSilence`), `internal/commit-index`, `internal/leader` | any host |
+  | `internal/recover/copies`, `internal/recover/rejoin` (step 7) | a control-plane host |
+  | `internal/hosts/self/secrets`, `internal/hosts/self/tls` (step 6) | any host, for itself |
+- **The host's commands split by role:** `hostKinds` (`api/server.go`) keeps a host's
+  reports about itself; `set-cli-cutoff` and every kind that acts for the cluster come
+  only from a control-plane host.
+- **Raft takes only the control plane:** every host's Raft listener (`raftnode`,
+  `pki.ServerTLSForHosts`) takes a control-plane certificate only, as only the leader
+  sends to a non-voter. A worker could otherwise send entries of its own past every
+  check above. With a test of a worker that tries.
+- **The CLI takes only control-plane hosts:** it refuses a host certificate without
+  `control-plane`, so a removed worker cannot answer it as the cluster.
 
-### Package 5: workers get only their stacks' secrets
+### Step 6: keys only on the control plane
 
-- A worker asks a control-plane host over mTLS for the secrets of a stack the state
-  places on it, and the control-plane host checks that it does, as Kubernetes' node
-  authorizer. Stacks start only after the catch-up with the leader anyway.
-- A worker commits only host commands about itself, as Kubernetes' NodeRestriction, and
-  never forwards the CLI's commands; today every host forwards them as `cli`.
-- The ingress host needs the TLS keys of every route. A worker that holds the Floating
-  IP fetches them as it fetches secrets, and the control-plane host checks that it is
-  the ingress host.
+- Only control-plane hosts hold the data key, and with it the CA's key and the sealing
+  key; a join's answer carries it only for them.
+- Other hosts ask a control-plane host over mTLS for what they need, and get only that,
+  as Kubernetes' node authorizer gives a node only its pods' secrets
+  (`internal/hosts/self/secrets` and `…/tls`, step 5):
+  - a worker: the secrets and registry logins of the stacks the state places on it.
+    Images that need a login are no longer pulled before a stack moves there, only as
+    it starts, so its failover waits for the pull: a known gap. Images without one are
+    pulled before, as now.
+  - an ingress host: the TLS keys of the routes while it holds the Floating IP. The
+    Floating IP's move thus needs a control-plane host, which the leader that moves it
+    is anyway.
+  - every host: the key of the secrets' digests, today derived from the data key
+    (`agent/run.go`). It becomes a key of its own, made at `init`, kept in the state
+    encrypted with the data key, and handed to every host in its join's answer: it
+    shows when a secret changed and opens none.
+- `QuorumWatch` (`agent/run.go`) runs on control-plane hosts only, as its alert
+  channels are secrets: a worker cut off from all of them alerts nobody, the voters see
+  it fail (a known gap).
+- `checkRetired` (`agent/retired.go`) runs on control-plane hosts only, which hold the
+  token (step 7 says why a retired worker needs none).
+- A worker that restarts while the control plane is down starts none of its stacks: on
+  top of the catch-up (step 4), their secrets are kept on no disk, by choice.
 
-### Package 6: recover and fencing with workers
+### Step 7: recover and fencing with roles
 
-- Fencing and failover stay as they are: every host beats to the voters.
-- `clowderd recover` runs on a control-plane host, which may hold no copies: the remap
-  must take the copies on workers that are still reachable into account instead of
-  retiring every other host. The package starts with a design of its own.
+Agreed with the operator before the plan.
 
-### Package 7: the live tests of phase 2b
+- **Fencing and failover stay as they are.** Every host beats to the voters; a host a
+  majority of them has not heard for 45 s is failed (with one control-plane host, that
+  one). A failed host with stacks, a worker, is fenced; a control-plane host without
+  the worker role has none, so it is never fenced and keeps its vote. The leader fences
+  and moves the Floating IP with the token, both on the control plane; the Floating IP
+  goes to an `ingress` host only.
+- **`clowderd recover --power-off`** runs, as now, on a control-plane host that is left
+  when the majority of the voters is gone for good, and asks for the host's name.
+  - A host that takes no connection is retired, whatever its roles: labeled and
+    powered off as now. A voter that answers stops the recover, as a host that knows a
+    leader does now. A worker that answers stays in the cluster: it never voted, so it
+    cannot make an old majority.
+  - The remap keeps the copies that are left: before it changes anything, recover asks
+    each worker that stayed for its copies (`internal/recover/copies`: DRBD's disk
+    state, the data generation), and a synced copy there counts as one here does now.
+    Only copies on retired hosts go; stacks there are placed anew, as after a failover.
+    When only control-plane hosts were lost, the workers' stacks and volumes run on,
+    and recover only brings Raft back.
+  - Raft goes on with this host as its only voter. A worker that stayed may hold a
+    higher term or entries the old majority committed without this host, which its
+    state applied already and the new leader would never send. So recover tells each
+    (`internal/recover/rejoin`, with the retired hosts): the worker drops the retired
+    hosts from its DRBD resources (`DropPeers`: `del-peer`, quorum off, `resume-io`, as
+    the host that recovers does), sets its Raft directory aside, and follows the new
+    leader from its snapshot as a fresh non-voter. A non-voter's log is a copy only, so
+    nothing is lost that the remap keeps. A unit test runs a worker ahead of the host
+    that recovers.
+- **`checkRetired` only on the control plane** (step 6 moves it). A retired voter is
+  the danger: two of them could elect each other. They hold the token and check at
+  their start, as now. A retired worker is harmless: it never votes, its certificate is revoked so no
+  control-plane host takes it, it is out of the WireGuard mesh and the DRBD resources,
+  and it starts no stack before it caught up with a leader it never reaches.
+- **Every control-plane host gone:** the cluster is lost, as a Kubernetes cluster
+  without its etcd: the workers hold the log but no key. The way back is a new
+  cluster, the `SealedSecret`s sealed anew with the exported sealing key, and the data
+  from phase 3's backups. A known gap; three control-plane hosts are the advice.
+
+### The live tests (after step 5, and at the end)
 
 - `test/live` and `bin/dev live` follow the whole phase: credentials fetched over SSH
   into `~/.clowder/config` (through `$CLOWDER_CONFIG`), the `ClusterConfiguration` and
   the cluster's secrets applied with `clowder apply`, `SealedSecret`s in place of
-  `!secret`, no bootstrap key.
-- Scenarios for what is new: a CLI certificate with a name and its actor in the log, the
-  warning before a certificate ends, a configuration whose Hetzner token does not see
-  the hosts' servers refused, a `Secret` in clear and a `SealedSecret` alike in a stack,
-  the sealing key exported and used by `secret decrypt`; a cluster with a control-plane
-  host without the worker role and a worker that is no control-plane host, a tiebreaker
-  on the control plane, a worker that gets only its stacks' secrets and refuses to
-  forward the CLI's commands, failover and recover with workers.
-- All live tests green; a failure goes back to the package it came from.
+  `!secret`, no bootstrap key. The labs of three hosts with all roles keep today's
+  scenarios.
+- A new lab of five hosts for the roles: three with `control-plane` only, two with
+  `worker,ingress`. `bin/dev live up` takes a lab's layout, `examples/hetzner` each
+  host's roles.
+- Scenarios for what is new: a CLI certificate with a name and its actor in the log,
+  the warning before a certificate ends, the question before a token that sees no
+  server and the alert `hetzner-token`, a `Secret` in clear and a `SealedSecret` alike
+  in a stack, a registry login of a namespace, the sealing key exported and used by
+  `secret decrypt`. In the lab of roles: a volume with its copies on the workers and
+  its tiebreaker on the control plane, a worker that gets only its stacks' secrets, a
+  worker's token refused for the control plane, a worker refused on the control
+  plane's routes and on Raft, the CLI refusing a worker, a worker's failover to the
+  other, and a recover after the loss of two control-plane hosts in which the workers'
+  stacks and copies stay.
+- The run after step 5 has every scenario but those of steps 6 and 7 (a worker that
+  gets only its stacks' secrets, the recover with workers).
+- All live tests green; a failure goes back to the step it came from.
 
 ### After phase 2b
 
-- A removed worker holds no keys; revoking its certificate is enough. `cluster
-  rotate-keys` (phase 4) is needed only after a control-plane host is removed, which
-  makes [Keys of a removed host](#keys-of-a-removed-host) smaller.
+- A removed worker holds no keys, and the CLI does not take it: revoking its
+  certificate is enough. `cluster rotate-keys` (phase 4) is needed only after a
+  control-plane host is removed, which makes [Keys of a removed
+  host](#keys-of-a-removed-host) smaller.
 
 ## Known gaps
 
