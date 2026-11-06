@@ -7,10 +7,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// How hosts report that they are alive, and when the leader considers a
-// host failed. The beats go to every voter, not through the Raft log. A new
-// leader has heard them too, so a host's silence keeps counting across a
-// change of leader.
+// The beats go to every voter, not through the Raft log, so a host's silence
+// keeps counting across a change of leader.
 const (
 	// BeatInterval is how often an agent tells every voter that it is alive.
 	BeatInterval = 5 * time.Second
@@ -62,7 +60,6 @@ func (h *Heard) Silence(host state.HostID) time.Duration {
 	return h.now().Sub(last)
 }
 
-// majority reports whether count voters out of total voters are a majority.
 func majority(count, total int) bool {
 	return count > total/2
 }

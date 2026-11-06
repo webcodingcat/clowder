@@ -24,7 +24,6 @@ type Members interface {
 	TransferLeadership() error
 }
 
-// memberAction is one change the members loop makes.
 type memberAction string
 
 const (
@@ -39,7 +38,6 @@ const (
 	removeLeaving   memberAction = "remove from the cluster once empty"
 )
 
-// memberStep is the next change: an action on a host.
 type memberStep struct {
 	action memberAction
 	host   state.HostID
@@ -48,16 +46,8 @@ type memberStep struct {
 }
 
 // RunMembers keeps Raft's members and the hosts' roles as the state wants
-// them while this agent leads, until ctx ends. It makes one change at a
-// time (nextMemberStep):
-//   - Every host that is not removed is a member; a joining host starts as
-//     a non-voter and becomes active once its agent has reported.
-//   - Of the control-plane hosts in service, 1, 3 or 5 vote (voterCount):
-//     first those that voted already, then those with the lowest IDs.
-//   - A removed host leaves Raft once another host has taken its vote.
-//   - The state records each host's vote as Raft has it (set-host-voter).
-//
-// raftAddress is a host's Raft address.
+// them while this agent leads, until ctx ends. raftAddress is a host's Raft
+// address.
 func RunMembers(ctx context.Context, cluster Cluster, members Members, propose Propose,
 	raftAddress func(state.HostID) string, self state.HostID, logger *slog.Logger,
 ) {
@@ -83,7 +73,6 @@ func RunMembers(ctx context.Context, cluster Cluster, members Members, propose P
 	}
 }
 
-// tendMembers makes the next change, if there is one, and returns it.
 func tendMembers(ctx context.Context, cluster Cluster, members Members, propose Propose,
 	raftAddress func(state.HostID) string, self state.HostID,
 ) (memberStep, error) {
@@ -125,9 +114,7 @@ func movePhase(ctx context.Context, propose Propose, host *state.Host, phase sta
 }
 
 // voterCount returns how many of n control-plane hosts vote. Below three
-// hosts, one votes, because two voters would stop when either is lost. So
-// the second control-plane host waits for its vote until a third one comes.
-// From six hosts on, five vote.
+// hosts, one votes, because two voters would stop when either is lost.
 func voterCount(n int) int {
 	switch {
 	case n >= 6:
@@ -139,21 +126,8 @@ func voterCount(n int) int {
 	}
 }
 
-// nextMemberStep decides the next change. configuration is Raft's
-// configuration, and self is the leader. The order matters:
-//  1. A removed leader hands over its lead first. The API normally does
-//     this before the removal; this is the fallback. The leader's revoked
-//     certificate stops new connections, but Raft's open connections stay
-//     up, and so would its lead.
-//  2. Hosts that are not members join Raft. A voter that is joining or has
-//     no control plane loses its vote.
-//  3. A leaving host (Host.Leaving) with nothing left on it is removed. If
-//     it leads, it hands over its lead first, and the next leader removes
-//     it. Then a joining host whose agent has reported becomes active.
-//  4. Votes move before a removed voter leaves, so the cluster never has
-//     fewer voters along the way than at the end.
-//  5. Removed hosts leave Raft.
-//  6. The state records Raft's votes.
+// nextMemberStep decides the next change; self is the leader. The order
+// matters, and docs/developing/cluster.md (Members) explains it.
 func nextMemberStep(current *state.State, configuration map[state.HostID]bool, self state.HostID) memberStep {
 	ids := slices.Sorted(maps.Keys(current.Hosts))
 	isMember := func(id state.HostID) bool {
@@ -169,16 +143,13 @@ func nextMemberStep(current *state.State, configuration map[state.HostID]bool, s
 		case host.Phase != state.Removed && !isMember(id):
 			return memberStep{action: addNonvoter, host: id}
 		// a host that took the ID of a removed host before that host left
-		// Raft inherits its vote. It gets no vote while it joins, and none
-		// at all without the control plane.
+		// Raft inherits its vote
 		case (host.Phase == state.Joining || !host.Roles.Has(hostrole.ControlPlane)) && configuration[id] && id != self:
 			return memberStep{action: demoteVoter, host: id}
 		}
 	}
 	for _, id := range ids {
-		// a leaving host is removed once nothing is left on it. If it
-		// leads, it hands over its lead first, and the next leader removes
-		// it.
+		// a leader cannot remove itself: the next leader removes it
 		if current.Hosts[id].Leaving && current.CheckRemoval(id) == nil {
 			if id == self {
 				return memberStep{action: handOverLead, host: id}
@@ -210,15 +181,9 @@ func nextMemberStep(current *state.State, configuration map[state.HostID]bool, s
 }
 
 // nextVoter promotes or demotes one host, so that voterCount of the
-// eligible hosts vote. Eligible are the control-plane hosts that are in
-// service, or out of service but expected back (see votes). A host that
-// voted keeps its vote while it may, and the leader never gives up its own.
-// Only a host in service gets a new vote, because a host that cannot answer
-// would count toward a quorum that it does not help to reach.
-//
-// A failed or fenced voter keeps its vote. Taking it away would shrink the
-// cluster below what it was built for. With three hosts, the leader would
-// end up as the only voter, and the cluster would stop at the next failure.
+// eligible hosts vote. Only a host in service gets a new vote, because a
+// host that cannot answer would count toward a quorum that it does not help
+// to reach.
 func nextVoter(current *state.State, configuration map[state.HostID]bool, ids []state.HostID,
 	self state.HostID,
 ) memberStep {
@@ -250,8 +215,8 @@ func nextVoter(current *state.State, configuration map[state.HostID]bool, ids []
 }
 
 // votes reports whether a control-plane host in this phase counts toward
-// the voters: it is in service, or it was and should come back after a
-// failure.
+// the voters. A failed or fenced voter keeps its vote: with three hosts,
+// taking it would leave the leader as the only voter.
 func votes(phase state.HostPhase) bool {
 	switch phase {
 	case state.Active, state.Draining, state.Failed, state.Fencing, state.Fenced, state.Recovering, state.Disabled:

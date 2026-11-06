@@ -65,7 +65,6 @@ func newRekey(g *globals) *cobra.Command {
 	return command
 }
 
-// filesOf returns a file, or the YAML files of a directory.
 func filesOf(from string, report io.Writer) ([]string, error) {
 	info, err := os.Stat(from)
 	if err != nil {
@@ -77,10 +76,9 @@ func filesOf(from string, report io.Writer) ([]string, error) {
 	return yamlFiles(from, report)
 }
 
-// rekeyFile opens the values of one file with identities. It seals each
-// value again for recipient and for the same Secret. Then it writes the
-// file back, whole or not at all. It returns how many values it rekeyed.
-// Like an apply, it refuses a value that is not meant for its Secret.
+// rekeyFile writes the file whole or not at all and returns how many values
+// it rekeyed. Like an apply, it refuses a value that is not meant for its
+// Secret.
 func rekeyFile(path string, identities []age.Identity, recipient age.Recipient) (int, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {

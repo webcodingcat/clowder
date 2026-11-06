@@ -22,23 +22,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// A host joins with a one-time token that a user created (clowder host
-// join-token, internal/jointoken):
-//
-//  1. GET /v1/join?token=<id>: the agent sends its CA certificate. While
-//     the token is open, it adds a pki.TrustProof over the certificate,
-//     made with the token's hash (jointoken.ProofKey). The joining host
-//     trusts the CA only if the proof matches its token.
-//  2. POST /v1/join, over TLS checked against that CA, sends the token,
-//     the host's details, a nonce and the time (JoinRequest). Any agent
-//     hands the request to the leader. The leader checks the token, and
-//     the server with Hetzner. It issues the host's certificate and
-//     commits add-host, which uses up the token. The answer carries the
-//     certificate, the data key and the other hosts.
-//
-// Neither request has a client certificate. So each agent accepts only a
-// limited number of tries per minute (limiter).
-
 // JoinOffer is the agent's answer to a joining host's first contact. The
 // host cannot check the TLS connection yet; the proof makes the CA
 // trustworthy.
@@ -67,13 +50,12 @@ type JoinRequest struct {
 	// request only once, and only within joinMaxAge.
 	Nonce []byte    `json:"nonce"`
 	Time  time.Time `json:"time"`
-	// Source is the address that the request came from. The agent that
-	// accepted the request sets it. The leader accepts a join only from
-	// the host's own addresses.
+	// Source is set by the agent that accepted the request, from the
+	// connection. The leader accepts a join only from the host's own
+	// addresses.
 	Source netip.Addr `json:"source,omitzero"`
 }
 
-// joinMaxAge is how old a join request may be.
 const joinMaxAge = 5 * time.Minute
 
 // JoinAnswer is what a joined host needs to start.
@@ -94,8 +76,7 @@ type JoinPeer struct {
 	Underlay    netip.Addr   `json:"underlay"`
 }
 
-// Joins is the leader's side of a join, which the agent implements. It
-// checks the request against the state and Hetzner, and commits it.
+// Joins is the leader's side of a join, which the agent implements.
 type Joins interface {
 	// Join adds the host. A refusal is a *StatusError, which the joining
 	// host is shown (JoinRefused). Any other error is the cluster's fault.
@@ -164,7 +145,7 @@ func FindClusterByToken(ctx context.Context, endpoint string, connectTimeout tim
 }
 
 // Join asks the cluster to add the host, over TLS checked against the
-// trusted CA. It fills in the token, a nonce and the time.
+// trusted CA.
 func (c *JoiningCluster) Join(ctx context.Context, request JoinRequest) (JoinAnswer, error) {
 	request.Token, request.Time = c.token.String(), time.Now().UTC()
 	request.Nonce = make([]byte, 16)
@@ -207,8 +188,6 @@ func uncheckedClient(connectTimeout time.Duration) *http.Client {
 	}
 }
 
-// checkedClient talks to the agents of a CA that a trust proof made
-// trustworthy. It sends no client certificate.
 func checkedClient(ca *x509.Certificate, connectTimeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout:   answerTimeout,
@@ -217,9 +196,8 @@ func checkedClient(ca *x509.Certificate, connectTimeout time.Duration) *http.Cli
 }
 
 // CheckJoinRequest refuses a request that is too old, too new or
-// incomplete. It keeps the checks of the request's form in one place. The
-// leader checks the rest against the state (state.CheckJoiningHost) and
-// with Hetzner.
+// incomplete. The leader checks the rest against the state
+// (state.CheckJoiningHost) and with Hetzner.
 func CheckJoinRequest(request JoinRequest, now time.Time) error {
 	if age := now.Sub(request.Time); age > joinMaxAge || age < -joinMaxAge {
 		return errors.New("the request is too old (or a clock is off by minutes)")
@@ -240,8 +218,7 @@ func CheckJoinRequest(request JoinRequest, now time.Time) error {
 	return nil
 }
 
-// newJoinToken creates a join token and commits it. Only the token's hash
-// goes into the state.
+// newJoinToken puts only the token's hash into the state.
 func (s *Server) newJoinToken(w http.ResponseWriter, r *http.Request) {
 	var request JoinTokenRequest
 	if err := decodeStrict(r.Body, &request); err != nil {
@@ -285,8 +262,6 @@ func (s *Server) newJoinToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, JoinTokenAnswer{Token: token.String(), Expires: expires})
 }
 
-// joinOffer answers a joining host's first contact. It includes a proof
-// only while the token is open.
 func (s *Server) joinOffer(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("token")
 	var caPEM []byte
@@ -310,8 +285,6 @@ func (s *Server) joinOffer(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// join accepts a join request on any control-plane agent. The leader
-// handles the request, and a follower hands it on.
 func (s *Server) join(w http.ResponseWriter, r *http.Request) {
 	var request JoinRequest
 	if err := decodeStrict(r.Body, &request); err != nil {
@@ -347,7 +320,6 @@ const (
 	joinClientTimeout = 2 * joinTimeout
 )
 
-// internalJoin is where a follower hands a join request to the leader.
 func (s *Server) internalJoin(w http.ResponseWriter, r *http.Request) {
 	var request JoinRequest
 	if err := decodeStrict(r.Body, &request); err != nil {
@@ -365,8 +337,8 @@ func (s *Server) internalJoin(w http.ResponseWriter, r *http.Request) {
 	s.answerJoin(w, answer, err)
 }
 
-// answerJoin answers a join. It passes a refusal on unchanged and reports
-// any other error as the cluster's fault.
+// answerJoin passes a refusal on unchanged and reports any other error as
+// the cluster's fault.
 func (s *Server) answerJoin(w http.ResponseWriter, answer JoinAnswer, err error) {
 	var statusError *StatusError
 	switch {
@@ -380,7 +352,6 @@ func (s *Server) answerJoin(w http.ResponseWriter, answer JoinAnswer, err error)
 	}
 }
 
-// forwardJoin hands a join request to the leader's internal endpoint.
 func (s *Server) forwardJoin(ctx context.Context, id state.HostID, request JoinRequest) (JoinAnswer, error) {
 	body, err := json.Marshal(request)
 	if err != nil {

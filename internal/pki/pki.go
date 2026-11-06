@@ -1,17 +1,7 @@
 // Package pki is the cluster's certificate authority. Hosts and the CLI
-// authenticate with certificates that it issues (mutual TLS). Hosts use them
-// between agents and for Raft, and the CLI uses them to call the agents.
-// Keys are Ed25519. Hosts send only their public key. clowderd credentials
-// makes the CLI's key on a host and hands it over with the certificate, as
-// kubeadm does with admin.conf.
-//
-// A host certificate ends by revocation, not by expiry. The cluster keeps
-// the revoked serials, and Verify checks them. The long lifetime spares a
-// host that stays powered off for months a renewal that it could not do.
-// A CLI certificate lasts a year (cliLifetime), kubeadm's default for client
-// certificates. It ends sooner only through the cluster's cutoff
-// (state.SetCLICutoff), which the API checks. Nothing renews a CLI
-// certificate, so the user then fetches a new one from a host.
+// authenticate with the Ed25519 certificates that it issues (mutual TLS).
+// A host certificate ends by revocation, not by expiry, and a CLI
+// certificate lasts cliLifetime (docs/developing/cluster.md, Certificates).
 package pki
 
 import (
@@ -36,11 +26,13 @@ import (
 	"github.com/webcodingcat/clowder/internal/names"
 )
 
-// Lifetimes of the certificates.
 const (
-	caLifetime   = 20 * 365 * 24 * time.Hour
+	caLifetime = 20 * 365 * 24 * time.Hour
+	// leafLifetime is long, because a host that stays powered off for months
+	// could not renew its certificate.
 	leafLifetime = 10 * 365 * 24 * time.Hour
-	cliLifetime  = 365 * 24 * time.Hour
+	// cliLifetime is kubeadm's default for client certificates.
+	cliLifetime = 365 * 24 * time.Hour
 	// clockSkew backdates certificates, so that a host whose clock runs a
 	// little behind accepts them right away.
 	clockSkew = time.Hour
@@ -118,9 +110,8 @@ func (ca *CA) KeyPEM() ([]byte, error) {
 }
 
 // IssueHost issues the certificate of a host, for TLS both as server and
-// as client. It is valid for the host's addresses (underlay and node
-// address). The certificate names the host's roles as its organizations, so
-// that another host can read them from the certificate alone.
+// as client. It names the host's roles as its organizations, so that another
+// host can read them from the certificate alone.
 func (ca *CA) IssueHost(public crypto.PublicKey, id int, roles hostrole.Set, addresses []netip.Addr,
 	now time.Time,
 ) ([]byte, error) {
@@ -167,7 +158,6 @@ func (ca *CA) IssueCLI(public crypto.PublicKey, name string, now time.Time) ([]b
 	return ca.issue(template, public)
 }
 
-// issue signs a template for a public key and returns the certificate in PEM.
 func (ca *CA) issue(template *x509.Certificate, public crypto.PublicKey) ([]byte, error) {
 	if _, ok := public.(ed25519.PublicKey); !ok {
 		return nil, fmt.Errorf("the public key is a %T, not Ed25519", public)
@@ -198,10 +188,8 @@ type Identity struct {
 	NotBefore time.Time
 }
 
-// Verify checks a certificate that a peer presented (a CLI, or an agent
-// that calls another agent). The CA must have issued it, it must be within
-// its lifetime, and it must not be revoked. Verify returns whose certificate
-// it is. It needs only the CA certificate, not the CA's key.
+// Verify checks a certificate that a peer presented against the CA, its
+// lifetime and the revoked serials, and returns whose certificate it is.
 func Verify(caCertificate, certificate *x509.Certificate, revoked func(serial string) bool, now time.Time) (Identity, error) {
 	roots := x509.NewCertPool()
 	roots.AddCert(caCertificate)
@@ -243,9 +231,8 @@ func Verify(caCertificate, certificate *x509.Certificate, revoked func(serial st
 }
 
 // HostRoles reads the roles that a host certificate names, without
-// verifying the certificate. At its start, the agent compares them with its
-// own files, and its certificate may have expired by then. Verify uses
-// HostRoles too.
+// verifying the certificate, because the agent compares them with its own
+// files at its start, when its certificate may have expired.
 func HostRoles(certificate *x509.Certificate) (hostrole.Set, error) {
 	// DER sorts a SET OF by its encoding, so the organizations may come back
 	// in a different order than IssueHost wrote them. New sorts them.
@@ -315,10 +302,8 @@ func ParseCertificate(certificatePEM []byte) (*x509.Certificate, error) {
 }
 
 // TrustProof binds the CA certificate to a proof key that the agent and
-// the caller share (the join token's, jointoken.ProofKey). On first
-// contact, a joining host has no CA to trust yet. So the agent sends its CA
-// certificate with this proof, and only someone who holds the proof key can
-// make the proof.
+// the caller share (jointoken.ProofKey), so that a joining host can trust
+// the CA on first contact.
 func TrustProof(proofKey, caCertificatePEM []byte) []byte {
 	mac := hmac.New(sha256.New, proofKey)
 	mac.Write(caCertificatePEM)
@@ -330,8 +315,6 @@ func CheckTrustProof(proofKey, caCertificatePEM, proof []byte) bool {
 	return hmac.Equal(TrustProof(proofKey, caCertificatePEM), proof)
 }
 
-// newTemplate fills in what every certificate has: a random serial and the
-// lifetime.
 func newTemplate(subject pkix.Name, now time.Time, lifetime time.Duration) (*x509.Certificate, error) {
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {

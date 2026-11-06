@@ -29,9 +29,8 @@ import (
 // it turns unhealthy, because the host's ingress depends on it.
 var traefikRule = supervisor.Rule{Restart: "always", RestartUnhealthy: true}
 
-// traefikRunner runs clowder's Traefik on this host and writes its routes.
-// Traefik is not a stack, so it has its own loop next to the stack runner.
-// That way a stack's long image pull does not hold up the ingress.
+// traefikRunner has its own loop next to the stack runner, so that a
+// stack's long image pull does not hold up the ingress.
 type traefikRunner struct {
 	files   Files
 	host    Host
@@ -57,9 +56,6 @@ type traefikRunner struct {
 	unopened map[string]bool
 }
 
-// run keeps Traefik and its routes the way this host needs them, until ctx
-// ends (loop.Run). Each pass compares every file with what is on disk, so it
-// also repairs what someone changed by hand.
 func (t *traefikRunner) run(ctx context.Context) {
 	loop.Run(ctx, t.cluster, t.signal.Wake(), func() {
 		if err := t.pass(ctx); err != nil {
@@ -68,11 +64,9 @@ func (t *traefikRunner) run(ctx context.Context) {
 	})
 }
 
-// pass writes the certificates and the routes. Then it runs compose up if
-// the Compose file or the static configuration changed (a new image pin, a
-// new Floating IP), or if Traefik has not come up since the agent started.
-// The routes and certificates change without a restart, because Traefik
-// watches the routes' directory.
+// pass runs compose up only for a new Compose file or static configuration,
+// or once after the agent starts. Routes and certificates change without a
+// restart, because Traefik watches the routes' directory.
 func (t *traefikRunner) pass(ctx context.Context) error {
 	input := t.read()
 	floatingIP, err := netip.ParseAddr(input.floatingIP)
@@ -144,8 +138,6 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	return nil
 }
 
-// traefikInput is what Traefik's files depend on: the Floating IP, the
-// HTTP routes of the stacks and the certificates.
 type traefikInput struct {
 	floatingIP string
 	// routes are the routes of the stacks on this host, by project, then
@@ -196,17 +188,14 @@ func (t *traefikRunner) read() traefikInput {
 	return input
 }
 
-// writeCertificates writes each certificate's chain and decrypted key into
-// the certificates' directory, under names that change with the
-// certificate (ingress.CertificateFiles). A key that cannot be decrypted
-// leaves its domain on plain HTTP. The other domains keep their
-// certificates.
+// writeCertificates names the files after the certificate's chain, so
+// that a renewed certificate gets new files. A key that cannot be
+// decrypted leaves only its domain on plain HTTP.
 func (t *traefikRunner) writeCertificates(certificates []state.Certificate) ([]ingress.CertificateFiles, error) {
 	// create the directory even without certificates: Traefik's Compose
 	// file mounts it, and Docker would create a missing directory that
 	// everyone can read. Restrict it to root each time, even if it already
-	// existed with other permissions. It lies in SecretsDir, which Run
-	// secures at the agent's start.
+	// existed with other permissions.
 	dir := t.files.traefikCertificatesDir()
 	if err := atomicfile.EnsureDir(dir, 0o700); err != nil {
 		return nil, err
@@ -237,8 +226,8 @@ func (t *traefikRunner) writeCertificates(certificates []state.Certificate) ([]i
 	return written, nil
 }
 
-// removeOtherCertificates removes the files of certificates that were
-// renewed or deleted, once the routes no longer name them.
+// removeOtherCertificates runs after the routes are written, so that no
+// route names a removed file.
 func (t *traefikRunner) removeOtherCertificates(certificates []ingress.CertificateFiles) error {
 	keep := map[string]bool{}
 	for _, certificate := range certificates {
@@ -262,9 +251,6 @@ func (t *traefikRunner) removeOtherCertificates(certificates []ingress.Certifica
 	return nil
 }
 
-// routes returns the HTTP routes of the stacks on this host, each with the
-// containers that may take its requests: those that run and, if they have
-// a health check, are healthy.
 func (t *traefikRunner) routes(ctx context.Context, byProject map[string]map[string]stackspec.HTTP) ([]ingress.Route, error) {
 	var routes []ingress.Route
 	ports := map[string]uint16{} // "<project>.<service>" -> the port requests go to

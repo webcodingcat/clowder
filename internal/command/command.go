@@ -1,10 +1,7 @@
-// Package command runs the host's tools (lvs, drbdadm, mkfs, nft, ip,
-// systemctl, ...) so that none of them can hang the agent. Every host tool
-// runs through this package, with no exception. Without quorum, DRBD
-// suspends I/O. A process that touches a volume then hangs in the kernel in
-// state D, and not even SIGKILL ends it. A tool that hangs for any other
-// reason must not stop a reconciler either. So Run gives up on a process
-// after its timeout and leaves it behind instead of waiting for it.
+// Package command runs the host's tools so that none of them can hang the
+// agent: Run gives up on a process after its timeout and leaves it behind.
+// Without quorum, DRBD suspends I/O, and a process that touches a volume
+// then hangs in the kernel in state D, where not even SIGKILL ends it.
 package command
 
 import (

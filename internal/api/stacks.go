@@ -29,9 +29,8 @@ type Containers interface {
 	Logs(ctx context.Context, project string, follow bool, out io.Writer) error
 }
 
-// stackHost finds the host that a stack runs on, and the stack's Compose
-// project there. If there is no such host, it writes the error answer and
-// returns false.
+// stackHost writes the error answer and returns false if the stack runs
+// on no host.
 func (s *Server) stackHost(w http.ResponseWriter, r *http.Request) (state.HostID, string, bool) {
 	namespace, name := r.PathValue("namespace"), r.PathValue("name")
 	id := names.ID(namespace, name)
@@ -53,7 +52,6 @@ func (s *Server) stackHost(w http.ResponseWriter, r *http.Request) (state.HostID
 	return *host, names.Project(namespace, name), true
 }
 
-// stackPs lists a stack's containers by asking the stack's host.
 func (s *Server) stackPs(w http.ResponseWriter, r *http.Request) {
 	host, project, ok := s.stackHost(w, r)
 	if !ok {
@@ -66,8 +64,6 @@ func (s *Server) stackPs(w http.ResponseWriter, r *http.Request) {
 	s.ps(w, r, project)
 }
 
-// stackLogs writes a stack's logs, taken from the stack's host. With
-// ?follow=true, it keeps streaming.
 func (s *Server) stackLogs(w http.ResponseWriter, r *http.Request) {
 	host, project, ok := s.stackHost(w, r)
 	if !ok {
@@ -80,15 +76,14 @@ func (s *Server) stackLogs(w http.ResponseWriter, r *http.Request) {
 	s.logs(w, r, project)
 }
 
-// RestartRequest is the body of POST /v1/stacks/{namespace}/{name}/restart.
-// It names the services to restart, or none to restart all of them. The
-// services that depend on them are restarted too (state.RestartStack).
+// RestartRequest names the services to restart, or none to restart all of
+// them.
 type RestartRequest struct {
 	Services []string `json:"services,omitempty"`
 }
 
-// restartStack commits restart-stack. The state checks the stack and its
-// services.
+// restartStack leaves the checks of the stack and its services to the
+// state.
 func (s *Server) restartStack(w http.ResponseWriter, r *http.Request) {
 	var request RestartRequest
 	if err := decodeStrict(r.Body, &request); err != nil {
@@ -100,9 +95,8 @@ func (s *Server) restartStack(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// localProject returns the Compose project named in an internal route.
-// Only hosts call these routes. Still, the project becomes a path on this
-// host, so it must be a stack's project.
+// localProject checks the project although only hosts call these routes,
+// because it becomes a path on this host.
 func localProject(w http.ResponseWriter, r *http.Request) (string, bool) {
 	project := r.PathValue("project")
 	if _, _, ok := names.SplitProject(project); !ok {
@@ -124,7 +118,6 @@ func (s *Server) localLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ps answers with the containers of a stack on this host.
 func (s *Server) ps(w http.ResponseWriter, r *http.Request, project string) {
 	if s.config.Containers == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("this agent runs no containers"))
@@ -138,7 +131,6 @@ func (s *Server) ps(w http.ResponseWriter, r *http.Request, project string) {
 	writeJSON(w, http.StatusOK, containers)
 }
 
-// logs streams the logs of a stack on this host.
 func (s *Server) logs(w http.ResponseWriter, r *http.Request, project string) {
 	if s.config.Containers == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("this agent runs no containers"))

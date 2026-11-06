@@ -35,19 +35,9 @@ const (
 type Connect func(channel clusterspec.AlertChannel, secrets notify.Secrets) (notify.Notifier, error)
 
 // Alerts raises and resolves the cluster's alerts while this agent leads,
-// and sends them to the channels. It sends a message when an alert is
-// raised or gets worse, every remindEvery while it is open, and when it is
-// resolved. Its second loop calls the heartbeat. The alerts are in the
-// state, but the deliveries are only in this agent's memory. So after a
-// change of leader, the new leader sends one reminder for each open alert:
-// a duplicate is better than a lost alert.
-//
-// One pass moves a message through these steps:
-//   - wantedAlerts says which alerts should be open.
-//   - put-alert and resolve-alert make the state match.
-//   - notice compares the open alerts with what the channels were told,
-//     and puts the messages that are due into the outbox.
-//   - deliver sends them and keeps the failed ones for another try.
+// and sends them to the channels. The deliveries are only in this agent's
+// memory, so a new leader sends one reminder for each open alert: a
+// duplicate is better than a lost alert.
 type Alerts struct {
 	cluster Cluster
 	propose Propose
@@ -122,7 +112,6 @@ func (a *Alerts) Run(ctx context.Context) {
 // forget drops what this agent kept while it led, because the new leader
 // informs the channels now. It also forgets the conditions that the other
 // loops observe, because this is the one place that sees the lead end.
-// What this agent saw will be stale if it leads again later.
 func (a *Alerts) forget() {
 	a.mu.Lock()
 	a.outbox = nil
@@ -170,8 +159,6 @@ func (a *Alerts) heartbeat(ctx context.Context) (time.Duration, bool) {
 	return alerts.Heartbeat.Every(), true
 }
 
-// pass brings the open alerts in line with what the cluster shows, then
-// informs the channels.
 func (a *Alerts) pass(ctx context.Context) {
 	copied := a.cluster.SharedCopy()
 	if !copied.Configured() {
@@ -226,8 +213,6 @@ func (a *Alerts) pass(ctx context.Context) {
 	a.deliver(ctx, copied, now)
 }
 
-// commitOrLog writes one command and reports whether it committed. It logs
-// a failure, and the next pass tries again.
 func (a *Alerts) commitOrLog(ctx context.Context, kind string, payload any) bool {
 	if _, err := commit(ctx, a.propose, kind, payload); err != nil {
 		a.logger.Error("raise the alerts", "command", kind, "error", err)
@@ -236,11 +221,8 @@ func (a *Alerts) commitOrLog(ctx context.Context, kind string, payload any) bool
 	return true
 }
 
-// notice puts into the outbox the messages that the open alerts call for:
-// an alert that was raised or is worse than what the channels were told, a
-// reminder, or an alert that was resolved. An alert that gets better, or
-// worse again up to its peak, sends nothing until its reminder or its
-// all-clear.
+// notice sends nothing for an alert that gets better, or worse again up to
+// its peak, until its reminder or its all-clear.
 func (a *Alerts) notice(clusterName string, config clusterspec.Config, generation int64, open map[string]state.Alert,
 	now time.Time,
 ) {
@@ -281,8 +263,6 @@ func (a *Alerts) notice(clusterName string, config clusterspec.Config, generatio
 	}
 }
 
-// enqueue adds a message to the outbox for each channel that takes its
-// severity. When the outbox is full, the oldest messages are dropped.
 func (a *Alerts) enqueue(clusterName string, config clusterspec.Config, generation int64, alert state.Alert,
 	event, severity string, now time.Time,
 ) {
@@ -304,11 +284,8 @@ func (a *Alerts) enqueue(clusterName string, config clusterspec.Config, generati
 	}
 }
 
-// deliver sends the messages in the outbox that are due. After each
-// failure, a message waits longer. A channel that fails gets nothing more
-// in this pass, so a dead mail server cannot hold up the loop. A message
-// meant for an earlier configuration is dropped, because its index may
-// name another channel now.
+// deliver gives a channel that fails nothing more in this pass, so a dead
+// mail server cannot hold up the loop.
 func (a *Alerts) deliver(ctx context.Context, copied *state.State, now time.Time) {
 	a.mu.Lock()
 	due := slices.Clone(a.outbox)
@@ -348,8 +325,7 @@ func (a *Alerts) deliver(ctx context.Context, copied *state.State, now time.Time
 	a.outbox = kept // only this loop adds to it
 }
 
-// send delivers one message. It makes each channel's notifier only once
-// per pass.
+// send makes each channel's notifier only once per pass (notifiers).
 func (a *Alerts) send(ctx context.Context, copied *state.State, notifiers map[int]notify.Notifier, item delivery) error {
 	config := copied.Config.Spec
 	if config.Alerts == nil || item.channel >= len(config.Alerts.Channels) {
@@ -368,8 +344,6 @@ func (a *Alerts) send(ctx context.Context, copied *state.State, notifiers map[in
 	return notifier.Send(ctx, item.message)
 }
 
-// secrets returns a function that opens the secret values that the
-// configuration names, from the state.
 func (a *Alerts) secrets(copied *state.State) notify.Secrets {
 	return func(ref names.SecretKeyRef) (string, error) {
 		encrypted, ok := copied.SystemSecret(ref)
@@ -381,7 +355,6 @@ func (a *Alerts) secrets(copied *state.State) notify.Secrets {
 	}
 }
 
-// channelName names a channel of the configuration for people to read.
 func channelName(config clusterspec.Config, index int) string {
 	if config.Alerts == nil || index >= len(config.Alerts.Channels) {
 		return fmt.Sprintf("alerts.channels[%d]", index)

@@ -15,20 +15,13 @@ import (
 )
 
 const (
-	// readHeaderTimeout is how long the agent's HTTP servers wait for a
-	// request's headers.
 	readHeaderTimeout = 10 * time.Second
-	// apiIdleTimeout is how long the API keeps an idle keep-alive
-	// connection of a CLI or an agent.
-	apiIdleTimeout = 2 * time.Minute
+	apiIdleTimeout    = 2 * time.Minute
 )
 
-// serve starts the API on the host's addresses, the server for ACME's
-// challenges, and the metrics. If one of them cannot listen, serve closes
-// the servers it started and returns the error, which ends the agent at its
-// start. Once they serve, only the API's errors reach serveErrors. The host
-// still runs its stacks without the other two servers, so those servers
-// only log their errors.
+// serve fails, and so ends the agent at its start, if any server cannot
+// listen. Once they serve, only the API's errors reach serveErrors: the
+// host runs its stacks without the other two servers, so they only log.
 func (d *daemon) serve() ([]*http.Server, <-chan error, error) {
 	servers, serveErrors, err := serveAPI(d.server, d.host.apiAddresses(), d.logger)
 	if err != nil {
@@ -67,7 +60,6 @@ var freeBind = net.ListenConfig{
 	},
 }
 
-// serveAPI listens on every address and serves the API there.
 func serveAPI(server *api.Server, addresses []string, logger *slog.Logger) ([]*http.Server, <-chan error, error) {
 	var servers []*http.Server
 	serveErrors := make(chan error, len(addresses))
@@ -96,7 +88,6 @@ func serveAPI(server *api.Server, addresses []string, logger *slog.Logger) ([]*h
 	return servers, serveErrors, nil
 }
 
-// alertsAPI answers the API's alert routes from the alerts loop.
 type alertsAPI struct {
 	alerts *controller.Alerts
 }

@@ -27,14 +27,7 @@ func findStack(s *State, id string) *Meta {
 }
 
 // putStack stores a stack's spec in normalized form, so a spec that is
-// written differently but means the same counts as unchanged. The state
-// reads the spec itself, so nothing derived travels with the command.
-// putStack checks the spec against the cluster (priority categories,
-// privileges, the ports and routes of other stacks) and against the
-// namespace (its volumes and secrets). It also works out what the scheduler
-// needs. A running or failing stack becomes starting until its host reports
-// that the new generation is up. Any other stack keeps its status, and its
-// host or the placement moves it on.
+// written differently but means the same counts as unchanged.
 func putStack(s *State, id string, payload PutResource) (func() *Meta, error) {
 	written, err := decodeSpec[stackspec.Spec](payload.Kind, id, payload.Spec)
 	if err != nil {
@@ -100,11 +93,6 @@ type RestartStack struct {
 	Services  []string `json:"services,omitempty"`
 }
 
-// applyRestartStack records the restart's time for each service. It changes
-// no spec, so the generation stays the same. Any channel may restart a
-// stack, whoever owns it, so an operator can restart a stack that GitOps
-// applies. A running or failing stack is starting until its host reports
-// that the recreated containers are up.
 func applyRestartStack(s *State, cmd Command, payload RestartStack) (func(), error) {
 	id := names.ID(payload.Namespace, payload.Name)
 	stack, ok := s.Stacks[id]
@@ -137,11 +125,8 @@ func applyRestartStack(s *State, cmd Command, payload RestartStack) (func(), err
 	}, nil
 }
 
-// servicesOf works out what the scheduler needs of each service:
-//   - its priority as written (its own, or else the stack's), which must
-//     resolve with the cluster's categories;
-//   - its reservations (zero means the cluster's default);
-//   - the services it depends on.
+// servicesOf works out what the scheduler needs of each service. Each
+// priority must resolve with the cluster's categories.
 func servicesOf(spec stackspec.Spec, priorities clusterspec.Priorities) (map[string]Service, error) {
 	services := map[string]Service{}
 	for _, name := range slices.Sorted(maps.Keys(spec.Services)) {
@@ -250,22 +235,13 @@ type SetStackStatus struct {
 	// (checkPlanned). A host leaves it 0.
 	PlannedAt uint64 `json:"planned_at,omitempty"`
 	// Operation is the leader's operation that makes the change, if any.
-	// Only the operation that holds the stack's lock may change or move the
-	// stack.
 	Operation uint64 `json:"operation,omitempty"`
-	// Generation is the generation that the host ran when it reported. The
-	// leader leaves it 0. A report about an older generation is refused,
-	// because an apply came in between and the new generation has not come
-	// up yet.
-	Generation int64 `json:"generation,omitempty"`
-	// Restarted holds the restart times that the host ran with
-	// (Stack.Restarted). The leader sends none. A report about other times
-	// is refused, like a report about an older generation, because a
-	// restart came in between.
-	Restarted map[string]time.Time `json:"restarted,omitempty"`
-	// AppliedSecrets holds the digests of the secrets that the containers
-	// came up with, by name. The host sends them with running. The leader
-	// sends none.
+	// Generation and Restarted are what the host ran with (checkHostReport).
+	// The leader sends neither.
+	Generation int64                `json:"generation,omitempty"`
+	Restarted  map[string]time.Time `json:"restarted,omitempty"`
+	// AppliedSecrets goes with running from the host (Stack.AppliedSecrets).
+	// The leader sends none.
 	AppliedSecrets map[string]string `json:"applied_secrets,omitempty"`
 	// UpError is why the host could not bring the stack up. It is set only
 	// with failing, which only the host reports.
@@ -333,12 +309,8 @@ type RequestMove struct {
 	To        HostID `json:"to"`
 }
 
-// applyRequestMove records the request in Stack.MoveTo. It refuses a stack
-// that has no host yet, because the placement chooses one. It refuses a
-// host that takes no stacks. It also refuses while an operation holds the
-// stack, because that operation may move it. A move to the host that the
-// stack runs on takes back an earlier request. Like a restart, the request
-// changes no spec, and any channel may make it.
+// applyRequestMove refuses while an operation holds the stack, because that
+// operation may move it. Like a restart, any channel may make the request.
 func applyRequestMove(s *State, cmd Command, payload RequestMove) (func(), error) {
 	id := names.ID(payload.Namespace, payload.Name)
 	stack, ok := s.Stacks[id]
@@ -372,11 +344,9 @@ func applyRequestMove(s *State, cmd Command, payload RequestMove) (func(), error
 	}, nil
 }
 
-// checkLeaderStatus refuses the leader's change of a stack's status if the
-// leader planned it on an older version of the stack (checkPlanned), or if
-// another operation's lock forbids it. It also refuses to move a placed
-// stack without the operation that holds the stack's lock. The exception
-// is a failover from a host whose server is off (FailsOver).
+// checkLeaderStatus refuses to move a placed stack without the operation
+// that holds the stack's lock, except for a failover from a host whose
+// server is off (FailsOver).
 func (s *State) checkLeaderStatus(stack *Stack, payload SetStackStatus) error {
 	if err := checkPlanned(resource.KindStack, payload.ID, &stack.Meta, payload.PlannedAt); err != nil {
 		return err
@@ -410,12 +380,9 @@ func FailsOver(phase HostPhase) bool {
 }
 
 // checkHostReport refuses a host's report that does not match the stack as
-// the state has it now. Only the host that runs the stack may report about
-// it. The report cannot move the stack to another host, because the leader
-// may have moved it since the host read the state. The report must
-// also be about the stack's current generation and restarts. A report about
-// older ones was made before an apply or a restart whose containers have
-// not come up yet.
+// the state has it now. A report from another host, or about an older
+// generation or restart, was made before the leader or a user changed the
+// stack.
 func checkHostReport(stack *Stack, actor string, payload SetStackStatus) error {
 	switch {
 	case stack.Host == nil || actor != HostActor(*stack.Host) || !samePlace(stack.Host, payload.Host):
@@ -478,8 +445,7 @@ func applySetPushedOut(s *State, _ Command, payload SetPushedOut) (func(), error
 
 // SetStackWaitReason records why the placement cannot place a stack, or a
 // volume that the stack names. An empty reason clears it. It changes
-// nothing else, so it never moves or stops a running stack. WaitingSince
-// starts with the first reason, at the command's time.
+// nothing else, so it never moves or stops a running stack.
 type SetStackWaitReason struct {
 	ID     string `json:"id"` // the stack's
 	Reason string `json:"reason,omitempty"`

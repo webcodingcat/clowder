@@ -18,8 +18,8 @@ const APIVersion = "clowder/v1"
 // Kinds are the kinds of resources.
 var Kinds = []string{KindClusterConfiguration, KindNamespace, KindSecret, KindStack, KindVolume}
 
-// KindOf returns the kind that word names. The word is the kind in lower
-// case ("volume"), as in the API's paths.
+// KindOf returns the kind that word names: the kind in lower case
+// ("volume"), as in the API's paths.
 func KindOf(word string) (string, bool) {
 	for _, kind := range Kinds {
 		if strings.ToLower(kind) == word {
@@ -43,9 +43,9 @@ type Object struct {
 }
 
 // Metadata names a resource. The cluster sets Owner, Generation and
-// ResourceVersion, and an apply ignores them. So a resource that the API
-// returned can be applied again as it is. A secret is the exception,
-// because its values never leave the cluster.
+// ResourceVersion, and an apply ignores them, so that what the API
+// returned can be applied again as it is (except a secret, whose values
+// never leave the cluster).
 type Metadata struct {
 	Namespace       string `json:"namespace,omitempty"`
 	Name            string `json:"name"`
@@ -74,8 +74,8 @@ func (r Ref) String() string {
 	return r.Kind + " " + r.Namespace + "/" + r.Name
 }
 
-// decodeStrict reads a spec as users write it. A field that the kind does
-// not have is an error, so a typo is not silently ignored.
+// decodeStrict refuses a field that the kind does not have, so that a typo
+// is not silently ignored.
 func decodeStrict(raw json.RawMessage, spec any) error {
 	if len(raw) == 0 {
 		raw = json.RawMessage("{}")
@@ -99,8 +99,7 @@ func DecodeNamespaceSpec(raw json.RawMessage) (NamespaceSpec, error) {
 }
 
 // DecodeClusterConfiguration reads the configuration's spec as users write
-// it. It does not check the spec. The state runs clusterspec.Check, and it
-// also checks the spec against the cluster.
+// it, without checking it: the state does that.
 func DecodeClusterConfiguration(raw json.RawMessage) (clusterspec.Config, error) {
 	var spec clusterspec.Config
 	if err := decodeStrict(raw, &spec); err != nil {

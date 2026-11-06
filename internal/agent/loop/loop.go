@@ -11,9 +11,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Interval is how often the reconcilers (network, stacks, Traefik) run when
-// the state does not change. These passes repair what someone changed by
-// hand.
+// Interval is how often the agent's loops run a pass when the state does
+// not change. These passes repair what someone changed by hand.
 const Interval = 30 * time.Second
 
 // Cluster is what the agent's loops need from the Raft member. A loop
@@ -27,9 +26,6 @@ type Cluster interface {
 // Run runs pass immediately. After that, it runs pass again whenever the
 // state changes, wake fires, or Interval passes, until ctx ends. wake may be
 // nil.
-//
-// The host's report has its own loop, because it reacts only to a new
-// configuration, not to every change of the state.
 func Run(ctx context.Context, cluster Cluster, wake <-chan struct{}, pass func()) {
 	for {
 		// get the channel before the pass, so no change during it is missed
@@ -45,12 +41,10 @@ func Run(ctx context.Context, cluster Cluster, wake <-chan struct{}, pass func()
 	}
 }
 
-// Signal is how the supervisor reaches a runner (the stack runner or
-// Traefik's runner). It starts the runner's next pass immediately and
-// counts Docker's restarts. With live-restore, the containers survive a
-// Docker restart. But nobody watched the containers that died during the
-// restart, and nothing starts them again (restart: "no"). So after a Docker
-// restart, the runner brings up again everything it brought up before.
+// Signal is how the supervisor reaches a runner. It counts Docker's
+// restarts, because nobody watched the containers that died during a
+// restart and nothing starts them again (restart: "no"), so the runner
+// brings up again everything it brought up before.
 type Signal struct {
 	// wake is buffered (1): one pending pass is enough
 	wake chan struct{}
@@ -71,7 +65,7 @@ func (s *Signal) Wake() <-chan struct{} { return s.wake }
 func (s *Signal) Now() {
 	select {
 	case s.wake <- struct{}{}:
-	default: // a pass is already due
+	default:
 	}
 }
 
@@ -100,7 +94,6 @@ type BroughtUp struct {
 }
 
 // Pauser is what the runners need from the supervisor.
-// supervisor.Supervisor is the real implementation.
 type Pauser interface {
 	Pause(project string) (resume func())
 }
@@ -114,11 +107,9 @@ func WhilePaused(watcher Pauser, project string, change func() error) error {
 	return change()
 }
 
-// CommitAsHost commits a command in which this host reports about itself
-// (its report, a stack's status, a forgotten copy), with the host as actor.
-// The leader's loops commit with the leader as actor (controller's commit).
-// propose is a controller.Propose. Its type is spelled out so that the
-// host's loops need nothing from the leader's package.
+// CommitAsHost commits a command in which this host reports about itself,
+// with the host as actor. propose is a controller.Propose, spelled out so
+// that the host's loops need nothing from the leader's package.
 func CommitAsHost(ctx context.Context, propose func(context.Context, state.Command) (uint64, error),
 	host state.HostID, kind string, payload any,
 ) error {

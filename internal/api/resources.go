@@ -15,20 +15,16 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Reading resources as users see them: lists, single resources, and their
-// statuses. changes.go has the code that changes them.
-
-// ResourceList is the answer to GET /v1/resources/{kind}. It holds the
-// resources, sorted by namespace and name, and the state's index at which
-// they were read.
+// ResourceList is the answer to GET /v1/resources/{kind}, sorted by
+// namespace and name. Index is the state's index at which it was read, for
+// the watch.
 type ResourceList struct {
 	Index uint64            `json:"index"`
 	Items []resource.Object `json:"items"`
 }
 
-// VolumeStatus is a volume's status as the API shows it. If all copies are
-// synced, Status is the state's status (pending, ok). It is resyncing while
-// a copy catches up, and degraded while copies are missing.
+// VolumeStatus is a volume's status as the API shows it. Status adds
+// resyncing and degraded to the state's status (volumeHealth).
 type VolumeStatus struct {
 	Status         string       `json:"status"`
 	DataGeneration int64        `json:"dataGeneration"`
@@ -55,12 +51,9 @@ type StackStatus struct {
 	Status string `json:"status"`
 	Host   string `json:"host,omitempty"` // empty: not placed yet
 	// Priority is the stack's priority as the cluster resolves it now.
-	// Default says that the spec names no priority, so the configuration's
-	// default applies.
-	Priority int  `json:"priority"`
-	Default  bool `json:"default,omitempty"`
-	// PushedOut are the services stopped to make room for services of
-	// higher priority.
+	// Default says that it is the configuration's default.
+	Priority  int      `json:"priority"`
+	Default   bool     `json:"default,omitempty"`
 	PushedOut []string `json:"pushedOut,omitempty"`
 	// WaitReason is why the stack, or a volume it names, finds no place.
 	WaitReason string `json:"waitReason,omitempty"`
@@ -74,8 +67,6 @@ type StackStatus struct {
 	Restarted map[string]time.Time `json:"restarted,omitempty"`
 }
 
-// listResources lists the resources of a kind, in one namespace
-// (?namespace=) or in all namespaces (?allNamespaces=true).
 func (s *Server) listResources(w http.ResponseWriter, r *http.Request) {
 	kind, ok := resource.KindOf(r.PathValue("kind"))
 	if !ok {
@@ -109,10 +100,9 @@ func (n namespaceSelection) holds(namespace string) bool {
 	return n.all || namespace == n.namespace
 }
 
-// selectNamespace reads ?namespace= or ?allNamespaces=true for a kind.
-// There is no default, so no reader gets the wrong namespace by accident.
-// If the query does not fit the kind, it writes the error answer and
-// returns false.
+// selectNamespace has no default, so no reader gets the wrong namespace by
+// accident. If the query does not fit the kind, it writes the error answer
+// and returns false.
 func selectNamespace(w http.ResponseWriter, r *http.Request, kind string) (namespaceSelection, bool) {
 	selected := namespaceSelection{
 		namespace: r.URL.Query().Get("namespace"), all: r.URL.Query().Get("allNamespaces") == "true",
@@ -129,8 +119,6 @@ func selectNamespace(w http.ResponseWriter, r *http.Request, kind string) (names
 	return selected, true
 }
 
-// getResource answers with one resource in a namespace:
-// /v1/resources/{kind}/{namespace}/{name}.
 func (s *Server) getResource(w http.ResponseWriter, r *http.Request) {
 	kind, ok := resource.KindOf(r.PathValue("kind"))
 	if !ok || !resource.Namespaced(kind) {
@@ -140,8 +128,6 @@ func (s *Server) getResource(w http.ResponseWriter, r *http.Request) {
 	s.answerResource(w, resource.Ref{Kind: kind, Namespace: r.PathValue("namespace"), Name: r.PathValue("name")})
 }
 
-// getClusterResource answers with one resource of a kind that has no
-// namespace (a namespace, the configuration): /v1/resources/{kind}/{name}.
 func (s *Server) getClusterResource(w http.ResponseWriter, r *http.Request) {
 	kind, ok := resource.KindOf(r.PathValue("kind"))
 	if !ok || resource.Namespaced(kind) {
@@ -162,8 +148,6 @@ func (s *Server) answerResource(w http.ResponseWriter, ref resource.Ref) {
 	writeJSON(w, http.StatusOK, found)
 }
 
-// objectOf returns one resource as the API shows it, or false if there is
-// none.
 func objectOf(current *state.State, ref resource.Ref) (resource.Object, bool) {
 	for _, object := range objects(current, ref.Kind) {
 		if object.Ref() == ref {
@@ -173,8 +157,8 @@ func objectOf(current *state.State, ref resource.Ref) (resource.Object, bool) {
 	return resource.Object{}, false
 }
 
-// objects returns the resources of a kind as the API shows them, sorted by
-// namespace and name. A secret shows its digest, never its value.
+// objects sorts by namespace and name. A secret shows its digest, never
+// its values.
 func objects(current *state.State, kind string) []resource.Object {
 	var shown []resource.Object
 	add := func(meta state.Meta, spec, status any) {
@@ -268,10 +252,8 @@ const (
 	volumeResyncing = "resyncing"
 )
 
-// volumeHealth tells how healthy a placed volume's copies are. It is
-// degraded with fewer copies than replicas, resyncing while a copy is not
-// synced yet, and ok otherwise. A volume with replicas 0 has one plain LV,
-// so it counts as one copy.
+// volumeHealth counts a volume with replicas 0 as one copy, because it has
+// one plain LV.
 func volumeHealth(volume *state.Volume) string {
 	copies, synced := 0, 0
 	for _, volumeCopy := range volume.Copies {

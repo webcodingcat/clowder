@@ -36,12 +36,9 @@ func (s *State) changed(kind string, meta *Meta) {
 // The leader then plans again on the new state.
 var ErrStale = errors.New("changed since the plan")
 
-// checkPlanned refuses the leader's change to a resource that changed after
-// the state that the leader planned with (the index plannedAt). The
-// resource may have changed, or it may have been deleted and created anew
-// under the same name. In both cases its ResourceVersion is higher than
-// plannedAt. The leader plans on a copy of the state and commits later.
-// Without this check, it would overwrite what came in between.
+// checkPlanned refuses the leader's change to a resource that changed, or
+// was created anew, after the state it planned with (the index plannedAt).
+// Without it, the leader would overwrite what came in between.
 func checkPlanned(kind, id string, stored *Meta, plannedAt uint64) error {
 	switch {
 	case plannedAt == 0:
@@ -52,7 +49,6 @@ func checkPlanned(kind, id string, stored *Meta, plannedAt uint64) error {
 	return nil
 }
 
-// deleted records that the command being applied removed a resource.
 func (s *State) deleted(kind string, meta Meta) {
 	s.changes = append(s.changes, Change{
 		Kind: kind, Namespace: meta.Namespace, Name: meta.Name, ResourceVersion: s.Index, Deleted: true,
@@ -60,8 +56,7 @@ func (s *State) deleted(kind string, meta Meta) {
 }
 
 // PutResource creates or changes a resource. A spec equal to the stored
-// one changes nothing, neither the generation nor the resource version. So
-// applying the same files again restarts nothing.
+// one changes nothing.
 type PutResource struct {
 	// Kind is the resource's kind (such as resource.KindVolume), not the
 	// command's.
@@ -90,19 +85,13 @@ type DeleteResource struct {
 // resourceKind says how the state keeps one kind of resource, by its ID
 // (resourceID).
 type resourceKind struct {
-	// find returns the resource's Meta, or nil if there is none.
+	// find returns nil if there is no such resource.
 	find func(s *State, id string) *Meta
-	// put and remove only read the state. Like a handler, they return
-	// their change as a function, which runs only once every check has
-	// passed.
-	//
-	// put first decodes the spec and compares it with the stored one. For
-	// an equal spec it returns errUnchanged. Then it checks the spec
-	// against the state and returns the change that stores it. That change
-	// returns the stored Meta, so that the caller can count the generation.
-	put func(s *State, id string, payload PutResource) (store func() *Meta, err error)
-	// remove checks that nothing uses the resource, then returns the change
-	// that removes it.
+	// put and remove only read the state and return their change, as a
+	// handler does. put returns errUnchanged for a spec equal to the stored
+	// one; its change returns the stored Meta, so that the caller can count
+	// the generation.
+	put    func(s *State, id string, payload PutResource) (store func() *Meta, err error)
 	remove func(s *State, id string) (func(), error)
 }
 
@@ -116,9 +105,7 @@ var resourceKinds = map[string]resourceKind{
 
 // ChangeResources puts and deletes resources in order, all of them or none.
 // Each change is checked against the state with the changes before it
-// applied. So a Secret can come before the configuration that names it, or
-// a namespace before its stacks, in the same command. Every apply and
-// delete of a user comes in this way (runChanges in the api package).
+// applied.
 type ChangeResources struct {
 	Changes []ResourceChange `json:"changes"`
 }
@@ -140,13 +127,9 @@ func (e *ChangeError) Error() string { return fmt.Sprintf("change %d: %v", e.Ind
 
 func (e *ChangeError) Unwrap() error { return e.Err }
 
-// applyChangeResources applies the changes in order to a clone of the
-// state, and the function it returns puts the clone in place. It is the one
-// handler that works on a clone, because what each change checks depends
-// on the changes before it. The clone shares the specs and the encrypted
-// values (State.Clone), so it costs about as much as the statuses, not as
-// much as the secrets. A change that changes nothing does not count, and a
-// batch of only such changes is unchanged.
+// applyChangeResources is the one handler that works on a clone of the
+// state, because what each change checks depends on the changes before it.
+// A batch of only unchanged changes is unchanged.
 func applyChangeResources(s *State, cmd Command, payload ChangeResources) (func(), error) {
 	if len(payload.Changes) == 0 {
 		return nil, errors.New("no changes")
@@ -190,9 +173,8 @@ func applyChangeResources(s *State, cmd Command, payload ChangeResources) (func(
 // even if the state has changed since in a way that would make the same
 // spec fail the other checks.
 //
-// It does not check the actor. The cluster has no users, so every CLI
-// certificate may change every resource. The API decides who may send
-// change-resources at all.
+// It does not check the actor: the cluster has no users, and the API
+// decides who may send change-resources at all.
 func applyPutResource(s *State, payload PutResource) (func(), error) {
 	kind, ok := resourceKinds[payload.Kind]
 	if !ok {

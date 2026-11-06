@@ -58,7 +58,6 @@ func (d Driver) ensureFilesystem(ctx context.Context, volume Volume, format bool
 	return nil
 }
 
-// ensureMounted mounts the device and creates data/ inside it.
 func (d Driver) ensureMounted(ctx context.Context, volume Volume) error {
 	device, mountPoint := d.device(volume), d.MountPoint(volume)
 	isMounted, err := d.mounted(ctx, mountPoint)
@@ -106,7 +105,6 @@ func (d Driver) Unmount(ctx context.Context, volume Volume) error {
 	return nil
 }
 
-// mounted tells whether a file system is mounted at mountPoint.
 func (d Driver) mounted(ctx context.Context, mountPoint string) (bool, error) {
 	_, err := d.Run(ctx, shortTimeout, "findmnt", "--noheadings", "--mountpoint", mountPoint)
 	if code, exited := command.ExitCode(err); exited && code == findmntNotFound {

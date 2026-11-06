@@ -35,9 +35,9 @@ import (
 // scrapes every host on the same port.
 const MetricsPort = 7444
 
-// metricsTimeout limits the scrape's calls to Docker. It is well below
-// Prometheus' default scrape timeout of 10 s. So a slow Docker costs only
-// the containers' values, not the whole scrape.
+// metricsTimeout limits the scrape's calls to Docker, well below
+// Prometheus' default scrape timeout of 10 s, so that a slow Docker costs
+// only the containers' values, not the whole scrape.
 const metricsTimeout = 5 * time.Second
 
 // metricsSource gathers what /metrics shows. Each agent exports the values
@@ -53,15 +53,13 @@ type metricsSource struct {
 	docker   Docker
 	restarts func() map[supervisor.Service]int
 	failures func() []controller.Failure
-	// seen returns what the volume reconciler last observed about the
-	// copies on this host (volumes.Reconciler.Seen)
+	// seen is volumes.Reconciler.Seen
 	seen func() map[string]storage.Observed
-	// memory reads the agent's resident memory (readRSS); tests replace it
+	// memory is readRSS; tests replace it
 	memory func() (int64, error)
 	logger *slog.Logger
 }
 
-// collect gathers one scrape.
 func (m *metricsSource) collect(ctx context.Context) *metrics.Set {
 	set := metrics.NewSet()
 	// a copy instead of the state under its lock: the scrape waits for
@@ -76,8 +74,6 @@ func (m *metricsSource) collect(ctx context.Context) *metrics.Set {
 	return set
 }
 
-// addHost adds the values of this host: its phase and role, the Raft
-// index, its pools, Docker, the root file system and the agent's memory.
 func (m *metricsSource) addHost(set *metrics.Set, copied *state.State, leads bool) {
 	name := m.host.Name
 	set.Add("clowder_raft_applied_index", "Raft index of the last command this host applied.", metrics.Gauge,
@@ -107,10 +103,6 @@ func (m *metricsSource) addHost(set *metrics.Set, copied *state.State, leads boo
 	m.addCopies(set)
 }
 
-// addCopies adds the values of this host's copies of the volumes: how far
-// each copy is behind its peers and, if its DRBD resource is up, its role,
-// whether its data is current, whether it has quorum, and whether a peer
-// has split off from it (split brain).
 func (m *metricsSource) addCopies(set *metrics.Set) {
 	name := m.host.Name
 	seen := m.seen()
@@ -132,8 +124,6 @@ func (m *metricsSource) addCopies(set *metrics.Set) {
 	}
 }
 
-// addContainers adds the number of the stacks' containers on this host by
-// state, and how often the supervisor restarted each service.
 func (m *metricsSource) addContainers(ctx context.Context, set *metrics.Set) {
 	ctx, cancel := context.WithTimeout(ctx, metricsTimeout)
 	defer cancel()
@@ -163,9 +153,8 @@ func (m *metricsSource) addContainers(ctx context.Context, set *metrics.Set) {
 	}
 }
 
-// stackLabels returns the namespace and stack of a Compose project.
-// clowder's own projects (Traefik) have no namespace and keep their project
-// name.
+// stackLabels keeps the project name of clowder's own projects (Traefik),
+// which have no namespace.
 func stackLabels(project string) (namespace, stack string) {
 	if namespace, stack, ok := names.SplitProject(project); ok {
 		return namespace, stack
@@ -173,8 +162,6 @@ func stackLabels(project string) (namespace, stack string) {
 	return "", project
 }
 
-// addCluster adds the cluster-wide values: the room of each host, the
-// certificates, the open alerts and the failed deliveries.
 func (m *metricsSource) addCluster(set *metrics.Set, copied *state.State) {
 	rooms := scheduler.Rooms(copied)
 	for _, id := range slices.Sorted(maps.Keys(rooms)) {
@@ -211,8 +198,8 @@ func boolValue(value bool) float64 {
 	return 0
 }
 
-// readRSS reads the agent's resident memory (VmRSS in /proc/self/status).
-// The live test measures the agent's RAM with this value.
+// readRSS returns the agent's resident memory in bytes. The live test
+// measures the agent's RAM with it.
 func readRSS() (int64, error) {
 	file, err := os.Open("/proc/self/status")
 	if err != nil {
@@ -231,7 +218,6 @@ func readRSS() (int64, error) {
 	return 0, errors.New("no VmRSS in /proc/self/status")
 }
 
-// serveMetrics serves /metrics on the node address.
 func serveMetrics(source *metricsSource, address string, logger *slog.Logger) (*http.Server, error) {
 	listener, err := freeBind.Listen(context.Background(), "tcp", address)
 	if err != nil {
@@ -255,7 +241,6 @@ func serveMetrics(source *metricsSource, address string, logger *slog.Logger) (*
 	return server, nil
 }
 
-// metricsAddress is the node address with the metrics port.
 func metricsAddress(host Host) string {
 	return net.JoinHostPort(host.NodeAddress.String(), strconv.Itoa(MetricsPort))
 }

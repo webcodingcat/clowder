@@ -19,12 +19,9 @@ type KnownLeader struct {
 	Leader state.HostID `json:"leader"`
 }
 
-// knownLeader answers with the leader that this agent knows. On the leader,
-// that is itself, once a majority has confirmed that it still leads. On a
-// follower, it is the leader that the follower hears from. It answers 503
-// while it knows no leader. clowderd recover asks this route
-// (KnowsLeader). Until its heartbeat times out, a follower may name a
-// leader that is gone. recover then refuses, which is the safe side.
+// knownLeader serves KnowsLeader. Until its heartbeat times out, a
+// follower may name a leader that is gone; recover then refuses, which is
+// the safe side.
 func (s *Server) knownLeader(w http.ResponseWriter, r *http.Request) {
 	if s.config.Cluster.IsLeader() {
 		if err := s.config.Cluster.VerifyLeader(r.Context()); err != nil {
@@ -56,13 +53,9 @@ const (
 var ErrNotReached = errors.New("not reached")
 
 // KnowsLeader asks the agent at address (host:port, over mTLS as a host)
-// whether it knows a leader of its cluster, either itself or another host.
-// If it does, its cluster is not lost. clowderd recover asks every other
-// host before it retires them. It goes on only if each host knows no
-// leader or is not reached (ErrNotReached). Any other failure leaves the
-// answer unknown, such as a refused certificate, another version or a
-// missing answer. The question ignores revocations, because recover runs
-// on a host whose own list may be behind, and it only reads the answer.
+// whether it knows a leader of its cluster, for clowderd recover. Only
+// ErrNotReached means the agent was not reached; any other error leaves
+// the answer unknown.
 func KnowsLeader(ctx context.Context, address string, certificate tls.Certificate, ca *x509.Certificate,
 	version string,
 ) (bool, error) {

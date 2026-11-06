@@ -47,7 +47,6 @@ func (g *globals) register(root *cobra.Command) {
 	}
 }
 
-// readConfig reads the credentials file and returns it with its path.
 func (g *globals) readConfig() (clientconfig.Config, string, error) {
 	path, err := clientconfig.Path(g.config)
 	if err != nil {
@@ -57,9 +56,8 @@ func (g *globals) readConfig() (clientconfig.Config, string, error) {
 	return config, path, err
 }
 
-// connect reads the context that the flags pick. It returns a client for
-// the cluster's agents at the context's endpoints. It warns about a
-// certificate that expires soon.
+// connect returns a client for the context that the flags pick, and warns
+// about a certificate that expires soon.
 func (g *globals) connect() (*api.Client, error) {
 	config, _, err := g.readConfig()
 	if err != nil {
@@ -86,9 +84,8 @@ func (g *globals) connect() (*api.Client, error) {
 	return api.NewClient(cliContext.Endpoints, g.connectTimeout, certificate, ca, buildinfo.Version), nil
 }
 
-// warnBeforeTheEnd warns that a context's certificate is about to expire,
-// starting renewWarning before it does. An agent refuses the certificate
-// once it has expired. A warning that cannot be written stops no command.
+// warnBeforeTheEnd ignores write errors: a warning that cannot be written
+// stops no command.
 func warnBeforeTheEnd(out io.Writer, contextName string, notAfter, now time.Time) {
 	left := notAfter.Sub(now)
 	if left > renewWarning {

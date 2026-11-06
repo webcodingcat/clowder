@@ -13,8 +13,7 @@ import (
 )
 
 // WatchEvent is one change that GET /v1/watch streams, as one JSON object
-// per line. It says which resource changed (spec or status) or was
-// deleted. The client reads the resource itself if it needs it.
+// per line. The client reads the resource itself if it needs it.
 type WatchEvent struct {
 	Kind            string `json:"kind"`
 	Namespace       string `json:"namespace,omitempty"`
@@ -24,23 +23,11 @@ type WatchEvent struct {
 }
 
 // watchWaitTimeout limits how long a watch waits for a since index that
-// this agent has not applied yet. Without it, a follower cut off from the
-// leader would wait forever. It is a variable so that the tests need not
-// wait as long.
+// this agent has not applied yet, because a follower cut off from the
+// leader would wait forever. It is a variable for the tests.
 var watchWaitTimeout = 30 * time.Second
 
-// watch streams the changes of one kind in one namespace (or in all of
-// them) after ?since=, the index of the client's list:
-// GET /v1/watch?kind=&namespace=|allNamespaces=true&since=. Any agent
-// answers from its own ring of changes (state.ChangeRing), so a client
-// that listed on one agent can watch on another.
-//   - If since is older than what the ring holds, the answer is 410, and
-//     the client lists again.
-//   - If this agent has not applied since yet, it waits at most
-//     watchWaitTimeout, then answers 504.
-//   - The stream ends when ctx ends, or when the ring has dropped changes
-//     that the client has not read yet. The client then lists again, as
-//     after a 410.
+// watch answers as docs/developing/api.md (The watch) describes.
 func (s *Server) watch(w http.ResponseWriter, r *http.Request) {
 	kind, ok := resource.KindOf(r.URL.Query().Get("kind"))
 	if !ok {

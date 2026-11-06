@@ -11,9 +11,8 @@ import (
 	"io"
 )
 
-// WriteParts writes each part to hash, preceded by its length. So two
-// different lists never give the hash the same input: "ab", "c" and
-// "a", "bc" differ.
+// WriteParts writes each part to hash, preceded by its length, so that
+// "ab", "c" and "a", "bc" differ.
 func WriteParts(hash io.Writer, parts ...[]byte) {
 	for _, part := range parts {
 		_, _ = hash.Write(binary.BigEndian.AppendUint64(nil, uint64(len(part)))) // a hash never fails to write

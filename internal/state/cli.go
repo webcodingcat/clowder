@@ -7,28 +7,23 @@ import (
 	"time"
 )
 
-// cliActorPrefix is the prefix of every CLI certificate's actor.
 const cliActorPrefix = "cli/"
 
-// CLIActor returns the actor of the CLI with the name in its certificate,
-// for the audit. A cluster has no users: the name grants nothing, and
-// whoever holds a CLI certificate controls the cluster, as with kubeadm's
-// admin.conf.
+// CLIActor returns the CLI's actor with the name in its certificate. The
+// name is for the audit and grants nothing.
 func CLIActor(name string) string {
 	return cliActorPrefix + name
 }
 
-// IsCLIActor tells whether an actor is the CLI, whatever its name. The
-// name grants nothing, so nothing here checks it. pki checks it when it
-// issues the certificate.
+// IsCLIActor tells whether an actor is the CLI, whatever its name. pki
+// checks the name when it issues the certificate.
 func IsCLIActor(actor string) bool {
 	return strings.HasPrefix(actor, cliActorPrefix) && len(actor) > len(cliActorPrefix)
 }
 
 // SetCLICutoff refuses every CLI certificate issued before Cutoff
-// (clowderd credentials --revoke-older). This locks out a lost laptop. A
-// host commits the command, because root on that host issued the new
-// certificate.
+// (clowderd credentials --revoke-older). A host commits it, because root on
+// that host issued the new certificate.
 type SetCLICutoff struct {
 	Cutoff time.Time `json:"cutoff"`
 }
@@ -46,7 +41,6 @@ func applySetCLICutoff(s *State, cmd Command, payload SetCLICutoff) (func(), err
 	return func() { s.CLICutoff = payload.Cutoff }, nil
 }
 
-// serialInUse tells whether a serial belongs to a host or was revoked.
 func (s *State) serialInUse(serial string) bool {
 	if _, revoked := s.Revoked[serial]; revoked {
 		return true
@@ -66,9 +60,7 @@ const revokedKept = 7 * 24 * time.Hour
 
 // revoke puts a certificate on the revocation list. The list grows only
 // here, so revoke also drops the certificates that expired more than
-// revokedKept before the command. No handshake accepts them any more. It
-// uses the command's time, never the clock, so every agent drops the same
-// certificates.
+// revokedKept before the command's time.
 func (s *State) revoke(serial string, notAfter, at time.Time) {
 	maps.DeleteFunc(s.Revoked, func(_ string, revocation Revocation) bool {
 		return at.Sub(revocation.NotAfter) > revokedKept

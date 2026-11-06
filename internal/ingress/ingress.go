@@ -70,7 +70,6 @@ type Static struct {
 	Overlay netip.Prefix
 }
 
-// staticConfig is Traefik's static configuration (traefik.yml).
 type staticConfig struct {
 	Global      globalConfig          `yaml:"global"`
 	Log         logConfig             `yaml:"log"`
@@ -201,7 +200,6 @@ type Route struct {
 	Forwarded bool
 }
 
-// dynamicConfig is the file provider's configuration.
 type dynamicConfig struct {
 	HTTP httpConfig `yaml:"http"`
 	TLS  *tlsConfig `yaml:"tls,omitempty"`
@@ -270,22 +268,15 @@ const (
 // stack's router, because Traefik's default priority is the rule's length.
 const challengePriority = 1_000_000
 
-// RenderDynamic writes the routes for the file provider. Each route gets a
-// service with its targets, named "<project>.<service>", and routers named
-// "<entrypoint>.<project>.<service>". Projects and services have no dot, so
-// the names never clash. The routers of a route are:
-//   - with a certificate for its domain: a router on websecure, and a router
-//     on web that redirects to it;
-//   - without a certificate: only a plain router on web, so nobody sees
-//     Traefik's self-signed default certificate;
-//   - for a stack on this host, also a router on the internal entrypoint.
-//     Other hosts' Traefiks forward the route's requests there, after they
-//     have ended TLS.
+// RenderDynamic writes the routes for the file provider, with a service
+// "<project>.<service>" and routers "<entrypoint>.<project>.<service>" per
+// route. Projects and services have no dot, so the names never clash.
+// A route without a certificate gets only a plain router on web, so nobody
+// sees Traefik's self-signed default certificate.
 //
-// The ACME challenges go to the agent on every host, whatever the domain.
-// They also go there on the internal entrypoint, because the leader checks
-// a challenge there on the ingress host before the CA asks for it
-// (controller.checkAddress).
+// The ACME challenges also go to the agent on the internal entrypoint,
+// because the leader checks a challenge there on the ingress host before
+// the CA asks for it (controller.checkAddress).
 func RenderDynamic(routes []Route, certificates []CertificateFiles) ([]byte, error) {
 	config := dynamicConfig{HTTP: httpConfig{
 		Routers: map[string]router{

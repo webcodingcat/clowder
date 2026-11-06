@@ -10,9 +10,7 @@ import (
 )
 
 // PublicSealingKey is the public half of the cluster's sealing key (GET
-// /v1/sealing-key). clowder secret seal seals values for it. The CLI asks
-// for it each time it seals, rather than trusting a copy that someone may
-// have changed.
+// /v1/sealing-key).
 type PublicSealingKey struct {
 	Recipient string `json:"recipient"`
 }
@@ -26,18 +24,13 @@ func (s *Server) publicSealingKey(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, PublicSealingKey{Recipient: identity.Recipient().String()})
 }
 
-// SealingKeyAnswer is the answer of /v1/internal/sealing-key. It holds the
-// cluster's sealing key in age's text form.
+// SealingKeyAnswer holds the cluster's sealing key in age's text form.
 type SealingKeyAnswer struct {
 	Identity string `json:"identity"`
 }
 
-// internalSealingKey gives the sealing key to root on this host (clowderd
-// sealing-key export). Root asks with the host's certificate, as clowderd
-// credentials does for a CLI certificate. The host already holds the data
-// key that opens the sealing key in the state. So the route gives it
-// nothing new; it only saves root from reading the state. The log tells
-// which host exported the key.
+// internalSealingKey gives root on this host nothing new: the host already
+// holds the data key that opens the sealing key in the state.
 func (s *Server) internalSealingKey(w http.ResponseWriter, r *http.Request) {
 	identity, err := s.sealingKey()
 	if err != nil {
@@ -48,8 +41,6 @@ func (s *Server) internalSealingKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, SealingKeyAnswer{Identity: identity.String()})
 }
 
-// sealingKey decrypts the cluster's sealing key from the state with the
-// data key. Every value of a SealedSecret is sealed for this key.
 func (s *Server) sealingKey() (*age.X25519Identity, error) {
 	var encrypted state.Encrypted
 	s.config.Cluster.Read(func(current *state.State) {

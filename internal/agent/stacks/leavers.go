@@ -8,13 +8,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/agent/loop"
 )
 
-// stopLeavers stops the stacks that left this host. A leaver's files show
-// how far it got, so the runner can recover from a crash at any point. Its
-// compose.yaml exists until compose down succeeds (stop). After that, its
-// directory is removed, and its secrets are removed once compose.yaml is
-// gone (removeSecretsOfOthers). Until then, the volume reconciler leaves
-// its volume copies alone (Files.HeldLVs). stopLeavers returns the volumes
-// that leavers which failed to stop may still use.
+// stopLeavers returns the volumes that leavers which failed to stop may
+// still use. A leaver's compose.yaml stays until compose down succeeds, so
+// that a crash at any point leaves it to be stopped again.
 func (r *Runner) stopLeavers(ctx context.Context, desired desiredState) volumesInUse {
 	inUse := volumesInUse{}
 	entries, err := os.ReadDir(r.files.StacksDir)
@@ -54,8 +50,6 @@ func (r *Runner) stopLeavers(ctx context.Context, desired desiredState) volumesI
 	return inUse
 }
 
-// stop runs compose down for a stack that left this host. It does so only
-// once, because it removes the Compose file afterwards.
 func (r *Runner) stop(ctx context.Context, project string) error {
 	file := r.files.stackFile(project)
 	if _, err := os.Stat(file); errors.Is(err, os.ErrNotExist) {
@@ -77,11 +71,8 @@ type volumesInUse map[string]string
 // uses.
 const anyVolume = "*"
 
-// errVolumeInUse is what apply returns for a stack that must wait, because
-// a stack that failed to stop may still use one of its volumes.
 var errVolumeInUse = errors.New("a stack that failed to stop may still use a volume")
 
-// user returns the stack that may still use an LV.
 func (u volumesInUse) user(lv string) (string, bool) {
 	if project, ok := u[lv]; ok {
 		return project, true
@@ -90,11 +81,9 @@ func (u volumesInUse) user(lv string) (string, bool) {
 	return project, ok
 }
 
-// markInUse adds the LVs that a leaver's containers may hold
-// (readMountedLVs). The leaver may still use them while its containers run.
-// If the LVs cannot be read, it marks every volume: starting a stack next
-// to the leaver by mistake could ruin a file system, and waiting costs only
-// a pass.
+// markInUse marks every volume if the leaver's LVs cannot be read: starting
+// a stack next to the leaver by mistake could ruin a file system, and
+// waiting costs only a pass.
 func (r *Runner) markInUse(inUse volumesInUse, project string) {
 	if _, err := os.Stat(r.files.stackFile(project)); errors.Is(err, os.ErrNotExist) {
 		return // stopped after all

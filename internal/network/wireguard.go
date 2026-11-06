@@ -56,12 +56,10 @@ func PeerInterface(id state.HostID) string {
 	return peerInterfacePrefix + strconv.Itoa(int(id))
 }
 
-// peerTable is the routing table of the answers to the peer with the ID.
 func peerTable(id state.HostID) int {
 	return peerTableBase + int(id)
 }
 
-// peerMark marks the connections that came from the peer with the ID.
 func peerMark(id state.HostID) uint32 {
 	return peerMarkBase + uint32(id)
 }
@@ -75,7 +73,6 @@ type peerRule struct {
 	Table    string `json:"table"`
 }
 
-// wantedRule is the rule for the peer with the ID.
 func wantedRule(id state.HostID) peerRule {
 	return peerRule{
 		Priority: peerTable(id),
@@ -103,10 +100,8 @@ func (r peerRule) selector() []string {
 // wg syncconf reads it. The configuration holds the private key, so it goes
 // to wg on its standard input and never into a file or an argument.
 //
-// Each side listens on the port of the other side's ID. So the interface to
-// peer m listens on wireGuardBasePort + m and reaches m at
-// wireGuardBasePort + self. For example, host 0's clw-2 listens on 51802,
-// and host 2's clw-0 listens on 51800.
+// Each side listens on the port of the other side's ID: host 0's clw-2
+// listens on 51802, and host 2's clw-0 on 51800.
 //
 // AllowedIPs allows every address. Answers without SNAT, and a DNAT to
 // another host, carry a client's address. The peers are the cluster's own
@@ -124,14 +119,9 @@ AllowedIPs = 0.0.0.0/0
 		netip.AddrPortFrom(peer.Underlay, uint16(wireGuardBasePort+int(self))))
 }
 
-// ApplyMesh makes the WireGuard interfaces match the mesh. For each peer it
-// sets up the interface, the route and the routing table of the peer's
-// answers. For a former peer it removes all three and forgets the
-// connections that came from it. At every pass it sets each peer's
-// interface and routes again (wg syncconf and ip replace change only what
-// differs), and it replaces any rule that differs from the wanted one. A
-// peer that fails does not hold up the others. ApplyMesh returns all errors
-// together.
+// ApplyMesh makes the WireGuard interfaces, routes and routing rules match
+// the mesh. A peer that fails does not hold up the others, and ApplyMesh
+// returns all errors together.
 func (h Host) ApplyMesh(ctx context.Context, mesh Mesh) error {
 	listed, err := h.Run(ctx, toolTimeout, "", "ip", "-j", "link", "show", "type", "wireguard")
 	if err != nil {
@@ -182,10 +172,8 @@ func (h Host) ApplyMesh(ctx context.Context, mesh Mesh) error {
 	return errors.Join(failures...)
 }
 
-// connectPeer sets up the interface to a peer, its route and the routing
-// table of its answers. hasInterface says whether the interface exists.
-// rules are the peer's existing rules. connectPeer deletes all of them
-// except the wanted one.
+// connectPeer takes the peer's existing rules and deletes all of them
+// except one copy of the wanted rule.
 func (h Host) connectPeer(ctx context.Context, privateKey string, self state.HostID, peer Peer,
 	hasInterface bool, rules []peerRule,
 ) error {
@@ -216,7 +204,6 @@ func (h Host) connectPeer(ctx context.Context, privateKey string, self state.Hos
 		{"route", "replace", peerNode + "/32", "dev", name, "src", node},
 		{"route", "replace", "default", "dev", name, "table", rule.Table},
 	}
-	// keep one copy of the wanted rule and delete the peer's other rules
 	found := false
 	for _, existing := range rules {
 		if existing == rule && !found {
@@ -236,11 +223,10 @@ func (h Host) connectPeer(ctx context.Context, privateKey string, self state.Hos
 	return nil
 }
 
-// disconnectPeer removes what connectPeer set up for a former peer (the
-// routes go away with the interface). First it forgets the connections that
-// came from the peer, because the peer's ID may come back with another host.
-// If the agent stops halfway, the interface or rule that is left makes the
-// next pass call disconnectPeer again.
+// disconnectPeer first forgets the connections that came from the peer,
+// because the peer's ID may come back with another host. The routes go away
+// with the interface. If the agent stops halfway, the interface or rule that
+// is left makes the next pass call disconnectPeer again.
 func (h Host) disconnectPeer(ctx context.Context, id state.HostID, hasInterface bool, rules []peerRule) error {
 	// conntrack exits with 1 when no connection had the mark
 	_, err := h.Run(ctx, toolTimeout, "", "conntrack", "--delete", "--mark",
@@ -262,8 +248,6 @@ func (h Host) disconnectPeer(ctx context.Context, id state.HostID, hasInterface 
 	return nil
 }
 
-// underlayMTU is the MTU of the interface through which the host reaches an
-// underlay address.
 func (h Host) underlayMTU(ctx context.Context, address netip.Addr) (int, error) {
 	output, err := h.Run(ctx, toolTimeout, "", "ip", "-j", "route", "get", address.String())
 	if err != nil {

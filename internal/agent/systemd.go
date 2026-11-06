@@ -9,8 +9,7 @@ import (
 	"time"
 )
 
-// notify tells systemd about the agent (sd_notify): READY=1 once the agent
-// serves, WATCHDOG=1 while it is healthy. Outside systemd it does nothing.
+// notify is sd_notify; outside systemd it does nothing.
 func notify(message string) error {
 	socket := os.Getenv("NOTIFY_SOCKET")
 	if socket == "" {
@@ -31,9 +30,7 @@ func notify(message string) error {
 	return nil
 }
 
-// watchdogInterval returns how often the agent reports to systemd's
-// watchdog: half the watchdog's timeout (WatchdogSec), or 0 if there is no
-// watchdog.
+// watchdogInterval returns 0 if there is no watchdog.
 func watchdogInterval() time.Duration {
 	microseconds, err := strconv.ParseInt(os.Getenv("WATCHDOG_USEC"), 10, 64)
 	if err != nil || microseconds <= 0 {

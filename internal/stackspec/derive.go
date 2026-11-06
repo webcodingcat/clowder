@@ -10,14 +10,10 @@ import (
 	"github.com/webcodingcat/clowder/internal/names"
 )
 
-// Normalize fills in the schema's own defaults. It also writes everything
-// that can be written in several ways in one way, so that two specs that
-// mean the same are equal. For example, it sorts the lists whose order
-// means nothing, writes a route's host in lower case, and drops CAP_ from
-// capabilities. It leaves out the configuration's defaults (reservations,
-// priority), because the scheduler applies them when it places. The
-// result shares nothing with spec, and spec stays unchanged. A normalized
-// spec normalizes to itself.
+// Normalize fills in the schema's own defaults and writes in one way what
+// may be written in several, so that two specs that mean the same are
+// equal. The result shares nothing with spec, and a normalized spec
+// normalizes to itself.
 func Normalize(spec Spec) Spec {
 	normalized := Spec{Priority: spec.Priority, Services: map[string]Service{}}
 	for name, service := range spec.Services {
@@ -80,8 +76,6 @@ func copyAmount(amount *Amount) *Amount {
 	return &copied
 }
 
-// capabilities returns the names of capabilities as Docker writes them:
-// in upper case, without CAP_, sorted, and each once.
 func capabilities(names []string) []string {
 	written := make([]string, 0, len(names))
 	for _, name := range names {
@@ -90,8 +84,6 @@ func capabilities(names []string) []string {
 	return sortedSet(written)
 }
 
-// sortedSet returns a set's members sorted and each once, or nil if there
-// are none.
 func sortedSet(members []string) []string {
 	return nilIfEmpty(slices.Compact(slices.Sorted(slices.Values(members))))
 }
@@ -111,13 +103,11 @@ func mapOrNil[Value any](values map[string]Value) map[string]Value {
 }
 
 // RestartsUnhealthy tells whether the supervisor restarts the service's
-// container when it turns unhealthy. It does, unless the spec says no.
+// container when it turns unhealthy.
 func (s Service) RestartsUnhealthy() bool {
 	return s.RestartUnhealthy == nil || *s.RestartUnhealthy
 }
 
-// withDefaults returns the port with the schema's defaults: the published
-// port is the container's port, and the protocol is tcp.
 func (p Port) withDefaults() Port {
 	if p.Published == 0 {
 		p.Published = p.Port
@@ -135,8 +125,8 @@ func (p Port) key() string {
 	return port.Protocol + "/" + strconv.Itoa(int(port.Published))
 }
 
-// key returns the name that the cluster uses for an HTTP route: the host
-// in lower case and the path ("shop.example.com/api").
+// key returns the name that the cluster uses for an HTTP route:
+// "shop.example.com/api".
 func (h HTTP) key() string {
 	routePath := h.Path
 	if routePath == "" {
@@ -182,9 +172,8 @@ func (s Spec) VolumeNames() []string {
 }
 
 // WithDependents returns the named services and every service that depends
-// on one of them, directly or through others, sorted. A dependency only
-// applies when a container starts, so whoever restarts a service must also
-// restart the services that depend on it.
+// on one of them, also indirectly, sorted. A dependency only applies when a
+// container starts, so whoever restarts a service must also restart these.
 func (s Spec) WithDependents(services []string) []string {
 	with := map[string]bool{}
 	for _, service := range services {

@@ -20,8 +20,6 @@ func newStack(g *globals) *cobra.Command {
 	return stack
 }
 
-// stackPath returns the API path for one stack's containers, logs or
-// restart.
 func stackPath(stack selection, what string) string {
 	return "/v1/stacks/" + url.PathEscape(stack.namespace) + "/" + url.PathEscape(stack.name) + "/" + what
 }

@@ -12,7 +12,6 @@ import (
 // release candidate) or 0.0.0~dev+abc (a development build).
 var version = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)(.*)$`)
 
-// parsed is a version split into its numbers and suffix.
 type parsed struct {
 	numbers [3]int
 	suffix  string
@@ -50,7 +49,6 @@ func Compare(a, b string) int {
 	}
 }
 
-// suffixRun is a run of digits or of other characters in a suffix.
 var suffixRun = regexp.MustCompile(`\d+|\D+`)
 
 // compareSuffixes compares runs of digits by their number and the rest as
@@ -72,7 +70,6 @@ func compareSuffixes(a, b string) int {
 	return cmp.Compare(len(first), len(second))
 }
 
-// rank orders false before true.
 func rank(value bool) int {
 	if value {
 		return 1

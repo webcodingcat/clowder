@@ -38,9 +38,7 @@ func NewRoot() *cobra.Command {
 	return root
 }
 
-// hostFlags are the flags that init and join share. They describe the host.
-// The host's name in the cluster is its hostname, which DRBD also uses for
-// the host in a resource.
+// hostFlags are the flags that init and join share.
 type hostFlags struct {
 	underlay, publicAddress, roles string
 	serverID                       int64
@@ -59,14 +57,12 @@ func (f *hostFlags) add(cmd *cobra.Command, roles hostrole.Set) {
 	}
 }
 
-// parsedHost holds the values that hostFlags.parse returns.
 type parsedHost struct {
 	name                    string
 	roles                   hostrole.Set
 	underlay, publicAddress netip.Addr
 }
 
-// parse reads the hostname, the roles and the addresses.
 func (f *hostFlags) parse() (parsedHost, error) {
 	var host parsedHost
 	var err error
@@ -85,8 +81,6 @@ func (f *hostFlags) parse() (parsedHost, error) {
 	return host, nil
 }
 
-// startService enables and starts clowderd.service. From then on the agent
-// runs as a service and survives reboots.
 func (f *hostFlags) startService(ctx context.Context) error {
 	if !f.start {
 		return nil
@@ -182,7 +176,6 @@ func newRun() *cobra.Command {
 	}
 }
 
-// hostNetwork is the host's real network.
 func hostNetwork(files Files) network.Host {
 	return network.Host{
 		ResolvConf: "/etc/resolv.conf", WireGuardKey: files.wireGuardKey(), Run: command.RunWithInput,
@@ -190,14 +183,12 @@ func hostNetwork(files Files) network.Host {
 	}
 }
 
-// hostStorage is the host's real storage driver.
 func hostStorage(files Files) storage.Driver {
 	return storage.Driver{
 		VolumesDir: files.volumesDir(), StateDir: files.storageDir(), ResourceDir: "/etc/drbd.d", Run: command.Run,
 	}
 }
 
-// hostParts are the host's real network, storage and Docker.
 func hostParts(files Files) HostParts {
 	return HostParts{
 		Network: hostNetwork(files),

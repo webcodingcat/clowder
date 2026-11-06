@@ -15,9 +15,8 @@ const (
 	readTimeout = 30 * time.Second
 )
 
-// withConfig puts docker's --config before args. It names the directory of
-// the config.json whose registry logins a pull uses. There is one directory
-// per namespace, so a stack pulls only with its own namespace's logins.
+// withConfig puts docker's --config (one directory per namespace) before
+// args, so a stack pulls only with its own namespace's registry logins.
 // Without --config, docker uses root's own logins.
 func withConfig(config string, args ...string) []string {
 	if config == "" {

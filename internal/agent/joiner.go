@@ -36,12 +36,10 @@ type joiner struct {
 	// the same free ID, and the second would be refused through no fault of
 	// its own.
 	mu sync.Mutex
-	// seen holds the nonces of the last joinNonceKept, each with the time
-	// it was seen, so that the leader accepts each request only once. This
-	// protects little: whoever saw a request also saw its token, and only
-	// the cluster's agents see requests, over TLS. It is insurance against
-	// a request sent twice. The map lives only in this leader's memory, so
-	// a new leader starts with an empty map.
+	// seen holds the nonces of the last joinNonceKept with the time each was
+	// seen, so that a request sent twice is accepted once. It is only
+	// insurance: whoever saw a request also saw its token. A new leader
+	// starts with an empty map.
 	seen map[string]time.Time
 }
 
@@ -153,8 +151,6 @@ func (j *joiner) firstSeen(nonce string, now time.Time) bool {
 	return true
 }
 
-// issue creates the joining host's certificate for the host's own key, its
-// ID, its roles and its addresses.
 func (j *joiner) issue(current *state.State, request api.JoinRequest, id state.HostID, now time.Time) (
 	[]byte, *x509.Certificate, error,
 ) {
@@ -181,10 +177,8 @@ func (j *joiner) issue(current *state.State, request api.JoinRequest, id state.H
 	return certificatePEM, certificate, nil
 }
 
-// checkServer asks Hetzner whether the server belongs to the host
-// (hetzner.Client.CheckServer). A server that belongs to someone else
-// refuses the join. An API that does not answer is an error, but not a
-// refusal.
+// checkServer refuses the join of a server that belongs to someone else.
+// An API that does not answer is an error, but not a refusal.
 func (j *joiner) checkServer(ctx context.Context, current *state.State, host state.Host) error {
 	client, err := controller.OpenHetzner(current, j.dataKey.Decrypt)
 	if err != nil {
@@ -197,8 +191,7 @@ func (j *joiner) checkServer(ctx context.Context, current *state.State, host sta
 	return err
 }
 
-// joinPeers are the hosts that a joining host connects to over WireGuard.
-// They are the same hosts that readWantedNetwork picks.
+// joinPeers must pick the same hosts as readWantedNetwork.
 func joinPeers(current *state.State, joining state.HostID) []api.JoinPeer {
 	var peers []api.JoinPeer
 	for _, id := range slices.Sorted(maps.Keys(current.Hosts)) {

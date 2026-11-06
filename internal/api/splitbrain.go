@@ -16,9 +16,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// ResolveRequest is the body of POST
-// /v1/volumes/{namespace}/{name}/resolve-splitbrain. Keep names the host
-// whose copy keeps its data.
+// ResolveRequest names the host whose copy keeps its data.
 type ResolveRequest struct {
 	Keep string `json:"keep"`
 }
@@ -40,27 +38,20 @@ type ResolvedCopy struct {
 	Connected bool `json:"connected"`
 }
 
-// internalResolve is the body of the internal route that resolves a host's
-// copy.
 type internalResolve struct {
 	Discard bool `json:"discard"`
 }
 
-// resolvingCopy is a host with a copy of the volume, and whether that copy
-// discards its data.
 type resolvingCopy struct {
 	host    state.HostID
 	name    string
 	discard bool
 }
 
-// resolveSplitBrain asks each host with a copy of a volume to connect the
-// copy again. First come the hosts whose disk copies give up their
-// changes. Then come the host to keep and the tiebreaker, which keep their
-// data. It refuses while the volume's stack runs on a host other than the
-// one to keep, because the copy there is primary and its data cannot be
-// discarded. Nothing goes through Raft: the split exists in the hosts'
-// DRBD, and the state knows of it only from their reports.
+// resolveSplitBrain refuses while the volume's stack runs on a host other
+// than the one to keep, because the copy there is primary and its data
+// cannot be discarded. Nothing goes through Raft: the split exists in the
+// hosts' DRBD, and the state knows of it only from their reports.
 func (s *Server) resolveSplitBrain(w http.ResponseWriter, r *http.Request) {
 	namespace, name := r.PathValue("namespace"), r.PathValue("name")
 	var request ResolveRequest
@@ -112,9 +103,9 @@ func doneSoFar(resolved []ResolvedCopy) string {
 	return "connected again already: " + strings.Join(connected, ", ")
 }
 
-// resolveOrder returns the volume's copies in the order in which they are
-// resolved. If the request is refused, it returns the reason and its HTTP
-// status. Every copy's host is in the state, because the state refuses a
+// resolveOrder puts the copies that give up their changes first, then the
+// one to keep and the tiebreaker. It returns the HTTP status with a
+// refusal. Every copy's host is in the state, because the state refuses a
 // copy on a host that it does not know.
 func resolveOrder(current *state.State, id, keep string) ([]resolvingCopy, int, error) {
 	volume, ok := current.Volumes[id]
@@ -150,8 +141,7 @@ func resolveOrder(current *state.State, id, keep string) ([]resolvingCopy, int, 
 	return append(discarding, keeping...), http.StatusOK, nil
 }
 
-// resolveOn resolves the copy on a host, this one or another. It returns
-// false when none of the copy's peers was StandAlone.
+// resolveOn returns false when none of the copy's peers was StandAlone.
 func (s *Server) resolveOn(ctx context.Context, host state.HostID, volumeID string, discard bool) (bool, error) {
 	if host == s.config.HostID {
 		return s.resolveHere(ctx, volumeID, discard)
@@ -175,7 +165,6 @@ func (s *Server) resolveOn(ctx context.Context, host state.HostID, volumeID stri
 	return resolved.Connected, nil
 }
 
-// resolveHere resolves this host's copy (Volumes.ResolveSplitBrain).
 func (s *Server) resolveHere(ctx context.Context, volumeID string, discard bool) (bool, error) {
 	if s.config.Volumes == nil {
 		return false, errors.New("this agent keeps no volumes")
@@ -183,8 +172,6 @@ func (s *Server) resolveHere(ctx context.Context, volumeID string, discard bool)
 	return s.config.Volumes.ResolveSplitBrain(ctx, volumeID, discard)
 }
 
-// localResolve resolves this host's copy for the agent that took the
-// user's request.
 func (s *Server) localResolve(w http.ResponseWriter, r *http.Request) {
 	var request internalResolve
 	if err := decodeStrict(r.Body, &request); err != nil {

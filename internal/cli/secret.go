@@ -27,8 +27,7 @@ func newSecret(g *globals) *cobra.Command {
 	return secret
 }
 
-// valueFlags are the flags that give a Secret's values on the command
-// line, like those of kubectl create secret generic.
+// valueFlags are like those of kubectl create secret generic.
 type valueFlags struct {
 	literals, fromFiles []string
 }
@@ -39,7 +38,6 @@ func (f *valueFlags) register(command *cobra.Command) {
 		"a key and the file of its value, <key>=<path>, or <key>=- for stdin")
 }
 
-// valueFlagsHelp explains valueFlags in a command's long help.
 const valueFlagsHelp = "--from-file takes a file's content, or with - one value from stdin: on a terminal it asks\n" +
 	"without echo, otherwise it reads stdin without one line end at the end. --from-literal puts\n" +
 	"the value on the command line, where the shell's history keeps it."
@@ -103,8 +101,8 @@ func newSeal(g *globals) *cobra.Command {
 	return command
 }
 
-// readSecrets reads the Secrets that seal turns into SealedSecrets. It
-// refuses a resource of another kind, because seal would drop it.
+// readSecrets refuses a resource of another kind, because seal would drop
+// it.
 func readSecrets(from string, stdin io.Reader, report io.Writer) ([]resource.Object, error) {
 	objects, err := readResourceFiles(from, stdin, report)
 	if err != nil {
@@ -118,7 +116,6 @@ func readSecrets(from string, stdin io.Reader, report io.Writer) ([]resource.Obj
 	return objects, nil
 }
 
-// secretFromFlags builds the Secret [<namespace>/]<name> from valueFlags.
 func secretFromFlags(text string, flags valueFlags, stdin io.Reader, prompt io.Writer) (resource.Object, error) {
 	namespace, name, err := secretName(text)
 	if err != nil {
@@ -144,8 +141,7 @@ func secretFromFlags(text string, flags valueFlags, stdin io.Reader, prompt io.W
 	}, nil
 }
 
-// sealedSecret seals the values of a Secret for recipient and writes the
-// SealedSecret as YAML, each value on one line, as kubeseal does.
+// sealedSecret writes each value on one line, as kubeseal does.
 func sealedSecret(secret resource.Object, recipient age.Recipient) (string, error) {
 	values, err := resource.DecodeSecretSpec(secret.Spec)
 	if err != nil {
@@ -170,10 +166,8 @@ func sealedSecret(secret resource.Object, recipient age.Recipient) (string, erro
 	return out.String(), nil
 }
 
-// sealingRecipient returns the public half of the sealing key. It reads it
-// from a file that clowderd sealing-key export --public wrote, or asks the
-// context's cluster. The CLI asks the cluster each time and keeps no copy
-// that someone could change.
+// sealingRecipient asks the cluster each time unless certFile is given,
+// and keeps no copy that someone could change.
 func sealingRecipient(cmd *cobra.Command, g *globals, certFile string) (age.Recipient, error) {
 	var text string
 	if certFile != "" {
@@ -200,8 +194,7 @@ func sealingRecipient(cmd *cobra.Command, g *globals, certFile string) (age.Reci
 	return recipient, nil
 }
 
-// secretValues reads the values of valueFlags by key. Each key may appear
-// once, and stdin may be used at most once.
+// secretValues allows each key once, and stdin at most once.
 func secretValues(flags valueFlags, stdin io.Reader, prompt io.Writer) (map[string][]byte, error) {
 	values := map[string][]byte{}
 	add := func(flag, pair string, read func(source string) ([]byte, error)) error {
@@ -252,7 +245,7 @@ func secretValues(flags valueFlags, stdin io.Reader, prompt io.Writer) (map[stri
 	return values, nil
 }
 
-// readFileValue reads a value from a file, unchanged.
+// readFileValue keeps a trailing line break, unlike readValue.
 func readFileValue(path string) ([]byte, error) {
 	value, err := os.ReadFile(path)
 	switch {
@@ -264,9 +257,8 @@ func readFileValue(path string) ([]byte, error) {
 	return value, nil
 }
 
-// secretName reads [<namespace>/]<name>. Without a namespace, it uses
-// default, as get and delete do. It also accepts names.System, which holds
-// the cluster's own Secrets.
+// secretName reads [<namespace>/]<name>, with default as get and delete
+// use it.
 func secretName(text string) (namespace, name string, err error) {
 	namespace, name, ok := strings.Cut(text, "/")
 	if !ok {
@@ -278,8 +270,8 @@ func secretName(text string) (namespace, name string, err error) {
 	return namespace, name, nil
 }
 
-// checkSecretName returns a usage error if a Secret's namespace or name is
-// not valid.
+// checkSecretName also accepts names.System, which holds the cluster's own
+// Secrets.
 func checkSecretName(namespace, name string) error {
 	switch {
 	case namespace != names.System && !names.ValidNamespace(namespace):
@@ -290,9 +282,8 @@ func checkSecretName(namespace, name string) error {
 	return nil
 }
 
-// readValue reads a value from stdin. On a terminal, it asks for the value
-// without echo. Otherwise it reads all of in and drops one trailing line
-// break, which echo and most files add.
+// readValue asks without echo on a terminal. Otherwise it drops one
+// trailing line break, which echo and most files add.
 func readValue(in io.Reader, prompt io.Writer) ([]byte, error) {
 	var value []byte
 	if file, ok := in.(*os.File); ok && term.IsTerminal(int(file.Fd())) {

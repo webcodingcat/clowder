@@ -71,14 +71,12 @@ func (f *fsm) halt(err error) {
 	close(f.halted)
 }
 
-// haltError returns why the fsm halted, or nil if it has not halted.
 func (f *fsm) haltError() error {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return f.haltErr
 }
 
-// wake tells the waiters that the state changed.
 func (f *fsm) wake() {
 	f.mu.Lock()
 	close(f.changed)
@@ -101,7 +99,6 @@ func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 	return snapshot(encoded.Bytes()), nil
 }
 
-// Restore replaces the state with a snapshot's.
 func (f *fsm) Restore(snapshotFile io.ReadCloser) error {
 	defer func() { _ = snapshotFile.Close() }() // read only
 	restored, err := state.ReadSnapshot(snapshotFile)
@@ -135,7 +132,6 @@ func (f *fsm) changesSince(index uint64) ([]state.Change, uint64, error) {
 	return changes, f.state.Index, err
 }
 
-// read runs a function on the state under the read lock.
 func (f *fsm) read(use func(current *state.State)) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -158,7 +154,6 @@ func (f *fsm) sharedCopy() *state.State {
 	return f.shared
 }
 
-// waitFor returns once the state has applied index.
 func (f *fsm) waitFor(ctx context.Context, index uint64) error {
 	for {
 		f.mu.RLock()
@@ -175,8 +170,6 @@ func (f *fsm) waitFor(ctx context.Context, index uint64) error {
 	}
 }
 
-// revoked tells whether a certificate serial is on the state's list of
-// revoked certificates.
 func (f *fsm) revoked(serial string) bool {
 	f.mu.RLock()
 	defer f.mu.RUnlock()

@@ -22,9 +22,6 @@ type Bootstrap struct {
 	Host        Host        `json:"host"`
 }
 
-// applyBootstrap creates the cluster with its first host. The CLI's first
-// credentials come from root on that host (clowderd credentials). Other
-// hosts join with tokens.
 func applyBootstrap(s *State, _ Command, payload Bootstrap) (func(), error) {
 	switch {
 	case s.Keys != nil:
@@ -54,7 +51,6 @@ func applyBootstrap(s *State, _ Command, payload Bootstrap) (func(), error) {
 	}, nil
 }
 
-// checkNewHost checks the fields that every new host must have.
 func checkNewHost(host Host) error {
 	switch {
 	case host.Name == "":
@@ -105,22 +101,16 @@ type SetHostPhase struct {
 	// in. The change is refused if the host has left that phase since.
 	From HostPhase `json:"from,omitempty"`
 	// Operation is the leader's operation that makes the change, if any.
-	// While an operation holds the host's lock (fencing, drain, remove),
-	// only that operation changes the host's phase. The host's own phase
-	// reports are refused too.
+	// While an operation holds the host's lock, only that operation changes
+	// the host's phase.
 	Operation uint64 `json:"operation,omitempty"`
-	// Leaving is set only together with draining. It means that a user
-	// removes a host that still has stacks or volume copies (Host.Leaving).
-	// An undrain takes the remove back. A failure keeps it, and the host
-	// leaves once it is back.
+	// Leaving goes only with draining (Host.Leaving).
 	Leaving bool `json:"leaving,omitempty"`
 }
 
-// mover says who may make a phase change: the leader (on its own or for the
-// CLI), or the host itself, when it reports what only it can see. A host
-// never changes another host's phase. The API checks which actor may send
-// which kind of command at all. The state checks only what needs the
-// state: whether the reporting host is the host that the report is about.
+// mover says who may make a phase change. The API checks which actor may
+// send which kind of command at all; the state checks only that a host
+// reports about itself.
 type mover int
 
 const (
@@ -128,19 +118,10 @@ const (
 	byTheHost
 )
 
-// phaseChanges holds the allowed changes. The leader or the CLI may also
-// move a host in any phase to Removed, unless checkRemoval refuses.
-//
-// A host starts as joining (add-host). It becomes fencing only when a
-// fence-host operation starts (StartOperation.Fence), which holds the
-// host's lock. Only that operation moves the host on: to fenced once its
-// server is off, or back to failed when it could not power the server off.
-//
-// A failed host that is heard again may become active again. Only the
-// leader decides this, from the beats that a majority of the voters hear,
-// because the host cannot tell whether the leader is about to fence it.
-// Once the host is fencing, nothing stops the operation, not even a late
-// beat.
+// phaseChanges holds the allowed changes; Host phases in
+// docs/developing/state.md gives their reasons. The leader or the CLI may
+// also move a host in any phase to Removed, unless checkRemoval refuses. A
+// host becomes fencing only when a fence-host operation starts.
 var phaseChanges = map[HostPhase]map[HostPhase]mover{
 	Joining:    {Active: byLeaderOrCLI},
 	Active:     {Draining: byLeaderOrCLI, Failed: byLeaderOrCLI},
@@ -191,12 +172,9 @@ func (s *State) fence(host *Host, at time.Time) {
 	s.unsync(host)
 }
 
-// unsync marks the copies of a failed host as no longer synced. The other
-// copies go on without them, so DRBD must catch them up once the host is
-// back. Until the host reports a copy synced again, no stack fails over or
-// moves to that copy, and a recovering host does not become active. A
-// failed host's own stacks keep running (KeepsStacks), whatever the flag
-// on its copies says.
+// unsync marks the copies of a failed host as no longer synced, because the
+// other copies go on without them. A failed host's own stacks keep running
+// (KeepsStacks), whatever the flag on its copies says.
 func (s *State) unsync(host *Host) {
 	for _, id := range slices.Sorted(maps.Keys(s.Volumes)) {
 		volume := s.Volumes[id]
@@ -226,9 +204,7 @@ func (s *State) checkCaughtUp(host *Host) error {
 // KeepsStacks tells whether a host in this phase runs the stacks placed on
 // it. A failed host keeps running them until it is powered off, because no
 // other host runs them before that. A fenced host runs none until it is
-// active again, because by then they may run elsewhere. Only a worker has
-// stacks placed on it. The section Host phases in docs/developing/state.md
-// has a table of what each phase means.
+// active again, because by then they may run elsewhere.
 func KeepsStacks(phase HostPhase) bool {
 	return InService(phase) || phase == Failed || phase == Fencing
 }
@@ -253,8 +229,6 @@ func Up(phase HostPhase) bool {
 // loss of one host.
 const MinHAHosts = 3
 
-// controlPlaneInService counts the control-plane hosts in service. The
-// hosts in leftOut are not counted.
 func (s *State) controlPlaneInService(leftOut ...HostID) int {
 	count := 0
 	for _, other := range s.Hosts {
@@ -293,10 +267,8 @@ func (s *State) CheckLeaving(id HostID) error {
 }
 
 // checkRemoval refuses to remove a host that the cluster cannot do without
-// (checkMayGo). It also refuses a host in service while a stack or a
-// volume copy is still on it, because they would be lost with it. Such a
-// host leaves instead (SetHostPhase.Leaving): its stacks and copies move
-// off, and then the host goes.
+// (checkMayGo), and a host in service while a stack or a volume copy is
+// still on it, because they would be lost with it.
 func (s *State) checkRemoval(host *Host) error {
 	if err := s.checkMayGo(host); err != nil || !InService(host.Phase) {
 		return err
@@ -314,9 +286,7 @@ func (s *State) checkRemoval(host *Host) error {
 //     for good, takes the cluster below that.
 //
 // Before the cluster is highly available, a control-plane host out of
-// service may always go, so a dead host can be given up. A host without
-// the control plane may always go. Its stacks and copies move off it
-// first (checkRemoval).
+// service may always go, so a dead host can be given up.
 func (s *State) checkMayGo(host *Host) error {
 	if !host.Roles.Has(hostrole.ControlPlane) {
 		return nil
@@ -344,8 +314,6 @@ func (s *State) checkMayGo(host *Host) error {
 // or a volume copy.
 var ErrNotEmpty = errors.New("it must move off first")
 
-// checkEmpty refuses a host that still has a stack or a volume copy
-// (ErrNotEmpty).
 func (s *State) checkEmpty(host *Host) error {
 	for _, id := range slices.Sorted(maps.Keys(s.Stacks)) {
 		if placed := s.Stacks[id].Host; placed != nil && *placed == host.ID {
@@ -360,10 +328,8 @@ func (s *State) checkEmpty(host *Host) error {
 	return nil
 }
 
-// remove marks the host as removed. It revokes the host's certificate,
-// drops its retired copies, and asks every remaining host to forget it as
-// a DRBD peer (Forgetting, report-peer-forgotten). The host's ID is free
-// once all of them have done so.
+// remove marks the host as removed, revokes its certificate, and asks every
+// remaining host to forget it as a DRBD peer (Forgetting).
 func (s *State) remove(host *Host, at time.Time) {
 	host.Phase, host.Voter = Removed, false
 	s.revoke(host.CertificateSerial, host.CertificateNotAfter, at)
@@ -385,8 +351,6 @@ func (s *State) remove(host *Host, at time.Time) {
 	}
 }
 
-// forgot takes a host off the list of hosts that still have to forget the
-// peer. Once the list is empty, it takes the peer off Forgetting.
 func (s *State) forgot(host, peer HostID) {
 	waiting := slices.DeleteFunc(s.Forgetting[peer], func(id HostID) bool { return id == host })
 	if len(waiting) == 0 {
@@ -455,10 +419,8 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), err
 	}, nil
 }
 
-// enterPhase moves a host to a phase that applySetHostPhase allowed. It
-// also updates what goes with the change: the fence's record and the
-// copies, the user's remove, the requests to move stacks to the host, and
-// the cluster's HA.
+// enterPhase moves a host to a phase that applySetHostPhase allowed, and
+// updates what goes with the change.
 func (s *State) enterPhase(host *Host, payload SetHostPhase, at time.Time) {
 	switch {
 	case payload.Phase == Fenced && host.Phase == Disabled:
@@ -554,10 +516,9 @@ func applySetIngress(s *State, _ Command, payload SetIngress) (func(), error) {
 
 // ReportHost is an agent's report about its host: the version it runs, its
 // memory and CPUs, its thin pools (by pool name, "vg/thin"), whether Docker
-// answers and how full the root file system is. The leader places stacks
-// by it and raises alerts from it. Agents send it only when something has
-// changed, not on every check. So every value is one that seldom changes,
-// such as a bool or a whole percent.
+// answers and how full the root file system is. Agents send it only when
+// something has changed, so every value is one that seldom changes, such as
+// a bool or a whole percent.
 type ReportHost struct {
 	Host            HostID          `json:"host"`
 	Version         string          `json:"version"`
@@ -594,7 +555,6 @@ func applyReportHost(s *State, cmd Command, payload ReportHost) (func(), error) 
 	}, nil
 }
 
-// percent tells whether a value is a whole percent, 0 to 100.
 func percent(value int) bool {
 	return value >= 0 && value <= 100
 }
@@ -610,7 +570,6 @@ func (s *State) forgetMovesTo(id HostID) {
 	}
 }
 
-// stacksOn returns the IDs of the stacks placed on a host, sorted.
 func (s *State) stacksOn(id HostID) []string {
 	var stacks []string
 	for _, stackID := range slices.Sorted(maps.Keys(s.Stacks)) {

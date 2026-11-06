@@ -22,8 +22,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// ApplyRequest is the body of POST /v1/apply. It holds the resources in
-// the order in which they are applied, which is their order in the files.
+// ApplyRequest holds the resources in the order in which they are applied,
+// which is their order in the files.
 type ApplyRequest struct {
 	Resources []resource.Object `json:"resources"`
 	// Create refuses every resource that already exists, as kubectl create
@@ -31,9 +31,8 @@ type ApplyRequest struct {
 	Create bool `json:"create,omitempty"`
 }
 
-// DeleteRequest is the body of POST /v1/delete. It holds the resources in
-// the order in which they are deleted: a resource that uses another comes
-// before it.
+// DeleteRequest holds the resources in the order in which they are
+// deleted: a resource that uses another comes before it.
 type DeleteRequest struct {
 	Resources []resource.Ref `json:"resources"`
 	// WithData must be set to delete a volume. The volume's data is deleted
@@ -47,22 +46,19 @@ const (
 	Applied   = "applied"
 	Deleted   = "deleted"
 	Unchanged = "unchanged"
-	// Refused means that the state refused the resource as sent. So
-	// nothing of the request is applied.
+	// Refused means that the state refused the resource as sent.
 	Refused = "refused"
 	// Failed means that the request did not commit (no leader, no quorum,
-	// a timeout). The same request may succeed when tried again.
+	// a timeout), and may succeed when tried again.
 	Failed = "failed"
 	// NotApplied marks every other resource of a request that was refused
 	// or failed, because a request is applied whole or not at all.
 	NotApplied = "not-applied"
 )
 
-// ChangeResult is the answer to POST /v1/apply and /v1/delete. It has one
-// result per resource, in the order sent.
+// ChangeResult has one result per resource, in the order sent.
 type ChangeResult struct {
-	// Index is the Raft index of the committed command, or 0 if nothing
-	// was committed, as in a dry run.
+	// Index is 0 if nothing was committed, as in a dry run.
 	Index   uint64           `json:"index"`
 	Results []ResourceResult `json:"results"`
 	// Warnings are about the service URLs in the configuration that the
@@ -80,33 +76,27 @@ type ResourceResult struct {
 	Name      string `json:"name"`
 	Outcome   string `json:"outcome"`
 	Message   string `json:"message,omitempty"`
-	// Created and Differs are set in a dry run and tell what an applied
-	// resource changes. Either the resource is new, or the listed parts
-	// differ: the spec's top-level fields, or a Secret's keys (never its
-	// values).
+	// Created and Differs are set in a dry run. Differs lists the spec's
+	// top-level fields, or a Secret's keys (never its values).
 	Created bool     `json:"created,omitempty"`
 	Differs []string `json:"differs,omitempty"`
 }
 
-// TokenCheck is what an apply's new Hetzner token sees. The token sees the
-// servers of Seen out of Hosts hosts. Error is set if Hetzner could not be
-// asked.
+// TokenCheck is what an apply's new Hetzner token sees: the servers of
+// Seen out of Hosts hosts. Error is set if Hetzner could not be asked.
 type TokenCheck struct {
 	Hosts int    `json:"hosts"`
 	Seen  int    `json:"seen"`
 	Error string `json:"error,omitempty"`
 }
 
-// secretResourcePurpose names the key for the digests of Secret resources.
-// It differs from the key for the containers' labels, so neither digest
-// reveals anything about the other.
+// secretResourcePurpose differs from the key for the containers' labels,
+// so neither digest reveals anything about the other.
 const secretResourcePurpose = "clowder secret resource digest"
 
 // changeBatch is an apply or a delete as the agent that took it hands it
-// to the leader. It holds each resource's change in order, or the reason
-// why a resource has none. The leader decides on its own state. A
-// follower's state may be behind, so the follower could answer "unchanged"
-// or "refused" for a resource that has changed since.
+// to the leader. The leader decides, because a follower's state may be
+// behind and answer "unchanged" or "refused" for what has changed since.
 type changeBatch struct {
 	DryRun  bool          `json:"dry_run,omitempty"`
 	Actor   string        `json:"actor"`
@@ -120,8 +110,8 @@ type batchChange struct {
 	Error string `json:"error,omitempty"`
 }
 
-// decodeStrict reads a request body. An unknown field is an error, so a
-// typo does not become an empty request.
+// decodeStrict refuses an unknown field, so a typo does not become an
+// empty request.
 func decodeStrict(body io.Reader, request any) error {
 	decoder := json.NewDecoder(body)
 	decoder.DisallowUnknownFields()
@@ -131,7 +121,6 @@ func decodeStrict(body io.Reader, request any) error {
 	return nil
 }
 
-// applyResources puts resources, in the order sent.
 func (s *Server) applyResources(w http.ResponseWriter, r *http.Request) {
 	var request ApplyRequest
 	if err := decodeStrict(r.Body, &request); err != nil {
@@ -158,7 +147,6 @@ func (s *Server) applyResources(w http.ResponseWriter, r *http.Request) {
 	s.runOnLeader(w, r, batch)
 }
 
-// deleteResources deletes resources, in the order sent.
 func (s *Server) deleteResources(w http.ResponseWriter, r *http.Request) {
 	var request DeleteRequest
 	if err := decodeStrict(r.Body, &request); err != nil {
@@ -194,12 +182,8 @@ func (b *changeBatch) add(ref resource.Ref, change state.ResourceChange, err err
 	b.Changes = append(b.Changes, batchChange{Ref: ref, Change: &change})
 }
 
-// putChange turns a resource as the user wrote it into a put. It reads the
-// spec strictly and checks it. For a Secret, it encrypts the values and
-// computes the digest. A SealedSecret becomes a Secret the same way, after
-// its values are opened. Every change by a user comes from the CLI, so the
-// owner is the channel cli (state.OwnerCLI). With create, the put refuses a
-// resource that already exists.
+// putChange reads the spec strictly. Every change by a user comes from the
+// CLI, so the owner is the channel cli (state.OwnerCLI).
 func (s *Server) putChange(object resource.Object, create bool) (state.PutResource, error) {
 	if object.APIVersion != resource.APIVersion {
 		return state.PutResource{}, fmt.Errorf("apiVersion %q is not %s", object.APIVersion, resource.APIVersion)
@@ -244,10 +228,9 @@ func (s *Server) putChange(object resource.Object, create bool) (state.PutResour
 	return put, nil
 }
 
-// unsealSecret opens the values of a SealedSecret with the sealing key.
-// Each value must be sealed for this Secret. Otherwise a value copied from
-// another Secret, such as the Hetzner token of clowder-system, could reach
-// a container.
+// unsealSecret requires each value to be sealed for this Secret. Otherwise
+// a value copied from another Secret, such as the Hetzner token of
+// clowder-system, could reach a container.
 func (s *Server) unsealSecret(id string, raw json.RawMessage) (map[string][]byte, error) {
 	written, err := resource.DecodeSealedSecretSpec(raw)
 	if err != nil {
@@ -268,11 +251,9 @@ func (s *Server) unsealSecret(id string, raw json.RawMessage) (map[string][]byte
 	return values, nil
 }
 
-// encryptSecret encrypts a Secret's values with the data key and computes
-// the digest, for a Secret and a SealedSecret alike. The digest is an HMAC
-// over the secret's ID and its keys and values, with a key derived from
-// the data key. A plain hash would give away a short password. Because the
-// ID is included, two secrets with the same values have different digests.
+// encryptSecret computes the digest as an HMAC, because a plain hash would
+// give away a short password. It includes the ID, so two secrets with the
+// same values have different digests.
 func (s *Server) encryptSecret(id string, values map[string][]byte) (state.EncryptedSecret, error) {
 	digestKey, err := s.config.Keys.Derive(secretResourcePurpose)
 	if err != nil {
@@ -291,9 +272,6 @@ func (s *Server) encryptSecret(id string, values map[string][]byte) (state.Encry
 	return encrypted, nil
 }
 
-// runOnLeader has the leader run a batch. If this agent leads, it runs the
-// batch itself; otherwise it sends the batch to the leader's
-// /v1/internal/changes.
 func (s *Server) runOnLeader(w http.ResponseWriter, r *http.Request, batch changeBatch) {
 	leader, here, err := s.waitForLeader(r.Context())
 	if err != nil {
@@ -320,7 +298,6 @@ func (s *Server) runOnLeader(w http.ResponseWriter, r *http.Request, batch chang
 	writeJSON(w, http.StatusOK, answer)
 }
 
-// forwardChanges hands a batch to the leader and returns its answer.
 func (s *Server) forwardChanges(ctx context.Context, leader state.HostID, batch changeBatch) (ChangeResult, error) {
 	body, err := json.Marshal(batch)
 	if err != nil {
@@ -339,9 +316,8 @@ func (s *Server) forwardChanges(ctx context.Context, leader state.HostID, batch 
 	return answer, nil
 }
 
-// internalChanges runs a batch that a follower forwards for the CLI. It
-// accepts only the CLI's batches. Like internalPropose, it does not forward
-// them again: if another agent leads by now, the caller asks again.
+// internalChanges does not forward a batch again, like internalPropose: if
+// another agent leads by now, the caller asks again.
 func (s *Server) internalChanges(w http.ResponseWriter, r *http.Request) {
 	// lenient, as in internalPropose: the follower may run the next release
 	// and send fields that this one does not know
@@ -361,11 +337,9 @@ func (s *Server) internalChanges(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.runChanges(r.Context(), batch))
 }
 
-// runChanges runs a batch on the leader as one change-resources command.
-// It first applies the batch to a copy of the state, with all of the
-// state's checks. So a refusal is answered at once, a batch that changes
-// nothing is not proposed, and a dry run stops there. Only then is the
-// batch proposed, and the state checks it once more as it commits.
+// runChanges first applies the batch to a copy of the state, so a refusal
+// is answered at once, a batch that changes nothing is not proposed, and a
+// dry run stops there.
 func (s *Server) runChanges(ctx context.Context, batch changeBatch) ChangeResult {
 	answer := ChangeResult{Results: make([]ResourceResult, len(batch.Changes))}
 	payload := state.ChangeResources{}
@@ -434,15 +408,12 @@ func (s *Server) runChanges(ctx context.Context, batch changeBatch) ChangeResult
 	return answer
 }
 
-// storedRef names the resource as the state stores it. The result keeps
-// the kind that the user sent (a SealedSecret), while the state keeps the
-// stored kind (a Secret).
+// storedRef is needed because the result keeps the kind that the user sent
+// (a SealedSecret), while the state keeps the stored kind (a Secret).
 func (r ResourceResult) storedRef() resource.Ref {
 	return resource.Ref{Kind: resource.StoredKind(r.Kind), Namespace: r.Namespace, Name: r.Name}
 }
 
-// outcomes sets the outcome of each resource from what the batch changed.
-// A resource that the batch did not change is unchanged.
 func (a *ChangeResult) outcomes(changes []state.Change) {
 	changed := map[resource.Ref]bool{}
 	for _, change := range changes {
@@ -463,8 +434,7 @@ func (a *ChangeResult) outcomes(changes []state.Change) {
 	}
 }
 
-// refused marks the resource that the state refused, or the first one if
-// the refusal names none. Nothing of the batch was applied.
+// refused marks the first resource if the refusal names none.
 func (a ChangeResult) refused(err error) ChangeResult {
 	index := 0
 	var changeError *state.ChangeError
@@ -480,7 +450,6 @@ func (a ChangeResult) refused(err error) ChangeResult {
 	return a
 }
 
-// failed marks every resource as failed, because the batch did not commit.
 func (a ChangeResult) failed(err error) ChangeResult {
 	for each := range a.Results {
 		a.Results[each].Outcome, a.Results[each].Message = Failed, err.Error()
@@ -488,7 +457,6 @@ func (a ChangeResult) failed(err error) ChangeResult {
 	return a
 }
 
-// configWarnings warns about the configuration if the batch changed it.
 func configWarnings(changes []state.Change, after *state.State) []string {
 	if slices.ContainsFunc(changes, func(change state.Change) bool {
 		return change.Kind == resource.KindClusterConfiguration
@@ -498,9 +466,6 @@ func configWarnings(changes []state.Change, after *state.State) []string {
 	return nil
 }
 
-// describe adds to a dry run's answer what an apply would change: which
-// resources are new, which parts of the others differ, the configuration's
-// warnings, and what a new Hetzner token sees.
 func (s *Server) describe(ctx context.Context, answer *ChangeResult, changes []state.Change,
 	before, after *state.State,
 ) {
@@ -526,11 +491,9 @@ func (s *Server) describe(ctx context.Context, answer *ChangeResult, changes []s
 	answer.HetznerToken = s.checkNewToken(ctx, before, after)
 }
 
-// secretDifferences lists the keys of a Secret that were added or removed,
-// or whose value changed. It compares the digests of the values and never
-// shows a value. It names the keys as the stored Secret has them (data.),
-// also for a SealedSecret, because its encryptedData is stored as that
-// Secret.
+// secretDifferences compares digests and never shows a value. It names the
+// keys data. also for a SealedSecret, because its encryptedData is stored
+// as that Secret.
 func secretDifferences(was, is state.EncryptedSecret) []string {
 	var differs []string
 	for _, key := range is.Keys() {
@@ -550,7 +513,6 @@ func secretDifferences(was, is state.EncryptedSecret) []string {
 	return differs
 }
 
-// differences lists the top-level fields of the spec that differ.
 func differences(old, updated resource.Object) []string {
 	fields := func(object resource.Object) map[string]json.RawMessage {
 		var byField map[string]json.RawMessage
@@ -573,8 +535,7 @@ func differences(old, updated resource.Object) []string {
 	return differs
 }
 
-// checkNewToken asks Hetzner once which servers the batch's new Hetzner
-// token sees. It returns nil if the batch does not change the token. It
+// checkNewToken returns nil if the batch does not change the token. It
 // never refuses the batch, because a user may change the token on purpose
 // before moving the servers to its project.
 func (s *Server) checkNewToken(ctx context.Context, before, after *state.State) *TokenCheck {
@@ -616,9 +577,8 @@ func (s *Server) checkNewToken(ctx context.Context, before, after *state.State) 
 	return check
 }
 
-// reason returns why the state refused a command. It drops the command's
-// kind, which Apply puts first, because the user named a resource, not a
-// command.
+// reason drops the command's kind, which Apply puts first, because the
+// user named a resource, not a command.
 func reason(err error) string {
 	var refusal *state.CommandError
 	if errors.As(err, &refusal) {

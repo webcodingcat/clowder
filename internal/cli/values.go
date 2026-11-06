@@ -15,9 +15,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
-// fileValue is a sealed value in a file, for secret rekey and decrypt. It
-// holds the YAML node with the value, its key, and the Secret that the
-// value must be for.
+// fileValue is a sealed value in a file, for secret rekey and decrypt.
 type fileValue struct {
 	node   *yaml.Node
 	key    string
@@ -30,10 +28,9 @@ func (v fileValue) label() string {
 	return v.secret + "[" + v.key + "]"
 }
 
-// fileValues reads the values of the SealedSecrets in a file from its YAML
-// nodes, because rekey needs the line of each value. path names the file
-// in errors. A file that apply would refuse is refused here too, so the
-// nodes it reads belong to valid SealedSecrets.
+// fileValues reads the values from the file's YAML nodes, because rekey
+// needs the line of each value. It first refuses a file that apply would
+// refuse, so the nodes it reads belong to valid SealedSecrets.
 func fileValues(path string, content []byte) ([]fileValue, error) {
 	if _, err := readFile(path, content, false); err != nil {
 		return nil, err
@@ -66,9 +63,8 @@ func fileValues(path string, content []byte) ([]fileValue, error) {
 	}
 }
 
-// field returns the value of key in a mapping node. For any other node, or
-// a missing key, it returns nil, so a chain of calls ends in nil where a
-// field is missing.
+// field returns nil for a node that is not a mapping or a missing key, so a
+// chain of calls ends in nil where a field is missing.
 func field(mapping *yaml.Node, key string) *yaml.Node {
 	if mapping == nil || mapping.Kind != yaml.MappingNode {
 		return nil
@@ -81,7 +77,6 @@ func field(mapping *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-// text returns the text of a scalar node, or "" for nil.
 func text(node *yaml.Node) string {
 	if node == nil {
 		return ""
@@ -89,10 +84,9 @@ func text(node *yaml.Node) string {
 	return node.Value
 }
 
-// replaceValues replaces each value's old text with the new text on the
-// value's line. It leaves the rest of the file unchanged (comments,
-// quotes, line breaks). It refuses a value that is not on one line, which
-// is how clowder secret seal writes it.
+// replaceValues leaves the rest of the file unchanged (comments, quotes,
+// line breaks). It refuses a value that is not on one line, which is how
+// clowder secret seal writes it.
 func replaceValues(content []byte, values []fileValue, replacements []string) ([]byte, error) {
 	lines := strings.SplitAfter(string(content), "\n")
 	for index, value := range values {
@@ -105,8 +99,7 @@ func replaceValues(content []byte, values []fileValue, replacements []string) ([
 	return []byte(strings.Join(lines, "")), nil
 }
 
-// readIdentities reads age identities, such as the sealing key, from a
-// file or from stdin ("-"). With stdin, they can come from a password
+// readIdentities reads stdin for "-", so the key can come from a password
 // manager without a file on disk.
 func readIdentities(from string, stdin io.Reader) ([]age.Identity, error) {
 	source := stdin

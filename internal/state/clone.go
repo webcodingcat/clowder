@@ -5,20 +5,10 @@ import (
 	"slices"
 )
 
-// Clone returns a copy of the state without its audit. It is for work that
-// is too slow for the state's lock, that keeps parts of the state, or that
-// changes its copy (change-resources, a dry run).
-//
-// Clone copies what the handlers change in place: the maps, the resources
-// and their statuses. It shares what they only ever replace whole: the
-// specs (and a stack's Services), the encrypted values and the
-// certificates' bytes. Copying those would cost as much as all of the
-// cluster's secrets. A handler that changed such a part in place would
-// change every clone. The state's tests check that no handler does
-// (cluster.changes in state_test.go).
-//
-// The agent's loops share one clone per change (raftnode.Node.SharedCopy),
-// so none of them may change it.
+// Clone returns a copy of the state without its audit. It shares what the
+// handlers only ever replace whole (the specs, a stack's Services, the
+// encrypted values, the certificates' bytes), so nobody may change those in
+// place. docs/developing/state.md, Copies of the state, explains why.
 func (s *State) Clone() *State {
 	copied := *s
 	copied.Audit = nil
@@ -93,8 +83,7 @@ func cloneOperation(operation *Operation) *Operation {
 	return &copied
 }
 
-// clonePointer copies the value that a pointer points to, one level deep,
-// or returns nil.
+// clonePointer copies the value that a pointer points to, one level deep.
 func clonePointer[Value any](pointer *Value) *Value {
 	if pointer == nil {
 		return nil

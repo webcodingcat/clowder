@@ -1,16 +1,7 @@
 // Package scheduler decides where stacks and their volumes go, and which
 // services give way to others. It is pure logic: it reads the state and
-// returns decisions. The controller on the leader writes them as commands.
-//
-// Every service reserves memory and CPUs: its own reservations, or else
-// the cluster's default. A host offers what it reported minus
-// systemReserve. A new stack goes to a host where all of it fits.
-// Otherwise it goes to a host where its services push out services of
-// lower effective priority, one service after the other (fitStack). A host
-// that has the stack's data comes before a host that must get a copy
-// first. A stack moves to such a host (Move). Only workers take stacks and
-// copies with a disk; any host takes a tiebreaker. copies.go keeps the
-// copies of the volumes. docs/developing/placement.md has the full rules.
+// returns decisions, which the controller on the leader writes as
+// commands. docs/developing/placement.md has the rules.
 package scheduler
 
 import (
@@ -56,8 +47,7 @@ type Move struct {
 	To   state.HostID
 	// PushedOut are the pushed-out lists on To, as for a placement.
 	PushedOut map[string][]string
-	// Why is the reason that the log shows: a user asked, the host
-	// drains, and so on.
+	// Why is the reason that the log shows.
 	Why string
 }
 
@@ -86,9 +76,7 @@ type Decisions struct {
 	OverCapacity []state.HostID
 	Placements   []Placement
 	Moves        []Move
-	// Copies are the volumes' records with a copy added, a surplus copy
-	// given up, or the tiebreaker set (copies.go), with one put-volume
-	// each.
+	// Copies are the volumes' changed records, with one put-volume each.
 	Copies  []state.Volume
 	Waiting []Waiting
 	// ComeBack is the first pushed-out service that fits again, if any. It
@@ -97,14 +85,7 @@ type Decisions struct {
 	ComeBack *ComeBack
 }
 
-// Plan decides everything for one pass:
-//   - it makes hosts over capacity fit;
-//   - it places the volumes that placed stacks newly name, and the stacks
-//     that have no host yet, highest priority first;
-//   - it moves the stacks off draining hosts, and the stacks that a user
-//     asked to move;
-//   - it keeps the volumes' copies;
-//   - it names the pushed-out service that may come back.
+// Plan decides everything for one pass.
 func Plan(current *state.State, now time.Time) Decisions {
 	planner := newPlanner(current)
 	planner.now = now
@@ -153,15 +134,14 @@ func Plan(current *state.State, now time.Time) Decisions {
 	return decisions
 }
 
-// decision is what the planner decides for one stack: a placement, a
-// move, or why the stack waits. Any of them may be empty.
+// decision is what the planner decides for one stack. Any of its fields
+// may be empty.
 type decision struct {
 	placement Placement
 	move      *Move
 	reason    string
 }
 
-// add adds the decisions for one stack.
 func (d *Decisions) add(decided ...decision) {
 	for _, one := range decided {
 		d.addOne(one)
@@ -184,16 +164,16 @@ func (d *Decisions) addOne(one decision) {
 type planner struct {
 	current *state.State
 	classes map[string]clusterspec.StorageClass
-	// allocated lists the sizes of the volumes in each pool of each host.
+	// allocated lists the sizes in bytes of the volumes in each pool of
+	// each host.
 	allocated map[state.HostID]map[string][]int64
 	minors    map[int]bool
 	room      *room
 	// syncing is true while a copy with a disk is not synced yet, in the
-	// state or in this plan. It enforces the resync limit (copies.go).
+	// state or in this plan: the resync limit.
 	syncing bool
 	// tiebreakers counts the planned tiebreakers on each host. planned
-	// holds each volume's last record in this plan, by ID
-	// (countTiebreakers).
+	// holds each volume's last record in this plan, by ID.
 	tiebreakers map[state.HostID]int
 	planned     map[string]state.Volume
 	// now is the leader's clock, for the cooldown of moves (makeRoom).
@@ -245,22 +225,19 @@ func (p *planner) take(host state.HostID, pool string, size int64) {
 }
 
 // takesStacks tells whether a host takes new stacks and copies with a
-// disk. It does if it is an active worker and no user removes it.
+// disk.
 func (p *planner) takesStacks(id state.HostID) bool {
 	host, ok := p.current.Hosts[id]
 	return ok && host.Roles.Has(hostrole.Worker) && host.Phase == state.Active && !host.Leaving
 }
 
-// takesTiebreakers tells whether a host takes new tiebreakers. It does if
-// it is active and no user removes it. A tiebreaker holds no data and no
-// load, so it needs no role. A host without the worker role still has
-// DRBD for tiebreakers.
+// takesTiebreakers needs no role: a tiebreaker holds no data and no load,
+// and a host without the worker role still has DRBD for it.
 func (p *planner) takesTiebreakers(id state.HostID) bool {
 	host, ok := p.current.Hosts[id]
 	return ok && host.Phase == state.Active && !host.Leaving
 }
 
-// tiebreakerHosts returns the hosts that take tiebreakers, sorted.
 func (p *planner) tiebreakerHosts() []state.HostID {
 	var hosts []state.HostID
 	for _, id := range slices.Sorted(maps.Keys(p.current.Hosts)) {
@@ -271,7 +248,6 @@ func (p *planner) tiebreakerHosts() []state.HostID {
 	return hosts
 }
 
-// stackHosts returns the hosts that take stacks, sorted, except leftOut.
 func (p *planner) stackHosts(leftOut *state.HostID) []state.HostID {
 	var hosts []state.HostID
 	for _, id := range slices.Sorted(maps.Keys(p.current.Hosts)) {
@@ -282,10 +258,8 @@ func (p *planner) stackHosts(leftOut *state.HostID) []state.HostID {
 	return hosts
 }
 
-// keep decides for a stack that has a host. It fails the stack over if its
-// host is down (fenced). It moves the stack if its host drains or a user
-// asked for a move, and the volumes that the stack newly names go with
-// it. Otherwise it places those volumes where the stack runs.
+// keep decides for a stack that has a host. On a move, the volumes that
+// the stack newly names go with it.
 func (p *planner) keep(stack *state.Stack) []decision {
 	host := *stack.Host
 	switch {
@@ -312,17 +286,8 @@ func (p *planner) keep(stack *state.Stack) []decision {
 }
 
 // place finds a host among hosts for a stack that has none, or for a stack
-// that moves (why says why it moves). It tries in this order:
-//  1. a host that has the stack's data and where all of the stack fits;
-//     of these, the one with the least free memory (best fit);
-//  2. a host where all of the stack fits once its volumes get copies
-//     there, but only while no other copy syncs (the resync limit);
-//  3. for a stack without a host, room made by moving stacks of lower
-//     priority (makeRoom);
-//  4. a host where the stack's services push out others, hosts with its
-//     data first.
-//
-// A decision with a reason means that the stack waits.
+// that moves (why says why), in the order that placement.md's "Placing a
+// stack" gives. A decision with a reason means that the stack waits.
 func (p *planner) place(stack *state.Stack, hosts []state.HostID, why string) []decision {
 	var whole, pushing []stackFit
 	reasons := map[state.HostID]string{}
@@ -341,10 +306,7 @@ func (p *planner) place(stack *state.Stack, hosts []state.HostID, why string) []
 			pushing = append(pushing, fit)
 		}
 	}
-	// a host without the stack's data comes after the hosts with it. The
-	// copies it needs must sync first. A volume of replicas 0 starts anew
-	// there, empty, because its data is thrown away when its stack moves
-	// (dataElsewhere).
+	// best fit: the least free memory first
 	freeMemory := map[state.HostID]int64{}
 	for _, fit := range whole {
 		freeMemory[fit.host] = p.room.free(fit.host).memory
@@ -376,8 +338,9 @@ func (p *planner) place(stack *state.Stack, hosts []state.HostID, why string) []
 }
 
 // withDataFirst returns the hosts of fits that can take the stack's
-// volumes, with the hosts that have its data first. It adds to reasons
-// why each other host cannot take them.
+// volumes, with the hosts that have its data first, because the others
+// must sync copies first. It adds to reasons why each other host cannot
+// take them.
 func (p *planner) withDataFirst(stack *state.Stack, fits []stackFit, reasons map[state.HostID]string) []candidate {
 	var withData, withoutData []candidate
 	for _, fit := range fits {
@@ -403,11 +366,9 @@ type candidate struct {
 	volumes, copies []state.Volume
 }
 
-// choose makes a candidate the stack's host. For a stack without a host
-// whose data is there, this is a placement; otherwise it is a move. If a
-// move of the stack failed recently (failedRecently), a move that the
-// placement starts on its own waits. A move that a user asked for goes
-// ahead.
+// choose makes a candidate the stack's host: a placement for a stack
+// without a host whose data is there, otherwise a move. After a failed
+// move, only a move that a user asked for goes ahead before MoveCooldown.
 func (p *planner) choose(stack *state.Stack, chosen candidate, why string) decision {
 	host := chosen.fit.host
 	moves := stack.Host != nil || len(chosen.copies) > 0 || p.dataElsewhere(stack, host)
@@ -446,9 +407,8 @@ func (p *planner) hasData(stack *state.Stack, host state.HostID) bool {
 	return reason == "" && len(copies) == 0 && !p.dataElsewhere(stack, host)
 }
 
-// reserve takes from the planner what is new in the volume records with
-// which a decision places copies on host: the space of the copy there, the
-// minor and the tiebreakers (countTiebreakers).
+// reserve takes from the planner what a decision's volume records take on
+// host: the copy's space, the minor and the tiebreakers.
 func (p *planner) reserve(host state.HostID, volumes []state.Volume) {
 	for _, volume := range volumes {
 		index := slices.IndexFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == host })
@@ -477,17 +437,13 @@ func (p *planner) dataElsewhere(stack *state.Stack, host state.HostID) bool {
 }
 
 // volumesOn works out what a stack's volumes need on host:
-//   - volumes are the volumes that wait for their first stack (pending),
-//     each placed there with its first copy;
+//   - volumes are the pending volumes, each placed there with its first
+//     copy;
 //   - copies are placed volumes of replicas 1 or more that get a copy
-//     there (a tiebreaker there gets a disk). Each comes with the
-//     tiebreaker that it then needs (fitTiebreaker), so that a volume of
-//     replicas 1 keeps its quorum while the new copy syncs, in case a host
-//     fails.
+//     there, each with the tiebreaker it then needs (fitTiebreaker).
 //
 // A placed volume of replicas 0 needs neither (dataElsewhere). volumesOn
-// takes nothing from the planner yet; reserve does that. If host cannot
-// take the volumes, it returns the reason.
+// takes nothing from the planner yet; reserve does that.
 func (p *planner) volumesOn(stack *state.Stack, host state.HostID) (volumes, copies []state.Volume, reason string) {
 	var reserved []allocation
 	var minors []int
@@ -547,27 +503,25 @@ func (p *planner) volumesOn(stack *state.Stack, host state.HostID) (volumes, cop
 	return volumes, copies, ""
 }
 
-// noPool returns the reason for a volume that fits no pool of a host.
 func noPool(name string, spec resource.VolumeSpec) string {
 	return fmt.Sprintf("volume %s (%s, class %s) fits no pool", name, units.FormatSize(int64(spec.Size)), spec.Class)
 }
 
 // retiresHere tells whether a host is still removing a copy of the volume
-// in the given data generation. A new copy there would have the same LV.
+// in the given data generation, whose LV a new copy there would reuse.
 func (p *planner) retiresHere(volumeID string, generation int64, host state.HostID) bool {
 	return slices.Contains(p.current.Retired, state.RetiredCopy{Volume: volumeID, DataGeneration: generation, Host: host})
 }
 
-// allocation is the space that a volume takes in a pool.
+// allocation is the space in bytes that a volume takes in a pool.
 type allocation struct {
 	pool string
 	size int64
 }
 
-// fit finds a class whose pool on host holds size without overcommit. It
-// counts the space in reserved as well as what the planner has taken. A
-// class with a pool of its own is the only candidate. A class without a
-// pool stands for its fallbacks, which fit tries in order.
+// fit finds a class whose pool on host holds size, counting reserved as
+// well as what the planner has taken. A class without a pool stands for
+// its fallbacks, which fit tries in order.
 func (p *planner) fit(host state.HostID, className string, size int64, reserved []allocation) (
 	class, pool string, ok bool,
 ) {
@@ -594,8 +548,6 @@ func (p *planner) fit(host state.HostID, className string, size int64, reserved 
 	return "", "", false
 }
 
-// freeMinor finds the lowest DRBD minor that no volume has and that is not
-// in reserved.
 func (p *planner) freeMinor(reserved []int) (int, bool) {
 	for minor := range state.MaxMinor + 1 {
 		if !p.minors[minor] && !slices.Contains(reserved, minor) {

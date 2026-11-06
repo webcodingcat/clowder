@@ -51,8 +51,6 @@ func secretLabel(key []byte, digests map[string]string, secretNames []string) st
 	return digest.HMAC(key, parts...)
 }
 
-// openSecrets decrypts the secrets that a stack names. They are Secret
-// resources of the stack's namespace.
 func (r *Runner) openSecrets(desired desiredState, stack *state.Stack) (stackSecrets, error) {
 	values := map[names.SecretKeyRef]string{}
 	secrets := stackSecrets{
@@ -94,12 +92,10 @@ func (r *Runner) openSecrets(desired desiredState, stack *state.Stack) (stackSec
 	return secrets, nil
 }
 
-// writeSecrets writes the new and changed secret files and the secret
-// variables, at every pass of a stack that runs here. A file is replaced by
-// a rename, so a running container keeps the old value until compose up
-// recreates it. An unchanged file stays, and its owner and mode are set
-// again. The same holds for the stack's directories. A stack without
-// secrets has nothing to protect. removeStaleSecrets empties what it had.
+// writeSecrets replaces a file by a rename, so a running container keeps
+// the old value until compose up recreates it. An unchanged file or
+// directory gets its owner and mode back. A stack without secrets has
+// nothing to protect; removeStaleSecrets empties what it had.
 func (r *Runner) writeSecrets(project string, secrets stackSecrets) error {
 	if len(secrets.files) == 0 && secrets.env == nil {
 		return nil
@@ -167,9 +163,7 @@ func (r *Runner) removeStaleSecrets(project string, secrets stackSecrets) error 
 	return nil
 }
 
-// removeSecretsOfOthers removes the secrets of the stacks that are not
-// placed here and have no Compose file left (compose down ran). These are
-// the leavers and whatever a crash left behind.
+// removeSecretsOfOthers also removes what a crash left behind.
 func (r *Runner) removeSecretsOfOthers(desired desiredState) {
 	entries, err := os.ReadDir(r.files.SecretsDir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

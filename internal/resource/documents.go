@@ -15,13 +15,11 @@ import (
 // version or any other.
 const clowderVersions = "clowder/"
 
-// ParseDocuments reads the YAML documents of a file as resources (JSON is
-// YAML too). A file holds either only clowder's resources or none of them,
-// like a Compose file or a Kubernetes manifest in the same directory. For
-// a file without clowder's resources it returns none, so that an apply of
+// ParseDocuments reads the YAML documents of a file as resources, strictly
+// (JSON is YAML too). For a file without clowder's resources, such as a
+// Compose file in the same directory, it returns none, so that an apply of
 // a directory can skip the file. A file that mixes both is an error, and
-// so is a resource of another clowder apiVersion. Resources are read
-// strictly: a field that the resource does not have is an error.
+// so is a resource of another clowder apiVersion.
 func ParseDocuments(data []byte) ([]Object, error) {
 	documents, err := yamlDocuments(data)
 	if err != nil {
@@ -65,7 +63,6 @@ func ParseDocuments(data []byte) ([]Object, error) {
 	return objects, nil
 }
 
-// yamlDocuments reads every YAML document of data as a node tree.
 func yamlDocuments(data []byte) ([]*yaml.Node, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	var documents []*yaml.Node
@@ -82,7 +79,6 @@ func yamlDocuments(data []byte) ([]*yaml.Node, error) {
 	}
 }
 
-// decodeObject reads a resource from JSON, strictly.
 func decodeObject(encoded []byte) (Object, error) {
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.DisallowUnknownFields()

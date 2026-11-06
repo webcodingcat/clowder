@@ -22,13 +22,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/storage"
 )
 
-// hostReporter tells the cluster about this host: its version, memory and
-// CPUs, its pools, whether Docker answers, how full the root file system
-// is, and the volumes whose copies on this host need a human (split brain)
-// or hang (no quorum). It has a loop of its own, so that a hanging Docker
-// cannot hold up the report that says so. Each probe ends at its driver's
-// timeout (Docker's ping, lvs), so a pass takes at most the sum of those
-// timeouts.
+// hostReporter has a loop of its own, so that a hanging Docker cannot hold
+// up the report that says so. Each probe ends at its driver's timeout
+// (Docker's ping, lvs), so a pass takes at most the sum of those timeouts.
 type hostReporter struct {
 	host    Host
 	version string
@@ -37,17 +33,15 @@ type hostReporter struct {
 	storage Storage
 	propose controller.Propose
 	logger  *slog.Logger
-	// root is the file system whose usage the report shows: "/"
+	// root is "/" outside tests
 	root string
-	// seen returns what the volume reconciler last observed about the
-	// copies on this host (volumes.Reconciler.Seen)
+	// seen is volumes.Reconciler.Seen
 	seen func() map[string]storage.Observed
 }
 
-// run reports until ctx ends: every loop.Interval, and immediately when a
-// new configuration may name a new pool. Other changes of the state (a
-// stack's status, a certificate) do not start a probe, because lvs is slow
-// on a host whose DRBD hangs.
+// run reports every loop.Interval, and at once when a new configuration may
+// name a new pool. Other changes of the state do not start a probe, because
+// lvs is slow on a host whose DRBD hangs.
 func (r *hostReporter) run(ctx context.Context) {
 	seen := int64(-1) // the configuration's generation at the last pass
 	var next time.Time
@@ -69,21 +63,17 @@ func (r *hostReporter) run(ctx context.Context) {
 	}
 }
 
-// configGeneration returns the generation of the configuration in the
-// state.
 func (r *hostReporter) configGeneration() int64 {
 	var generation int64
 	r.cluster.Read(func(current *state.State) { generation = current.Config.Generation })
 	return generation
 }
 
-// pass probes the host and reports the results when anything differs from
-// the state. When a probe fails, the report keeps the state's value, so a
-// pool whose lvs timed out is not reported as gone. The other values are
-// still reported, above all whether Docker answers.
+// pass keeps the state's value where a probe fails, so a pool whose lvs
+// timed out is not reported as gone. The other values are still reported,
+// above all whether Docker answers.
 func (r *hostReporter) pass(ctx context.Context) error {
 	pools, self := r.read()
-	// start from the state's values: they stay where a probe below fails
 	report := state.ReportHost{
 		Host: r.host.ID, Version: r.version, Capacity: self.Capacity, RootUsedPercent: self.RootUsedPercent,
 		DockerDown: r.docker.Ping(ctx) != nil,
@@ -143,8 +133,6 @@ func (r *hostReporter) pass(ctx context.Context) error {
 	return nil
 }
 
-// read takes only what the report needs from the state: the pools that the
-// storage classes name, and this host's entry.
 func (r *hostReporter) read() (pools []string, self state.Host) {
 	r.cluster.Read(func(current *state.State) {
 		for _, class := range current.Config.Spec.StorageClasses {
@@ -160,9 +148,8 @@ func (r *hostReporter) read() (pools []string, self state.Host) {
 	return pools, self
 }
 
-// readPool reads a pool's size and its use in whole percent. Like every
-// percentage in the report, the use is rounded up, so a threshold trips
-// sooner rather than later.
+// readPool rounds the use up to whole percent, like every percentage in
+// the report, so a threshold trips sooner rather than later.
 func (r *hostReporter) readPool(ctx context.Context, name string) (state.Pool, error) {
 	size, dataPercent, metadataPercent, err := r.storage.PoolUsage(ctx, name)
 	if err != nil {
@@ -190,8 +177,6 @@ func usedPercent(path string) (int, error) {
 	return int((used*100 + total - 1) / total), nil
 }
 
-// readCapacity reads what this host offers containers: its memory
-// (MemTotal in /proc/meminfo) and its CPUs.
 func readCapacity() (state.Resources, error) {
 	file, err := os.Open("/proc/meminfo")
 	if err != nil {
@@ -217,9 +202,6 @@ func readCapacity() (state.Resources, error) {
 	return state.Resources{}, errors.New("read the memory of this host: no MemTotal in /proc/meminfo")
 }
 
-// drbdProblems lists the IDs of two kinds of volumes, sorted: those whose
-// copy on this host has split off from a peer (split brain), and those
-// whose primary copy on this host lacks DRBD's quorum.
 func drbdProblems(seen map[string]storage.Observed) (splitBrain, noQuorum []string) {
 	for _, id := range slices.Sorted(maps.Keys(seen)) {
 		copyNow := seen[id]

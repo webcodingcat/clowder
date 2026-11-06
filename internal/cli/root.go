@@ -1,7 +1,6 @@
 // Package cli holds the commands of the clowder CLI. It must build on
 // Linux, macOS and Windows, so no package that only works on Linux may be
-// imported here. .golangci.yml checks the direct imports, and the cross
-// build in CI checks the rest.
+// imported here.
 package cli
 
 import (
@@ -39,15 +38,13 @@ func (e usageError) Error() string { return e.err.Error() }
 
 func (e usageError) Unwrap() error { return e.err }
 
-// usage turns an error into a wrong call.
 func usage(format string, args ...any) error {
 	return usageError{fmt.Errorf(format, args...)}
 }
 
-// checkArgs turns every command's argument errors into usage errors. A
-// command that only groups other commands (clowder, clowder stack) shows
-// its help and treats an unknown subcommand as a wrong call. Without this,
-// cobra would show the help and exit as if it had succeeded.
+// checkArgs turns every command's argument errors into usage errors, and
+// gives each command that only groups others a RunE. Without it, cobra
+// would show the help and exit as if it had succeeded.
 func checkArgs(command *cobra.Command) {
 	if command.HasSubCommands() && !command.Runnable() {
 		command.Args = cobra.ArbitraryArgs
@@ -71,11 +68,8 @@ func checkArgs(command *cobra.Command) {
 	}
 }
 
-// ExitCode returns the exit code for the error that a command returned: 0
-// when it did what was asked, 2 for a wrong call, and 1 for anything else
-// (refused, missing, not reachable). Like kubectl diff, diff ends with 1
-// when the resources differ (errDiffers) and with 2 when it could not tell
-// (diffFailed).
+// ExitCode returns the exit code for the error that a command returned: 2
+// for a wrong call or when diff could not tell, and 1 for anything else.
 func ExitCode(err error) int {
 	var wrongCall usageError
 	var failed diffFailed

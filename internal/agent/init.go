@@ -38,10 +38,8 @@ type InitOptions struct {
 	Name        string
 	// Roles are the host's roles. The first host must be a control-plane
 	// host.
-	Roles hostrole.Set
-	// Underlay is the server's address in the Hetzner private network.
-	Underlay netip.Addr
-	// PublicAddress is the server's public IPv4, where users reach the API.
+	Roles         hostrole.Set
+	Underlay      netip.Addr
 	PublicAddress netip.Addr
 	// ServerID is the Hetzner Cloud ID of the server, for the Floating IP
 	// and fencing.
@@ -63,13 +61,10 @@ func checkHostName(name string) error {
 	return nil
 }
 
-// leaderTimeout is how long init waits for its own Raft member to lead.
 const leaderTimeout = 30 * time.Second
 
-// Init makes this host the first of a new cluster: it creates the CA, the
-// data key and the cluster's sealing key, the host's certificate and WireGuard
-// key, and a Raft group with this host as its only voter. It refuses a host
-// that already belongs to a cluster.
+// Init makes this host the first of a new cluster. It refuses a host that
+// already belongs to a cluster.
 func Init(ctx context.Context, files Files, options InitOptions, hostNetwork HostNetwork, logger *slog.Logger) error {
 	if _, err := os.Stat(files.raftDir()); err == nil {
 		return fmt.Errorf("%s exists: this host was part of a cluster, or an init failed halfway "+
@@ -121,9 +116,9 @@ func Init(ctx context.Context, files Files, options InitOptions, hostNetwork Hos
 	return files.writeHost(host)
 }
 
-// createKeys creates the cluster's keys and this host's keys. It writes the
-// host's keys to disk and returns what goes into the state. It does not
-// wrap errors, because the functions it calls already say what failed.
+// createKeys writes this host's keys to disk and returns the cluster's keys
+// and the host for the state. It does not wrap errors, because the
+// functions it calls already say what failed.
 func createKeys(files Files, clusterName string, host Host) (state.ClusterKeys, state.Host, error) {
 	var keys state.ClusterKeys
 	now := time.Now()
@@ -186,9 +181,7 @@ func createKeys(files Files, clusterName string, host Host) (state.ClusterKeys, 
 	return keys, entry, nil
 }
 
-// writeKeys writes the host's credentials: the CA's certificate, the host's
-// own certificate and key, its WireGuard key and the data key. init and
-// join both use it.
+// writeKeys is shared by init and join.
 func (f Files) writeKeys(caPEM, certificatePEM, hostKeyPEM []byte, wireGuardKey *ecdh.PrivateKey,
 	dataKey *datakey.Key,
 ) error {
@@ -202,7 +195,6 @@ func (f Files) writeKeys(caPEM, certificatePEM, hostKeyPEM []byte, wireGuardKey 
 		{f.wireGuardKey(), []byte(base64.StdEncoding.EncodeToString(wireGuardKey.Bytes()) + "\n")},
 	}
 	for _, write := range writes {
-		// keys and certificates: root only, whole or not at all
 		if err := atomicfile.Write(write.path, write.content, 0o600); err != nil {
 			return err
 		}
@@ -210,7 +202,6 @@ func (f Files) writeKeys(caPEM, certificatePEM, hostKeyPEM []byte, wireGuardKey 
 	return dataKey.Save(f.dataKey())
 }
 
-// bootstrapRaft starts the Raft group and writes the bootstrap command.
 func bootstrapRaft(ctx context.Context, files Files, host Host, keys state.ClusterKeys, entry state.Host,
 	clusterName string, logger *slog.Logger,
 ) error {
@@ -243,7 +234,6 @@ func bootstrapRaft(ctx context.Context, files Files, host Host, keys state.Clust
 	return nil
 }
 
-// waitForLead waits until this member leads its new group.
 func waitForLead(ctx context.Context, node *raftnode.Node) error {
 	deadline := time.Now().Add(leaderTimeout)
 	for !node.IsLeader() {

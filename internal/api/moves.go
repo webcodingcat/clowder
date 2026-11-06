@@ -20,8 +20,8 @@ type Volumes interface {
 	ResolveSplitBrain(ctx context.Context, volumeID string, discard bool) (connected bool, err error)
 }
 
-// moveStack commits request-move to a host that the user named. The
-// placement starts the move once the stack fits on that host.
+// moveStack only commits the request; the placement starts the move once
+// the stack fits on that host.
 func (s *Server) moveStack(w http.ResponseWriter, r *http.Request) {
 	var request MoveRequest
 	if err := decodeStrict(r.Body, &request); err != nil {
@@ -47,9 +47,8 @@ func (s *Server) moveStack(w http.ResponseWriter, r *http.Request) {
 }
 
 // leaves returns the phase change for removing a host that still has
-// stacks or volume copies. The host drains and leaves
-// (SetHostPhase.Leaving). The leader removes it once they have moved to
-// other hosts. It returns nil for a host that the state would remove at
+// stacks or volume copies: it drains, and the leader removes it once they
+// have moved. It returns nil for a host that the state would remove at
 // once, or would refuse to remove anyway.
 func (s *Server) leaves(id state.HostID) *state.SetHostPhase {
 	var leave *state.SetHostPhase
@@ -63,7 +62,6 @@ func (s *Server) leaves(id state.HostID) *state.SetHostPhase {
 	return leave
 }
 
-// localProgress answers how far this host's copies have synced (Volumes).
 func (s *Server) localProgress(w http.ResponseWriter, _ *http.Request) {
 	if s.config.Volumes == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("this agent keeps no volumes"))

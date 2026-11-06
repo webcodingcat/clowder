@@ -27,7 +27,6 @@ type tlsStream struct {
 	client    *tls.Config
 }
 
-// newTLSStream listens on bind and tells peers to reach it at advertise.
 func newTLSStream(bind string, advertise net.Addr, certificate tls.Certificate, ca *x509.Certificate,
 	revoked func(serial string) bool,
 ) (*tlsStream, error) {
@@ -45,7 +44,6 @@ func (s *tlsStream) Addr() net.Addr {
 	return s.advertise
 }
 
-// Dial connects to a peer, which must show a host certificate of the cluster.
 func (s *tlsStream) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: timeout}
 	connection, err := tls.DialWithDialer(dialer, "tcp", string(address), s.client)

@@ -49,8 +49,6 @@ const (
 	stepDemote         step = "demote"
 )
 
-// copyFacts is what plan bases its decision on: the copy's target, its
-// kind, and what the host has of it.
 type copyFacts struct {
 	target target
 	// plain is a copy without DRBD (replicas 0), diskless a tiebreaker
@@ -70,9 +68,7 @@ var (
 	errTiebreakerMounted = errors.New("this host holds only a tiebreaker of the volume, which has no data to mount")
 )
 
-// plan returns, in order, the steps that bring a copy from what the host
-// has to its target. It returns none when the copy is already there. It
-// only decides, so a pass that finds everything in place runs no tool.
+// plan only decides, so a pass that finds everything in place runs no tool.
 //
 // A volume that never held data is promoted with --force and formatted,
 // because its first copy has no UpToDate peer and no file system yet. After

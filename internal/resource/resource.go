@@ -1,7 +1,6 @@
 // Package resource defines what users apply to the cluster: the kinds of
-// resources, their specs, and the rules that each spec must meet by
-// itself. A stack's spec has its own package (stackspec), and so does the
-// cluster's configuration (clusterspec). The package does no I/O, because
+// resources, their specs (except a stack's and the configuration's), and
+// the rules that each spec must meet by itself. It does no I/O, because
 // the CLI, the API and the state share it.
 package resource
 
@@ -22,26 +21,23 @@ const (
 	KindNamespace = "Namespace"
 	KindVolume    = "Volume"
 	KindSecret    = "Secret"
-	// KindSealedSecret lets a Secret be kept in Git. Its values are sealed
-	// for the cluster's sealing key, as with Bitnami's sealed secrets. It
-	// exists only on the way in. The cluster stores it as the Secret of
-	// the same namespace and name (StoredKind), and get, delete and diff
-	// work on that Secret.
+	// KindSealedSecret lets a Secret be kept in Git, with its values sealed
+	// for the cluster's sealing key. It exists only on the way in: the
+	// cluster stores it as the Secret of the same namespace and name
+	// (StoredKind), and get, delete and diff work on that Secret.
 	KindSealedSecret = "SealedSecret"
 	// KindStack's spec is a stackspec.Spec.
 	KindStack = "Stack"
 	// KindClusterConfiguration's spec is a clusterspec.Config. A cluster
-	// has one, named ClusterConfigurationName, like kubeadm's
-	// ClusterConfiguration.
+	// has one, named ClusterConfigurationName.
 	KindClusterConfiguration = "ClusterConfiguration"
 )
 
 // ClusterConfigurationName is the name of the one ClusterConfiguration.
-// OpenShift names its configuration resources "cluster" too.
 const ClusterConfigurationName = "cluster"
 
 // StoredKind returns the kind under which the cluster stores a resource of
-// kind. A SealedSecret becomes a Secret; every other kind stays the same.
+// kind: a SealedSecret becomes a Secret.
 func StoredKind(kind string) string {
 	if kind == KindSealedSecret {
 		return KindSecret
@@ -57,11 +53,9 @@ func Namespaced(kind string) bool {
 // NamespaceSpec is a namespace as the user asks for it.
 type NamespaceSpec struct {
 	// ImagePullSecrets name Secrets of the namespace that hold registry
-	// logins (with the keys of RegistryLoginKeys). The namespace's stacks
-	// pull their images with these logins. Kubernetes does the same with
-	// the image pull secrets of a namespace's default service account. An
-	// apply does not check that the Secrets exist, because they live in
-	// the namespace and so are applied after it.
+	// logins (with the keys of RegistryLoginKeys) for the namespace's
+	// stacks. An apply does not check that the Secrets exist, because they
+	// live in the namespace and so are applied after it.
 	ImagePullSecrets []LocalObjectReference `json:"imagePullSecrets,omitempty"`
 }
 
@@ -109,8 +103,8 @@ type VolumeSpec struct {
 	Replicas int `json:"replicas"`
 }
 
-// Check tells what is wrong with the spec by itself. It does not check
-// that the class exists, because that depends on the cluster.
+// Check tells what is wrong with the spec by itself. The state checks that
+// the class exists.
 func (v VolumeSpec) Check() error {
 	var problems []error
 	if v.Class == "" {
@@ -125,9 +119,9 @@ func (v VolumeSpec) Check() error {
 	return errors.Join(problems...)
 }
 
-// CheckUnchanged refuses a new class, size or number of replicas for an
-// existing volume. clowder cannot change an existing volume yet, so such
-// an apply would seem to work but do nothing.
+// CheckUnchanged refuses a changed spec for an existing volume. clowder
+// cannot change a volume yet, so such an apply would seem to work but do
+// nothing.
 func (v VolumeSpec) CheckUnchanged(wanted VolumeSpec) error {
 	if wanted == v {
 		return nil
@@ -136,10 +130,10 @@ func (v VolumeSpec) CheckUnchanged(wanted VolumeSpec) error {
 		v.Class, units.FormatSize(int64(v.Size)), v.Replicas)
 }
 
-// The limits of the secrets, measured on their values in clear. They keep
+// The limits of the secrets, in bytes of their values in clear. They keep
 // the Raft log and the snapshots small, because every apply writes the
-// secrets into the log, and every snapshot holds them. MaxSecretBytes
-// limits all values of one Secret together.
+// secrets into the log. MaxSecretBytes limits all values of one Secret
+// together.
 const (
 	MaxSecretBytes          = 64 << 10
 	MaxNamespaceSecretBytes = 256 << 10
@@ -148,11 +142,10 @@ const (
 )
 
 // SecretSpec is a Secret as users write it, with its values in clear. As
-// in Kubernetes, data holds each value in Base64 and stringData holds it
-// as text. For a key in both, stringData wins. Unlike in Kubernetes, both
-// are fields of spec, because every clowder resource keeps what it wants
-// in spec. The values travel to the cluster over mTLS, and the cluster
-// encrypts them with its data key. The state enforces the size limits.
+// in Kubernetes, data holds each value in Base64 and stringData as text,
+// and for a key in both, stringData wins. Unlike in Kubernetes, both are
+// fields of spec, because every clowder resource keeps what it wants in
+// spec.
 type SecretSpec struct {
 	Data       map[string]string `json:"data,omitempty"`
 	StringData map[string]string `json:"stringData,omitempty"`
@@ -188,9 +181,8 @@ func (s SecretSpec) Values() (map[string][]byte, error) {
 	return values, nil
 }
 
-// SealedSecretSpec is a SealedSecret as users write it. `clowder secret
-// seal` seals each value for the cluster's sealing key and the Secret's ID
-// (secretvalue). Only the cluster can open the values.
+// SealedSecretSpec is a SealedSecret as users write it, each value sealed
+// for the cluster's sealing key and the Secret's ID (secretvalue).
 type SealedSecretSpec struct {
 	EncryptedData map[string]string `json:"encryptedData"`
 }
@@ -203,7 +195,6 @@ func (s SealedSecretSpec) Check() error {
 	return checkSecretKeys(slices.Collect(maps.Keys(s.EncryptedData)))
 }
 
-// checkSecretKeys tells which keys of a Secret break names.SecretKeyRule.
 func checkSecretKeys(keys []string) error {
 	var problems []error
 	for _, key := range slices.Sorted(slices.Values(keys)) {

@@ -16,9 +16,6 @@ type restartRules struct {
 	host    state.HostID
 }
 
-// of returns a service's restart rule, taken from the stack in the state.
-// A pushed-out service never restarts. Clowder's own Traefik has a rule of
-// its own.
 func (r restartRules) of(project, service string) (supervisor.Rule, bool) {
 	if names.ClowdersOwn(project) {
 		return traefikRule, true

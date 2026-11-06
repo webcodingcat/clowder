@@ -82,29 +82,7 @@ const forwardMark = 0x200
 // Render writes the table inet clowder. It deletes and recreates the table
 // in one transaction, so nft -f replaces it atomically and leaves other
 // rules (Docker's) alone. docs/developing/host.md (Network) describes each
-// chain. In short:
-//   - guard_in: on the host, a container reaches only the resolver, the
-//     local Traefik on the Floating IP (HTTP hairpin), and the answers to
-//     its own connections.
-//   - guard_fwd: the first rule drops a packet whose source is not in its
-//     bridge's network (a fib lookup), so a container with NET_RAW cannot
-//     spoof another container's address. Then everything that clowder or
-//     Docker redirected (DNAT) passes. The metadata API, the hosts, the
-//     private network and the overlay stay closed.
-//   - guard_out: the host's own processes cannot reach the metadata API
-//     either. clowderd never needs it, and cloud-init reads it before
-//     clowderd starts.
-//   - marks: a container's answer to a peer's connection goes back through
-//     that peer. The host's own processes get no mark, because the route to
-//     the peer's node address already leads back. So a DNAT from another
-//     host that keeps the client's address must lead to a container, never
-//     to a process in the host's network.
-//   - forwards and hairpin (forwardChains): every host has them, not only
-//     the one with the Floating IP, because its own containers need them
-//     too.
-//
-// A connection that was open before the table first loads passes as
-// established until it ends.
+// chain.
 func Render(ruleset Ruleset) string {
 	lines := []string{
 		"table inet clowder",
@@ -179,17 +157,11 @@ func Render(ruleset Ruleset) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// forwardChains are the chains of the forwards. A published port whose stack
-// runs on another host goes, with the client's address, to that host's node
-// address over WireGuard. A port of a stack on this host belongs to Docker
-// alone. The chains are:
-//   - forwards: the DNAT. It runs before Docker's (dstnat - 10) and sets
-//     the mark that Docker's FORWARD chain lets pass (dockerRule).
-//   - hairpin: the SNAT of the containers' own connections to the node
-//     address. An answer to a container's bridge address would reach a
-//     bridge of the same network on the stack's host.
-//
-// Without a Floating IP there are no such chains.
+// forwardChains renders the DNAT of the forwards, which runs before Docker's
+// (dstnat - 10), and the hairpin SNAT: an answer to a container's bridge
+// address would reach a bridge of the same network on the stack's host.
+// Every host has them, not only the one with the Floating IP, because its
+// own containers need them too.
 func forwardChains(ruleset Ruleset) []string {
 	if !ruleset.FloatingIP.IsValid() || !ruleset.NodeAddress.IsValid() {
 		return nil
@@ -213,7 +185,6 @@ func forwardChains(ruleset Ruleset) []string {
 	)
 }
 
-// joinAddresses lists addresses for an nft set.
 func joinAddresses(addresses []netip.Addr) string {
 	listed := make([]string, len(addresses))
 	for i, address := range addresses {

@@ -147,7 +147,6 @@ func (s *Supervisor) Run(ctx context.Context, label string) {
 	}
 }
 
-// handle decides about one event.
 func (s *Supervisor) handle(ctx context.Context, event docker.Event) {
 	stack, service := event.Labels[docker.ProjectLabel], event.Labels[docker.ServiceLabel]
 	id := event.ContainerID
@@ -180,7 +179,6 @@ func (s *Supervisor) handle(ctx context.Context, event docker.Event) {
 	}
 }
 
-// crashed restarts a container that died, if its rule says so.
 func (s *Supervisor) crashed(ctx context.Context, stack, service, id string, exitCode int) {
 	rule, known := s.rules(stack, service)
 	s.mu.Lock()

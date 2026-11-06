@@ -20,17 +20,14 @@ import (
 // the stacks' secrets leaves it alone. RegistryConfigs cleans it up instead.
 const registriesDir = names.ReservedPrefix + "registries"
 
-// registryConfigDir is the Docker config directory with which a namespace's
-// images are pulled (docker --config).
 func (f Files) registryConfigDir(namespace string) string {
 	return filepath.Join(f.SecretsDir, registriesDir, namespace)
 }
 
-// RegistryConfigs writes the Docker config of each namespace whose images
-// this host pulls, and removes the configs of the other namespaces. The
-// runner's jobs and the prefetcher share one RegistryConfigs and write from
-// separate goroutines. Its lock keeps the writers apart, because atomicfile
-// allows only one writer of a path at a time.
+// RegistryConfigs keeps the Docker config of each namespace whose images
+// this host pulls. The runner's jobs and the prefetcher share it; its lock
+// keeps their writes apart, because atomicfile allows only one writer of a
+// path at a time.
 type RegistryConfigs struct {
 	files Files
 	open  func(state.Encrypted) ([]byte, error)
@@ -52,13 +49,11 @@ type dockerAuth struct {
 	Auth string `json:"auth"` // base64 of "username:password", as docker login writes it
 }
 
-// Write decrypts a namespace's registry logins (state.RegistryLogins),
-// writes them into the namespace's Docker config and returns the config's
-// directory. A namespace without logins gets an empty config, so that no
-// stack pulls with the logins of root's own config. missing names the image
-// pull secrets that Write left out. Like the kubelet, Write goes on without
-// them, and a pull that fails says why. The file is replaced by a rename,
-// so a pull reads either the old logins or the new ones.
+// Write writes a namespace's Docker config and returns its directory. A
+// namespace without logins gets an empty config, so that no stack pulls
+// with root's own logins. missing names the image pull secrets left out;
+// like the kubelet, Write goes on without them. The rename lets a pull read
+// either the old logins or the new ones.
 func (r *RegistryConfigs) Write(current *state.State, namespace string) (dir string, missing, err error) {
 	logins, missing := current.RegistryLogins(namespace)
 	config := dockerConfig{Auths: map[string]dockerAuth{}}
@@ -97,9 +92,6 @@ func (r *RegistryConfigs) Write(current *state.State, namespace string) (dir str
 	return dir, missing, nil
 }
 
-// removeRegistryConfigsOfOthers keeps the Docker configs of the namespaces
-// that have a stack which runs here or which this host may take (the
-// prefetcher's stacks), and removes the others.
 func (r *Runner) removeRegistryConfigsOfOthers(desired desiredState) {
 	keep := map[string]bool{}
 	for _, stack := range desired.stacks {

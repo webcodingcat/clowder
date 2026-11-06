@@ -10,13 +10,12 @@ import (
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 )
 
-// trimInterval is how often the volumes give their free blocks back.
 const trimInterval = 7 * 24 * time.Hour
 
 // Trim gives the free blocks of this host's mounted copies back to their
-// pools once every trimInterval, until ctx ends. The time of the last trim
-// is kept in a file, so that restarts of the agent do not delay it. Trim runs
-// next to the reconciler's loop and shares only the fields that mu guards.
+// pools every trimInterval. The time of the last trim is kept in a file, so
+// that restarts of the agent do not delay it. Trim runs next to the
+// reconciler's loop and shares only the fields that mu guards.
 func (r *Reconciler) Trim(ctx context.Context) {
 	for {
 		info, err := os.Stat(r.files.LastTrim)
@@ -31,19 +30,13 @@ func (r *Reconciler) Trim(ctx context.Context) {
 	}
 }
 
-// trimNow trims the copies that the last pass saw mounted, and records the
-// time once all of them are trimmed. If there are none (also before the
-// first pass), or if a copy was skipped or failed, it tries again in the
-// next round.
+// trimNow records the time only once every mounted copy is trimmed; with
+// none (also before the first pass), it tries again in the next round.
 //
-// fstrim writes to the volume (it discards blocks). It is the one write
-// that the agent runs outside a job, because a trim takes long and must
-// not hold up the copy's steps. Only a copy whose DRBD has quorum is
-// trimmed (a plain copy always is), because without quorum fstrim hangs in
-// state D. If quorum is lost while fstrim runs, the timeout of
-// internal/command lets the agent go on. Each volume is claimed while
-// fstrim runs, so that no job unmounts it. A busy volume is skipped, and
-// the driver skips a copy that is no longer mounted.
+// fstrim is the one write to a volume outside a job (DEVELOPING.md,
+// Volumes). It runs only on a copy whose DRBD has quorum, because without
+// quorum fstrim hangs in state D, and it claims the volume so that no job
+// unmounts it meanwhile.
 func (r *Reconciler) trimNow(ctx context.Context) {
 	r.mu.Lock()
 	mounted := slices.Clone(r.mounted)

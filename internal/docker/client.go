@@ -160,7 +160,7 @@ type Details struct {
 	// Health is "healthy", "unhealthy" or "starting". It is empty for a
 	// container without a health check.
 	Health string
-	// Addresses are the container's addresses by network.
+	// Addresses are keyed by network.
 	Addresses map[string]netip.Addr
 }
 

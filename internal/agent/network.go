@@ -21,8 +21,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// HostNetwork is what the agent changes in the host's network. network.Host
-// is the real implementation. Tests use a fake.
+// HostNetwork is what the agent changes in the host's network (network.Host,
+// or a fake in tests).
 type HostNetwork interface {
 	SetUpInterface(ctx context.Context, nodeAddress netip.Addr) error
 	ApplyMesh(ctx context.Context, mesh network.Mesh) error
@@ -32,17 +32,14 @@ type HostNetwork interface {
 	StartResolver() (io.Closer, error)
 }
 
-// wantedNetwork is what the state wants of the host's network.
 type wantedNetwork struct {
 	mesh    network.Mesh
 	ruleset network.Ruleset
 }
 
-// reconcileNetwork keeps the WireGuard mesh and the nft rules in line with
-// the state, until ctx ends. It applies them after a change of the state
-// when they differ, and every loop.Interval anyway, to repair what someone
-// changed by hand. It saves the applied mesh in net.json for the next start
-// (restoreMesh).
+// reconcileNetwork applies the network every loop.Interval even when it
+// has not changed, to repair what someone changed by hand. It keeps the
+// applied mesh in net.json for restoreMesh.
 func reconcileNetwork(ctx context.Context, cluster loop.Cluster, files Files, self state.HostID,
 	hostNetwork HostNetwork, logger *slog.Logger,
 ) {
@@ -106,7 +103,6 @@ func reconcileNetwork(ctx context.Context, cluster loop.Cluster, files Files, se
 	})
 }
 
-// writeMesh saves the mesh in net.json, unless the file already holds it.
 func (f Files) writeMesh(mesh network.Mesh) error {
 	content, err := json.MarshalIndent(mesh, "", "  ")
 	if err != nil {
@@ -120,9 +116,8 @@ func (f Files) writeMesh(mesh network.Mesh) error {
 }
 
 // restoreMesh applies the mesh of net.json, if there is one. Raft runs
-// over the mesh, so after a reboot a host would have to learn its peers
-// from a leader that it cannot reach without them. The file breaks that
-// circle. The state's mesh replaces it once the state has caught up.
+// over the mesh, so without the file a rebooted host would have to learn
+// its peers from a leader that it cannot reach without them.
 func restoreMesh(ctx context.Context, files Files, self state.HostID, hostNetwork HostNetwork) error {
 	content, err := os.ReadFile(files.meshFile())
 	if errors.Is(err, os.ErrNotExist) {
@@ -144,12 +139,10 @@ func restoreMesh(ctx context.Context, files Files, self state.HostID, hostNetwor
 	return nil
 }
 
-// readWantedNetwork reads the mesh and the nft ruleset from the current
-// state. Every other host is a peer until it is removed. The addresses of
-// all hosts stay closed to containers, including those of a removed host,
-// because it may still run until its server is gone. known is false while
-// the state does not know this host yet. Such a state says nothing about
-// the network.
+// readWantedNetwork keeps the addresses of a removed host closed to
+// containers, because it may still run until its server is gone. known is
+// false while the state does not know this host yet; such a state says
+// nothing about the network.
 func readWantedNetwork(cluster loop.Cluster, self state.HostID) (wanted wantedNetwork, known bool) {
 	wanted = wantedNetwork{mesh: network.Mesh{Self: self}, ruleset: network.Ruleset{NodeAddress: network.NodeAddress(self)}}
 	ruleset := &wanted.ruleset
@@ -190,10 +183,8 @@ func readWantedNetwork(cluster loop.Cluster, self state.HostID) (wanted wantedNe
 	return wanted, known
 }
 
-// forwardsOf returns the published ports of the stacks on other hosts,
-// sorted. Each port is forwarded to the node address of its stack's host. A
-// stack without a host has no forwards: its ports lead nowhere until it is
-// placed.
+// forwardsOf gives a stack without a host no forwards: its ports lead
+// nowhere until it is placed.
 func forwardsOf(current *state.State, self state.HostID) []network.Forward {
 	var forwards []network.Forward
 	for _, stack := range current.Stacks {
@@ -214,10 +205,8 @@ func forwardsOf(current *state.State, self state.HostID) []network.Forward {
 	return forwards
 }
 
-// movedForwards returns the ports whose target changed between two lists of
-// forwards: ports now forwarded elsewhere, newly forwarded ports, and ports
-// no longer forwarded. The last two happen, for example, when a stack
-// leaves this host or comes to it.
+// movedForwards counts a port that is newly forwarded or no longer
+// forwarded as moved too, as when a stack comes to this host or leaves it.
 func movedForwards(old, current []network.Forward) []network.Forward {
 	type port struct {
 		protocol string

@@ -1,8 +1,6 @@
 // Package agenttest has the fakes that the tests of the agent, its stack
-// runner and its volume reconciler share: a cluster that applies what is
-// proposed, Docker, the storage driver and the volume reconciler. Each fake
-// is a sync.Locker, so a test can change its fields under the lock while a
-// loop runs.
+// runner and its volume reconciler share. Each fake is a sync.Locker, so a
+// test can change its fields under the lock while a loop runs.
 package agenttest
 
 import (
@@ -115,8 +113,6 @@ type Storage struct {
 	Hold map[string]chan struct{}
 }
 
-// step records a step on a copy, waits while Hold says so, fails while
-// Fails says so, and otherwise changes the copy.
 func (f *Storage) step(ctx context.Context, name string, volume storage.Volume, change func(*storage.Observed)) error {
 	f.Add("%s %s", name, volume.LV)
 	f.Lock()
@@ -545,8 +541,8 @@ func (c *Cluster) PutSecretIn(namespace, name string, values map[string]string) 
 	c.PutIn(namespace, resource.KindSecret, name, c.encrypted(values))
 }
 
-// encrypted encrypts a secret's values with the cluster's data key. Its
-// digest is a stand-in for the one that the API computes.
+// encrypted makes a digest that only stands in for the one that the API
+// computes.
 func (c *Cluster) encrypted(values map[string]string) state.EncryptedSecret {
 	c.t.Helper()
 	secret := state.EncryptedSecret{Data: map[string]state.Encrypted{}, Digest: "digest of"}

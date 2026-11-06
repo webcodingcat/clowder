@@ -20,13 +20,11 @@ const beatTimeout = 2 * time.Second
 // Beater sends this host's beat to a voter (api.Server.Beat).
 type Beater func(ctx context.Context, voter state.HostID) error
 
-// sendBeats tells every voter that this host is alive, every
-// controller.BeatInterval, until ctx ends. The leader considers a host
-// failed when a majority of the voters has not heard from it for
-// controller.FailAfter. sendBeats starts before the state has caught up,
-// because a beat says that the agent runs, not what it runs. A voter that
-// does not answer is logged only at debug level. Otherwise every beat would
-// log while the voter is down.
+// sendBeats tells every voter that this host is alive; the leader fails a
+// host that a majority of the voters has not heard from. It starts before
+// the state has caught up, because a beat says that the agent runs, not
+// what it runs. A voter that does not answer is logged at debug level only,
+// or every beat would log while the voter is down.
 func sendBeats(ctx context.Context, node *raftnode.Node, self state.HostID, beat Beater, logger *slog.Logger) {
 	for {
 		var voters []state.HostID

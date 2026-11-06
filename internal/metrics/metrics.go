@@ -24,14 +24,12 @@ const (
 	Counter Kind = "counter"
 )
 
-// family is one metric with its samples.
 type family struct {
 	help    string
 	kind    Kind
 	samples []sample
 }
 
-// sample is one value of a family, identified by its labels.
 type sample struct {
 	labels map[string]string
 	value  float64
@@ -86,8 +84,6 @@ func (s *Set) Write(out io.Writer) error {
 	return err
 }
 
-// labels writes {name="value",...} sorted by name, or nothing if there are
-// no labels.
 func labels(set map[string]string) string {
 	if len(set) == 0 {
 		return ""

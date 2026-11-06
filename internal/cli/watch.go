@@ -17,10 +17,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
-// watchObjects lists the selection. Then it shows each of its resources
-// that changes (GET /v1/watch from the list's index), until ctx ends. When
-// the agent can no longer follow from that index (410, or the stream
-// ends), it lists again, continues, and says so on report.
+// watchObjects runs until ctx ends. When the agent can no longer follow
+// from the list's index (410, or the stream ends), it lists again and says
+// so on report.
 func watchObjects(ctx context.Context, client *api.Client, out, report io.Writer, selected selection,
 	output string,
 ) error {
@@ -55,8 +54,8 @@ func watchObjects(ctx context.Context, client *api.Client, out, report io.Writer
 	}
 }
 
-// showEvent prints the current state of one event's resource. It prints a
-// deleted resource as "<Kind> <name>: deleted".
+// showEvent reads the event's resource, because an event does not carry
+// it.
 func showEvent(ctx context.Context, client *api.Client, out io.Writer, selected selection, output string,
 	event api.WatchEvent,
 ) error {
@@ -85,9 +84,6 @@ func showEvent(ctx context.Context, client *api.Client, out io.Writer, selected 
 	return printWatched(out, selected, []resource.Object{object}, output, false)
 }
 
-// printWatched prints what a watch shows: table rows (with the header only
-// before the first list), one JSON object per resource, or YAML documents
-// separated by "---".
 func printWatched(out io.Writer, selected selection, objects []resource.Object, output string, first bool) error {
 	switch output {
 	case "json":
@@ -110,7 +106,6 @@ func printWatched(out io.Writer, selected selection, objects []resource.Object, 
 	return printTable(out, selected.kind, objects, first)
 }
 
-// watchPath returns the API path for the selection's watch from an index.
 func (s selection) watchPath(since uint64) string {
 	query := url.Values{"kind": {strings.ToLower(s.kind)}, "since": {strconv.FormatUint(since, 10)}}
 	switch {

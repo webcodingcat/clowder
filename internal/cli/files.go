@@ -11,10 +11,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
-// readResourceFiles reads the resources of a file, of the YAML files in a
-// directory, or of stdin ("-"). A file or stdin must hold resources. In a
-// directory, it skips hidden files, other files and files of other
-// documents, and names each skipped file on report.
+// readResourceFiles reads a file, a directory, or stdin ("-"). A file or
+// stdin must hold resources; a directory's other files are skipped and
+// named on report.
 func readResourceFiles(from string, stdin io.Reader, report io.Writer) ([]resource.Object, error) {
 	if from == "-" {
 		data, err := io.ReadAll(stdin)
@@ -37,8 +36,6 @@ func readResourceFiles(from string, stdin io.Reader, report io.Writer) ([]resour
 	return readDirectory(from, report)
 }
 
-// readDirectory reads the YAML files in a directory, in the order of their
-// names. It does not read the files in subdirectories.
 func readDirectory(dir string, report io.Writer) ([]resource.Object, error) {
 	paths, err := yamlFiles(dir, report)
 	if err != nil {
@@ -62,9 +59,6 @@ func readDirectory(dir string, report io.Writer) ([]resource.Object, error) {
 	return objects, nil
 }
 
-// yamlFiles lists the YAML files in a directory, sorted by name, without
-// the files in subdirectories. It skips and reports hidden files and other
-// files.
 func yamlFiles(dir string, report io.Writer) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -87,14 +81,12 @@ func yamlFiles(dir string, report io.Writer) ([]string, error) {
 	return paths, nil
 }
 
-// skipped reports a file that a command skips.
 func skipped(report io.Writer, path, why string) {
 	_, _ = fmt.Fprintf(report, "skipped %s: %s\n", path, why) // a report only
 }
 
-// readFile reads the resources of one file (resource.ParseDocuments). A
-// file without resources is an error if required is set. Otherwise it is
-// allowed, so that a directory can skip such a file.
+// readFile allows a file without resources unless required is set, so that
+// a directory can skip such a file.
 func readFile(name string, data []byte, required bool) ([]resource.Object, error) {
 	objects, err := resource.ParseDocuments(data)
 	switch {
@@ -111,8 +103,7 @@ func readFile(name string, data []byte, required bool) ([]resource.Object, error
 	return objects, nil
 }
 
-// namespaceOrDefault returns the namespace that a file names, or default
-// if it names none, as on the command line.
+// namespaceOrDefault defaults a file's namespace as the command line does.
 func namespaceOrDefault(namespace string) string {
 	if namespace == "" {
 		return names.Default

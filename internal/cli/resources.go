@@ -144,9 +144,8 @@ func (f *selectFlags) register(command *cobra.Command, lists bool) {
 	}
 }
 
-// selection is what a command names: a kind, a namespace (empty for a kind
-// without namespaces or for every namespace), and a name (empty for a
-// list).
+// selection is what a command names. namespace is empty for a kind without
+// namespaces or for every namespace, and name is empty for a list.
 type selection struct {
 	kind      string
 	namespace string
@@ -154,9 +153,6 @@ type selection struct {
 	all       bool
 }
 
-// resolve reads a kind and a name as users type them, with -n and -A. The
-// namespace comes from -n or from the name (shop/data), or else it is
-// default. If both name a namespace, they must agree.
 func (f selectFlags) resolve(kindWord, name string) (selection, error) {
 	kind, err := kindOf(kindWord)
 	if err != nil {
@@ -187,8 +183,7 @@ func (f selectFlags) resolve(kindWord, name string) (selection, error) {
 	return chosen, nil
 }
 
-// kindOf reads a kind as users type it: in lower case, singular or plural
-// (volume, volumes).
+// kindOf takes a kind in singular or plural (volume, volumes).
 func kindOf(word string) (string, error) {
 	if kind, ok := resource.KindOf(word); ok {
 		return kind, nil
@@ -207,7 +202,6 @@ func kindWords() string {
 	return strings.Join(words, ", ")
 }
 
-// listPath returns the API path for the selection's list.
 func (s selection) listPath() string {
 	path := "/v1/resources/" + strings.ToLower(s.kind)
 	switch {
@@ -220,7 +214,6 @@ func (s selection) listPath() string {
 	}
 }
 
-// path returns the API path for the one selected resource.
 func (s selection) path() string {
 	if !resource.Namespaced(s.kind) {
 		return "/v1/resources/" + strings.ToLower(s.kind) + "/" + url.PathEscape(s.name)
@@ -228,8 +221,6 @@ func (s selection) path() string {
 	return "/v1/resources/" + strings.ToLower(s.kind) + "/" + url.PathEscape(s.namespace) + "/" + url.PathEscape(s.name)
 }
 
-// printObjects prints resources as a table, as YAML documents (which apply
-// accepts again), or as JSON (one object, or a list of objects).
 func printObjects(out io.Writer, selected selection, objects []resource.Object, output string) error {
 	switch output {
 	case "json":
@@ -245,8 +236,6 @@ func printObjects(out io.Writer, selected selection, objects []resource.Object, 
 	return printTable(out, selected.kind, objects, true)
 }
 
-// printYAML prints resources as YAML documents, each after "---" except
-// the first.
 func printYAML(out io.Writer, objects []resource.Object) error {
 	for index, object := range objects {
 		document, err := yamlOf(object)
@@ -263,8 +252,8 @@ func printYAML(out io.Writer, objects []resource.Object) error {
 	return nil
 }
 
-// yamlOf encodes a resource as YAML, with its fields in the order in which
-// the API wrote them.
+// yamlOf keeps the API's field order, so that apply accepts the documents
+// again as they are.
 func yamlOf(object resource.Object) ([]byte, error) {
 	encoded, err := json.Marshal(object)
 	if err != nil {
@@ -288,12 +277,11 @@ func blockStyle(node *yaml.Node) {
 	}
 }
 
-// digestShown is how many characters of a secret's digest a table shows.
-// That is enough to see a change.
+// digestShown is how many characters of a secret's digest a table shows:
+// enough to see a change.
 const digestShown = 12
 
-// printTable prints resources as a table. The watch prints later rows
-// without repeating the header (withHeader false).
+// printTable leaves out the header for the watch's later rows.
 func printTable(out io.Writer, kind string, objects []resource.Object, withHeader bool) error {
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	// tabwriter reports errors on Flush

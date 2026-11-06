@@ -21,11 +21,8 @@ func findVolume(s *State, id string) *Meta {
 	return nil
 }
 
-// putVolumeResource creates a volume. The volume is placed together with
-// the first stack that names it, on that stack's host. Until then it waits
-// (VolumePending). putVolumeResource does not check the volume's lock,
-// because it changes no existing volume, and only an existing volume can
-// be locked.
+// putVolumeResource does not check the volume's lock, because it changes no
+// existing volume, and only an existing volume can be locked.
 func putVolumeResource(s *State, id string, payload PutResource) (func() *Meta, error) {
 	spec, err := decodeSpec[resource.VolumeSpec](payload.Kind, id, payload.Spec)
 	if err != nil {
@@ -120,7 +117,6 @@ type PutVolume struct {
 	// (checkPlanned).
 	PlannedAt uint64 `json:"planned_at"`
 	// Operation is the leader's operation that makes the change, if any.
-	// Only the operation that holds the volume's lock changes the volume.
 	Operation uint64 `json:"operation,omitempty"`
 }
 

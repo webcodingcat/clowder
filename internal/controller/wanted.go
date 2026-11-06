@@ -21,22 +21,17 @@ const (
 	noQuorumFor     = 2 * time.Minute
 )
 
-// The keys of the conditions that other loops observe (Conditions). A
-// condition's key names a host by its ID, which never changes. An alert's
-// key names a host by its name, which people read. conditionKeys lists all
-// condition keys.
+// A condition's key names a host by its ID, which never changes. An alert's
+// key names a host by its name, which people read.
 const (
 	ingressNotHeld = "ingress-not-held"
-	// hetznerTokenRefused holds while Hetzner refuses the token in the
-	// calls that fencing and the Floating IP make anyway
-	// (hetzner.TokenRefused). No loop asks Hetzner more often because of it.
+	// hetznerTokenRefused is observed only in the calls that fencing and the
+	// Floating IP make anyway
 	hetznerTokenRefused = "hetzner-token"
 )
 
-// conditionKeys returns the keys of every condition whose subject is still
-// in the state: the hosts that are not removed, the stacks and the volumes.
-// A new key must be added here too, or every alerts pass forgets its
-// conditions (Conditions.Keep).
+// conditionKeys must list every condition key, or every alerts pass forgets
+// that condition (Conditions.Keep).
 func conditionKeys(current *state.State) map[string]bool {
 	keys := map[string]bool{ingressNotHeld: true, hetznerTokenRefused: true}
 	for id, host := range current.Hosts {
@@ -55,31 +50,24 @@ func conditionKeys(current *state.State) map[string]bool {
 	return keys
 }
 
-// overCapacityKey returns the condition key for a host over capacity.
 func overCapacityKey(host state.HostID) string {
 	return fmt.Sprintf("over-capacity/%d", host)
 }
 
-// dockerDownKey returns the condition key for a host whose Docker does not
-// answer.
 func dockerDownKey(host state.HostID) string {
 	return fmt.Sprintf("docker-down/%d", host)
 }
 
-// fencingBlockedKey returns the condition key for a failed host that the
-// leader cannot fence (fencer.whyNotFence).
 func fencingBlockedKey(host state.HostID) string {
 	return fmt.Sprintf("fencing-blocked/%d", host)
 }
 
-// stackFailingKey returns the condition key for a stack that its host could
-// not bring up. Like the alert's key, it names the stack by its ID.
+// stackFailingKey names the stack by its ID, like the alert's key.
 func stackFailingKey(stack string) string {
 	return "stack-failing/" + stack
 }
 
-// noQuorumKey returns the condition key for a volume whose primary copy
-// lacks DRBD's quorum. Like the alert's key, it names the volume by its ID.
+// noQuorumKey names the volume by its ID, like the alert's key.
 func noQuorumKey(volume string) string {
 	return "no-quorum/" + volume
 }
@@ -211,9 +199,6 @@ func wantedAlerts(current *state.State, conditions *Conditions, now time.Time) m
 	return wanted
 }
 
-// addCertificateAlerts adds an alert for each certificate that is still not
-// renewed when less than half of its renewal window is left. It adds one
-// more alert if acme.renewBefore is ignored for any certificate.
 func addCertificateAlerts(current *state.State, now time.Time, add func(key, kind, severity, subject, message string)) {
 	config := current.Config.Spec.ACME
 	var ignoredFor []string
@@ -238,9 +223,6 @@ func addCertificateAlerts(current *state.State, now time.Time, add func(key, kin
 	}
 }
 
-// addHostAlerts adds the alerts about a host's failure: failed (also while
-// fencing), fencing blocked, fenced (until it is active again) and
-// disabled.
 func addHostAlerts(host *state.Host, blocked bool, add func(key, kind, severity, subject, message string)) {
 	switch host.Phase {
 	case state.Failed, state.Fencing:
@@ -266,9 +248,8 @@ func addHostAlerts(host *state.Host, blocked bool, add func(key, kind, severity,
 	}
 }
 
-// addVolumeAlerts adds the alerts about volumes, from the copies that the
-// hosts report. A split brain raises an alert at once, because it needs a
-// human and does not go away by itself. A primary without DRBD's quorum
+// addVolumeAlerts raises a split brain at once, because it needs a human and
+// does not go away by itself. A primary without DRBD's quorum
 // raises an alert only after noQuorumFor, because a failing host takes the
 // quorum away until the failover.
 func addVolumeAlerts(current *state.State, held func(condition, alert string, atLeast time.Duration) bool,

@@ -1,8 +1,6 @@
 // Package hostrole holds the roles of a host, like the node roles of
-// Kubernetes: control-plane, worker and ingress. A host gets its roles when
-// it joins (clowderd init and join --roles, within what its join token
-// allows), and they stay fixed until it is removed. Its certificate names
-// them, so that a host can read another host's roles without the state.
+// Kubernetes. A host gets its roles when it joins, and they stay fixed until
+// it is removed.
 package hostrole
 
 import (

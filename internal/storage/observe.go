@@ -18,11 +18,10 @@ type Observed struct {
 	// until its host removes it.
 	LV bool
 	// ResourceFileCurrent says that the DRBD resource file is the one the
-	// copy should have (only for replicated volumes). A new peer changes the
-	// file.
-	ResourceFileCurrent bool
-	// Role is the DRBD resource's role on this host (only for replicated
+	// copy should have and adjust has applied it (only for replicated
 	// volumes).
+	ResourceFileCurrent bool
+	// Role is set only for replicated volumes.
 	Role Role
 	// Disk is DRBD's disk state of the copy on this host (DiskUpToDate,
 	// ...). OutOfSyncBytes is the largest difference from any peer; during
@@ -135,8 +134,6 @@ func sameDevice(source, device string) bool {
 	return errSource == nil && errDevice == nil && sourceNode == deviceNode
 }
 
-// resourceFileCurrent tells whether the resource file has the wanted
-// content and adjust has applied it.
 func (d Driver) resourceFileCurrent(resource *Resource) (bool, error) {
 	content, err := os.ReadFile(d.resourceFile(resource))
 	if errors.Is(err, os.ErrNotExist) {

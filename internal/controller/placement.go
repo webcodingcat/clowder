@@ -28,18 +28,14 @@ type placer struct {
 	// fittingSince is when it began to fit
 	fitting      string
 	fittingSince time.Time
-	// conditions records the hosts whose highest priority alone reserves
-	// more than the host offers; the alerts loop reads them
-	conditions *Conditions
-	// plannedAt is the index of the state that the pass plans with. The
-	// pass's commands carry it, so the state can refuse them as stale
-	// (state.ErrStale).
+	conditions   *Conditions
+	// plannedAt is the index of the state that the pass plans with, so the
+	// state can refuse its commands as stale (state.ErrStale)
 	plannedAt uint64
 }
 
 // RunPlacement places stacks and their new volumes, pushes services out
-// and brings them back while this agent leads, until ctx ends. It runs a
-// pass at every change of the state and every interval.
+// and brings them back while this agent leads, until ctx ends.
 func RunPlacement(ctx context.Context, cluster Cluster, propose Propose, conditions *Conditions, logger *slog.Logger) {
 	p := &placer{cluster: cluster, propose: propose, logger: logger, conditions: conditions}
 	for {
@@ -59,9 +55,8 @@ func RunPlacement(ctx context.Context, cluster Cluster, propose Propose, conditi
 	}
 }
 
-// pass plans once, and commits the decisions and the reasons why stacks
-// wait. It returns how soon the next pass should run: when a pushed-out
-// service will have fit long enough, or else 0.
+// pass returns how soon the next pass should run: when a pushed-out service
+// will have fit long enough, or else 0.
 func (p *placer) pass(ctx context.Context) time.Duration {
 	// Plan weighs every stack on every host. That is too slow to do under
 	// the state's lock, which Raft's Apply waits for.
@@ -69,11 +64,9 @@ func (p *placer) pass(ctx context.Context) time.Duration {
 	p.plannedAt = copied.Index
 	decisions := scheduler.Plan(copied, time.Now())
 	p.noteOverCapacity(copied, decisions.OverCapacity)
-	// A push-out holds, for each stack it touches, the stack's new list of
-	// pushed-out services. If a push-out fails, nothing is placed in this
-	// pass, because the placements count on the room it frees. A failed
-	// placement, by contrast, affects only its own stack, so the others
-	// still go ahead.
+	// If a push-out fails, nothing is placed in this pass, because the
+	// placements count on the room it frees. A failed placement affects only
+	// its own stack.
 	for _, pushOut := range decisions.PushOuts {
 		p.logger.Warn("pushing out services: the host's stacks reserve more than it offers", "pushed_out", pushOut)
 		if !p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: pushOut, PlannedAt: p.plannedAt}) {
@@ -94,12 +87,10 @@ func (p *placer) pass(ctx context.Context) time.Duration {
 	return p.comeBack(ctx, decisions.ComeBack)
 }
 
-// commitOrLog writes one command and reports whether it committed. It logs
-// a failure, and the next pass plans again. A command at the index right
-// after plannedAt becomes part of the planned state, so the pass's next
-// commands may change what it changed. Any other index leaves plannedAt as
-// it is: something else came in between, and the state refuses a command
-// about what that changed.
+// commitOrLog reports whether the command committed; after a failure, the
+// next pass plans again. A command at the index right after plannedAt
+// becomes part of the planned state, so the pass's next commands may change
+// what it changed.
 func (p *placer) commitOrLog(ctx context.Context, kind string, payload any) bool {
 	index, err := commit(ctx, p.propose, kind, payload)
 	switch {
@@ -116,8 +107,6 @@ func (p *placer) commitOrLog(ctx context.Context, kind string, payload any) bool
 	return true
 }
 
-// noteOverCapacity observes the over-capacity condition of each host, and
-// logs it once when it begins.
 func (p *placer) noteOverCapacity(copied *state.State, hosts []state.HostID) {
 	for _, id := range slices.Sorted(maps.Keys(copied.Hosts)) {
 		if copied.Hosts[id].Phase == state.Removed {
@@ -130,12 +119,9 @@ func (p *placer) noteOverCapacity(copied *state.State, hosts []state.HostID) {
 	}
 }
 
-// commitWaitReasons records why stacks wait. The state keeps the last
-// reason, so each change is written and logged once, not every 30 s, and a
-// new leader knows the reason too. An empty reason clears it once the stack
-// no longer waits. Each change is a Raft write and an audit entry, so a
-// reason holds only what stays the same from pass to pass: no free space,
-// no times.
+// commitWaitReasons writes a reason only when it changes, because each
+// change is a Raft write and an audit entry. So a reason holds only what
+// stays the same from pass to pass: no free space, no times.
 func (p *placer) commitWaitReasons(ctx context.Context, copied *state.State, waiting []scheduler.Waiting) {
 	reasons := map[string]string{}
 	for _, wait := range waiting {
@@ -153,12 +139,10 @@ func (p *placer) commitWaitReasons(ctx context.Context, copied *state.State, wai
 	}
 }
 
-// commitPlacement commits one placement. It first commits the services that
-// the stack pushes out, then the volumes, then the stack's host. So the
-// agent finds the volumes when it sees the stack. If the leader changes in
-// between, the services stay pushed out without the new stack, and come
-// back later (comeBack). The first command that fails ends the placement,
-// and the next pass plans it again.
+// commitPlacement commits the stack's host last, so that the agent finds
+// the volumes when it sees the stack. If the leader changes in between, the
+// services stay pushed out without the new stack, and come back later
+// (comeBack).
 func (p *placer) commitPlacement(ctx context.Context, placement scheduler.Placement) {
 	if placement.PushedOut != nil &&
 		!p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: placement.PushedOut, PlannedAt: p.plannedAt}) {
@@ -177,10 +161,9 @@ func (p *placer) commitPlacement(ctx context.Context, placement scheduler.Placem
 	}
 }
 
-// comeBack brings a pushed-out service back once it has fit for
-// comeBackAfter. It brings back one service per decision, because each
-// return changes the free room, so the next service's wait starts again.
-// It returns how long until the service will have fit long enough, or 0.
+// comeBack brings back one service per decision, because each return
+// changes the free room, so the next service's wait starts again. It
+// returns how long until the service will have fit long enough, or 0.
 func (p *placer) comeBack(ctx context.Context, back *scheduler.ComeBack) time.Duration {
 	if back == nil {
 		p.fitting = ""
@@ -202,10 +185,9 @@ func (p *placer) comeBack(ctx context.Context, back *scheduler.ComeBack) time.Du
 	return 0
 }
 
-// startMove starts a move-stack operation, which RunMoves then carries out.
-// Like a placement, it first commits the services that the stack pushes out
-// on the new host. If the start then fails, those services come back by
-// the usual rule (comeBack). The operation locks the stack and its volumes.
+// startMove starts a move-stack operation, which RunMoves carries out. If
+// the start fails after the push-out, the pushed-out services come back by
+// the usual rule (comeBack).
 func (p *placer) startMove(ctx context.Context, copied *state.State, move scheduler.Move) {
 	if move.PushedOut != nil &&
 		!p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: move.PushedOut, PlannedAt: p.plannedAt}) {

@@ -12,7 +12,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/storage"
 )
 
-// wantedCopy is a copy that the state places on this host, and its target.
 type wantedCopy struct {
 	volume         storage.Volume
 	dataGeneration int64
@@ -24,11 +23,6 @@ type wantedCopy struct {
 	err error
 }
 
-// desired returns the copies that the state places on this host, sorted by
-// volume ID. A copy that is named by a stack placed on this host is
-// mounted, unless the stack stops for a move (State.StopsForMove). A copy that a
-// local stack may still hold (held, or any copy while holdAll) is kept as
-// it is. Any other copy is secondary.
 func (r *Reconciler) desired(copied *state.State, held map[string]bool, holdAll bool) []wantedCopy {
 	named := map[string]bool{}
 	for _, stack := range copied.Stacks {
@@ -63,12 +57,9 @@ func (r *Reconciler) desired(copied *state.State, held map[string]bool, holdAll 
 	return wanted
 }
 
-// describe turns a volume of the state into this host's copy of it, in the
-// form that the storage driver expects. The LV's name contains the generation, so
-// a restored volume is a new LV next to the old one. The DRBD resource has
-// the LV's name. Even a copy that cannot be described has its ID and LV, so
-// that the error reaches the stack that waits for it. The caller (desired)
-// makes sure that the volume has a copy on this host.
+// describe needs a volume with a copy on this host. Even a copy that cannot
+// be described has its ID and LV, so that the error reaches the stack that
+// waits for it.
 func (r *Reconciler) describe(copied *state.State, volume *state.Volume) (storage.Volume, error) {
 	id := volume.ID()
 	lv := names.VolumeName(id, volume.DataGeneration)
@@ -110,10 +101,8 @@ func (r *Reconciler) describe(copied *state.State, volume *state.Volume) (storag
 	return described, nil
 }
 
-// poolOf returns the thin pool of a copy's storage class. The state refuses
-// a configuration that lacks a class which a volume uses, so a missing
-// class is a bug. poolOf reports it clearly instead of passing an empty
-// pool to lvcreate.
+// poolOf reports a missing class clearly instead of passing an empty pool
+// to lvcreate, though the state refuses a configuration that lacks one.
 func poolOf(config clusterspec.Config, volumeID, class string) (string, error) {
 	storageClass, ok := config.StorageClasses[class]
 	if !ok || storageClass.Pool == "" {
@@ -122,8 +111,6 @@ func poolOf(config clusterspec.Config, volumeID, class string) (string, error) {
 	return storageClass.Pool, nil
 }
 
-// placedHere reports whether the state has a copy of the volume on this host
-// in the recorded data generation.
 func (r *Reconciler) placedHere(copied *state.State, volume storage.Volume) bool {
 	current, ok := copied.Volumes[volume.ID]
 	if !ok || !slices.ContainsFunc(current.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host }) {
@@ -132,8 +119,6 @@ func (r *Reconciler) placedHere(copied *state.State, volume storage.Volume) bool
 	return names.VolumeName(volume.ID, current.DataGeneration) == volume.LV
 }
 
-// retiredHere finds the retired copy in the state that matches the copy
-// recorded on this host.
 func (r *Reconciler) retiredHere(copied *state.State, volume storage.Volume) (state.RetiredCopy, bool) {
 	for _, retired := range copied.Retired {
 		if retired.Host == r.host && retired.Volume == volume.ID &&

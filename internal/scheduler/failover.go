@@ -13,25 +13,17 @@ import (
 )
 
 // CopyWait is how long after the fence a fenced host's copies still count
-// toward their volumes' replicas. The leader powers the host on again once
-// its fence is over (at most state.StepTime later). The host is usually
-// back (recovering) within minutes after that and catches its copies up.
-// If a host stays off longer or is disabled, its copies are made anew
-// elsewhere.
+// toward their volumes' replicas. The leader powers the host on again at
+// most state.StepTime after the fence, and the host is usually back within
+// minutes after that.
 const CopyWait = state.StepTime + 10*time.Minute
 
-// failover places a stack whose host was fenced on another host at once.
-// It needs no move, because the old host is off and stops nothing. The
-// rules are in docs/developing/placement.md (Failover). In short, the new
-// host must have a synced copy of each volume of replicas 1 or more,
-// because nothing can sync from the old host. A stack that finds no such
-// host waits on its old host. With replicas 1, it waits until the host is
-// back or a user restores the volume elsewhere.
+// failover places a stack whose host was fenced on another host at once,
+// without a move, because the old host is off and stops nothing
+// (placement.md, "Failover").
 func (p *planner) failover(stack *state.Stack) []decision {
 	from := *stack.Host
 	reasons := map[state.HostID]string{}
-	// as in place: whole are the hosts where all of the stack fits, and
-	// pushing are those where it pushes services out (stackFit)
 	var whole, pushing []stackFit
 	volumes := map[state.HostID][]state.Volume{}
 	for _, id := range p.stackHosts(&from) {
@@ -76,11 +68,9 @@ func (p *planner) failover(stack *state.Stack) []decision {
 }
 
 // failoverVolumes works out what a stack's volumes need for the stack to
-// fail over to host. A volume of replicas 1 or more must have a synced copy
-// with a disk there. A volume of replicas 0 gets a new, empty LV there (a
-// new data generation), because its old LV is on the host that is down. It
-// returns the new records of the volumes of replicas 0, or the reason why
-// host cannot take the stack.
+// fail over to host. It returns the new records of the volumes of replicas
+// 0, which get a new, empty LV there because their old LV is on the host
+// that is down.
 func (p *planner) failoverVolumes(stack *state.Stack, host state.HostID) ([]state.Volume, string) {
 	var fresh []state.Volume
 	var reserved []allocation

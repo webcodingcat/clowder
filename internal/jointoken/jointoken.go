@@ -1,13 +1,7 @@
 // Package jointoken makes and reads the one-time tokens that a host joins
-// the cluster with (clowder host join-token, clowderd join). A token is an
-// ID and a secret. The state keeps only the secret's Hash, under the ID,
-// until a join uses the token or it expires. So whoever reads the state
-// cannot join with it.
-//
-// The joining host trusts the cluster's CA because of a proof made with
-// the hash (pki.TrustProof). Only someone with the token or the state can
-// make that proof. The host then sends the token itself, over TLS checked
-// against that CA, and the leader compares its hash.
+// the cluster with. The state keeps only the secret's Hash, so whoever reads
+// the state cannot join with it. The hash also keys the proof that lets the
+// joining host trust the cluster's CA (pki.TrustProof).
 package jointoken
 
 import (

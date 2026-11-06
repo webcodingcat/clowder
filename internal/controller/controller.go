@@ -33,7 +33,6 @@ type Open func(encrypted state.Encrypted) ([]byte, error)
 // change.
 const interval = 30 * time.Second
 
-// commit writes one command as the leader and returns its Raft index.
 func commit(ctx context.Context, propose Propose, kind string, payload any) (uint64, error) {
 	// the leader sets the time when it commits
 	cmd, err := state.NewCommand(kind, time.Time{}, state.LeaderActor, payload)

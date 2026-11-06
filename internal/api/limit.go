@@ -29,7 +29,6 @@ type limiter struct {
 	total    int
 }
 
-// allow tells whether a try by sender at now is accepted, and counts it.
 func (l *limiter) allow(sender netip.Addr, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -44,8 +43,7 @@ func (l *limiter) allow(sender netip.Addr, now time.Time) bool {
 	return true
 }
 
-// senderOf returns the address that a request counts for: the IPv4
-// address, or for IPv6 the /64, because one machine usually has a whole
+// senderOf counts IPv6 by the /64, because one machine usually has a whole
 // /64 to itself.
 func senderOf(r *http.Request) netip.Addr {
 	addressPort, err := netip.ParseAddrPort(r.RemoteAddr)
@@ -60,8 +58,6 @@ func senderOf(r *http.Request) netip.Addr {
 	return address
 }
 
-// limited lets a route accept only the tries that the limiter allows. The
-// others get 429.
 func limited(tries *limiter, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !tries.allow(senderOf(r), time.Now()) {

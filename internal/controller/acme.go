@@ -68,8 +68,7 @@ type retry struct {
 	backoff time.Duration
 }
 
-// acmeRunner orders and renews the HTTP routes' certificates while this
-// agent leads. Tests replace its fields other than the state.
+// acmeRunner's fields other than the state are replaced by the tests.
 type acmeRunner struct {
 	cluster Cluster
 	propose Propose
@@ -86,10 +85,7 @@ type acmeRunner struct {
 }
 
 // RunACME keeps a certificate for each domain of an HTTP route while this
-// agent leads, until ctx ends. It runs a pass at every change of the state
-// and every interval. It orders each certificate with HTTP-01, renews it
-// before it expires, and deletes the certificates that no stack names any
-// more.
+// agent leads, until ctx ends, with HTTP-01.
 func RunACME(ctx context.Context, cluster Cluster, propose Propose, keys Keys, logger *slog.Logger) {
 	runner := &acmeRunner{
 		cluster: cluster, propose: propose, keys: keys, lookup: net.DefaultResolver.LookupNetIP,
@@ -109,8 +105,6 @@ func RunACME(ctx context.Context, cluster Cluster, propose Propose, keys Keys, l
 	}
 }
 
-// pass deletes what no order needs any more, then orders each certificate
-// that is missing or due for renewal, one domain after the other.
 func (r *acmeRunner) pass(ctx context.Context) {
 	copied := r.cluster.SharedCopy()
 	if !copied.Configured() {
@@ -188,23 +182,19 @@ func (r *acmeRunner) pass(ctx context.Context) {
 	}
 }
 
-// failed makes a domain wait after a failure that reached the CA. The first
-// wait is firstBackoff; each later wait is twice the last, up to maxBackoff.
+// failed is only for a failure that reached the CA.
 func (r *acmeRunner) failed(domain string, now time.Time, err error) {
 	backoff := max(r.retries[domain].backoff, firstBackoff)
 	r.retries[domain] = retry{at: now.Add(backoff), backoff: min(2*backoff, maxBackoff)}
 	r.logger.Warn("ordering a certificate failed", "domain", domain, "error", err, "retry_in", backoff)
 }
 
-// commitOrLog writes a command whose result the caller does not need. It
-// logs a failure, and the next pass tries again.
 func (r *acmeRunner) commitOrLog(ctx context.Context, kind string, payload any) {
 	if _, err := commit(ctx, r.propose, kind, payload); err != nil {
 		r.logger.Warn("keep the certificates", "command", kind, "error", err)
 	}
 }
 
-// routeDomains returns the domains of the stacks' HTTP routes, sorted.
 func routeDomains(current *state.State) []string {
 	domains := map[string]bool{}
 	for _, stack := range current.Stacks {
@@ -217,12 +207,10 @@ func routeDomains(current *state.State) []string {
 	return slices.Sorted(maps.Keys(domains))
 }
 
-// renewBefore returns how long before its expiry a certificate is renewed.
-// The default is a third of its lifetime. acme.renewBefore replaces the
-// default while it is shorter than the lifetime. A longer setting would
-// renew every new certificate at once, so it is ignored for that
-// certificate, and ignored is true. Both values come from the state alone,
-// so neither a setting nor a change of leader can cause a renewal loop.
+// renewBefore ignores an acme.renewBefore that is not shorter than the
+// lifetime, because it would renew every new certificate at once. It reads
+// the state alone, so no setting and no change of leader can cause a
+// renewal loop.
 func renewBefore(certificate *state.Certificate, config clusterspec.ACME) (before time.Duration, ignored bool) {
 	lifetime := certificate.Lifetime()
 	byDefault := lifetime / 3
@@ -239,8 +227,6 @@ func renewBefore(certificate *state.Certificate, config clusterspec.ACME) (befor
 	return configured, false
 }
 
-// renewalDue reports whether a domain needs a certificate now: either it
-// has none, or its renewal window has begun.
 func renewalDue(certificate *state.Certificate, config clusterspec.ACME, now time.Time) bool {
 	if certificate == nil {
 		return true
@@ -270,8 +256,7 @@ func (r *acmeRunner) checkDNS(ctx context.Context, domain string, floatingIP net
 	return nil
 }
 
-// connect makes the ACME client with the cluster's account at the
-// directory. If the cluster has no account there yet, it creates one first.
+// connect creates the cluster's account if it has none at the directory.
 func (r *acmeRunner) connect(ctx context.Context, copied *state.State) (*acme.Client, error) {
 	config := copied.Config.Spec.ACME
 	httpClient, err := acmeHTTPClient([]byte(config.CA))
@@ -330,8 +315,6 @@ func (r *acmeRunner) connect(ctx context.Context, copied *state.State) (*acme.Cl
 	return client, nil
 }
 
-// acmeHTTPClient makes an HTTP client that trusts the system's CAs and the
-// CA in acme.ca, if any, such as Pebble's test CA.
 func acmeHTTPClient(caPEM []byte) (*http.Client, error) {
 	pool, err := x509.SystemCertPool()
 	if err != nil {
@@ -345,7 +328,6 @@ func acmeHTTPClient(caPEM []byte) (*http.Client, error) {
 	return &http.Client{Transport: transport}, nil
 }
 
-// order gets a new certificate for a domain and records it.
 func (r *acmeRunner) order(ctx context.Context, client *acme.Client, domain string, checkAt netip.AddrPort) error {
 	ctx, cancel := context.WithTimeout(ctx, orderTimeout)
 	defer cancel()
@@ -399,10 +381,8 @@ func (r *acmeRunner) order(ctx context.Context, client *acme.Client, domain stri
 	return err
 }
 
-// authorize proves to the CA that the cluster serves the domain. It
-// publishes the answer to the HTTP-01 challenge in the state, where every
-// agent serves it. It checks that the answer comes back through the ingress
-// host's Traefik (checkAddress), and only then lets the CA validate.
+// authorize lets the CA validate only once the answer comes back through
+// the ingress host's Traefik (checkAddress).
 func (r *acmeRunner) authorize(ctx context.Context, client *acme.Client, url, domain string, checkAt netip.AddrPort) error {
 	authorization, err := client.GetAuthorization(ctx, url)
 	if err != nil {
@@ -448,8 +428,6 @@ func (r *acmeRunner) authorize(ctx context.Context, client *acme.Client, url, do
 	return nil
 }
 
-// selfCheck asks Traefik at checkAt for the challenge, as the CA will,
-// until the answer comes back, for at most selfCheckTimeout.
 func (r *acmeRunner) selfCheck(ctx context.Context, checkAt netip.AddrPort, domain, token, keyAuthorization string) error {
 	ctx, cancel := context.WithTimeout(ctx, selfCheckTimeout)
 	defer cancel()
@@ -476,7 +454,6 @@ func (r *acmeRunner) selfCheck(ctx context.Context, checkAt netip.AddrPort, doma
 	}
 }
 
-// fetchChallenge asks for a challenge once, with the domain as the host.
 func fetchChallenge(ctx context.Context, client *http.Client, url, domain, want string) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
@@ -498,12 +475,9 @@ func fetchChallenge(ctx context.Context, client *http.Client, url, domain, want 
 	return nil
 }
 
-// checkAddress returns where the self-check asks for a challenge: the
-// internal entrypoint of the ingress host's Traefik. The CA's request
-// through the Floating IP lands on that host too. The leader's own Traefik
-// is not enough, for two reasons. The leader may not be the ingress host,
-// and the ingress host may apply the challenge later than the leader.
-// Without an ingress host, the self-check asks the Floating IP on httpPort.
+// checkAddress returns the ingress host's Traefik, where the CA's request
+// lands too. The leader's own Traefik is not enough: the leader may not be
+// the ingress host, and the ingress host may apply the challenge later.
 func (r *acmeRunner) checkAddress(copied *state.State, floatingIP netip.Addr) netip.AddrPort {
 	if copied.Ingress == nil {
 		return netip.AddrPortFrom(floatingIP, r.httpPort)

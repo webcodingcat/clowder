@@ -1,8 +1,6 @@
-// Package hetznertest is a fake of Hetzner Cloud's API for the tests of the
-// packages that use internal/hetzner: servers with their addresses and
-// labels, Floating IPs, and power actions that finish at once. A test puts
-// its URL into the configuration's hetzner.api, so the real client talks to
-// the fake.
+// Package hetznertest is a fake of Hetzner Cloud's API, whose power actions
+// finish at once. A test puts its URL into the configuration's hetzner.api,
+// so the real client talks to the fake.
 package hetznertest
 
 import (
@@ -31,8 +29,7 @@ type API struct {
 	mu          sync.Mutex
 	servers     map[int64]*server
 	floatingIPs map[netip.Addr]int64 // the server each is routed to, 0 for none
-	// changes holds what the requests changed, in order: "poweroff 41",
-	// "poweron 41", "assign 203.0.113.10 41", "label 41 clowder-retired=s1"
+	// changes is what Changes returns
 	changes []string
 	// failing counts, per server, how many more actions will end in an
 	// error
@@ -132,8 +129,8 @@ func (a *API) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// writeFloatingIPs lists the Floating IPs, sorted by address, on one page.
-// A Floating IP's ID is its position in the list.
+// writeFloatingIPs gives each Floating IP its position as its ID, which
+// assign relies on.
 func (a *API) writeFloatingIPs(w http.ResponseWriter) {
 	type floatingIP struct {
 		ID     int64  `json:"id"`
@@ -151,7 +148,6 @@ func (a *API) writeFloatingIPs(w http.ResponseWriter) {
 	writeJSON(w, map[string]any{"floating_ips": list, "meta": map[string]any{"pagination": map[string]any{"next_page": nil}}})
 }
 
-// writeServers lists the servers, sorted by ID, on one page.
 func (a *API) writeServers(w http.ResponseWriter) {
 	list := []map[string]int64{}
 	for _, id := range slices.Sorted(maps.Keys(a.servers)) {
@@ -164,7 +160,6 @@ func (a *API) sortedFloatingIPs() []netip.Addr {
 	return slices.SortedFunc(maps.Keys(a.floatingIPs), netip.Addr.Compare)
 }
 
-// assign routes the Floating IP with the ID to the server in the body.
 func (a *API) assign(w http.ResponseWriter, r *http.Request, idText string) {
 	var body struct {
 		Server int64 `json:"server"`
@@ -185,8 +180,6 @@ func (a *API) assign(w http.ResponseWriter, r *http.Request, idText string) {
 	writeJSON(w, map[string]any{"action": map[string]any{"id": 1, "status": "success"}})
 }
 
-// serveServer answers /servers/<id> (GET, PUT of the labels) and its power
-// actions.
 func (a *API) serveServer(w http.ResponseWriter, r *http.Request, parts []string) {
 	id, err := strconv.ParseInt(parts[1], 10, 64)
 	found, ok := a.servers[id]
@@ -224,8 +217,7 @@ func (a *API) serveServer(w http.ResponseWriter, r *http.Request, parts []string
 	}
 }
 
-// actionFails reports whether the next action on the server fails, and
-// counts the failure.
+// actionFails also counts the failure down.
 func (a *API) actionFails(serverID int64) bool {
 	if a.failing[serverID] <= 0 {
 		return false

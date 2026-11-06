@@ -31,9 +31,8 @@ const (
 	// snapshotThreshold is how many entries Raft writes before it takes a
 	// snapshot. Raft then cuts the log before the snapshot.
 	snapshotThreshold = 8192
-	// keptSnapshots is how many snapshots stay on disk.
-	keptSnapshots = 2
-	// storeFile is the file in Dir that holds the log and stable store.
+	keptSnapshots     = 2
+	// storeFile holds the log and the stable store.
 	storeFile = "raft.db"
 	// proposeTimeout bounds how long a command waits to be committed.
 	proposeTimeout = 10 * time.Second
@@ -205,12 +204,10 @@ func (n *Node) Propose(ctx context.Context, cmd state.Command) (uint64, error) {
 	return future.Index(), nil
 }
 
-// CatchUp waits until the state holds what the log holds, because after a
-// restart Raft replays the log in the background. It waits for a leader.
-// On the leader, it also waits until the barrier has made sure that every
-// entry is applied (followLead). A follower knows only what its leader has
-// sent it so far. So before a follower acts on the state, it asks for the
-// leader's commit index and waits for it (WaitCommitted).
+// CatchUp waits for a leader, because after a restart Raft replays the log
+// in the background. On the leader, it also waits for followLead's barrier.
+// A follower knows only what its leader has sent it so far, so before it
+// acts on the state it waits for the leader's commit index (WaitCommitted).
 func (n *Node) CatchUp(ctx context.Context) error {
 	for {
 		_, known := n.Leader()

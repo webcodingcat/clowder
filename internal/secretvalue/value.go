@@ -1,8 +1,5 @@
-// Package secretvalue seals and opens the values of a SealedSecret. A
-// sealed value is age's ciphertext for the cluster's sealing key, written
-// as one line of Base64, as kubeseal writes a value of spec.encryptedData.
-// age encrypts an envelope that binds the value to its Secret (by ID). So
-// a value copied to another Secret is refused when it is opened.
+// Package secretvalue seals and opens the values of a SealedSecret, each
+// bound to the ID of its Secret (docs/developing/specs.md).
 //
 // No error message contains a value. A file may be read with a wrong key
 // or be broken, and the message goes to a terminal or a log.
@@ -30,8 +27,8 @@ type Value struct {
 }
 
 // envelope is what age encrypts. encoding/json writes the []byte value as
-// Base64. So no escaping changes its size, UTF-8 does not matter, and
-// binary values need no other format.
+// Base64, so no escaping changes its size and binary values need no other
+// format.
 type envelope struct {
 	Version int    `json:"v"`
 	For     string `json:"for"`
@@ -62,9 +59,8 @@ func Seal(value Value, recipient age.Recipient) (string, error) {
 	return base64.StdEncoding.EncodeToString(ciphertext.Bytes()), nil
 }
 
-// OpenFor decrypts a value that was found in the Secret with the ID want.
-// It refuses a value meant for another Secret, such as the Hetzner token
-// of clowder-system copied into a stack's Secret.
+// OpenFor decrypts a value that was found in the Secret with the ID want,
+// and refuses a value meant for another Secret.
 func OpenFor(sealed, want string, identities ...age.Identity) (Value, error) {
 	opened, err := Open(sealed, identities...)
 	if err != nil {
@@ -77,8 +73,7 @@ func OpenFor(sealed, want string, identities ...age.Identity) (Value, error) {
 }
 
 // Open decrypts a sealed value with one of the identities. The caller must
-// check that the value is meant for the Secret where it was found
-// (Value.For), or use OpenFor, which does that check.
+// check Value.For, or use OpenFor.
 func Open(sealed string, identities ...age.Identity) (Value, error) {
 	// base64's errors name only an offset, never the text
 	ciphertext, err := base64.StdEncoding.DecodeString(sealed)

@@ -15,8 +15,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/pki"
 )
 
-// fromAHost tells the user how to get credentials. Messages that need to
-// explain this use it.
+// fromAHost tells the user how to get credentials.
 const fromAHost = "ssh root@<host> clowderd credentials | clowder config import -"
 
 func newConfig(g *globals) *cobra.Command {
@@ -102,7 +101,6 @@ func newDeleteContext(g *globals) *cobra.Command {
 	}
 }
 
-// importFlags are the flags of clowder config import.
 type importFlags struct {
 	as      string
 	replace bool
@@ -146,8 +144,6 @@ func newImport(g *globals) *cobra.Command {
 	return command
 }
 
-// changeConfig reads the credentials file, changes it and writes it back.
-// Then it prints what it did and which context is current.
 func (g *globals) changeConfig(out io.Writer, done string, change func(config *clientconfig.Config) error) error {
 	config, path, err := g.readConfig()
 	if err != nil {
@@ -167,7 +163,6 @@ func (g *globals) changeConfig(out io.Writer, done string, change func(config *c
 	return err
 }
 
-// readImport reads the file to import, or stdin for "-".
 func readImport(stdin io.Reader, path string) (clientconfig.Config, error) {
 	var content []byte
 	var err error

@@ -1,9 +1,6 @@
 // Package stackspec describes a stack in clowder's own schema, not as a
-// Compose file. Compose is only the way the agent runs a stack on a host:
-// the agent renders the Compose file from the spec (compose.Render). A
-// field that the schema does not have is an error, so only what clowder
-// knows can run. The package does no I/O, because the CLI, the API and
-// the state share it.
+// Compose file. It does no I/O, because the CLI, the API and the state
+// share it.
 package stackspec
 
 import (
@@ -22,9 +19,8 @@ import (
 // names no priority of its own.
 type Spec struct {
 	// Priority is a number from 0 to 1000 or a category of the
-	// configuration. Empty means the cluster's default. The scheduler
-	// looks the default up when it places the stack, so a change of the
-	// configuration changes no stored spec.
+	// configuration. Empty means the cluster's default, which the
+	// scheduler looks up when it places the stack.
 	Priority string             `yaml:"priority,omitempty" json:"priority,omitempty"`
 	Services map[string]Service `yaml:"services" json:"services"`
 }
@@ -42,9 +38,8 @@ type Service struct {
 	// Env takes any YAML scalar and keeps the text as written (8080, 1.0,
 	// yes). The container sees every value as a string anyway.
 	Env map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
-	// SecretEnv sets variables to values of the namespace's secrets. It
-	// maps each variable to a secret and key, like Kubernetes'
-	// secretKeyRef.
+	// SecretEnv maps variables to a key of the namespace's secrets, like
+	// Kubernetes' secretKeyRef.
 	SecretEnv map[string]names.SecretKeyRef `yaml:"secretEnv,omitempty" json:"secretEnv,omitempty"`
 	// Secrets names secrets of the namespace. Each one appears as a
 	// directory /run/secrets/<name> with a file per key, as Kubernetes
@@ -64,7 +59,7 @@ type Service struct {
 	DependsOn   []string     `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
 	Healthcheck *Healthcheck `yaml:"healthcheck,omitempty" json:"healthcheck,omitempty"`
 	// Restart is always (the default), no, on-failure or on-failure:<n>.
-	// The supervisor applies it. Docker never restarts a container itself.
+	// The supervisor applies it, not Docker.
 	Restart string `yaml:"restart,omitempty" json:"restart,omitempty"`
 	// RestartUnhealthy restarts a container that turns unhealthy. It is
 	// true by default; read it with RestartsUnhealthy.
@@ -83,8 +78,7 @@ type Service struct {
 	CapDrop     []string `yaml:"capDrop,omitempty" json:"capDrop,omitempty"`
 	Privileged  bool     `yaml:"privileged,omitempty" json:"privileged,omitempty"`
 	SecurityOpt []string `yaml:"securityOpt,omitempty" json:"securityOpt,omitempty"`
-	// Priority is the service's own priority. If it is empty, the stack's
-	// priority applies.
+	// Priority is empty for the stack's priority.
 	Priority string `yaml:"priority,omitempty" json:"priority,omitempty"`
 }
 
@@ -130,9 +124,8 @@ type Healthcheck struct {
 	Retries     int      `yaml:"retries,omitempty" json:"retries,omitempty"`
 }
 
-// Resources are what a service reserves and its limits. The scheduler
-// places a service by its reservations. Without them, it uses the
-// configuration's defaults.reservations.
+// Resources are what a service reserves and its limits. A service without
+// reservations reserves the configuration's defaults.reservations.
 type Resources struct {
 	Reserve *Amount `yaml:"reserve,omitempty" json:"reserve,omitempty"`
 	Limit   *Amount `yaml:"limit,omitempty" json:"limit,omitempty"`
@@ -144,14 +137,9 @@ type Amount struct {
 	CPUs   float64 `yaml:"cpus,omitempty" json:"cpus,omitempty"`
 }
 
-// Decode reads a spec as users write it, in YAML. A field that the schema
-// does not have is an error, so a typo is not silently ignored.
-//
-// JSON is YAML too, so the API also uses Decode for a spec that the CLI
-// sends as JSON. The CLI keeps each number as written
-// (resource.ParseDocuments), so an env value of 1.0 arrives as "1.0". A
-// number that JSON cannot hold as written arrives as YAML reads it (0x10
-// as "16"). A boolean arrives as true or false.
+// Decode reads a spec in YAML, or in JSON, which is YAML too. A field that
+// the schema does not have is an error, so that a typo is not silently
+// ignored.
 func Decode(data []byte) (Spec, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)

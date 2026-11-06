@@ -81,16 +81,14 @@ func FormatSize(size int64) string {
 	return strconv.FormatInt(size, 10) + "B"
 }
 
-// Size is a size in bytes as a spec holds it. It is read with ParseSize.
-// It is written exactly, in the largest unit that holds it whole ("1G",
-// "1536M"). So a size that the user wrote as 1024M reads back as 1G, and
-// every written size can be read back. A size of 0 means no size: it is
-// written as "" and reads back as 0. The spec's check refuses it.
+// Size is a size in bytes as a spec holds it, read with ParseSize and
+// written exactly in the largest unit that holds it whole ("1G", "1536M"),
+// so that every written size reads back. A size of 0 means no size and is
+// written as ""; the spec's check refuses it.
 type Size int64
 
-// MarshalText writes the size in the largest unit that holds it whole. It
-// refuses a negative size or one that is not whole kibibytes, because
-// ParseSize never returns such a size.
+// MarshalText refuses a negative size or one that is not whole kibibytes,
+// because ParseSize never returns such a size.
 func (s Size) MarshalText() ([]byte, error) {
 	switch {
 	case s == 0:

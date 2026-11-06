@@ -11,9 +11,8 @@ import (
 )
 
 // Beats records the beats that this agent receives from hosts
-// (controller.Heard is the real implementation). Every agent sends beats to
-// every voter. Before the leader treats a host as failed, it asks the
-// voters how long they have not heard from that host.
+// (controller.Heard). The leader asks the voters for them before it treats
+// a host as failed.
 type Beats interface {
 	Beat(host state.HostID)
 	Silence(host state.HostID) time.Duration
@@ -32,7 +31,6 @@ func (s *Server) localBeat(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// localSilence answers how long this agent has not heard from a host.
 func (s *Server) localSilence(w http.ResponseWriter, r *http.Request) {
 	number, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil {

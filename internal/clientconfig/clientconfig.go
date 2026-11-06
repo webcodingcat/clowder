@@ -1,14 +1,6 @@
 // Package clientconfig reads and writes the CLI's credentials file, which
-// is like kubectl's kubeconfig. The file holds contexts, each the way into
-// one cluster, and names the current context. clowderd credentials prints
-// a file with one context, and clowder config import adds it to the user's
-// file. The package is portable (Linux, macOS, Windows).
-//
-// Unlike in a kubeconfig, a context holds everything itself, with no
-// clusters and users to join by name. It lists several endpoints, which
-// the CLI tries in turn, so a cluster needs nothing in front of it. The
-// file's keys are snake_case, like every clowder file that is not a
-// resource.
+// is like kubectl's kubeconfig (docs/developing/specs.md). It is portable
+// (Linux, macOS, Windows).
 package clientconfig
 
 import (
@@ -49,16 +41,13 @@ type Config struct {
 
 // Context is the way into one cluster: the agents to ask, the CA that
 // their certificates must come from, and the CLI's key and certificate.
-// Whoever holds a context controls the cluster, as with kubeadm's
-// admin.conf.
+// Whoever holds a context controls the cluster.
 type Context struct {
-	// Name is chosen by the user, as in a kubeconfig. It may be any text
-	// that is not empty, because it names no file and is sent nowhere.
-	// clowderd credentials names it after the cluster.
+	// Name may be any text that is not empty, because it names no file and
+	// is sent nowhere.
 	Name string `yaml:"name"`
-	// Endpoints are the agents that the CLI asks, in turn: the hosts'
-	// public addresses, or one address in front of them. Each uses the
-	// API's port unless it names its own. The CLI learns no other agents.
+	// Endpoints are asked in turn. Each uses the API's port unless it names
+	// its own.
 	Endpoints   []string `yaml:"endpoints"`
 	CA          string   `yaml:"ca"`
 	Certificate string   `yaml:"certificate"`
@@ -66,8 +55,7 @@ type Context struct {
 }
 
 // Path returns the file that the CLI reads: the flag, or else
-// $CLOWDER_CONFIG, or else ~/.clowder/config, like kubectl's
-// ~/.kube/config.
+// $CLOWDER_CONFIG, or else ~/.clowder/config.
 func Path(flag string) (string, error) {
 	for _, candidate := range []string{flag, os.Getenv(EnvVar)} {
 		if candidate != "" {
@@ -114,8 +102,6 @@ func Parse(content []byte) (Config, error) {
 	return config, nil
 }
 
-// check checks that every context has what the CLI needs, and that the
-// current context is one of them.
 func (c Config) check() error {
 	var seen []string
 	for _, cliContext := range c.Contexts {
@@ -181,7 +167,6 @@ func (c Config) Context(name string) (Context, error) {
 	return c.Contexts[index], nil
 }
 
-// index returns the position of the context of that name, or -1.
 func (c Config) index(name string) int {
 	return slices.IndexFunc(c.Contexts, func(cliContext Context) bool { return cliContext.Name == name })
 }
@@ -195,9 +180,8 @@ func (c *Config) Add(cliContext Context) error {
 	return c.Put(cliContext)
 }
 
-// Put adds a context. If a context of the same name exists, Put replaces it
-// in the same position, as new credentials replace old ones. The first
-// context becomes the current one.
+// Put adds a context, or replaces the one of the same name in its position.
+// The first context becomes the current one.
 func (c *Config) Put(cliContext Context) error {
 	if err := cliContext.check(); err != nil {
 		return err

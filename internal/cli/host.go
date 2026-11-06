@@ -57,7 +57,6 @@ func newHost(g *globals) *cobra.Command {
 	return host
 }
 
-// newJoinToken builds the subcommand that creates a join token.
 func newJoinToken(g *globals) *cobra.Command {
 	var ttl time.Duration
 	var roles string
@@ -98,8 +97,6 @@ func newJoinToken(g *globals) *cobra.Command {
 	return command
 }
 
-// newHostAction builds the subcommand for one host action. A final action
-// asks for confirmation first.
 func newHostAction(g *globals, action api.HostAction) *cobra.Command {
 	var yes bool
 	command := &cobra.Command{
@@ -142,9 +139,8 @@ func newHostAction(g *globals, action api.HostAction) *cobra.Command {
 	return command
 }
 
-// confirmHost asks for the host's name before an action that cannot be
-// undone. Without a terminal, --yes is the only way to confirm. The
-// question goes to stderr, so it shows even when stdout is redirected.
+// confirmHost asks for the host's name on stderr, so that the question
+// shows even when stdout is redirected.
 func confirmHost(cmd *cobra.Command, action, name string) error {
 	in, ok := cmd.InOrStdin().(*os.File)
 	if !ok || !term.IsTerminal(int(in.Fd())) {
@@ -163,7 +159,6 @@ func confirmHost(cmd *cobra.Command, action, name string) error {
 	return nil
 }
 
-// findHost finds a host by its name or ID.
 func findHost(hosts []api.HostInfo, nameOrID string) (api.HostInfo, error) {
 	for _, host := range hosts {
 		if host.Name == nameOrID || strconv.Itoa(host.ID) == nameOrID {

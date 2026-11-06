@@ -50,7 +50,6 @@ var checks = []check{
 	{"floating ip", checkFloatingIP},
 }
 
-// sysctl checks that a /proc/sys file holds want.
 func sysctl(path, want, why string) func(context.Context, Host, Options) (Status, string) {
 	return func(_ context.Context, host Host, _ Options) (Status, string) {
 		value, err := readTrimmed(host, path)

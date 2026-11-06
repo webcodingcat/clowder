@@ -42,7 +42,6 @@ func (d Driver) ForgetPeer(ctx context.Context, peer int) error {
 	if err != nil {
 		return err
 	}
-	// a host without replicated volumes has no file: Glob finds none
 	files, err := filepath.Glob(filepath.Join(d.ResourceDir, "clw-*.res"))
 	if err != nil {
 		return fmt.Errorf("list the DRBD resource files: %w", err)
@@ -77,9 +76,7 @@ func (d Driver) ForgetPeerOf(ctx context.Context, resource string, peer int) err
 	return d.forgetPeerOf(ctx, up, peer)
 }
 
-// forgetPeerOf runs forget-peer on a resource that is up, unless it still
-// has the peer configured. A tiebreaker has no metadata, so it has nothing
-// to forget.
+// forgetPeerOf skips a tiebreaker: it has no metadata, so nothing to forget.
 func (d Driver) forgetPeerOf(ctx context.Context, resource drbdResource, peer int) error {
 	if resource.disk() == DiskDiskless {
 		return nil

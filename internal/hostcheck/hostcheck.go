@@ -61,7 +61,6 @@ type Options struct {
 	FloatingIP netip.Addr
 }
 
-// check is one named check.
 type check struct {
 	name string
 	run  func(ctx context.Context, host Host, options Options) (Status, string)
@@ -101,7 +100,6 @@ func Print(out io.Writer, results []Result) error {
 	return nil
 }
 
-// readTrimmed reads a file and trims white space.
 func readTrimmed(host Host, path string) (string, error) {
 	content, err := host.ReadFile(path)
 	return strings.TrimSpace(string(content)), err

@@ -17,14 +17,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// CLI credentials come from root on a host, the first ones too, like
-// kubeadm's admin.conf. clowderd credentials creates a key. It then asks
-// its own agent, with the host's certificate, for a CLI certificate (POST
-// /v1/internal/credentials). The CA is trusted through SSH. The cluster
-// keeps no list of CLI certificates. With RevokeOlder, the agent also
-// commits the new certificate's start time as the cutoff (set-cli-cutoff).
-// Every agent then refuses the CLI certificates issued before it.
-
 // CredentialsRequest asks for a CLI certificate for a public key. Name is
 // for the audit; without it, the name is pki.DefaultCLIName.
 type CredentialsRequest struct {
@@ -39,14 +31,10 @@ type CredentialsAnswer struct {
 	CACertificate string `json:"ca_certificate"`
 	Certificate   string `json:"certificate"`
 	ClusterName   string `json:"cluster_name"`
-	// Endpoints are the public addresses of the control-plane hosts that
-	// are not removed, as the state knows them now. Only these hosts serve
-	// the CLI.
+	// Endpoints are the control-plane hosts as the state knows them now.
 	Endpoints []string `json:"endpoints"`
 }
 
-// internalCredentials issues a CLI certificate for root on a host. If
-// asked, it also sets the cutoff to the certificate's start time.
 func (s *Server) internalCredentials(w http.ResponseWriter, r *http.Request) {
 	var request CredentialsRequest
 	if err := decodeStrict(r.Body, &request); err != nil {
@@ -105,11 +93,9 @@ func (s *Server) internalCredentials(w http.ResponseWriter, r *http.Request) {
 	answer := CredentialsAnswer{CACertificate: string(ca.CertificatePEM()), Certificate: string(certificatePEM)}
 	s.config.Cluster.Read(func(current *state.State) {
 		answer.ClusterName = current.ClusterName
-		// without a port: the client adds the API's port (Address). List
-		// every control-plane host that is not removed. A host that is down
-		// now may be back later. Until then it costs the CLI only its
-		// connect timeout once per command, because the client starts with
-		// the endpoint that answered last.
+		// without a port: the client adds the API's port (Address). A host
+		// that is down now may be back later, and costs the CLI only one
+		// connect timeout per command until then.
 		for _, id := range slices.Sorted(maps.Keys(current.Hosts)) {
 			if host := current.Hosts[id]; host.Phase != state.Removed && host.Roles.Has(hostrole.ControlPlane) {
 				answer.Endpoints = append(answer.Endpoints, host.PublicAddress.String())
@@ -119,7 +105,6 @@ func (s *Server) internalCredentials(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, answer)
 }
 
-// authority decrypts the cluster CA from the state with the data key.
 func (s *Server) authority() (*pki.CA, error) {
 	var keys *state.ClusterKeys
 	s.config.Cluster.Read(func(current *state.State) {
@@ -138,10 +123,8 @@ func (s *Server) authority() (*pki.CA, error) {
 	return pki.LoadCA(keys.CACertificate, keyPEM)
 }
 
-// cliCutoffPassed tells whether a CLI certificate that starts at notBefore
-// was issued after the cluster's cutoff. The cutoff is the only way to end
-// a CLI certificate before it expires. Certificate times count in seconds,
-// so a certificate issued in the same second as the new one stays valid.
+// cliCutoffPassed keeps a certificate issued in the same second as the
+// cutoff valid, because certificate times count in seconds.
 func (s *Server) cliCutoffPassed(notBefore time.Time) bool {
 	var cutoff time.Time
 	s.config.Cluster.Read(func(current *state.State) { cutoff = current.CLICutoff })

@@ -15,15 +15,9 @@ import (
 // alert by itself.
 const noLeaderFor = 2 * time.Minute
 
-// QuorumWatch sends alerts from this agent while it knows no Raft leader.
-// Without a majority of the voters there is no leader, so the leader's
-// alerts are silent. That happens, for example, when two hosts of three
-// are down, or when this host is cut off. The watch alerts the channels
-// once there has been no leader for noLeaderFor, reminds them every
-// remindEvery, and sends the all-clear when a leader is back. It takes the
-// channels and their secrets from this agent's own state, the last one it
-// applied. It keeps what it sent in memory only, so an agent that restarts
-// without a leader alerts the channels again.
+// QuorumWatch sends alerts from this agent while it knows no Raft leader, so
+// while the leader's alerts are silent. It takes the channels from this
+// agent's own last state and keeps what it sent in memory only.
 type QuorumWatch struct {
 	alerts *Alerts
 	host   string
@@ -63,9 +57,8 @@ func (w *QuorumWatch) Run(ctx context.Context) {
 	}
 }
 
-// round checks whether this agent knows a leader, queues the message that
-// is due for each channel, and sends the pending messages. A channel that
-// fails gets its message again in the next round.
+// round leaves a message pending for a channel that fails, so that the
+// channel gets it again in the next round.
 func (w *QuorumWatch) round(ctx context.Context, now time.Time) {
 	if w.leader() {
 		if w.open {
@@ -88,10 +81,9 @@ func (w *QuorumWatch) round(ctx context.Context, now time.Time) {
 	w.deliver(ctx)
 }
 
-// tell queues a message for every channel that takes critical alerts.
-// Without channels there is nobody to tell, but the message still counts as
-// sent. If a channel has not taken the raised message yet, the all-clear
-// drops it, and the channel gets neither.
+// tell counts a message as sent even without channels. If a channel has not
+// taken the raised message yet, the all-clear drops it, and the channel gets
+// neither.
 func (w *QuorumWatch) tell(event string, now time.Time) {
 	copied := w.alerts.cluster.SharedCopy()
 	w.toldAt = now
@@ -118,7 +110,6 @@ func (w *QuorumWatch) tell(event string, now time.Time) {
 	}
 }
 
-// deliver sends the pending messages.
 func (w *QuorumWatch) deliver(ctx context.Context) {
 	if len(w.pending) == 0 {
 		return

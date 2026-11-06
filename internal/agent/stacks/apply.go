@@ -24,10 +24,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// apply runs one stack: it opens its secrets, finds its volume copies,
-// renders its Compose file, brings the stack up and reports it as running.
-// inUse holds the LVs that a stack which failed to stop (stopLeavers) may
-// still write to, so that no other stack takes them yet.
+// apply leaves alone the LVs in inUse: a stack that failed to stop may
+// still write to them.
 func (r *Runner) apply(ctx context.Context, desired desiredState, stack *state.Stack, inUse volumesInUse) error {
 	secrets, err := r.openSecrets(desired, stack)
 	if err != nil {
@@ -56,16 +54,9 @@ func (r *Runner) apply(ctx context.Context, desired desiredState, stack *state.S
 	return r.reportRunning(ctx, stack, secrets)
 }
 
-// errVolumeNotReady is what apply returns for a stack that must wait,
-// because the volume reconciler has not mounted one of its copies yet.
 var errVolumeNotReady = errors.New("a volume is not mounted on this host yet")
 
-// stackVolumes returns this host's mounted copies of the volumes that a
-// stack names, by name. It returns errVolumeInUse when a stack that failed
-// to stop may still use one of them, and errVolumeNotReady while one of
-// them is not mounted.
-//
-// The answer may be outdated by the time compose up runs. The reconciler
+// stackVolumes may be outdated by the time compose up runs. The reconciler
 // may read a newer state in which the stack has left, and unmount a copy
 // before writeStackFiles lists the LVs as held. Then compose up fails on
 // the missing data/ (the mount guard), and the next pass stops the stack.
@@ -97,7 +88,6 @@ func (r *Runner) stackVolumes(desired desiredState, stack *state.Stack, inUse vo
 	return volumes, nil
 }
 
-// render renders a stack's Compose file for this host.
 func (r *Runner) render(desired desiredState, stack *state.Stack, volumes map[string]compose.MountedVolume,
 	secrets stackSecrets,
 ) ([]byte, error) {
@@ -117,11 +107,8 @@ func (r *Runner) render(desired desiredState, stack *state.Stack, volumes map[st
 	return rendered, nil
 }
 
-// up writes a stack's files and runs compose up without the pushed-out
-// services, unless exactly this has already come up. First it pulls the
-// images of the services that a user restarted since their containers came
-// up. A failed pull or compose up is tried again at the next pass. Both
-// use the registry logins in the Docker config directory config.
+// up pulls and runs compose up with the registry logins in the Docker
+// config directory config.
 func (r *Runner) up(ctx context.Context, config string, stack *state.Stack, rendered []byte, secrets stackSecrets,
 	volumes map[string]compose.MountedVolume,
 ) error {
@@ -152,20 +139,16 @@ func (r *Runner) up(ctx context.Context, config string, stack *state.Stack, rend
 		return err
 	}
 	r.setApplied(project, upNow)
-	// The containers of the previous Compose file are gone, so the list of
-	// LVs shrinks to the new ones. If that write fails, the longer list
-	// stays. It only makes another stack wait a bit longer for a volume, so
-	// the stack still counts as up.
+	// the containers of the previous Compose file are gone, so the list of
+	// LVs shrinks to the new ones. A longer list left by a failed write only
+	// makes another stack wait a bit longer, so the stack still counts as up.
 	if err := r.writeMountedLVs(project, lvsOf(volumes)); err != nil {
 		r.logger.Warn("shorten the volumes a stack mounts", "project", project, "error", err)
 	}
 	return r.removeStaleSecrets(project, secrets)
 }
 
-// writeStackFiles writes the files that compose up reads, apart from the
-// secrets (writeSecrets): the LVs that the stack mounts (addMountedLVs) and
-// its Compose file. It returns the Compose files: the stack's file and, if
-// the stack has secret variables, the file with those.
+// writeStackFiles returns the Compose files for compose up.
 func (r *Runner) writeStackFiles(project string, rendered []byte, secrets stackSecrets,
 	volumes map[string]compose.MountedVolume,
 ) ([]string, error) {
@@ -185,7 +168,6 @@ func (r *Runner) writeStackFiles(project string, rendered []byte, secrets stackS
 	return files, nil
 }
 
-// lvsOf returns the LVs of a stack's volumes.
 func lvsOf(volumes map[string]compose.MountedVolume) []string {
 	lvs := []string{}
 	for _, volume := range volumes {
@@ -194,18 +176,13 @@ func lvsOf(volumes map[string]compose.MountedVolume) []string {
 	return lvs
 }
 
-// addMountedLVs adds the LVs that a stack is about to mount to its
-// volumes.json (stackVolumesFile), the list of LVs that its containers may
-// hold. If the stack fails to stop after it left this host, no other stack
-// may take them (markInUse). The LVs listed before stay, because the
-// containers of the previous Compose file keep theirs until compose up
-// succeeds. After that, up lists only the new ones.
+// addMountedLVs keeps the LVs listed before, because the containers of the
+// previous Compose file keep theirs until compose up succeeds.
 //
-// If the list cannot be read, the outcome depends on the Compose file.
-// Without a Compose file, the stack has no containers yet, and the list
-// becomes just the new LVs. With a Compose file, the stack's containers may
-// hold any LV. The file is then left as it is, and markInUse, which cannot
-// read it either, counts every volume as in use until compose up succeeds.
+// If the list cannot be read and there is no Compose file, the stack has no
+// containers yet, and the list becomes just the new LVs. With a Compose
+// file, the containers may hold any LV: the file is left as it is, and
+// markInUse, which cannot read it either, counts every volume as in use.
 func (r *Runner) addMountedLVs(project string, lvs []string) error {
 	held, err := r.files.readMountedLVs(project)
 	if err != nil {
@@ -218,7 +195,6 @@ func (r *Runner) addMountedLVs(project string, lvs []string) error {
 	return r.writeMountedLVs(project, append(held, lvs...))
 }
 
-// writeMountedLVs writes the LVs that a stack's containers may hold, sorted.
 func (r *Runner) writeMountedLVs(project string, lvs []string) error {
 	lvs = slices.Compact(slices.Sorted(slices.Values(lvs)))
 	encoded, err := json.Marshal(lvs)
@@ -228,7 +204,6 @@ func (r *Runner) writeMountedLVs(project string, lvs []string) error {
 	return atomicfile.Write(r.files.stackVolumesFile(project), encoded, 0o600)
 }
 
-// readMountedLVs reads the LVs that a stack's containers may hold.
 func (f Files) readMountedLVs(project string) ([]string, error) {
 	var lvs []string
 	content, err := os.ReadFile(f.stackVolumesFile(project))
@@ -241,8 +216,6 @@ func (f Files) readMountedLVs(project string) ([]string, error) {
 	return lvs, nil
 }
 
-// pullRestarted pulls the images of the services that a user restarted
-// since their containers came up (restartedSinceUp).
 func (r *Runner) pullRestarted(ctx context.Context, config, project string, files []string,
 	restarted map[string]time.Time,
 ) error {
@@ -259,14 +232,10 @@ func (r *Runner) pullRestarted(ctx context.Context, config, project string, file
 	return nil
 }
 
-// restartedSinceUp returns the services, sorted, whose containers carry a
-// different restart time than the state (compose.LabelRestarted), because a
-// user restarted them since. compose up recreates them because of the new
-// label.
-// Their images are pulled first, because an image may have changed under
-// the same tag. Docker keeps the label, so nothing is pulled again after a
-// reboot or an agent restart. A service without a container gets its image
-// from compose up anyway.
+// restartedSinceUp finds the services to pull before compose up recreates
+// them, because an image may have changed under the same tag. Docker keeps
+// the label, so nothing is pulled again after a reboot or an agent restart.
+// A service without a container gets its image from compose up anyway.
 func (r *Runner) restartedSinceUp(ctx context.Context, project string, restarted map[string]time.Time) ([]string, error) {
 	if len(restarted) == 0 {
 		return nil, nil
@@ -286,9 +255,8 @@ func (r *Runner) restartedSinceUp(ctx context.Context, project string, restarted
 	return slices.Compact(slices.Sorted(slices.Values(services))), nil
 }
 
-// upHash hashes everything that compose up reads: the rendered file, the
-// secret variables, the secret files and the services left out (the state
-// keeps them sorted).
+// upHash hashes everything that compose up reads. pushedOut must be sorted,
+// as the state keeps it.
 func upHash(rendered []byte, secrets stackSecrets, pushedOut []string) [32]byte {
 	hash := sha256.New()
 	digest.WriteParts(hash, rendered, secrets.env)
@@ -303,10 +271,8 @@ func upHash(rendered []byte, secrets stackSecrets, pushedOut []string) [32]byte 
 	return [32]byte(hash.Sum(nil))
 }
 
-// reportRunning reports a stack as running with the secrets that its
-// containers came up with. A new generation or a restart sets the stack to
-// starting, so a stack that is running with the same secrets has nothing
-// new to report.
+// reportRunning reports nothing for a stack that runs with the same
+// secrets: a new generation or a restart would have set it to starting.
 func (r *Runner) reportRunning(ctx context.Context, stack *state.Stack, secrets stackSecrets) error {
 	if stack.Status == state.StackRunning && maps.Equal(stack.AppliedSecrets, secrets.digests) {
 		return nil

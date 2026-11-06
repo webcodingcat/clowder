@@ -30,8 +30,7 @@ type Client struct {
 	http      *http.Client
 	streaming *http.Client
 	version   string
-	// written is the index of this client's last write.
-	written uint64
+	written   uint64
 	// answered is the endpoint that answered last; the next request tries
 	// it first. It is atomic because a watch runs beside other requests.
 	answered atomic.Pointer[string]
@@ -39,13 +38,8 @@ type Client struct {
 
 // NewClient connects to the agents at endpoints with a certificate: the
 // CLI's, or a host's for clowderd's own commands. It accepts only
-// control-plane hosts. A worker among the endpoints fails the handshake and
+// control-plane hosts; a worker among the endpoints fails the handshake and
 // is skipped like an endpoint that cannot be reached.
-//
-// An endpoint is also skipped if it has not connected within
-// connectTimeout, or has not finished TLS within the same time again. A
-// host that is cut off drops the packets. Without this shorter timeout,
-// the whole request's timeout would pass before the next endpoint is tried.
 func NewClient(endpoints []string, connectTimeout time.Duration, certificate tls.Certificate, ca *x509.Certificate,
 	version string,
 ) *Client {
@@ -63,15 +57,14 @@ func NewClient(endpoints []string, connectTimeout time.Duration, certificate tls
 const answerTimeout = 30 * time.Second
 
 // DefaultConnectTimeout is how long the CLI waits for an endpoint to
-// connect, and again for TLS, unless --connect-timeout sets another value.
-// It is long enough for a TLS handshake across the internet. It is short
-// enough that a host that is cut off (and drops packets) does not hold up
-// the next endpoint for long.
+// connect, and again for TLS: long enough for a TLS handshake across the
+// internet, short enough that a host that is cut off does not hold up the
+// next endpoint for long.
 const DefaultConnectTimeout = 5 * time.Second
 
 // endpointTransport is the transport of every client that asks endpoints.
-// The TCP connection and the TLS handshake each get connectTimeout. So an
-// endpoint that does not answer fails soon, and the next one is tried.
+// A host that is cut off drops the packets, so without connectTimeout the
+// request's own timeout would pass before the next endpoint is tried.
 func endpointTransport(tlsConfig *tls.Config, connectTimeout time.Duration) *http.Transport {
 	return &http.Transport{
 		TLSClientConfig:     tlsConfig,
@@ -90,9 +83,8 @@ func (c *Client) Post(ctx context.Context, path string, in any) (Written, error)
 	return c.sendChange(ctx, http.MethodPost, path, in)
 }
 
-// Act posts in (nil for no body) to path and reads the answer into out.
-// It is for an action whose answer is more than the index of a write, such
-// as a test alert or a join token.
+// Act posts in (nil for no body) to path and reads the answer into out,
+// for an action whose answer is more than the index of a write.
 func (c *Client) Act(ctx context.Context, path string, in, out any) error {
 	var body []byte
 	if in != nil {
@@ -152,9 +144,8 @@ func (c *Client) Stream(ctx context.Context, path string, out io.Writer) error {
 }
 
 // Watch passes each event of a watch (GET /v1/watch) to each. It returns
-// nil when ctx ends, and io.EOF when the agent ends the stream. The agent
-// ends the stream when its ring has dropped changes that the client has
-// not read yet. The client then lists again.
+// nil when ctx ends, and io.EOF when the agent ends the stream; the caller
+// then lists again.
 func (c *Client) Watch(ctx context.Context, path string, each func(event WatchEvent) error) error {
 	body, err := c.openStream(ctx, path)
 	if err != nil {
@@ -179,9 +170,7 @@ func (c *Client) Watch(ctx context.Context, path string, each func(event WatchEv
 	}
 }
 
-// openStream asks the first endpoint that answers for path, without a
-// timeout. The answer streams until ctx ends. An answer other than 2xx
-// becomes a StatusError.
+// openStream has no timeout: the answer streams until ctx ends.
 func (c *Client) openStream(ctx context.Context, path string) (io.ReadCloser, error) {
 	var unreachable []string
 	for _, endpoint := range c.inTurn() {
@@ -208,9 +197,8 @@ func (c *Client) openStream(ctx context.Context, path string) (io.ReadCloser, er
 	return nil, fmt.Errorf("no agent answered:\n  %s", strings.Join(unreachable, "\n  "))
 }
 
-// inTurn returns the endpoints in the order to try them, with the one that
-// answered last first. So an endpoint that is down costs its connect
-// timeout once per command, not once per request.
+// inTurn puts the endpoint that answered last first, so an endpoint that
+// is down costs its connect timeout once per command, not once per request.
 func (c *Client) inTurn() []string {
 	last := c.answered.Load()
 	if last == nil {
@@ -223,8 +211,7 @@ func (c *Client) inTurn() []string {
 	return append(slices.Clone(c.endpoints[index:]), c.endpoints[:index]...)
 }
 
-// sendChange sends a request that changes the state. It remembers the
-// write's index, so that later reads wait for it.
+// sendChange remembers the write's index, so that later reads wait for it.
 func (c *Client) sendChange(ctx context.Context, method, path string, in any) (Written, error) {
 	var body []byte
 	if in != nil {
@@ -242,8 +229,8 @@ func (c *Client) sendChange(ctx context.Context, method, path string, in any) (W
 	return written, nil
 }
 
-// do sends a request to the first endpoint that answers. An endpoint that
-// cannot be reached is skipped. Any answer, even an error, ends the search.
+// do skips an endpoint that cannot be reached. Any answer, even an error,
+// ends the search.
 func (c *Client) do(ctx context.Context, method, path string, body []byte, out any) error {
 	var unreachable []string
 	for _, endpoint := range c.inTurn() {
@@ -279,8 +266,6 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	return fmt.Errorf("no agent answered:\n  %s", strings.Join(unreachable, "\n  "))
 }
 
-// isForeignCA tells whether an agent showed a certificate of a CA other
-// than the one in the user's credentials.
 func isForeignCA(err error) bool {
 	var unknown x509.UnknownAuthorityError
 	return errors.As(err, &unknown)
@@ -294,8 +279,7 @@ func foreignCA(endpoint string, err error) error {
 		"or one set up anew? (%w)", endpoint, err)
 }
 
-// statusError reads an answer that is not 2xx. It takes the message from
-// the API's Error, or else the plain text of the body.
+// statusError falls back to the body's plain text when it holds no Error.
 func statusError(response *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20)) // for the message only
 	var answer Error
@@ -305,8 +289,7 @@ func statusError(response *http.Response) error {
 	return &StatusError{Status: response.StatusCode, Message: answer.Message}
 }
 
-// send runs a request and decodes a 2xx answer into out. Any other answer
-// becomes a StatusError.
+// send turns an answer other than 2xx into a StatusError.
 func send(client *http.Client, request *http.Request, out any) error {
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)

@@ -14,20 +14,8 @@ import (
 )
 
 // Operation is a long task in steps, such as moving a stack or fencing a
-// host. The leader starts it. The owner of each step runs that step and
-// records it as done (advance-operation). The leader finishes the
-// operation. While it runs, it holds locks on what it changes, and nothing
-// else may change those things.
-//
-// Each step has a deadline. Before its point of no return, an operation
-// whose step fails or runs late rolls back (roll-back-operation). The
-// leader finishes it as failed once it is undone. A move is undone at
-// once: the placement gives up the copies that the move left once the
-// locks are free.
-//
-// There are two kinds: moving a stack (OperationMoveStack) and fencing a
-// host (OperationFenceHost). Fencing has no rollback: when the leader
-// cannot power the host off, it moves the host back to failed itself.
+// host. While it runs, it holds locks on what it changes, and nothing else
+// may change those things (docs/developing/state.md, Operations and locks).
 type Operation struct {
 	// ID is the Raft index of the command that started the operation. It
 	// is unique, and IDs sort by start.
@@ -41,13 +29,11 @@ type Operation struct {
 	// Owner runs the next step: a host, or nil for the leader.
 	Owner *HostID `json:"owner,omitempty"`
 	// Deadline is when the next step must be done (the leader's clock).
-	Deadline time.Time `json:"deadline,omitzero"`
-	State    OpState   `json:"state"`
-	Error    string    `json:"error,omitempty"`
-	// Move is what a move-stack operation moves.
-	Move *StackMove `json:"move,omitempty"`
-	// Fence is what a fence-host operation fences.
-	Fence *HostFence `json:"fence,omitempty"`
+	Deadline time.Time  `json:"deadline,omitzero"`
+	State    OpState    `json:"state"`
+	Error    string     `json:"error,omitempty"`
+	Move     *StackMove `json:"move,omitempty"`
+	Fence    *HostFence `json:"fence,omitempty"`
 }
 
 // OpState says where an operation stands.
@@ -70,16 +56,9 @@ const (
 )
 
 // StackMove is what a move-stack operation moves: a stack with its volumes,
-// from its host to another. Each step is named after the last thing done:
-//
-//	MoveCopies   the leader placed a copy of each volume on To
-//	MoveSynced   To has them synced and the images pulled
-//	MoveStopped  From stopped the stack, its copies are secondary
-//	MoveHost     the leader set the stack's host to To
-//
-// The leader finishes the move once the stack runs on To. MoveStopped is
-// the point of no return. Before it, the stack still runs on From, and a
-// rollback leaves it there. After it, only To can run the stack.
+// from its host to another (docs/developing/state.md, Moving a stack).
+// MoveStopped is the point of no return: before it, a rollback leaves the
+// stack on From; after it, only To can run the stack.
 type StackMove struct {
 	Stack string `json:"stack"` // the stack's ID
 	// From is the stack's host when the move started. It is nil for a
@@ -118,25 +97,14 @@ func MoveStepName(step int) string {
 	}
 }
 
-// HostFence is what a fence-host operation fences: a failed host. The
-// leader powers off its server before any of its stacks or volumes start
-// elsewhere (docs/developing/loops.md, Fencing). Each step is named after
-// the last thing done:
-//
-//	FenceStart  the operation started, and with it the host is fencing
-//	FenceOff    the server is off and the host fenced; its stacks fail over
-//
-// The leader finishes the operation once the host's stacks run elsewhere,
-// or after StepTime. If the leader could not power the host off, the host
-// goes back to failed and the operation fails. Powering the host on again
-// happens after the operation, so the lock on the host ensures that only
-// one fencing runs at a time.
+// HostFence is what a fence-host operation fences: a failed host, whose
+// server the leader powers off before its stacks start elsewhere
+// (docs/developing/state.md, Fencing a host).
 type HostFence struct {
 	Host HostID `json:"host"`
-	// Stacks are the stacks that were on the host when it was fenced. The
-	// leader waits for them to run elsewhere. The command that moves the
-	// host to fenced records them (applySetHostPhase), and FenceOff then
-	// gets its own StepTime.
+	// Stacks are the stacks that were on the host when it was fenced, which
+	// the leader waits for to run elsewhere. The command that moves the host
+	// to fenced records them.
 	Stacks []string `json:"stacks,omitempty"`
 }
 
@@ -161,10 +129,9 @@ func (s *State) HostLocked(id HostID) bool {
 	return s.Locks[HostLock(id)] != 0
 }
 
-// checkFence ties a fence-host operation to its host. The operation must
-// lock the host, and the host must be failed. Its server must be checked,
-// because Hetzner powers off the server that ServerID names. Only a
-// fence-host operation names a fence.
+// checkFence ties a fence-host operation to its failed host. The host's
+// server must be checked, because Hetzner powers off the server that
+// ServerID names.
 func (s *State) checkFence(payload StartOperation) error {
 	fence := payload.Fence
 	switch {
@@ -193,8 +160,6 @@ func (s *State) checkFence(payload StartOperation) error {
 // a deadline of its own. A step that waits for a resync gets more time.
 const StepTime = 10 * time.Minute
 
-// deadline returns a step's deadline: the one given, or else StepTime from
-// the command's time (the leader's clock).
 func deadline(cmd Command, given time.Time) time.Time {
 	if given.IsZero() {
 		return cmd.At.Add(StepTime)
@@ -234,10 +199,8 @@ func (s *State) MoveOf(stackID string) *Operation {
 }
 
 // StopsForMove tells whether the stack's old host stops the stack for a
-// move. That is the case once the move's copies are synced on the new
-// host, and until the stack has the new host. From MoveHost on, the new
-// host is the stack's host and runs it like any other stack. A move that
-// rolls back leaves the stack running where it was.
+// move: from MoveSynced until the stack has the new host. A move that rolls
+// back leaves the stack running where it was.
 func (s *State) StopsForMove(stackID string) bool {
 	operation := s.MoveOf(stackID)
 	return operation != nil && operation.State == OpRunning &&
@@ -337,10 +300,6 @@ func applyStartOperation(s *State, cmd Command, payload StartOperation) (func(),
 	}, nil
 }
 
-// checkMove ties a move-stack operation to its stack. The operation must
-// lock the stack, start from where the stack is, and go to another host
-// that is an active worker and not leaving. Only a move-stack operation
-// names a move.
 func (s *State) checkMove(payload StartOperation) error {
 	move := payload.Move
 	switch {
@@ -370,10 +329,9 @@ func (s *State) checkMove(payload StartOperation) error {
 // AdvanceOperation records a step done and who runs the next one.
 type AdvanceOperation struct {
 	ID uint64 `json:"id"`
-	// FromStep is the step that the sender saw as the last one done. A
-	// step can be reported twice: by a host that was slow to report it, or
-	// by the leaders before and after a change of leader. The second report
-	// is refused.
+	// FromStep is the step that the sender saw as the last one done, so
+	// that a step reported twice (a slow host, a change of leader) is
+	// refused the second time.
 	FromStep int `json:"from_step"`
 	Step     int `json:"step"`
 	// Owner runs the next step: a host, or nil for the leader.
@@ -383,8 +341,6 @@ type AdvanceOperation struct {
 	Deadline time.Time `json:"deadline,omitzero"`
 }
 
-// applyAdvanceOperation accepts a step only from the owner of that step.
-// If the operation names no host as the owner, the owner is the leader.
 func applyAdvanceOperation(s *State, cmd Command, payload AdvanceOperation) (func(), error) {
 	operation, err := s.running(payload.ID)
 	if err != nil {
@@ -487,9 +443,9 @@ type FinishOperation struct {
 	Error  string `json:"error,omitempty"`
 }
 
-// applyFinishOperation ends an operation. A move that ends, whether it
-// worked or not, settles a user's request to move the stack (MoveTo). The
-// placement does not try the move again by itself.
+// applyFinishOperation settles a user's request to move the stack (MoveTo)
+// whether the move worked or not, so the placement does not try it again by
+// itself.
 func applyFinishOperation(s *State, cmd Command, payload FinishOperation) (func(), error) {
 	if cmd.Actor != LeaderActor {
 		return nil, fmt.Errorf("%s cannot finish an operation; only the leader does", cmd.Actor)
@@ -525,8 +481,6 @@ func applyFinishOperation(s *State, cmd Command, payload FinishOperation) (func(
 	}, nil
 }
 
-// moveStack returns the stack that a move moves, or empty for another
-// kind of operation.
 func moveStack(operation *Operation) string {
 	if operation.Move == nil {
 		return ""
@@ -547,8 +501,6 @@ func (s *State) running(id uint64) (*Operation, error) {
 	return operation, nil
 }
 
-// forgetFinished forgets the oldest finished operations beyond
-// keptFinished.
 func (s *State) forgetFinished() {
 	var finished []uint64
 	for _, id := range slices.Sorted(maps.Keys(s.Operations)) {

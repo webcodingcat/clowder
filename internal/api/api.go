@@ -1,8 +1,6 @@
-// Package api is the agents' HTTP API (v1): the types that both sides use,
-// the server that every agent runs, and the CLI's client. Every call uses
-// mutual TLS: the CLI presents its certificate, and agents present their
-// host certificate. Any control-plane agent answers the CLI. It passes
-// writes on to the leader and answers reads from its own copy of the state.
+// Package api is the agents' HTTP API (v1) over mutual TLS: the types that
+// both sides use, the server that every agent runs, and the CLI's client
+// (docs/developing/api.md).
 package api
 
 import (
@@ -119,8 +117,7 @@ type Written struct {
 }
 
 // HostActionAnswer is the answer to a host action. Leaving says that a
-// removed host still has stacks or volume copies. The host drains, they
-// move to other hosts, and then the host is removed.
+// removed host drains first, because it still has stacks or volume copies.
 type HostActionAnswer struct {
 	Written
 	Leaving bool `json:"leaving,omitempty"`
@@ -131,10 +128,8 @@ type MoveRequest struct {
 	To string `json:"to"`
 }
 
-// HostAction is something a user does to a host. POST
-// /v1/hosts/{id}/{name} moves the host from one of the phases in From (any
-// phase if From is empty) to To. The CLI builds its host subcommands from
-// this list.
+// HostAction moves a host from one of the phases in From (any phase if
+// From is empty) to To. The CLI builds its host subcommands from these.
 type HostAction struct {
 	Name        string
 	Description string

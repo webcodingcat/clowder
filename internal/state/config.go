@@ -11,8 +11,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
-// Configured tells whether a ClusterConfiguration was applied. Before that,
-// there is no Hetzner token, no Floating IP, no ACME and no alerts.
+// Configured tells whether a ClusterConfiguration was applied.
 func (s *State) Configured() bool {
 	return s.Config.Generation > 0
 }
@@ -104,8 +103,7 @@ func findConfig(s *State, id string) *Meta {
 //   - one that puts a host's underlay outside the private network.
 //
 // It also refuses a configuration that names a value that names.System
-// lacks. The state checks all this itself, in the log's order, so no
-// resource can slip in between.
+// lacks.
 func putConfig(s *State, id string, payload PutResource) (func() *Meta, error) {
 	if id != resource.ClusterConfigurationName {
 		return nil, fmt.Errorf("the ClusterConfiguration is named %s, not %s", resource.ClusterConfigurationName, id)

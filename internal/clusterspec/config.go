@@ -14,12 +14,10 @@ import (
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// Config is the spec of the cluster's one ClusterConfiguration. Like
-// kubeadm's ClusterConfiguration, it holds everything cluster-wide. It
-// holds no secret. Instead, it names Secrets in the namespace names.System
-// (SecretKeyRef), which the state keeps separately. Users write the json
-// names, and the state stores them. So a Go field may be renamed, but its
-// tags never change.
+// Config is the spec of the cluster's one ClusterConfiguration. It holds
+// no secret; it names Secrets in names.System instead. Users write the
+// json names, and the state stores them, so a Go field may be renamed,
+// but its tags never change.
 type Config struct {
 	Hetzner Hetzner `json:"hetzner"`
 	// PrivateNetwork is the Hetzner private network that the hosts share,
@@ -54,8 +52,7 @@ type Priority struct {
 	Category string `json:"category,omitempty"`
 }
 
-// Resolve turns a priority into a number. A number stays as it is. A
-// category is looked up in the categories. An empty priority gets the
+// Resolve turns a priority into a number. An empty priority gets the
 // default category.
 func (p Priorities) Resolve(priority Priority) (int, error) {
 	category := priority.Category
@@ -105,7 +102,6 @@ var (
 // no replication.resyncRate, in bytes per second for each resync.
 const DefaultResyncRate = "50M"
 
-// withDefaults fills in each field that is left out.
 func (r Resources) withDefaults(defaults Resources) Resources {
 	if r.Memory == "" {
 		r.Memory = defaults.Memory
@@ -116,8 +112,8 @@ func (r Resources) withDefaults(defaults Resources) Resources {
 	return r
 }
 
-// withDefaults fills in the default categories if there are none. It
-// keeps a default category that the configuration names.
+// withDefaults keeps a default category that the configuration names,
+// even without categories.
 func (p Priorities) withDefaults() Priorities {
 	if len(p.Categories) > 0 {
 		return p
@@ -131,8 +127,7 @@ func (p Priorities) withDefaults() Priorities {
 
 // Hetzner is the Hetzner Cloud project the hosts run in.
 type Hetzner struct {
-	// TokenSecretRef names the project's API token. Hetzner's cloud
-	// controller for Kubernetes reads it from kube-system/hcloud.
+	// TokenSecretRef names the project's API token.
 	TokenSecretRef names.SecretKeyRef `json:"tokenSecretRef"`
 	// API is the full URL of another Hetzner Cloud API than Hetzner's own,
 	// such as a test lab.
@@ -306,10 +301,9 @@ type SecretPlace struct {
 	Ref  names.SecretKeyRef
 }
 
-// SecretPlaces lists the fields of config that name a value of a Secret,
-// in the order of the configuration. It skips the fields that are left
-// out. It is the only list of these fields. Check checks each reference
-// against the naming rules, and the state checks that each Secret exists.
+// SecretPlaces lists the fields of config that name a value of a Secret
+// and are set, in the order of the configuration. It is the only list of
+// these fields: Check and the state rely on it.
 func SecretPlaces(config Config) []SecretPlace {
 	places := []SecretPlace{{Path: "hetzner.tokenSecretRef", Ref: config.Hetzner.TokenSecretRef}}
 	if config.Alerts == nil {

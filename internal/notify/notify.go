@@ -82,7 +82,6 @@ func New(channel clusterspec.AlertChannel, secrets Secrets) (Notifier, error) {
 	}
 }
 
-// postJSON posts body as JSON to target and expects a 2xx answer.
 func postJSON(ctx context.Context, target string, body any) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -112,7 +111,6 @@ func postJSON(ctx context.Context, target string, body any) error {
 	return nil
 }
 
-// webhook posts the message as JSON.
 type webhook struct {
 	url string
 }
@@ -121,8 +119,7 @@ func (w webhook) Send(ctx context.Context, message Message) error {
 	return postJSON(ctx, w.url, message)
 }
 
-// discord posts the message to a Discord webhook as an embed. The color
-// shows the severity, and green means the all-clear.
+// discord colors the embed by severity, and green means the all-clear.
 type discord struct {
 	url string
 }
@@ -169,7 +166,6 @@ func Heartbeat(ctx context.Context, target string) error {
 	return nil
 }
 
-// trust returns the system's CAs plus the CA from caPEM, if one is given.
 func trust(caPEM []byte) (*x509.CertPool, error) {
 	pool, err := x509.SystemCertPool()
 	if err != nil {
@@ -181,8 +177,6 @@ func trust(caPEM []byte) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// tlsConfig returns the TLS settings that the email channel uses with its
-// server.
 func tlsConfig(host string, caPEM []byte) (*tls.Config, error) {
 	pool, err := trust(caPEM)
 	if err != nil {

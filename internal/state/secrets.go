@@ -16,10 +16,6 @@ func findSecret(s *State, id string) *Meta {
 	return nil
 }
 
-// putSecret stores a secret's encrypted values, within the limits of
-// checkSecretLimits. It refuses to drop a key that a stack of its namespace
-// or the configuration names, because whatever names the key would fail
-// without it.
 func putSecret(s *State, id string, payload PutResource) (func() *Meta, error) {
 	spec, err := decodeSpec[EncryptedSecret](payload.Kind, id, payload.Spec)
 	if err != nil {

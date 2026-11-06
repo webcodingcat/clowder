@@ -13,8 +13,7 @@ import (
 )
 
 // CommandVersion is the format of the commands that this build writes.
-// Apply also reads the version before it. From v1.0.0 on, agents of two
-// neighboring releases run side by side during an upgrade.
+// Apply also reads the version before it.
 const CommandVersion = 1
 
 // Command is one entry of the Raft log.
@@ -69,7 +68,6 @@ const (
 // LeaderActor is the leader acting on its own (its control loops).
 const LeaderActor = "leader"
 
-// hostActorPrefix is the prefix of every host's actor.
 const hostActorPrefix = "host/"
 
 // IsHostActor tells whether an actor is a host (and not the leader or the
@@ -94,10 +92,8 @@ func NewCommand(kind string, at time.Time, actor string, payload any) (Command, 
 }
 
 // handler checks one kind of command and only reads the state. It returns
-// a function that makes the change, and Apply runs that function only when
-// the handler returned no error. The function cannot fail. So a refused
-// command leaves no trace, and no command needs a copy of the state. The
-// exception, applyChangeResources, is explained in docs/developing/state.md.
+// the change as a function that cannot fail, so a refused command leaves no
+// trace (docs/developing/state.md, Rules).
 type handler func(s *State, cmd Command) (change func(), err error)
 
 // commandKind says how Apply runs one kind of command, and which release
@@ -162,11 +158,9 @@ func decoded[Payload any](apply func(s *State, cmd Command, payload Payload) (fu
 var ErrNotBootstrapped = errors.New("the cluster is not bootstrapped yet")
 
 // ErrUnreadable marks a log entry or a snapshot that this agent cannot
-// read: not JSON, a version it does not read, or a kind it does not know.
-// It is not a refusal. The agents that can read the entry apply it, and an
-// agent that skipped it would differ from them for good. So the state stays
-// as it is, including its index, and the agent stops
-// (raftnode.Node.Halted).
+// read. It is not a refusal: an agent that skipped the entry would differ
+// from the others for good, so the state stays as it is, including its
+// index, and the agent stops (raftnode.Node.Halted).
 var ErrUnreadable = errors.New("not readable by this agent")
 
 // ApplyEntry applies a Raft log entry: a command as JSON.
@@ -235,10 +229,9 @@ func readable(cmd Command) (commandKind, error) {
 // later, once every agent runs the release that introduced the kind.
 var ErrNotReadByAll = errors.New("not every agent reads it yet")
 
-// CheckKnown returns an error (ErrNotReadByAll) while some agent of the
-// cluster may not read a kind of command yet. An agent stops at an entry
-// that it cannot read. So the leader writes a kind only once the oldest
-// agent (MinVersion) runs the release that introduced it.
+// CheckKnown returns ErrNotReadByAll while the oldest agent (MinVersion)
+// may not read a kind of command yet, because an agent stops at an entry
+// that it cannot read.
 func (s *State) CheckKnown(kind string) error {
 	known, ok := commandKinds[kind]
 	if !ok {
@@ -253,10 +246,9 @@ func (s *State) CheckKnown(kind string) error {
 
 // MinVersion is the oldest release that an agent of the cluster runs, or
 // empty if no agent counts. Removed hosts, hosts that have not reported a
-// version yet, and development builds do not count. A development build
-// reads every kind in its code. A joined host counts from its first report
-// on. If the leader writes a kind that the host cannot read before then,
-// the host stops at it.
+// version yet, and development builds (which read every kind of their code)
+// do not count. A joined host that cannot read a kind written before its
+// first report stops at it.
 func (s *State) MinVersion() string {
 	var oldest string
 	for _, host := range s.Hosts {

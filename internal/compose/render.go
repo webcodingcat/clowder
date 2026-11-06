@@ -1,6 +1,5 @@
 // Package compose renders a stack's spec (stackspec) into the Compose file
-// that docker compose gets on the stack's host. Compose is the way a host
-// runs a stack; users do not write it.
+// that docker compose gets on the stack's host; users do not write it.
 package compose
 
 import (
@@ -21,8 +20,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// The Compose file that Render writes, as its own types. The file holds
-// only what a spec can say, and its fields come in a fixed order.
+// The Compose file that Render writes, as its own types, so that it holds
+// only what a spec can say and its fields come in a fixed order.
 type (
 	composeFile struct {
 		Name     string                    `yaml:"name"`
@@ -118,12 +117,11 @@ type (
 	}
 )
 
-// secretsPath is where a container finds its secret files: a directory per
-// secret and a file per key, as Kubernetes mounts a secret.
+// secretsPath holds a directory per secret and a file per key, as
+// Kubernetes mounts a secret.
 const secretsPath = "/run/secrets"
 
-// secretFile returns the name of the Compose secret for one key of a
-// secret. No secret's name has "_", so "_" can separate the two.
+// secretFile relies on no secret's name having "_".
 func secretFile(secret, key string) string {
 	return secret + "_" + key
 }
@@ -133,35 +131,26 @@ const stackNetwork = "net"
 
 // Target is what a host's agent knows when it renders a stack.
 type Target struct {
-	// Namespace is the stack's namespace. Together with the stack's name,
-	// it makes the names on the host (names.Project, names.BridgeName).
 	Namespace string
-	// FloatingIP and NodeAddress are where published ports bind. Traffic to
-	// the Floating IP reaches the container when this host is the ingress
-	// host. Traffic to the node address reaches it when another host
-	// forwards the traffic here.
+	// FloatingIP and NodeAddress are where published ports bind: the
+	// Floating IP while this host is the ingress host, the node address
+	// for traffic that another host forwards here.
 	FloatingIP  netip.Addr
 	NodeAddress netip.Addr
 	// Resolver is the agent's DNS resolver for the containers.
 	Resolver netip.Addr
-	// Volumes maps each volume's name to the directory where its file
-	// system is mounted and to its name on the host.
-	Volumes map[string]MountedVolume
+	Volumes  map[string]MountedVolume
 	// SecretsDir holds a directory for each secret that the services use
 	// as files, with a file per key.
 	SecretsDir string
-	// SecretKeys are the keys of each secret that the services use as
-	// files.
 	SecretKeys map[string][]string
 	// SecretLabels holds a keyed digest of the secret files of each
 	// service that uses some (LabelSecrets). A changed file keeps its
 	// path, so without the label Compose would not recreate the container.
-	// The digest is keyed, so the label reveals nothing about the values
-	// to anyone who reads it.
+	// The key keeps the label from revealing anything about the values.
 	SecretLabels map[string]string
 	// Restarted holds the time of the restart for each service that a
-	// user restarted (LabelRestarted). A new time changes the container's
-	// configuration, so Compose recreates the container.
+	// user restarted (LabelRestarted), so that Compose recreates it.
 	Restarted map[string]time.Time
 }
 
@@ -170,18 +159,14 @@ type MountedVolume struct {
 	Dir string
 	// Name is the Docker volume's name, which is the copy's LV
 	// (names.VolumeName). It includes the data generation, because Docker
-	// cannot change the options of an existing volume, and a new data
-	// generation needs a new Docker volume.
+	// cannot change the options of an existing volume.
 	Name string
 }
 
-// The labels that the agent puts on containers. LabelStack holds the
-// stack's Compose project (names.Project) on every container. LabelSecrets
-// holds the digest of the secret files on the containers that use some.
-// LabelRestarted holds the time of the last restart on the containers that
-// a user restarted. There are no other labels. So an apply recreates only
-// the containers whose configuration or secret files changed, and a
-// restart recreates only the services that it names.
+// The labels that the agent puts on containers, and no others, so that an
+// apply recreates only the containers whose configuration or secret files
+// changed, and a restart only the services that it names. LabelStack holds
+// the stack's Compose project on every container.
 const (
 	LabelStack     = "clowder.stack"
 	LabelSecrets   = "clowder.secrets"
@@ -195,15 +180,10 @@ func RestartedLabel(at time.Time) string {
 }
 
 // Render returns the Compose file that docker compose gets on the host for
-// a stack. The caller must have checked the spec (stackspec.Check), and
-// Render normalizes it.
+// a stack. The caller must have checked the spec (stackspec.Check).
 //
-// Docker never restarts a container itself (restart "no"). After a
-// reboot, nothing may start before the agent has looked at the cluster,
-// and the agent applies the stack's restart rules instead. Every name on
-// the host comes from names. A $ in a value is meant literally. HTTP
-// routes are not in the Compose file, because Traefik routes them
-// (ingress).
+// Docker never restarts a container itself (restart "no"): after a reboot,
+// nothing may start before the agent has looked at the cluster.
 func Render(stackName string, spec stackspec.Spec, target Target) ([]byte, error) {
 	if err := checkTarget(stackName, target); err != nil {
 		return nil, err
@@ -256,7 +236,6 @@ func Render(stackName string, spec stackspec.Spec, target Target) ([]byte, error
 	return rendered, nil
 }
 
-// checkTarget refuses a target that lacks what every stack needs.
 func checkTarget(stackName string, target Target) error {
 	for _, required := range []struct {
 		what    string
@@ -272,7 +251,6 @@ func checkTarget(stackName string, target Target) error {
 	return nil
 }
 
-// renderService renders one service of a spec.
 func renderService(stackName, project, name string, spec stackspec.Spec, target Target) (composeService, error) {
 	service := spec.Services[name]
 	rendered := composeService{
@@ -358,8 +336,6 @@ func renderService(stackName, project, name string, spec stackspec.Spec, target 
 	return rendered, nil
 }
 
-// renderMounts turns a service's volumes, tmpfs and localtime into
-// Compose's mounts, in this order.
 func renderMounts(service stackspec.Service) ([]composeMount, error) {
 	var mounts []composeMount
 	for _, mount := range service.Volumes {
@@ -386,8 +362,6 @@ func renderMounts(service stackspec.Service) ([]composeMount, error) {
 	return mounts, nil
 }
 
-// renderResources turns reservations and limits into Compose's deploy
-// block. It returns nil if there are neither.
 func renderResources(resources stackspec.Resources) (*composeDeploy, error) {
 	if resources.Reserve == nil && resources.Limit == nil {
 		return nil, nil
@@ -421,11 +395,9 @@ func renderAmount(amount *stackspec.Amount) (*composeAmount, error) {
 	return rendered, nil
 }
 
-// RenderSecretEnv returns the second Compose file of a stack. It holds
-// only the variables that the services set to values of secrets
-// (secretEnv), with the values taken from values. The agent keeps this
-// file on tmpfs, apart from the rendered file on disk. RenderSecretEnv
-// returns nil if the stack sets no such variables.
+// RenderSecretEnv returns the second Compose file of a stack, with only
+// the secretEnv variables, or nil if there are none. The agent keeps it on
+// tmpfs, apart from the rendered file on disk.
 func RenderSecretEnv(stackName string, spec stackspec.Spec, values map[names.SecretKeyRef]string) ([]byte, error) {
 	file := secretEnvFile{Services: map[string]secretEnvService{}}
 	for name, service := range spec.Services {
@@ -452,8 +424,7 @@ func RenderSecretEnv(stackName string, spec stackspec.Spec, values map[names.Sec
 	return escapeDollars(marshaled)
 }
 
-// secretEnvFile is the second Compose file. It holds only the secret
-// variables, which Compose merges into the services of the first file.
+// secretEnvFile is merged by Compose into the services of the first file.
 type secretEnvFile struct {
 	Services map[string]secretEnvService `yaml:"services"`
 }
@@ -462,9 +433,9 @@ type secretEnvService struct {
 	Environment map[string]string `yaml:"environment"`
 }
 
-// escapeDollars writes every $ in a value of a Compose file as $$. docker
-// compose on the host interpolates the file, but a $ in a spec's value is
-// meant literally. Compose never interpolates keys.
+// escapeDollars writes every $ in a value as $$: docker compose on the
+// host interpolates the file, but a $ in a spec's value is meant
+// literally. Compose never interpolates keys.
 func escapeDollars(file []byte) ([]byte, error) {
 	var document yaml.Node
 	if err := yaml.Unmarshal(file, &document); err != nil {

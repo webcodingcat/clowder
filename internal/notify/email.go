@@ -22,7 +22,6 @@ import (
 // sent in clear text.
 const implicitTLSPort = 465
 
-// email sends the message as a plain-text mail.
 type email struct {
 	host     string
 	port     int
@@ -88,9 +87,6 @@ func (e email) Send(ctx context.Context, message Message) error {
 	return client.Quit()
 }
 
-// connect connects to the server and makes sure that the connection is
-// encrypted: TLS from the start on port 465, otherwise STARTTLS, which the
-// server must offer.
 func (e email) connect(ctx context.Context) (*smtp.Client, error) {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(e.host, strconv.Itoa(e.port)))
@@ -121,10 +117,9 @@ func (e email) connect(ctx context.Context) (*smtp.Client, error) {
 	return client, nil
 }
 
-// mail formats the message as a mail: headers, a blank line and the text,
-// with CRLF line ends. The headers are the ones that strict providers
-// require. The subject is encoded (RFC 2047), because a stack's name may
-// contain characters outside ASCII.
+// mail writes the headers that strict providers require. The subject is
+// encoded (RFC 2047), because a stack's name may contain characters outside
+// ASCII.
 func (e email) mail(message Message) ([]byte, error) {
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {

@@ -32,17 +32,15 @@ import (
 const recoverTimeout = 3 * time.Minute
 
 // RecoverParts are what recover changes on the host and what it asks of
-// other hosts. clowderd recover passes the real parts. The tests pass fakes.
+// other hosts; the tests pass fakes.
 type RecoverParts struct {
-	// Storage drops the DRBD peers that are gone (storage.Driver.DropPeers)
 	Storage interface {
 		DropPeers(ctx context.Context, peers []int) error
 	}
 	// Service runs a systemctl action ("stop", "start") on clowderd.service
 	Service func(ctx context.Context, action string) error
-	// KnowsLeader asks the agent at address (another host's underlay and API
-	// port) whether it knows a leader. It authenticates as this host
-	// (api.KnowsLeader).
+	// KnowsLeader is api.KnowsLeader: address is another host's underlay
+	// with the API port, and the call authenticates as this host.
 	KnowsLeader func(ctx context.Context, address string, certificate tls.Certificate, ca *x509.Certificate) (bool, error)
 }
 
@@ -91,7 +89,6 @@ func newRecover() *cobra.Command {
 	return recoverCommand
 }
 
-// recovery is one run of Recover: this host and what it works with.
 type recovery struct {
 	files       Files
 	host        Host
@@ -101,24 +98,9 @@ type recovery struct {
 	logger      *slog.Logger
 }
 
-// Recover makes this host the only one of its cluster (clowderd recover).
-// Each step is safe to run again after a failure:
-//  1. Stop the agent and read the state from the Raft log on disk.
-//  2. Refuse while another host knows a leader, or while it answers without
-//     saying whether it does. Step 3 names each host it cannot reach.
-//  3. Describe what it will do and ask for confirmation (RecoverOptions).
-//  4. For each other host, set the label clowder-retired, then power the
-//     server off. Hetzner confirms both. A server that the leader never
-//     checked is checked first, because the token may power off any server
-//     of the project.
-//  5. Start Raft with this host as its only voter (raftnode.Recover) and
-//     commit recover-remap as the new leader.
-//  6. Remove the other hosts from DRBD (storage.Driver.DropPeers).
-//  7. Start the agent. Its loops do the rest.
-//
-// If Recover fails before step 4, nothing has changed, and it starts the
-// agent again. From step 4 on, the agent stays stopped until a recover
-// finishes.
+// Recover makes this host the only one of its cluster (clowderd recover;
+// the steps are in docs/developing/cluster.md). Each step is safe to run
+// again after a failure.
 func Recover(ctx context.Context, files Files, parts RecoverParts, options RecoverOptions, logger *slog.Logger) (err error) {
 	r := recovery{files: files, parts: parts, options: options, logger: logger}
 	if r.host, err = files.readHost(); err != nil {
@@ -133,10 +115,8 @@ func Recover(ctx context.Context, files Files, parts RecoverParts, options Recov
 	if err := r.parts.Service(ctx, "stop"); err != nil {
 		return err
 	}
-	// changing is set right before the first step that changes something
-	// (the retire, or the remap in a run after an earlier retire). From
-	// then on the agent stays stopped, because it would start with the old
-	// cluster's state.
+	// once changing is set, the agent stays stopped, because it would start
+	// with the old cluster's state
 	changing := false
 	defer func() {
 		if err == nil {
@@ -198,9 +178,7 @@ func Recover(ctx context.Context, files Files, parts RecoverParts, options Recov
 	return err
 }
 
-// hostsToRetire returns the hosts that recover powers off and retires:
-// every other host that is not removed. After a recover has run, there are
-// none. A cluster of one host that never recovered has nothing to recover.
+// hostsToRetire returns none, without an error, after a recover has run.
 func hostsToRetire(current *state.State, self Host) ([]*state.Host, error) {
 	if current.Keys == nil {
 		return nil, errors.New("the cluster is not bootstrapped; there is nothing to recover")
@@ -224,9 +202,8 @@ func hostsToRetire(current *state.State, self Host) ([]*state.Host, error) {
 }
 
 // ask refuses while another host knows a leader, or while it answers
-// without saying whether it does. Then it describes what recover will do
-// and asks for this host's name: whoever types it knows which host
-// continues alone.
+// without saying whether it does. It asks for this host's name: whoever
+// types it knows which host continues alone.
 func (r recovery) ask(ctx context.Context, current *state.State, gone []*state.Host, remap state.Command) error {
 	var notReached []string
 	for _, other := range gone {
@@ -262,8 +239,6 @@ func (r recovery) ask(ctx context.Context, current *state.State, gone []*state.H
 	return nil
 }
 
-// describe returns a text that says what recover will do. It applies the
-// remap to a copy of the state to find the outcome.
 func (r recovery) describe(current *state.State, gone []*state.Host, notReached []string, remap state.Command) (string, error) {
 	after := current.Clone()
 	if _, err := after.Apply(current.Index+1, remap); err != nil {
@@ -306,7 +281,6 @@ func (r recovery) describe(current *state.State, gone []*state.Host, notReached 
 	return text.String(), nil
 }
 
-// retire labels each host's server clowder-retired and powers it off.
 func (r recovery) retire(ctx context.Context, current *state.State, gone []*state.Host) error {
 	client, err := controller.OpenHetzner(current, r.credentials.dataKey.Decrypt)
 	if err != nil {
@@ -323,9 +297,8 @@ func (r recovery) retire(ctx context.Context, current *state.State, gone []*stat
 	return nil
 }
 
-// retireHost labels the host's server with its certificate's serial and
-// powers it off. The label comes first: a server that is off but not
-// labeled could be switched on and join its old peers again.
+// retireHost labels the server before it powers it off: a server that is
+// off but not labeled could be switched on and join its old peers again.
 func retireHost(ctx context.Context, client *hetzner.Client, other *state.Host) error {
 	ctx, cancel := context.WithTimeout(ctx, recoverTimeout)
 	defer cancel()
@@ -343,9 +316,8 @@ func retireHost(ctx context.Context, client *hetzner.Client, other *state.Host) 
 	return nil
 }
 
-// remap makes this host Raft's only voter and commits recover-remap as its
-// leader. A second run finds the remap already done: the state treats the
-// command as changing nothing, and Propose returns without an error.
+// remap may run twice: the second time, the state treats the command as
+// changing nothing, and Propose returns without an error.
 func (r recovery) remap(ctx context.Context, remap state.Command) error {
 	config := raftnode.Config{
 		Dir: r.files.raftDir(), ID: r.host.ID, Bind: "127.0.0.1:0", Advertise: r.host.raftAddress(),

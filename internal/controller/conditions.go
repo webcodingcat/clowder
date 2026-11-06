@@ -7,11 +7,8 @@ import (
 )
 
 // Conditions holds what the leader's loops see but the state does not show,
-// such as a Floating IP that no host holds, a host over capacity, or Docker
-// that does not answer. Each condition has the time it began. Conditions
-// live in memory only, so they start again after a change of leader. A new
-// alert then comes a little later, but never wrongly. An open alert stays
-// open until the loop that observes its condition has looked at it.
+// each with the time it began. It lives in memory only, so after a change of
+// leader an alert comes a little later, but never wrongly.
 type Conditions struct {
 	mu    sync.Mutex
 	since map[string]time.Time

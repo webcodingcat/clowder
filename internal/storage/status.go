@@ -44,7 +44,6 @@ type drbdResource struct {
 	} `json:"connections"`
 }
 
-// disk is the resource's disk state on this host; empty without a device.
 func (r drbdResource) disk() string {
 	if len(r.Devices) == 0 {
 		return ""
@@ -89,8 +88,6 @@ func (d Driver) resources(ctx context.Context) (map[string]drbdResource, error) 
 	return resources, nil
 }
 
-// quorum tells whether the copy on this host has DRBD's quorum; false
-// without a device.
 func (r drbdResource) quorum() bool {
 	return len(r.Devices) > 0 && r.Devices[0].Quorum
 }
@@ -109,7 +106,6 @@ func (r drbdResource) standAlonePeers() []int {
 	return peers
 }
 
-// hasPeer tells whether the resource has the peer configured.
 func (r drbdResource) hasPeer(peer int) bool {
 	for _, connection := range r.Connections {
 		if connection.PeerNodeID == peer {
@@ -119,8 +115,6 @@ func (r drbdResource) hasPeer(peer int) bool {
 	return false
 }
 
-// primaryPeer returns the node-id of a connected peer that is primary;
-// false if there is none.
 func (r drbdResource) primaryPeer() (int, bool) {
 	for _, connection := range r.Connections {
 		if connection.ConnectionState == "Connected" && connection.PeerRole == RolePrimary {

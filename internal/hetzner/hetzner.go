@@ -1,10 +1,6 @@
 // Package hetzner is a client for the part of the Hetzner Cloud API that
-// clowder uses. For the leader, it routes the Floating IP to the ingress
-// host, checks which server a host runs on, and powers servers off
-// (fencing) and on. clowderd recover labels the servers that it takes out
-// of the cluster, and an agent reads the label when it starts. A server is
-// identified by its ID, which the state keeps as the host's ServerID. The
-// package is a small client of its own, because the official SDK would
+// clowder uses: the Floating IP, the servers' power (fencing) and their
+// labels. It is a small client of its own, because the official SDK would
 // bring Prometheus' client and much more into clowderd.
 package hetzner
 
@@ -155,12 +151,9 @@ func (c *Client) readServer(ctx context.Context, serverID int64) (server, error)
 // host's.
 var ErrOtherServer = errors.New("it is another server")
 
-// CheckServer makes sure that the server is the host's server. The host's
-// underlay must be one of the server's addresses in the project's private
-// networks, and the host's public address must be the server's public IPv4.
-// The check matters because a host names its server itself, fencing powers
-// off the server with that ID, and the project's token may power off any
-// server of the project.
+// CheckServer makes sure that the server is the host's server, by its
+// private and public addresses. It matters because a host names its server
+// itself, and fencing powers off the server with that ID.
 func (c *Client) CheckServer(ctx context.Context, serverID int64, underlay, publicAddress netip.Addr) error {
 	found, err := c.readServer(ctx, serverID)
 	if errors.Is(err, ErrNoSuchServer) {
@@ -265,10 +258,9 @@ func (c *Client) findFloatingIP(ctx context.Context, ip netip.Addr) (floatingIP,
 // not have.
 var ErrNoSuchFloatingIP = errors.New("the project has no such Floating IP")
 
-// TokenRefused reports whether Hetzner refused the token for a call. Either
-// the token is not valid or lacks the permission (401, 403), or its project
-// does not have the server or the Floating IP that the cluster names. The
-// latter happens with a token of another project.
+// TokenRefused reports whether Hetzner refused the token for a call. A
+// missing server or Floating IP counts too, because a token of another
+// project sees none of the cluster's.
 func TokenRefused(err error) bool {
 	return errors.Is(err, statusCode(http.StatusUnauthorized)) || errors.Is(err, statusCode(http.StatusForbidden)) ||
 		errors.Is(err, ErrNoSuchServer) || errors.Is(err, ErrNoSuchFloatingIP)
@@ -316,8 +308,7 @@ type action struct {
 	} `json:"error"`
 }
 
-// act starts an action and waits until it has finished; what describes the
-// attempt for the error.
+// act waits until the action has finished; what describes it for the error.
 func (c *Client) act(ctx context.Context, path string, body any, what string) error {
 	var answer struct {
 		Action action `json:"action"`
@@ -346,14 +337,11 @@ func (c *Client) act(ctx context.Context, path string, body any, what string) er
 	}
 }
 
-// do sends a request with the token and reads the answer into out. After an
-// error that may be temporary (apiError.passes, or a network error), it
-// sends the request again, up to attempts times. The leader fences through
-// do, and one busy moment of the API must not hold up a failover. Every
-// request that clowder sends is safe to send twice: reads, and changes that
-// do nothing the second time (an assignment to the same server, a power
-// action on a server already in that state, the same labels). An error
-// carries the API's message, never the token.
+// do retries an error that may be temporary (apiError.passes, or a network
+// error), because one busy moment of the API must not hold up a failover.
+// Every request that clowder sends is safe to send twice: reads, and
+// changes that do nothing the second time. An error carries the API's
+// message, never the token.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	var encoded []byte
 	if body != nil {
@@ -394,7 +382,6 @@ func jitter(wait time.Duration) time.Duration {
 	return wait/2 + rand.N(wait/2+1) //nolint:gosec // a wait, no secret
 }
 
-// send sends one request. encoded is the body, or nil for none.
 func (c *Client) send(ctx context.Context, method, path string, encoded []byte, out any) error {
 	var reader io.Reader
 	if encoded != nil {
@@ -477,7 +464,6 @@ type statusCode int
 
 func (s statusCode) Error() string { return fmt.Sprintf("HTTP %d", int(s)) }
 
-// errNotFound is the API's 404.
 var errNotFound error = statusCode(http.StatusNotFound)
 
 // ErrNoSuchServer is the error for a server that the project does not

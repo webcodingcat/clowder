@@ -9,21 +9,14 @@ import (
 	"github.com/webcodingcat/clowder/internal/hostrole"
 )
 
-// A host joins with a one-time token (internal/jointoken). A user creates
-// the token (add-join-token). The leader adds the host with it (add-host),
-// and that command also uses the token up. The state keeps only the
-// token's hash, and the handlers check its expiry against the command's
-// time.
-
 // JoinToken is an open join token.
 type JoinToken struct {
 	// Hash is jointoken.Token.Hash: SHA-256 of the secret, in hex.
 	Hash    string    `json:"hash"`
 	Expires time.Time `json:"expires"`
 	// Roles are the roles that a host may take when it joins with the
-	// token. A token works only once, so whoever reads a worker's token
-	// cannot join as a control-plane host with it. kubeadm needs a second
-	// secret for that (--certificate-key).
+	// token, so whoever reads a worker's token cannot join as a
+	// control-plane host with it.
 	Roles hostrole.Set `json:"roles"`
 }
 
@@ -85,8 +78,7 @@ func applyAddJoinToken(s *State, cmd Command, payload AddJoinToken) (func(), err
 }
 
 // dropExpiredTokens drops the tokens that expired more than joinTokenKept
-// before at. It uses the command's time, so every agent drops the same
-// tokens. Only add-join-token and add-host call it, so the list changes
+// before at. Only add-join-token and add-host call it, so the list changes
 // only with those commands.
 func (s *State) dropExpiredTokens(at time.Time) {
 	maps.DeleteFunc(s.JoinTokens, func(_ string, token JoinToken) bool {

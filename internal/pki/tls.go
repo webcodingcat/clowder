@@ -43,10 +43,8 @@ func clientTLS(certificate tls.Certificate, verify func(tls.ConnectionState) err
 }
 
 // ServerTLSForControlPlane returns the TLS configuration of a server that
-// only control-plane hosts may reach. Two servers use it:
-//   - Raft on every host, because only the leader and the candidates send;
-//   - the API of a host without the control plane, because only the
-//     control plane calls it.
+// only control-plane hosts may reach: Raft, and the API of a host without
+// the control plane.
 func ServerTLSForControlPlane(certificate tls.Certificate, ca *x509.Certificate, revoked func(serial string) bool) *tls.Config {
 	return &tls.Config{
 		Certificates:     []tls.Certificate{certificate},
@@ -56,9 +54,6 @@ func ServerTLSForControlPlane(certificate tls.Certificate, ca *x509.Certificate,
 	}
 }
 
-// verifyHost checks that the other side presents a host certificate of the
-// CA that is not revoked. If controlPlane is set, the certificate must also
-// name the role control-plane.
 func verifyHost(ca *x509.Certificate, revoked func(serial string) bool, controlPlane bool) func(tls.ConnectionState) error {
 	if revoked == nil {
 		revoked = func(string) bool { return false }

@@ -23,6 +23,11 @@ applies what the formatters can fix.
 - One job per function; no `Run()` that only calls `run()`.
 - Comments and doc comments say why (DRBD's or the kernel's behavior, a caveat); the code
   says what. Doc comments are sentences; other comments may be short lowercase fragments.
+- A comment stays only if it tells what the name and the code do not: a reason, a caveat,
+  a unit, an invariant, or who relies on it. An exported identifier keeps a doc comment
+  (revive's `exported` rule), one sentence if nothing more is needed. A comment that only
+  restates the name or the code goes, and so does a comment that repeats
+  `docs/developing/`.
 - Imports in three groups: standard library, others, this module (`goimports` with the
   local prefix sorts them).
 - JSON and YAML names: what users write and read as resources (`resource.Object`, the

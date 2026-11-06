@@ -21,12 +21,8 @@ import (
 const hetznerTimeout = 2 * time.Minute
 
 // RunFloatingIP keeps the Floating IP on the ingress host while this agent
-// leads, until ctx ends. It runs a pass at every change of the state and
-// every interval. It reads Hetzner's API at most once per interval, which
-// is about 120 of the 3600 requests an hour that Hetzner allows. While it
-// fails, it observes the condition ingressNotHeld, which the alerts loop
-// turns into an alert. Traefik, which answers on the Floating IP, belongs
-// to internal/ingress.
+// leads, until ctx ends. While it fails, it observes the condition
+// ingressNotHeld.
 func RunFloatingIP(ctx context.Context, cluster Cluster, propose Propose, open Open, conditions *Conditions,
 	logger *slog.Logger,
 ) {
@@ -70,9 +66,8 @@ func RunFloatingIP(ctx context.Context, cluster Cluster, propose Propose, open O
 	}
 }
 
-// warnServiceURLs logs clusterspec.ServiceURLWarnings when they differ
-// from the warnings it logged before, and returns them. So a configuration's
-// warnings are logged once, not at every pass.
+// warnServiceURLs logs the warnings only when they differ from logged, so
+// that a configuration's warnings are logged once, not at every pass.
 func warnServiceURLs(cluster Cluster, logged []string, logger *slog.Logger) []string {
 	var warnings []string
 	cluster.Read(func(current *state.State) { warnings = clusterspec.ServiceURLWarnings(current.Config.Spec) })
@@ -84,11 +79,8 @@ func warnServiceURLs(cluster Cluster, logged []string, logger *slog.Logger) []st
 	return warnings
 }
 
-// holdFloatingIP records the ingress host when it changes. Then it routes
-// the Floating IP to that host if Hetzner routes it elsewhere, for example
-// because someone moved it by hand or the ingress host is new. It reports
-// whether it asked Hetzner's API, because each request counts against the
-// API's limit.
+// holdFloatingIP reports whether it asked Hetzner's API, because each
+// request counts against the API's limit.
 func holdFloatingIP(ctx context.Context, cluster Cluster, propose Propose, open Open, logger *slog.Logger,
 ) (asked bool, err error) {
 	copied := cluster.SharedCopy()
@@ -138,11 +130,9 @@ func holdFloatingIP(ctx context.Context, cluster Cluster, propose Propose, open 
 	return true, client.AssignFloatingIP(ctx, ip, host.ServerID)
 }
 
-// confirmServer checks a host's server with Hetzner and records it as
-// checked. The first host took its server ID from the metadata service
-// without a check; a joining host's server is checked at the join. If
-// Hetzner does not confirm the server, the host gets no Floating IP, and
-// the loop's condition ingressNotHeld raises the alert.
+// confirmServer is for the first host, which took its server ID from the
+// metadata service without a check; a joining host's server is checked at
+// the join.
 func confirmServer(ctx context.Context, client *hetzner.Client, propose Propose, host *state.Host,
 	logger *slog.Logger,
 ) error {
@@ -157,9 +147,8 @@ func confirmServer(ctx context.Context, client *hetzner.Client, propose Propose,
 	return nil
 }
 
-// OpenHetzner creates the client of Hetzner's API. It uses the token that
-// the configuration names and reads it from its Secret in clowder-system.
-// The leader's loops, the join, recover and the agent's start use it.
+// OpenHetzner creates the client of Hetzner's API with the token that the
+// configuration names.
 func OpenHetzner(current *state.State, open Open) (*hetzner.Client, error) {
 	encrypted, err := current.HetznerToken()
 	if err != nil {
@@ -172,16 +161,10 @@ func OpenHetzner(current *state.State, open Open) (*hetzner.Client, error) {
 	return hetzner.New(current.Config.Spec.Hetzner.API, string(token)), nil
 }
 
-// ingressHost returns the host that should hold the Floating IP. That is
-// the recorded host while it can hold it, so the Floating IP never switches
-// back by itself. Otherwise it is the first host in ingress.preferredHosts
-// that can hold it, and after that the host with the lowest ID that can.
-//
-// A host can hold the Floating IP when it is an active ingress host and
-// Hetzner has confirmed its server. A host whose server is not checked yet
-// (the first host, before holdFloatingIP checks it) counts only while no
-// confirmed host can hold it. So a server that Hetzner refuses never keeps
-// the Floating IP from a host whose server is checked.
+// ingressHost returns the host that should hold the Floating IP. A host
+// whose server is not checked yet counts only while no checked host can
+// hold it, so a server that Hetzner refuses never keeps the Floating IP
+// from a checked one.
 func ingressHost(current *state.State) (*state.Host, bool) {
 	if host, ok := chooseIngress(current, true); ok {
 		return host, true
@@ -189,8 +172,8 @@ func ingressHost(current *state.State) (*state.Host, bool) {
 	return chooseIngress(current, false)
 }
 
-// chooseIngress makes ingressHost's choice among the active hosts. If
-// checkedOnly is true, it considers only hosts with checked servers.
+// chooseIngress takes the recorded host first, so that the Floating IP
+// never moves back by itself.
 func chooseIngress(current *state.State, checkedOnly bool) (*state.Host, bool) {
 	canHold := func(host *state.Host) bool {
 		return host != nil && host.Roles.Has(hostrole.Ingress) && host.Phase == state.Active &&

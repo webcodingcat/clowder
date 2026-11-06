@@ -38,9 +38,8 @@ func newSealingKey() *cobra.Command {
 	return sealingKey
 }
 
-// printSealingKey asks the host's own agent for the sealing key, just as
-// printCredentials asks it for a certificate. The agent holds the data key
-// that decrypts the sealing key in the state.
+// printSealingKey asks the host's own agent, which holds the data key that
+// decrypts the sealing key in the state.
 func printSealingKey(ctx context.Context, out io.Writer, files Files, public bool) error {
 	host, err := files.readHost()
 	if err != nil {
