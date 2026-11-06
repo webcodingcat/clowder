@@ -25,7 +25,7 @@ type fsm struct {
 	// changed is closed and replaced after every applied entry, to wake up
 	// those waiting for an index.
 	changed chan struct{}
-	// shared is a copy of the state for the loops to read. It is made once
+	// shared is a clone of the state for the loops to read. It is made once
 	// per change and dropped at the next one (sharedCopy). sharedMu guards
 	// it among the readers, who hold mu only for reading.
 	sharedMu sync.Mutex
@@ -142,22 +142,20 @@ func (f *fsm) read(use func(current *state.State)) {
 	use(f.state)
 }
 
-// sharedCopy returns a copy of the state that every caller shares until the
-// next change. The loops that wake at a change each read the state without
-// the lock, and one copy serves them all. No caller may change it.
-func (f *fsm) sharedCopy() (*state.State, error) {
+// sharedCopy returns a clone of the state that every caller shares until
+// the next change. The loops that wake at a change each read the state
+// without the lock, and one clone serves them all. No caller may change it:
+// it shares the specs and encrypted values with the state itself
+// (state.State.Clone).
+func (f *fsm) sharedCopy() *state.State {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	f.sharedMu.Lock()
 	defer f.sharedMu.Unlock()
 	if f.shared == nil {
-		copied, err := f.state.Copy()
-		if err != nil {
-			return nil, err
-		}
-		f.shared = copied
+		f.shared = f.state.Clone()
 	}
-	return f.shared, nil
+	return f.shared
 }
 
 // waitFor returns once the state has applied index.

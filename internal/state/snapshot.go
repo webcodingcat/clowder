@@ -31,26 +31,6 @@ func (s *State) WriteSnapshot(out io.Writer) error {
 	return nil
 }
 
-// Copy returns a deep copy of the state without its audit. It is for work
-// that is too slow to do under the state's lock (such as parsing Compose
-// files) or that keeps parts of the state. The copy goes through JSON, as
-// snapshots do. This is simple but costs as much as the whole state, so
-// the agent's loops share one copy per change (raftnode.Node.SharedCopy).
-// Only code that changes its copy (a dry run) makes its own.
-func (s *State) Copy() (*State, error) {
-	withoutAudit := *s
-	withoutAudit.Audit = nil
-	encoded, err := json.Marshal(&withoutAudit)
-	if err != nil {
-		return nil, fmt.Errorf("copy the state: %w", err)
-	}
-	var copied State
-	if err := json.Unmarshal(encoded, &copied); err != nil {
-		return nil, fmt.Errorf("copy the state: %w", err)
-	}
-	return &copied, nil
-}
-
 // ReadSnapshot reads a state written by WriteSnapshot of this release or
 // the previous one. Every error is an ErrUnreadable: like a log entry, a
 // snapshot that the agent cannot read stops the agent.

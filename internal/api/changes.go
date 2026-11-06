@@ -396,13 +396,11 @@ func (s *Server) runChanges(ctx context.Context, batch changeBatch) ChangeResult
 	// the current state is needed only to tell a dry run what differs
 	var before, after *state.State
 	s.config.Cluster.Read(func(current *state.State) {
-		if after, err = current.Copy(); err == nil && batch.DryRun {
-			before, err = current.Copy()
+		after = current.Clone()
+		if batch.DryRun {
+			before = current.Clone()
 		}
 	})
-	if err != nil {
-		return answer.failed(err)
-	}
 	// Apply takes the time from the command, which the trial run stamps
 	// with the leader's clock; proposeHere stamps the committed command
 	// again. No check of a resource reads the time.

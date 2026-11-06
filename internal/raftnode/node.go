@@ -301,9 +301,9 @@ func (n *Node) Read(use func(current *state.State)) {
 
 // SharedCopy returns a copy of the state to read outside the lock. Every
 // caller gets the same copy until the next change. No caller may change it;
-// a caller that needs to change it makes its own copy (State.Copy under
-// Read). The tests of the loops check this (statetest.ReadOnlyCopy).
-func (n *Node) SharedCopy() (*state.State, error) {
+// a caller that needs to change it makes its own (State.Clone under Read).
+// The tests of the loops check this (statetest.ReadOnlyCopy).
+func (n *Node) SharedCopy() *state.State {
 	return n.fsm.sharedCopy()
 }
 

@@ -19,7 +19,7 @@ const Interval = 30 * time.Second
 // reads the state through SharedCopy and never changes it.
 type Cluster interface {
 	Read(use func(current *state.State))
-	SharedCopy() (*state.State, error)
+	SharedCopy() *state.State
 	Changed() <-chan struct{}
 }
 

@@ -153,11 +153,7 @@ func (r *Reconciler) Run(ctx context.Context) {
 // pass compares the copies the state wants here with what the host has,
 // and starts a job for each volume whose copy needs a step.
 func (r *Reconciler) pass(ctx context.Context) {
-	copied, err := r.cluster.SharedCopy()
-	if err != nil {
-		r.logger.Error("read the state", "error", err)
-		return
-	}
+	copied := r.cluster.SharedCopy()
 	held, err := r.held()
 	// without knowing what the stacks hold, any copy may be in use
 	holdAll := err != nil

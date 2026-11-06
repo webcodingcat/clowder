@@ -11,7 +11,7 @@ clowder is built in phases, and each phase ends with live tests on HLab
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
 | 2 | three hosts: replication, failover with fencing | done, passes the live tests |
-| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 5 done, step 5b next |
+| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 5b done, step 5c next |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -254,29 +254,34 @@ so `test/live` reaches the cluster through control-plane hosts only.
 
 ### Step 5b: copy the state only where it changes
 
-Today the state is copied whole, through a JSON round trip (`State.Copy`), in two places
-that run inside Raft's FSM, under the state's lock:
+Done on `phase-2b` (lint and unit tests green, the full review loop over it; the interim
+live tests come after step 5c). Before it, the state was copied whole through a JSON
+round trip (`State.Copy`) for every `change-resources` and, after every applied entry,
+for the loops' shared copy (`raftnode` `fsm.sharedCopy`), even for an entry that changed
+one host's report. With `resource.MaxClusterSecretBytes` in secrets, each such copy
+allocated about 33 MiB.
 
-- every `change-resources` (`applyChangeResources`, `state/resources.go`) works on a copy of
-  the whole state, so that a batch goes in whole or not at all;
-- after every applied entry, the first loop that reads gets a shared copy
-  (`raftnode` `fsm.sharedCopy`), even for an entry that changed one host's report.
+The choice, made with the operator: **a typed clone that shares what never changes in
+place** (`State.Clone`, `state/clone.go`). It replaces `State.Copy` everywhere: in the batch,
+in the shared copy, in the dry run and in `clowderd recover`.
 
-The state holds every Secret's encrypted values (up to about 8 MiB) and the audit, so on a
-host with 4 GB each apply and each report costs memory and time that grow with the
-cluster. The step makes both cheaper without changing what they guarantee:
+- It copies the maps, the resources and their statuses, and shares the specs, a stack's
+  `Services`, the encrypted values and the certificates' bytes, which the handlers only
+  ever replace whole. It leaves the audit out.
+- The guarantees stay: a batch still works on a clone and puts it in place only if every
+  change passes, and a loop still reads a clone that no command changes.
+- The tests guard the rule: every command in the state's tests is checked against a
+  clone taken before it, `clone_test.go` fails when `Clone` shares a field it should copy,
+  and `statetest.ReadOnlyCopy` catches a loop that writes into a shared spec.
+- The cost (`TestAReportAndAnApplyCostLessThanTheSecrets`): with 4 MiB of secrets, a report
+  with the clone after it allocates about 18 KiB, and an apply of one resource about
+  31 KiB.
+- `SharedCopy` no longer returns an error, because a clone cannot fail.
 
-- A batch is still all or nothing, and a loop still never sees a state that changes
-  under it.
-- Only what a command changes is copied: for example, typed clones of the maps and
-  resources a change touches, or an undo of the batch's changes on failure instead of a
-  copy before it. The session weighs the ways with the operator and names the choice.
-- The audit and the encrypted values are not copied when nothing touches them.
-- A test shows the cost: a state of `resource.MaxClusterSecretBytes` in secrets, and a
-  report and an apply against it, with the allocations they make.
-
-The dry run (`api/changes.go`) may keep its own full copy, as it runs outside Raft.
-Review: the full loop; the step changes how the state applies its commands.
+The other ways weighed: copy-on-write in every handler (cheaper still, but every handler
+changes and a forgotten clone is a silent bug), and an undo of a failed batch (it does not
+help the shared copy, and an undo of `putStack` is easy to get wrong). Step 5c starts from
+here.
 
 ### Step 5c: smaller documentation
 

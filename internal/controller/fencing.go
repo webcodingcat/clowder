@@ -115,10 +115,7 @@ func RunFencing(ctx context.Context, parts FenceParts) {
 // pass makes each of the changes once, on the same copy of the state. A
 // change that depends on the commit of another one happens in the next pass.
 func (f *fencer) pass(ctx context.Context) error {
-	copied, err := f.Cluster.SharedCopy()
-	if err != nil {
-		return err
-	}
+	copied := f.Cluster.SharedCopy()
 	now := time.Now()
 	return errors.Join(f.watch(ctx, copied), f.fence(ctx, copied, now), f.powerOn(ctx, copied, now))
 }

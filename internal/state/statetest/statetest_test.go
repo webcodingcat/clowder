@@ -3,6 +3,7 @@ package statetest
 import (
 	"testing"
 
+	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -24,13 +25,17 @@ func (r *recorder) end() {
 	}
 }
 
+// shop is a state with one stack that has a spec.
+func shop() *state.State {
+	return &state.State{Stacks: map[string]*state.Stack{"default/shop": {
+		Meta: state.Meta{Name: "shop"},
+		Spec: stackspec.Spec{Services: map[string]stackspec.Service{"web": {Image: "nginx"}}},
+	}}}
+}
+
 func TestAWriteIntoTheCopyFailsTheTest(t *testing.T) {
-	current := &state.State{Stacks: map[string]*state.Stack{"default/shop": {Name: "shop"}}}
 	test := &recorder{TB: t}
-	copied, err := ReadOnlyCopy(test, current)
-	if err != nil {
-		t.Fatal(err)
-	}
+	copied := ReadOnlyCopy(test, shop())
 	copied.Stacks["default/shop"].WaitReason = "written by a loop"
 	test.end()
 	if !test.failed {
@@ -38,13 +43,20 @@ func TestAWriteIntoTheCopyFailsTheTest(t *testing.T) {
 	}
 }
 
-func TestReadingTheCopyPasses(t *testing.T) {
-	current := &state.State{Stacks: map[string]*state.Stack{"default/shop": {Name: "shop"}}}
+func TestAWriteIntoASharedSpecFailsTheTest(t *testing.T) {
 	test := &recorder{TB: t}
-	copied, err := ReadOnlyCopy(test, current)
-	if err != nil {
-		t.Fatal(err)
+	copied := ReadOnlyCopy(test, shop())
+	copied.Stacks["default/shop"].Spec.Services["web"] = stackspec.Service{Image: "written by a loop"}
+	test.end()
+	if !test.failed {
+		t.Error("a write into a spec that the copy shares went unnoticed")
 	}
+}
+
+func TestReadingTheCopyPasses(t *testing.T) {
+	current := shop()
+	test := &recorder{TB: t}
+	copied := ReadOnlyCopy(test, current)
 	_ = copied.Stacks["default/shop"].Name
 	current.Stacks["default/shop"].WaitReason = "a later change of the state itself"
 	test.end()

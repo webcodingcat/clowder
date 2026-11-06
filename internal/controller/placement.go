@@ -64,11 +64,7 @@ func RunPlacement(ctx context.Context, cluster Cluster, propose Propose, conditi
 func (p *placer) pass(ctx context.Context) time.Duration {
 	// Plan weighs every stack on every host. That is too slow to do under
 	// the state's lock, which Raft's Apply waits for.
-	copied, err := p.cluster.SharedCopy()
-	if err != nil {
-		p.logger.Error("place the stacks", "error", err)
-		return 0
-	}
+	copied := p.cluster.SharedCopy()
 	p.plannedAt = copied.Index
 	decisions := scheduler.Plan(copied, time.Now())
 	p.noteOverCapacity(copied, decisions.OverCapacity)

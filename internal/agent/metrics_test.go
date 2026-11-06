@@ -94,10 +94,7 @@ func golden(t *testing.T, name string, rendered []byte) {
 // scrape collects and writes one scrape.
 func scrape(t *testing.T, source *metricsSource) []byte {
 	t.Helper()
-	set, err := source.collect(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	set := source.collect(context.Background())
 	var out bytes.Buffer
 	if err := set.Write(&out); err != nil {
 		t.Fatal(err)

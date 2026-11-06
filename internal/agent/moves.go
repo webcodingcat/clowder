@@ -40,11 +40,7 @@ func (m moveSteps) run(ctx context.Context) {
 
 // pass records each step this host owns that is done.
 func (m moveSteps) pass(ctx context.Context) {
-	copied, err := m.cluster.SharedCopy()
-	if err != nil {
-		m.logger.Error("read the state", "error", err)
-		return
-	}
+	copied := m.cluster.SharedCopy()
 	for _, id := range slices.Sorted(maps.Keys(copied.Operations)) {
 		operation := copied.Operations[id]
 		if operation.Move == nil || operation.State != state.OpRunning || operation.Owner == nil || *operation.Owner != m.self {

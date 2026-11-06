@@ -88,10 +88,7 @@ func warnServiceURLs(cluster Cluster, logged []string, logger *slog.Logger) []st
 // API, since each request counts against the API's limit.
 func holdFloatingIP(ctx context.Context, cluster Cluster, propose Propose, open Open, logger *slog.Logger,
 ) (asked bool, err error) {
-	copied, err := cluster.SharedCopy()
-	if err != nil {
-		return false, err
-	}
+	copied := cluster.SharedCopy()
 	config := copied.Config.Spec
 	if !copied.Configured() {
 		return false, nil // no configuration yet: no Floating IP and no token to ask with

@@ -266,10 +266,7 @@ func (r recovery) ask(ctx context.Context, current *state.State, gone []*state.H
 // describe says what recover will do. It works out the outcome of the remap
 // on a copy of the state.
 func (r recovery) describe(current *state.State, gone []*state.Host, notReached []string, remap state.Command) (string, error) {
-	after, err := current.Copy()
-	if err != nil {
-		return "", err
-	}
+	after := current.Clone()
 	if _, err := after.Apply(current.Index+1, remap); err != nil {
 		return "", fmt.Errorf("work out the recover: %w", err)
 	}

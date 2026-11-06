@@ -61,24 +61,19 @@ type metricsSource struct {
 	logger *slog.Logger
 }
 
-// collect gathers one scrape. An error means no values at all: the handler
-// then answers 500, so Prometheus sees the target as down instead of seeing
-// every series disappear.
-func (m *metricsSource) collect(ctx context.Context) (*metrics.Set, error) {
+// collect gathers one scrape.
+func (m *metricsSource) collect(ctx context.Context) *metrics.Set {
 	set := metrics.NewSet()
 	// a copy, not the state under its lock: the scrape asks Docker, and
 	// Raft's Apply waits for the lock
-	copied, err := m.cluster.SharedCopy()
-	if err != nil {
-		return nil, err
-	}
+	copied := m.cluster.SharedCopy()
 	leads := m.cluster.IsLeader()
 	m.addHost(set, copied, leads)
 	m.addContainers(ctx, set)
 	if leads {
 		m.addCluster(set, copied)
 	}
-	return set, nil
+	return set
 }
 
 // addHost adds the values of this host: its phase and role, the Raft
@@ -243,12 +238,7 @@ func serveMetrics(source *metricsSource, address string, logger *slog.Logger) (*
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
-		set, err := source.collect(r.Context())
-		if err != nil {
-			logger.Error("collect the metrics", "error", err)
-			http.Error(w, "collect the metrics: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+		set := source.collect(r.Context())
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		_ = set.Write(w) // the scraper is gone if this fails
 	})

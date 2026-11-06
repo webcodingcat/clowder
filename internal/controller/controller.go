@@ -14,7 +14,7 @@ import (
 // reads the state through SharedCopy and never changes that copy.
 type Cluster interface {
 	Read(use func(current *state.State))
-	SharedCopy() (*state.State, error)
+	SharedCopy() *state.State
 	Changed() <-chan struct{}
 	IsLeader() bool
 	// VerifyLeader makes sure that a majority still accepts this agent as

@@ -66,7 +66,8 @@ func (w *QuorumWatch) Run(ctx context.Context) {
 // channel that fails gets the message again in the next round.
 func (w *QuorumWatch) round(ctx context.Context, now time.Time) {
 	if w.leader() {
-		if w.open && w.tell(notify.Resolved, now) {
+		if w.open {
+			w.tell(notify.Resolved, now)
 			w.open = false
 		}
 		w.lostAt = time.Time{}
@@ -76,7 +77,8 @@ func (w *QuorumWatch) round(ctx context.Context, now time.Time) {
 		}
 		switch {
 		case !w.open && now.Sub(w.lostAt) >= noLeaderFor:
-			w.open = w.tell(notify.Raised, now)
+			w.tell(notify.Raised, now)
+			w.open = true
 		case w.open && now.Sub(w.toldAt) >= remindEvery:
 			w.tell(notify.Reminder, now)
 		}
@@ -84,20 +86,16 @@ func (w *QuorumWatch) round(ctx context.Context, now time.Time) {
 	w.deliver(ctx)
 }
 
-// tell queues a message for every channel that takes critical alerts, and
-// tells whether it could. Without channels there is nobody to tell, which
-// counts as told. A channel that has not taken the raised message yet does
-// not get the all-clear either.
-func (w *QuorumWatch) tell(event string, now time.Time) bool {
-	copied, err := w.alerts.cluster.SharedCopy()
-	if err != nil {
-		w.alerts.logger.Error("alert without quorum", "error", err)
-		return false
-	}
+// tell queues a message for every channel that takes critical alerts.
+// Without channels there is nobody to tell, which counts as told. A
+// channel that has not taken the raised message yet does not get the
+// all-clear either.
+func (w *QuorumWatch) tell(event string, now time.Time) {
+	copied := w.alerts.cluster.SharedCopy()
 	w.toldAt = now
 	config := copied.Config.Spec
 	if config.Alerts == nil {
-		return true
+		return
 	}
 	message := notify.Message{
 		Cluster: copied.ClusterName, Event: event, Key: "no-leader/" + w.host, Kind: "no-leader",
@@ -116,7 +114,6 @@ func (w *QuorumWatch) tell(event string, now time.Time) bool {
 			w.pending[index] = message
 		}
 	}
-	return true
 }
 
 // deliver sends the pending messages.
@@ -124,11 +121,7 @@ func (w *QuorumWatch) deliver(ctx context.Context) {
 	if len(w.pending) == 0 {
 		return
 	}
-	copied, err := w.alerts.cluster.SharedCopy()
-	if err != nil {
-		w.alerts.logger.Error("alert without quorum", "error", err)
-		return
-	}
+	copied := w.alerts.cluster.SharedCopy()
 	notifiers := map[int]notify.Notifier{}
 	for _, index := range slices.Sorted(maps.Keys(w.pending)) {
 		message := w.pending[index]

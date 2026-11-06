@@ -218,14 +218,10 @@ type desiredState struct {
 	copied *state.State
 }
 
-// readDesired reads what this host should run. It makes a copy of the state
-// under the lock that Raft's Apply waits for; the pass then works on the
-// copy outside the lock.
-func readDesired(cluster loop.Cluster, self state.HostID) (desiredState, error) {
-	copied, err := cluster.SharedCopy()
-	if err != nil {
-		return desiredState{}, fmt.Errorf("copy the state: %w", err)
-	}
+// readDesired reads what this host should run from the shared copy of the
+// state, so the pass works outside the lock that Raft's Apply waits for.
+func readDesired(cluster loop.Cluster, self state.HostID) desiredState {
+	copied := cluster.SharedCopy()
 	desired := desiredState{
 		config: copied.Config.Spec, stacks: map[string]*state.Stack{}, volumes: copied.Volumes,
 		secrets: copied.Secrets, copied: copied,
@@ -233,7 +229,7 @@ func readDesired(cluster loop.Cluster, self state.HostID) (desiredState, error) 
 	// a host that was fenced runs nothing until it is active again, because
 	// its stacks may run elsewhere by now (state.KeepsStacks)
 	if host, ok := copied.Hosts[self]; !ok || !state.KeepsStacks(host.Phase) {
-		return desired, nil
+		return desired
 	}
 	for _, stack := range copied.Stacks {
 		// a stack that stops for a move is a leaver here (stopLeavers)
@@ -241,7 +237,7 @@ func readDesired(cluster loop.Cluster, self state.HostID) (desiredState, error) 
 			desired.stacks[stack.Project()] = stack
 		}
 	}
-	return desired, nil
+	return desired
 }
 
 // Run runs passes until ctx ends (loop.Run), then waits for the jobs.
@@ -260,11 +256,7 @@ func (r *Runner) Run(ctx context.Context) {
 // waits for the next pass. A stack whose volume is not mounted yet waits
 // too. A stack that fails to come up is reported as failing.
 func (r *Runner) pass(ctx context.Context) {
-	desired, err := readDesired(r.cluster, r.host)
-	if err != nil {
-		r.logger.Error("read the state", "error", err)
-		return
-	}
+	desired := readDesired(r.cluster, r.host)
 	inUse := r.stopLeavers(ctx, desired)
 	for _, project := range slices.Sorted(maps.Keys(desired.stacks)) {
 		stack := desired.stacks[project]

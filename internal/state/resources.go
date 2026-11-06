@@ -141,23 +141,22 @@ func (e *ChangeError) Error() string { return fmt.Sprintf("change %d: %v", e.Ind
 
 func (e *ChangeError) Unwrap() error { return e.Err }
 
-// applyChangeResources applies the changes to a copy of the state, one
+// applyChangeResources applies the changes to a clone of the state, one
 // after the other, because each needs the changes before it. The function
-// it returns puts the copy in place. This is the one handler that works on
-// a copy, because what a change checks depends on the changes before it. A
+// it returns puts the clone in place. This is the one handler that works on
+// a clone, because what a change checks depends on the changes before it.
+// The clone shares the specs and the encrypted values (State.Clone), so a
+// batch costs about as much as the resources' statuses, not the secrets. A
 // change that changes nothing does not count, and a batch of only such
 // changes is unchanged.
 func applyChangeResources(s *State, cmd Command, payload ChangeResources) (func(), error) {
 	if len(payload.Changes) == 0 {
 		return nil, errors.New("no changes")
 	}
-	copied, err := s.Copy()
-	if err != nil {
-		return nil, err
-	}
-	copied.makeMaps()
+	copied := s.Clone()
 	for index, each := range payload.Changes {
 		var change func()
+		var err error
 		switch {
 		case (each.Put == nil) == (each.Delete == nil):
 			err = errors.New("a change is one put or one delete")
@@ -178,8 +177,8 @@ func applyChangeResources(s *State, cmd Command, payload ChangeResources) (func(
 		return nil, errUnchanged
 	}
 	return func() {
-		// Copy leaves the audit out (snapshot.go), and Apply adds this
-		// command's entry to the state's own
+		// Clone leaves the audit out, and Apply adds this command's entry
+		// to the state's own
 		audit := s.Audit
 		*s = *copied
 		s.Audit = audit

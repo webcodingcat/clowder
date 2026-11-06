@@ -56,10 +56,7 @@ func (p *Prefetcher) Run(ctx context.Context) {
 // Ready tells whether Docker has every image of a stack, by its ID. A move
 // to this host waits until it does.
 func (p *Prefetcher) Ready(stackID string) bool {
-	copied, err := p.cluster.SharedCopy()
-	if err != nil {
-		return false
-	}
+	copied := p.cluster.SharedCopy()
 	stack, ok := copied.Stacks[stackID]
 	if !ok {
 		return false
@@ -79,11 +76,7 @@ func (p *Prefetcher) Ready(stackID string) bool {
 // comes back. A tag that changed under the same name is pulled again only
 // when a user restarts the stack (Runner.pullRestarted).
 func (p *Prefetcher) pass(ctx context.Context) {
-	copied, err := p.cluster.SharedCopy()
-	if err != nil {
-		p.logger.Error("read the state", "error", err)
-		return
-	}
+	copied := p.cluster.SharedCopy()
 	// the stacks that move here come first, because a move waits for them
 	var moving, others []*state.Stack
 	for _, id := range slices.Sorted(maps.Keys(copied.Stacks)) {

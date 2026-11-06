@@ -93,15 +93,35 @@ func (c *cluster) changes(kind, actor string, payload any) ([]Change, error) {
 	return changes, err
 }
 
-// applyAt applies a command of the given time.
+// applyAt applies a command of the given time. Every command of the tests
+// comes through here, so here the tests check that no command changes a
+// clone taken before it. A clone shares the specs and encrypted values
+// with the state (State.Clone), so a handler that changed one of them in
+// place would change the loops' shared copy under them.
 func (c *cluster) applyAt(at time.Time, kind, actor string, payload any) ([]Change, error) {
 	c.t.Helper()
 	cmd, err := NewCommand(kind, at, actor, payload)
 	if err != nil {
 		c.t.Fatal(err)
 	}
+	clone := c.state.Clone()
+	cloned := encodedState(c.t, clone)
 	c.index++
-	return c.state.Apply(c.index, cmd)
+	changes, err := c.state.Apply(c.index, cmd)
+	if after := encodedState(c.t, clone); after != cloned {
+		c.t.Errorf("%s changed a clone taken before it:\nbefore %s\nafter  %s", kind, cloned, after)
+	}
+	return changes, err
+}
+
+// encodedState returns a state as JSON.
+func encodedState(t *testing.T, state *State) string {
+	t.Helper()
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
 }
 
 // apply applies a command and returns Apply's error.
@@ -111,9 +131,8 @@ func (c *cluster) apply(kind, actor string, payload any) error {
 	return err
 }
 
-// mustApply applies a command that must pass. It skips the check of
-// changes, which encodes the state twice: tests fill it with a thousand
-// commands.
+// mustApply applies a command that must pass, so it skips the check of
+// changes that a refusal leaves the state as it was.
 func (c *cluster) mustApply(kind, actor string, payload any) {
 	c.t.Helper()
 	if _, err := c.applyAt(testTime, kind, actor, payload); err != nil {

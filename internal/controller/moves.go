@@ -64,11 +64,7 @@ func RunMoves(ctx context.Context, cluster Cluster, propose Propose, progress Pr
 
 // pass looks at each move once and tells how soon the next deadline comes.
 func (m *mover) pass(ctx context.Context) time.Duration {
-	copied, err := m.cluster.SharedCopy()
-	if err != nil {
-		m.logger.Error("move the stacks", "error", err)
-		return 0
-	}
+	copied := m.cluster.SharedCopy()
 	now := time.Now()
 	soonest := time.Duration(0)
 	for _, id := range slices.Sorted(maps.Keys(copied.Operations)) {

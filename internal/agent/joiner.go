@@ -27,7 +27,7 @@ import (
 // the host that joins.
 type joiner struct {
 	cluster interface {
-		SharedCopy() (*state.State, error)
+		SharedCopy() *state.State
 	}
 	propose controller.Propose
 	dataKey *datakey.Key
@@ -70,10 +70,7 @@ func (j *joiner) Join(ctx context.Context, request api.JoinRequest) (api.JoinAns
 	if err != nil {
 		return api.JoinAnswer{}, api.JoinRefused(err)
 	}
-	current, err := j.cluster.SharedCopy()
-	if err != nil {
-		return api.JoinAnswer{}, fmt.Errorf("read the state for the join: %w", err)
-	}
+	current := j.cluster.SharedCopy()
 	if !current.Configured() {
 		return api.JoinAnswer{}, api.JoinRefused(errors.New("the cluster has no ClusterConfiguration yet: apply it " +
 			"first, the leader checks the host's server with its Hetzner token"))

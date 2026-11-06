@@ -154,11 +154,7 @@ func (a *Alerts) RunHeartbeat(ctx context.Context) {
 // heartbeat calls the heartbeat's URL once and tells how long to wait until
 // the next call. It returns false if the configuration has no heartbeat.
 func (a *Alerts) heartbeat(ctx context.Context) (time.Duration, bool) {
-	copied, err := a.cluster.SharedCopy()
-	if err != nil {
-		a.logger.Error("call the heartbeat", "error", err)
-		return 0, false
-	}
+	copied := a.cluster.SharedCopy()
 	alerts := copied.Config.Spec.Alerts
 	if alerts == nil || alerts.Heartbeat == nil {
 		return 0, false
@@ -176,11 +172,7 @@ func (a *Alerts) heartbeat(ctx context.Context) (time.Duration, bool) {
 // pass brings the open alerts in line with what the cluster shows, then
 // tells the channels.
 func (a *Alerts) pass(ctx context.Context) {
-	copied, err := a.cluster.SharedCopy()
-	if err != nil {
-		a.logger.Error("raise the alerts", "error", err)
-		return
-	}
+	copied := a.cluster.SharedCopy()
 	if !copied.Configured() {
 		return // no configuration yet: no channels
 	}
@@ -432,10 +424,7 @@ type TestResult struct {
 // sends at once and from this agent, and tells how each channel took it.
 // It returns no results when the configuration names no channel.
 func (a *Alerts) Test(ctx context.Context) ([]TestResult, error) {
-	copied, err := a.cluster.SharedCopy()
-	if err != nil {
-		return nil, err
-	}
+	copied := a.cluster.SharedCopy()
 	config := copied.Config.Spec
 	if config.Alerts == nil {
 		return nil, nil

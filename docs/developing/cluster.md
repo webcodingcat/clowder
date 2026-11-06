@@ -13,11 +13,15 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   command and returns the change it makes as a function, and `Apply` runs that function
   only when the handler returned no error. The change itself cannot fail, so nothing can
   refuse a command halfway through. This costs nothing, whereas working on a copy of the
-  state would copy all of it for every command (see `Copy`). The one handler that works on
-  a copy is `change-resources` (below), because what each of its changes checks depends on
+  state would clone it for every command (see `Clone`). The one handler that works on
+  a clone is `change-resources` (below), because what each of its changes checks depends on
   the changes before it. The state's `Index` follows the log either way. The tests check
   what the types cannot, namely that the checks change nothing: every command that a test
   may see refused (`apply`, `changes`, `refuse`) is compared with the state before it.
+- **A spec or an encrypted value is replaced whole, never changed in place.** Every clone
+  of the state shares them (`Clone`), so a handler that wrote into one would change the
+  loops' shared copy under them, and a refused batch would leave the write behind. The
+  state's tests check every command against a clone taken before it.
 - **Commands.** A command has a kind, a payload of the type with the same name
   (`Bootstrap`, `ChangeResources`, ...) and an actor (`leader`, `host/<id>`, `cli/<name>`).
   The API takes the actor from the caller's certificate (`IsCLIActor` accepts any name).
@@ -66,8 +70,9 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   - **One command for every user's change.** `change-resources` (`ChangeResources`)
     carries a list of changes. Each is one put (`PutResource`) or one delete
     (`DeleteResource`) with the resource's kind. `applyChangeResources` applies them in
-    order to a copy of the state, and checks each against the state with the changes before
-    it already applied. So a Secret placed before the configuration that names it, or a
+    order to a clone of the state (`Clone`), and checks each against the state with the
+    changes before it already applied. Only if all pass does the clone take the state's
+    place. So a Secret placed before the configuration that names it, or a
     namespace placed before its stacks, goes in together with them. The first refusal
     refuses the whole command, as a `ChangeError` with the change's index, so the API can
     name the resource that was refused. A change that changes nothing counts as no change;
@@ -423,11 +428,17 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   may go on any host. Only an ingress host holds the Floating IP (`set-ingress`).
   `dropExpiredTokens` drops expired tokens a while later (`joinTokenKept`), so a late join
   learns that its token expired.
-- `Copy` returns a deep copy without the audit. It is for work that is too slow for the
-  state's lock (the placement weighs every stack) or that keeps parts of the state (the
-  agent's stacks). The loops do not make their own copies: `raftnode.Node.SharedCopy` makes
-  one copy per change, which every loop reads and none changes. A dry run applies commands
-  to its copy, so it makes its own.
+- `Clone` returns a copy without the audit. It is for work that is too slow for the
+  state's lock (the placement weighs every stack), that keeps parts of the state (the
+  agent's stacks), or that changes its copy (`change-resources`, a dry run). It copies
+  what the handlers change in place (the maps, the resources, their statuses) and shares
+  what they only ever replace whole: the specs, a stack's `Services`, the encrypted values
+  and the certificates' bytes. So a clone costs about as much as the resources' statuses,
+  not as much as the secrets. A handler must therefore never change a spec or an
+  encrypted value in place. The state's tests check every command against a clone taken
+  before it, and `clone_test.go` fails when `Clone` shares a field that it should copy.
+  The loops do not make their own clones: `raftnode.Node.SharedCopy` makes one per change,
+  which every loop reads and none changes.
 - Snapshots are gzip-compressed JSON (`WriteSnapshot`, `ReadSnapshot`). The audit keeps the
   last `auditSize` commands.
 
@@ -713,7 +724,7 @@ or delete them.
 - **The leader decides** (`runOnLeader`). A follower hands the changes on as a batch
   (`changeBatch`) to `/v1/internal/changes`, because its own state may be behind and would
   answer `unchanged` or `refused` for what has changed since. `runChanges` first applies
-  the one `change-resources` to a copy of the leader's state (`State.Copy`), with every
+  the one `change-resources` to a clone of the leader's state (`State.Clone`), with every
   check of the state. A refusal answers at once, and a batch that changes nothing is not
   proposed (no Raft entry). `?dryRun=true` stops there and answers what a real apply would,
   with index 0. Only a real change is proposed, and the state checks it once more as it

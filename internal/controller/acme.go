@@ -111,11 +111,7 @@ func RunACME(ctx context.Context, cluster Cluster, propose Propose, keys Keys, l
 // pass deletes what no order needs any more, then orders each certificate
 // that is missing or due for renewal, one domain after the other.
 func (r *acmeRunner) pass(ctx context.Context) {
-	copied, err := r.cluster.SharedCopy()
-	if err != nil {
-		r.logger.Error("keep the certificates", "error", err)
-		return
-	}
+	copied := r.cluster.SharedCopy()
 	if !copied.Configured() {
 		return // no configuration yet: no Floating IP
 	}

@@ -90,10 +90,7 @@ func RunMembers(ctx context.Context, cluster Cluster, members Members, propose P
 func tendMembers(ctx context.Context, cluster Cluster, members Members, propose Propose,
 	raftAddress func(state.HostID) string, self state.HostID,
 ) (memberStep, error) {
-	copied, err := cluster.SharedCopy()
-	if err != nil {
-		return memberStep{}, err
-	}
+	copied := cluster.SharedCopy()
 	configuration, err := members.Members()
 	if err != nil {
 		return memberStep{}, err

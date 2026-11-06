@@ -115,12 +115,9 @@ func waitForHalt(t *testing.T, node *Node) {
 
 func TestTheLoopsShareOneCopyUntilTheNextChange(t *testing.T) {
 	machine := newFSM()
-	first, err := machine.sharedCopy()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again, err := machine.sharedCopy(); err != nil || again != first {
-		t.Errorf("a second reader got another copy: %v", err)
+	first := machine.sharedCopy()
+	if again := machine.sharedCopy(); again != first {
+		t.Error("a second reader got another copy")
 	}
 	encoded, err := json.Marshal(bootstrapCommand(t))
 	if err != nil {
@@ -129,9 +126,9 @@ func TestTheLoopsShareOneCopyUntilTheNextChange(t *testing.T) {
 	if err, _ := machine.Apply(&raft.Log{Index: 1, Data: encoded}).(error); err != nil {
 		t.Fatal(err)
 	}
-	after, err := machine.sharedCopy()
-	if err != nil || after == first || after.Index != 1 || first.Index != 0 {
-		t.Errorf("after a change: the same copy %v, index %d (the first %d), %v", after == first, after.Index,
-			first.Index, err)
+	after := machine.sharedCopy()
+	if after == first || after.Index != 1 || first.Index != 0 {
+		t.Errorf("after a change: the same copy %v, index %d (the first %d)", after == first, after.Index,
+			first.Index)
 	}
 }

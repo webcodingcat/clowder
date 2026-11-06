@@ -469,7 +469,7 @@ func (c *Cluster) Read(use func(current *state.State)) {
 
 // SharedCopy copies afresh each time, and fails the test if a loop writes
 // into its copy (statetest.ReadOnlyCopy).
-func (c *Cluster) SharedCopy() (*state.State, error) {
+func (c *Cluster) SharedCopy() *state.State {
 	c.Lock()
 	defer c.Unlock()
 	return statetest.ReadOnlyCopy(c.t, c.State)

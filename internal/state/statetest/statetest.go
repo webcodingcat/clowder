@@ -12,18 +12,17 @@ import (
 // ReadOnlyCopy copies current as raftnode.Node.SharedCopy does, and fails
 // the test at its end if anything wrote into the copy. In the agent, all
 // loops share one copy per change, so a write there would show every other
-// loop a state that never existed. Go cannot make the copy read-only, so
-// the tests of the loops check it instead. The comparison uses JSON,
-// because that is all that Copy copies.
-func ReadOnlyCopy(t testing.TB, current *state.State) (*state.State, error) {
+// loop a state that never existed. The copy also shares its specs and
+// encrypted values with the state itself (state.State.Clone), so a write
+// into those would change the state behind Raft's back. Go cannot make the
+// copy read-only, so the tests of the loops check it instead, through its
+// JSON.
+func ReadOnlyCopy(t testing.TB, current *state.State) *state.State {
 	t.Helper()
-	copied, err := current.Copy()
-	if err != nil {
-		return nil, err
-	}
+	copied := current.Clone()
 	handedOut, err := json.Marshal(copied)
 	if err != nil {
-		return nil, err
+		t.Fatalf("encode the shared copy of the state: %v", err)
 	}
 	t.Cleanup(func() {
 		atEnd, err := json.Marshal(copied)
@@ -35,5 +34,5 @@ func ReadOnlyCopy(t testing.TB, current *state.State) (*state.State, error) {
 			t.Errorf("a loop wrote into the shared copy of the state (index %d)", copied.Index)
 		}
 	})
-	return copied, nil
+	return copied
 }
