@@ -19,11 +19,45 @@ import (
 // TestAlerts sends alerts to every kind of channel and lets Prometheus
 // scrape the agent.
 func TestAlerts(t *testing.T) {
-	server, _ := baseline(t)
+	server, _ := baseline(t, threeHosts)
 	runSteps(t, []step{
 		{"alerts reach every channel", func(t *testing.T) { alertsReachTheChannels(t, server) }},
 		{"Prometheus scrapes /metrics", func(t *testing.T) { scrapeMetrics(t, server) }},
+		{"a token that Hetzner refuses is asked for and raises hetzner-token", refusedToken},
 	})
+}
+
+// tokenRefusedSubject is the subject of the alert hetzner-token.
+const tokenRefusedSubject = "Hetzner refuses the cluster's token"
+
+// refusedToken applies a Hetzner token that HLab refuses, as a user who
+// pasted the wrong one. HLab has one project, so a token that sees none of
+// the servers is one it refuses. The CLI says so and asks; without --yes
+// nothing changes. With --yes, the leader's next call to Hetzner raises the
+// alert hetzner-token, and the right token ends it.
+func refusedToken(t *testing.T) {
+	// a scenario that fails leaves its things for a look, but a refused
+	// token would stop fencing in every later scenario
+	t.Cleanup(func() {
+		sealSystemSecret(t, "hetzner", "token", os.Getenv("HCLOUD_TOKEN"))
+		applyConfig(t)
+	})
+	sealSystemSecret(t, "hetzner", "token", "a refused token")
+	output, err := clowder("apply", "-f", configDir())
+	if err == nil || !strings.Contains(output, "The new Hetzner token ") || strings.Contains(output, "sees the servers of") ||
+		!strings.Contains(output, "confirm it with --yes") {
+		t.Errorf("an apply of a refused token without --yes: %v\n%s", err, output)
+	}
+	if diff, err := clowder("diff", "-f", configDir()); exitCode(err) != 1 ||
+		!strings.Contains(diff, "SealedSecret clowder-system/hetzner: differs in data.token\n") {
+		t.Errorf("the apply without --yes changed the token: %v\n%s", err, diff)
+	}
+	applyConfig(t)
+	// the leader asks Hetzner about the Floating IP every pass
+	alertOpen(t, tokenRefusedSubject, true)
+	sealSystemSecret(t, "hetzner", "token", os.Getenv("HCLOUD_TOKEN"))
+	applyConfig(t)
+	alertOpen(t, tokenRefusedSubject, false)
 }
 
 // The mail server bin/dev live runs in the lab's network: STARTTLS with the
@@ -65,7 +99,10 @@ func alertsReachTheChannels(t *testing.T, server host) {
 	if len(received.got("/discord")) != 1 || !received.hasMessage("/webhook", "test", "test") {
 		t.Errorf("the test alert: discord %v, webhook %v", received.got("/discord"), received.got("/webhook"))
 	}
-	if subjects := mailSubjects(t); !strings.Contains(subjects, "[live] info: test alert") {
+	// the subject starts with the cluster's name, the first word after
+	// "cluster" in its status
+	name := strings.TrimSuffix(strings.Fields(clusterStatus(t))[1], ",")
+	if subjects := mailSubjects(t); !strings.Contains(subjects, "["+name+"] info: test alert") {
 		t.Errorf("no test alert in the mail: %s", subjects)
 	}
 
@@ -160,8 +197,8 @@ func fillPool(t *testing.T, server host, received *receiver) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	createAndApply(t, "filler", simpleStack("filler", "filler-data")+
-		volumeDocument("filler-data", "small", fmt.Sprintf("%dM", poolBytes*90/100>>20), 0))
+	createAndApply(t, "filler", volumeDocument("filler-data", "small", fmt.Sprintf("%dM", poolBytes*90/100>>20), 0)+
+		simpleStack("filler", "filler-data"))
 	waitRunning(t, "filler", 1)
 	app := server.must(t, "docker ps -q --filter label=com.docker.compose.project="+project("filler"))
 	// zeros take blocks of a thin pool as any data does

@@ -44,7 +44,8 @@ func TestEveryScenarioIsListedOnce(t *testing.T) {
 }
 
 // listedScenarios reads the file scenarios: how often it names each test.
-// Each line is a name and a run time in minutes; # starts a comment line.
+// Each line is a name, a run time in minutes and the lab's layout that the
+// scenario needs; # starts a comment line.
 func listedScenarios(t *testing.T) map[string]int {
 	t.Helper()
 	file, err := os.Open("scenarios")
@@ -60,12 +61,15 @@ func listedScenarios(t *testing.T) map[string]int {
 			continue
 		}
 		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			t.Errorf("scenarios:%d: want a name and minutes, got %q", number, line)
+		if len(fields) != 3 {
+			t.Errorf("scenarios:%d: want a name, minutes and a layout, got %q", number, line)
 			continue
 		}
 		if minutes, err := strconv.ParseFloat(fields[1], 64); err != nil || minutes <= 0 {
 			t.Errorf("scenarios:%d: %q are no minutes", number, fields[1])
+		}
+		if _, ok := layouts[fields[2]]; !ok {
+			t.Errorf("scenarios:%d: %q is no layout of layouts_test.go", number, fields[2])
 		}
 		listed[fields[0]]++
 	}

@@ -3,11 +3,13 @@
 package live
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 )
 
@@ -24,7 +26,7 @@ import (
 // data has no quorum, and its writes hang), so its detection, alert and
 // resolve-splitbrain are unit tests.
 func TestQuorum(t *testing.T) {
-	server, tofu := baseline(t)
+	server, tofu := baseline(t, threeHosts)
 	hosts := scenarioHosts(server, tofu)
 	joined := undrainJoined(t)
 	cleanUpFaults(t)
@@ -57,8 +59,18 @@ func TestQuorum(t *testing.T) {
 // all-clear once they are back.
 func twoHostsGo(t *testing.T, joined []string) {
 	channel := emailChannel(t)
+	first := readOutputs(t).PublicAddress.Value
+	before := configGenerationOn(t, first)
 	changeConfig(t, func(config *clusterspec.Config) {
 		config.Alerts = &clusterspec.Alerts{Channels: []clusterspec.AlertChannel{channel}}
+	})
+	// the first host alerts from its own state: it must have the channel
+	// before the others go, or it learns of it only once they are back
+	eventually(t, time.Minute, "the first host has the email channel", func() error {
+		if generation := configGenerationOn(t, first); generation <= before {
+			return fmt.Errorf("the first host has the configuration's generation %d", generation)
+		}
+		return nil
 	})
 	subject := "no quorum as seen from " + firstHost
 	for _, name := range joined {
@@ -87,6 +99,17 @@ func twoHostsGo(t *testing.T, joined []string) {
 		}
 	}
 	changeConfig(t, func(config *clusterspec.Config) { config.Alerts = nil })
+}
+
+// configGenerationOn is the generation of the ClusterConfiguration that one
+// host has applied: the CLI's status asks whichever host answers first.
+func configGenerationOn(t *testing.T, address string) int64 {
+	t.Helper()
+	var status api.Status
+	if err := namedClient(t, credentialsFile(), address).Get(context.Background(), "/v1/status", &status); err != nil {
+		t.Fatal(err)
+	}
+	return status.Generation
 }
 
 // noLeaderDeadline is how long the agent left may take to mail no-leader:

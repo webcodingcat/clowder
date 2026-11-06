@@ -29,7 +29,7 @@ const (
 // TestIngress serves a stack under a domain with a certificate from HLab's
 // ACME CA, through the Floating IP, and measures the agent with Traefik.
 func TestIngress(t *testing.T) {
-	server, tofu := baseline(t)
+	server, tofu := baseline(t, threeHosts)
 	runSteps(t, []step{
 		{"the Floating IP comes back when moved by hand", func(t *testing.T) { holdFloatingIP(t, tofu) }},
 		{"HTTPS with a certificate from the ACME CA", func(t *testing.T) { serveHTTPS(t, tofu) }},

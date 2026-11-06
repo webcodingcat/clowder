@@ -29,6 +29,24 @@ import (
 // lab's network, and where the hosts reach them.
 const labAddress = "192.0.2.2"
 
+// layoutFile names the lab's layout; bin/dev live up writes it.
+const layoutFile = "layout"
+
+// labLayout is the layout that bin/dev live up gave the lab.
+func labLayout(t *testing.T) layout {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(workDir, layoutFile))
+	if err != nil {
+		t.Fatalf("the lab has no layout (bin/dev live up writes it): %v", err)
+	}
+	name := strings.TrimSpace(string(content))
+	found, ok := layouts[name]
+	if !ok {
+		t.Fatalf("the lab has the layout %q, which test/live does not know", name)
+	}
+	return found
+}
+
 // cloud calls HLab's Cloud API, Hetzner's API of the test's cluster, and
 // reads the answer into out (nil: none).
 func cloud(t *testing.T, method, path string, body, out any) {

@@ -74,9 +74,10 @@ func shopStack(greeting string) string {
       retries: 2
 `
 	}
-	return document(resource.KindStack, "shop", spec) +
-		volumeDocument("data", "fast", "1G", 2) +
-		volumeDocument("scratch", "bulk", "1G", 0)
+	// the volumes before the stack that mounts them, as an apply needs
+	return volumeDocument("data", "fast", "1G", 2) +
+		volumeDocument("scratch", "bulk", "1G", 0) +
+		document(resource.KindStack, "shop", spec)
 }
 
 // The deadlines of the steps. The setup installs packages, builds DRBD's
@@ -137,14 +138,20 @@ func watchHost(t *testing.T, server host) {
 const baselineConfigFile = "baseline-config.json"
 
 // baseline checks where every scenario starts, so each runs alone and in any
-// order (bin/dev live run -run <test>): the hosts that bin/dev live up made,
-// its cluster set up with a leader and the configuration's directory
-// applied as TestSetup left it, the first host active and the others drained (so
-// stacks start on the first), three voters, no stack or volume in any
+// order (bin/dev live run -run <test>): a lab of the scenario's layout, the
+// hosts that TestSetup made, its cluster set up with a leader and the
+// configuration's directory applied as TestSetup left it, the first host
+// active and the others active or, in the layout three, drained (so stacks
+// start on the first), the layout's voters, no stack or volume in any
 // namespace, and no fault in the lab. A scenario that fails leaves what it
 // made for a look; the next one stops here and names it.
-func baseline(t *testing.T) (host, outputs) {
+func baseline(t *testing.T, layoutName string) (host, outputs) {
 	t.Helper()
+	layout := labLayout(t)
+	if layout.name != layoutName {
+		t.Fatalf("the scenario needs a lab of the layout %s, this lab has %s (bin/dev live up --layout %s)",
+			layoutName, layout.name, layoutName)
+	}
 	tofu := readOutputs(t)
 	server := host{address: tofu.PublicAddress.Value}
 	watchHost(t, server)
@@ -166,15 +173,15 @@ func baseline(t *testing.T) (host, outputs) {
 	}
 	hosts := clusterHosts(t)
 	for _, found := range hosts {
-		want := "draining"
-		if found.ID == 0 {
-			want = "active"
+		want := "active"
+		if found.ID != 0 && layout.drainJoined {
+			want = "draining"
 		}
 		if found.Phase != want && found.Phase != "removed" {
 			t.Fatalf("host %s is %s, want %s: %+v", found.Name, found.Phase, want, hosts)
 		}
 	}
-	if err := checkThreeVoters(hosts); err != nil {
+	if err := checkVoters(hosts, layout.voters); err != nil {
 		t.Fatal(err)
 	}
 	// a deleted volume is listed until its host removed its copy
@@ -245,17 +252,20 @@ func resourcesInAllNamespaces(t *testing.T, kind string) []string {
 	return names
 }
 
-// TestSetup makes the first host, sets up its cluster and has two more
-// hosts join: the baseline of the other scenarios. bin/dev live up runs it,
-// once per cluster.
+// TestSetup makes the first host of the lab's layout, sets up its cluster
+// and has the layout's other hosts join: the baseline of the other
+// scenarios. bin/dev live up runs it, once per cluster.
 func TestSetup(t *testing.T) {
+	layout := labLayout(t)
+	t.Logf("OpenTofu makes the first host of the layout %s", layout.name)
+	applyHosts(t, nil, nil)
 	tofu := readOutputs(t)
 	server := host{address: tofu.PublicAddress.Value}
 	watchHost(t, server)
 	runSteps(t, []step{
 		{"the setup makes the first host", func(t *testing.T) { waitForSetup(t, server) }},
 		{"the user gets credentials over SSH and applies the configuration", func(t *testing.T) { setUpCluster(t, server, tofu) }},
-		{"two hosts join with a token each", growToThreeHosts},
+		{"the layout's other hosts join with a token each", func(t *testing.T) { joinHosts(t, layout) }},
 		{"each host starts fresh, with a DRBD module for its kernel", hostsStartFresh},
 	})
 }
@@ -263,7 +273,7 @@ func TestSetup(t *testing.T) {
 // TestStacks runs a stack's way from the first apply through restarts, a
 // reboot and changed secrets to its delete.
 func TestStacks(t *testing.T) {
-	server, tofu := baseline(t)
+	server, tofu := baseline(t, threeHosts)
 	runSteps(t, []step{
 		{"a stack runs from a private registry with volumes and secrets", func(t *testing.T) { runStack(t, server) }},
 		{"the same files again change nothing", func(t *testing.T) { applyAgainChangesNothing(t, server) }},
@@ -499,12 +509,12 @@ func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 	}
 	before := stackInfo(t, "shop").generation // 0 before the first apply
 	digestsBefore := secretDigests(t)
-	// the file starts with the stack and its volumes; the password after
-	// them is sealed anew each time
+	// the password, sealed anew each time, comes first, before the stack
+	// that uses it; the file ends with the volumes and the stack
 	previous, _ := os.ReadFile(stackFile("shop"))
-	specChanged := before == 0 || !strings.HasPrefix(string(previous), shopStack(greeting))
+	specChanged := before == 0 || !strings.HasSuffix(string(previous), shopStack(greeting))
 	password := sealSecret(t, "password", secrets["password"])
-	if err := os.WriteFile(stackFile("shop"), []byte(shopStack(greeting)+"---\n"+password), 0o644); err != nil {
+	if err := os.WriteFile(stackFile("shop"), []byte(password+"\n"+shopStack(greeting)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// the value has $ and ': Go's quoting is a YAML double-quoted string
@@ -517,7 +527,6 @@ func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 	}
 	t.Logf("clowder apply -f - (api-token):\n%s", output)
 	applied := appliedSecrets(output)
-	// the secrets before the stack, as apply orders a directory
 	output = mustClowder(t, "apply", "-f", stackDir("shop"))
 	applied = append(applied, appliedSecrets(output)...)
 	// a changed spec is the stack's next generation; a change of secrets
@@ -979,7 +988,7 @@ func missingSecretFile(t *testing.T, server host) {
 // says why, and the running stack is untouched.
 func fullPool(t *testing.T, server host) {
 	before := shopContainers(t, server)
-	createAndApply(t, "big", simpleStack("big", "huge")+volumeDocument("huge", "bulk", "1T", 0))
+	createAndApply(t, "big", volumeDocument("huge", "bulk", "1T", 0)+simpleStack("big", "huge"))
 	eventually(t, stackDeadline, "big waits with a reason", func() error {
 		stacks, err := listStacks()
 		if err != nil {

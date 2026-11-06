@@ -1,21 +1,27 @@
 # The scenarios that bin/dev live run runs, each with its run time on a lab
 # in minutes, as a run of bin/dev live measured it (go test -v prints it),
-# with the hosts made from the prepared image.
+# with the hosts made from the prepared image, and the lab's layout it needs
+# (layouts_test.go).
 # bin/dev live splits them among its labs by these times, the longest first
-# to the lab with the least so far. scenarios_test.go checks that every
-# scenario of the package is here, once.
-TestFailover 15.2
-TestNoFalseFailover 9.4
-TestPlacement 7.1
-TestStacks 6.8
-TestIngress 6.3
-TestRecover 5.9
-TestReplace 5.7
-TestQuorum 5.7
-TestIngressFailover 3.9
-TestCrashingAgent 3.8
-TestPriorities 3.4
-TestAlerts 3.3
-TestBoundaries 1.5
-TestMoveInterrupted 1.3
-TestJoin 1.1
+# to the lab with the least so far. The scenarios of a layout other than
+# three go to one lab together, which makes that layout's cluster for them.
+# scenarios_test.go checks that every scenario of the package is here, once.
+TestFailover 11.3 three
+TestNoFalseFailover 9.5 three
+TestIngress 6.0 three
+TestRecover 5.9 three
+TestStacks 5.7 three
+TestPlacement 5.3 three
+TestQuorum 5.0 three
+TestReplace 4.8 three
+TestCrashingAgent 3.9 three
+TestAlerts 3.7 three
+TestPriorities 3.4 three
+TestIngressFailover 3.3 three
+TestBoundaries 1.5 three
+TestJoin 1.2 three
+TestMoveInterrupted 1.2 three
+TestAccess 0.1 three
+TestRolesFailover 2.3 roles
+TestRoles 1.0 roles
+TestSingleHost 2.7 single

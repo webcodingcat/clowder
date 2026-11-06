@@ -45,7 +45,7 @@ const failoverVolumeSize = "256M"
 //   - another host, cut off for a while and back: either back without a
 //     fence, or fenced, never both.
 func TestFailover(t *testing.T) {
-	server, tofu := baseline(t)
+	server, tofu := baseline(t, threeHosts)
 	hosts := scenarioHosts(server, tofu)
 	undrainJoined(t)
 	cleanUpFaults(t)
@@ -175,7 +175,7 @@ const resyncDeadline = 15 * time.Minute
 // leader and one host only, and a pause of every host for 20 s, while a
 // volume of 20 GB resyncs.
 func TestNoFalseFailover(t *testing.T) {
-	server, tofu := baseline(t)
+	server, tofu := baseline(t, threeHosts)
 	hosts := scenarioHosts(server, tofu)
 	joined := undrainJoined(t)
 	cleanUpFaults(t)
@@ -245,7 +245,7 @@ func TestNoFalseFailover(t *testing.T) {
 // broken release, leads to no reboot loop: the host is fenced once, powered
 // on, and stays fenced while its agent does not run.
 func TestCrashingAgent(t *testing.T) {
-	server, tofu := baseline(t)
+	server, tofu := baseline(t, threeHosts)
 	hosts := scenarioHosts(server, tofu)
 	joined := undrainJoined(t)
 	cleanUpFaults(t)
@@ -295,7 +295,7 @@ func TestCrashingAgent(t *testing.T) {
 // TestMoveInterrupted fails the host a stack moves to while its copy
 // syncs: the move ends at once, and the stack runs once, where it was.
 func TestMoveInterrupted(t *testing.T) {
-	server, tofu := baseline(t)
+	server, tofu := baseline(t, threeHosts)
 	hosts := scenarioHosts(server, tofu)
 	joined := undrainJoined(t)
 	cleanUpFaults(t)

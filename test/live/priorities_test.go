@@ -17,7 +17,7 @@ import (
 
 // TestPriorities lets stacks of higher priority push others' services out.
 func TestPriorities(t *testing.T) {
-	server, _ := baseline(t)
+	server, _ := baseline(t, threeHosts)
 	runSteps(t, []step{
 		{"higher priorities push services out", func(t *testing.T) { pushOut(t, server) }},
 		{"the agent's memory after the churn", func(t *testing.T) { checkMemory(t, server, "after the churn") }},

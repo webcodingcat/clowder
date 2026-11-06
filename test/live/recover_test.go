@@ -24,7 +24,7 @@ import (
 //     the cluster of one host grows to three, keeper's volume gets its copy
 //     and its tiebreaker, and the cluster is highly available again.
 func TestRecover(t *testing.T) {
-	server, tofu := baseline(t)
+	server, tofu := baseline(t, threeHosts)
 	hosts := scenarioHosts(server, tofu)
 	joined := undrainJoined(t)
 	slices.Sort(joined)
@@ -116,11 +116,11 @@ func TestRecover(t *testing.T) {
 			applyHosts(t, []string{}, map[string]string{})
 			tokens := map[string]string{}
 			for _, name := range joined {
-				tokens[name] = joinToken(t, time.Hour)
+				tokens[name] = joinToken(t, time.Hour, allRoles)
 			}
 			applyHosts(t, joined, tokens)
 			waitForJoined(t, joined...)
-			eventually(t, time.Minute, "three voters", func() error { return checkThreeVoters(clusterHosts(t)) })
+			eventually(t, time.Minute, "three voters", func() error { return checkVoters(clusterHosts(t), 3) })
 			// the new servers have new addresses
 			volumeSteady(t, scenarioHosts(server, readOutputs(t)), "keeper")
 			if now := stackContainer(t, server, "keeper"); now != container {

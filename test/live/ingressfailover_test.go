@@ -26,7 +26,7 @@ const failoverDomain = "relay." + zone
 // the Floating IP after a drain and a failure of its host, which keeps it
 // when that host is back.
 func TestIngressFailover(t *testing.T) {
-	server, tofu := baseline(t)
+	server, tofu := baseline(t, threeHosts)
 	hosts := scenarioHosts(server, tofu)
 	joined := undrainJoined(t)
 	cleanUpFaults(t)

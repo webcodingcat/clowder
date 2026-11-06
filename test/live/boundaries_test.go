@@ -43,7 +43,7 @@ var neighborStack = document(resource.KindStack, "neighbor", `services:
 // other hosts: the rules of internal/network (guard_in, guard_fwd) and
 // Docker's own rules between stacks, which a Docker update could change.
 func TestBoundaries(t *testing.T) {
-	server, tofu := baseline(t)
+	server, tofu := baseline(t, threeHosts)
 	runSteps(t, []step{
 		{"a container reaches neither the host nor another stack", func(t *testing.T) {
 			checkBoundaries(t, server, tofu)

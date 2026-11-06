@@ -15,21 +15,23 @@
 #   all       lint, test, test-tools, package (what CI runs)
 #   live      the live tests in separate HLab labs, up to three at once
 #             (LIVE_LABS=<n>, otherwise as many as the free memory allows).
-#             Each lab runs a group of the scenarios of test/live/scenarios:
-#             live up, live run, and live down once they pass (needs
-#             HLAB=<path to HLab's bin/hlab> and /dev/kvm). A failed lab keeps
-#             its hosts for inspection.
-#   live up [--lab <n>] [<tag>]  package, make the hosts' image unless it is
-#             current (live image), start lab n (default 1) unless it runs,
-#             make the first host with examples/hetzner from the image,
-#             set up its cluster and let two more hosts join (test/live:
-#             TestSetup).
+#             Each lab runs a group of the scenarios of test/live/scenarios,
+#             for each layout in its group: live up, live run, and live down
+#             once they pass (needs HLAB=<path to HLab's bin/hlab> and
+#             /dev/kvm). A failed lab keeps its hosts for inspection.
+#   live up [--lab <n>] [--layout <layout>] [<tag>]  package, make the
+#             hosts' image unless it is current (live image), start lab n
+#             (default 1) unless it runs, and make the cluster of the layout
+#             (default three; the layouts are those of test/live/scenarios)
+#             with examples/hetzner from the image: the first host, its
+#             setup, and the other hosts' joins (test/live: TestSetup).
 #             With a tag, on a checkout of that tag: the release without the
 #             test hook. The image is made again from the release, the host
 #             installs clowderd from the APT repository, and the CLI comes
 #             from the GitHub release
-#   live run [--lab <n>] [<go test flags>]  the scenarios of test/live on the
-#             hosts of lab n (default 1), e.g. bin/dev live run -run TestIngress
+#   live run [--lab <n>] [<go test flags>]  the scenarios of the lab's layout
+#             on the hosts of lab n (default 1), or those that -run picks,
+#             e.g. bin/dev live run -run TestIngress
 #   live down [--lab <n>]  destroy what the live tests left and stop their
 #             labs, or only lab n
 #   live image [--rebuild]  make the hosts' image in a separate lab, unless
@@ -71,9 +73,12 @@ readonly BUSYBOX_IMAGE=busybox:1.37.0
 # inputs.
 readonly MAX_LABS=3
 # How much of the Docker host's memory a lab uses: at most five servers of
-# 4 GB at once (three hosts plus those that TestReplace and TestRecover add)
-# and the lab itself.
+# 4 GB at once (the layout roles, or three hosts plus those that TestReplace
+# and TestRecover add) and the lab itself.
 readonly LAB_MEMORY_GB=22
+# The layout of a lab's cluster unless live up names another; the scenarios
+# of the other layouts run together in one lab (scenario_groups).
+readonly DEFAULT_LAYOUT=three
 readonly IMAGE_LAB=clowder-live-image
 readonly IMAGE_VOLUME="${IMAGE_LAB}"
 # An image older than this is made again, because the mirrors' kernel and
@@ -581,21 +586,23 @@ import_image() {
     --label "clowder-live-image=${inputs}"
 }
 
-# up_lab [<tag>]: Make the first host from the hosts' image (made by
-# prepare_live) in the lab of use_test_lab, and start the lab unless it
-# runs. TestSetup sets up the cluster and lets two more hosts join, with
-# OpenTofu copied to /work/bin. The registry and the mail server keep
-# running until bin/dev live down. With a tag, use that release instead of
-# dist/.
+# up_lab <layout> [<tag>]: Make the cluster of the layout from the hosts'
+# image (made by prepare_live) in the lab of use_test_lab, and start the
+# lab unless it runs. TestSetup makes the hosts with OpenTofu, copied to
+# /work/bin, sets up the cluster and lets the other hosts join. The
+# registry and the mail server keep running until bin/dev live down. With a
+# tag, use that release instead of dist/.
 # Globals:
 #   lab_number (read)
 up_lab() {
-  local tag="${1:-}" package_variables public_key image_id
+  local layout="$1" tag="${2:-}" package_variables public_key image_id
   live_lock
   refuse_left_host
   live_lab
   in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/* \
     && ssh-keygen -q -t ed25519 -N "" -C clowder-live -f /work/id_ed25519' </dev/null
+  # TestSetup builds the cluster after it, and live run picks its scenarios
+  printf '%s' "${layout}" | in_lab "${GO_IMAGE}" sh -c 'cat >/work/layout'
   # live run checks again that the checkout is at this tag
   printf '%s' "${tag}" | in_lab "${GO_IMAGE}" sh -c 'cat >/work/release-tag'
   if [[ -n "${tag}" ]]; then
@@ -620,21 +627,22 @@ ${package_variables}
 EOF
   start_registry
   start_mail
-  # the tests run OpenTofu themselves for the hosts that join (test/live: tofu)
-  if ! live_tofu 'tofu apply -input=false -auto-approve -state=/work/terraform.tfstate \
-    -var-file=/work/live.tfvars && tofu output -json -state=/work/terraform.tfstate >/work/outputs.json \
-    && mkdir -p /work/bin && cp /usr/local/bin/tofu /work/bin/tofu' \
+  # the tests run OpenTofu themselves for every host (test/live: tofu), with
+  # the data of live_tofu's init
+  if ! live_tofu 'mkdir -p /work/bin && cp /usr/local/bin/tofu /work/bin/tofu' \
     || ! live_go_test -run '^TestSetup$'; then
     live_failed "bin/dev live down --lab ${lab_number}, then up, makes it anew"
   fi
 }
 
 # run_lab [<go test flags>]: Run the scenarios on the hosts of the lab of
-# use_test_lab; the hosts stay, whatever the outcome.
+# use_test_lab: those of the lab's layout, unless the flags pick others with
+# -run. The hosts stay, whatever the outcome.
 # Globals:
 #   lab_number, registry_container, mail_container (read)
 run_lab() {
-  local tag
+  local tag layout flag
+  local -a picked=()
   live_lock
   # not live_lab: a lab started at this point would have no host
   if ! lab_runs; then
@@ -657,7 +665,18 @@ run_lab() {
   if [[ -n "${tag}" ]]; then
     at_release_checkout "${tag}"
   fi
-  live_go_test -skip '^Test(Setup|Image)$' "$@" \
+  if ! layout="$(in_lab "${GO_IMAGE}" cat /work/layout </dev/null 2>/dev/null)"; then
+    echo "bin/dev live run: lab ${lab_number} has no layout (made before layouts existed);" \
+      "bin/dev live down --lab ${lab_number}, then up" >&2
+    return 1
+  fi
+  picked=(-run "$(layout_pattern "${layout}")")
+  for flag in "$@"; do
+    if [[ "${flag}" == -run || "${flag}" == -run=* ]]; then
+      picked=()
+    fi
+  done
+  live_go_test -skip '^Test(Setup|Image)$' "${picked[@]}" "$@" \
     || live_failed "bin/dev live run --lab ${lab_number} -run <test> runs a scenario again," \
       "bin/dev live down --lab ${lab_number} removes it all"
 }
@@ -742,41 +761,95 @@ lab_count() {
   echo $((count < 1 ? 1 : count > MAX_LABS ? MAX_LABS : count))
 }
 
-# scenario_groups <count>: Print one -run pattern per lab, one per line. The
-# scenarios of test/live/scenarios are split by their run time: the longest
-# scenario goes first, each to the lab with the least run time so far.
-scenario_groups() {
-  grep -v -e '^#' -e '^[[:space:]]*$' "${ROOT}/test/live/scenarios" | sort -k 2,2 -g -r \
-    | awk -v labs="$1" '
-      {
-        least = 1
-        for (lab = 2; lab <= labs; lab++) {
-          if (minutes[lab] < minutes[least]) least = lab
-        }
-        minutes[least] += $2
-        names[least] = names[least] (names[least] == "" ? "" : "|") $1
-      }
-      END {
-        for (lab = 1; lab <= labs; lab++) printf "^(%s)$ %s\n", names[lab], minutes[lab]
-      }'
+# scenarios: Print the lines of test/live/scenarios without the comments:
+# name, minutes, layout.
+scenarios() {
+  grep -v -e '^#' -e '^[[:space:]]*$' "${ROOT}/test/live/scenarios"
 }
 
-# cycle_lab <tag> <pattern>: Run up, run with the -run pattern, and down in
-# the lab of use_test_lab. A failure stops before down (set -e), and the
-# hosts stay.
+# layout_pattern <layout>: Print the -run pattern of the layout's scenarios;
+# fail if test/live/scenarios has none of that layout.
+layout_pattern() {
+  local names
+  names="$(scenarios | awk -v layout="$1" '$3 == layout { printf "%s%s", sep, $1; sep = "|" }')"
+  if [[ -z "${names}" ]]; then
+    echo "bin/dev live: test/live/scenarios has no scenario of the layout $1; its layouts are" \
+      "$(scenarios | awk '{print $3}' | sort -u | tr '\n' ' ')" >&2
+    return 1
+  fi
+  echo "^(${names})$"
+}
+
+# scenario_groups <count>: Print the labs' cycles, one per line: lab,
+# layout, -run pattern, minutes. The scenarios of DEFAULT_LAYOUT are split
+# by their run time, and those of each other layout go together, as one
+# group with their summed time: the longest goes first, each to the lab
+# with the least run time so far. A lab with groups of two layouts runs a
+# cycle for each. The split does not count the up of each cycle (a few
+# minutes): with three labs, that costs little.
+scenario_groups() {
+  scenarios | awk -v labs="$1" -v default_layout="${DEFAULT_LAYOUT}" '
+    $3 == default_layout {
+      count++
+      names[count] = $1; minutes[count] = $2; layouts[count] = $3
+      next
+    }
+    !($3 in together) {
+      count++
+      together[$3] = count
+      names[count] = $1; minutes[count] = $2; layouts[count] = $3
+      next
+    }
+    {
+      group = together[$3]
+      names[group] = names[group] "|" $1; minutes[group] += $2
+    }
+    END {
+      # the longest group first
+      for (i = 1; i <= count; i++) order[i] = i
+      for (i = 1; i <= count; i++) {
+        for (j = i + 1; j <= count; j++) {
+          if (minutes[order[j]] > minutes[order[i]]) { swap = order[i]; order[i] = order[j]; order[j] = swap }
+        }
+      }
+      for (i = 1; i <= count; i++) {
+        group = order[i]
+        least = 1
+        for (lab = 2; lab <= labs; lab++) {
+          if (total[lab] < total[least]) least = lab
+        }
+        total[least] += minutes[group]
+        key = least SUBSEP layouts[group]
+        if (!(key in cycle)) { cycle[key] = names[group]; cycles[least] = cycles[least] " " layouts[group] }
+        else cycle[key] = cycle[key] "|" names[group]
+        cycle_minutes[key] += minutes[group]
+      }
+      for (lab = 1; lab <= labs; lab++) {
+        split(substr(cycles[lab], 2), lab_layouts, " ")
+        for (n = 1; n in lab_layouts; n++) {
+          key = lab SUBSEP lab_layouts[n]
+          printf "%d %s ^(%s)$ %s\n", lab, lab_layouts[n], cycle[key], cycle_minutes[key]
+        }
+      }
+    }'
+}
+
+# cycle_lab <tag> <layout> <pattern>: Run up with the layout, run with the
+# -run pattern, and down in the lab of use_test_lab. A failure stops before
+# down (set -e), and the hosts stay.
 cycle_lab() {
-  up_lab "$1"
-  run_lab -run "$2"
+  up_lab "$2" "$1"
+  run_lab -run "$3"
   down_lab
 }
 
 # cmd_live [<tag>]: Run every scenario in as many labs at once as lab_count
-# says, each lab with one group from scenario_groups, and tear down each lab
-# once it has passed. Each lab's output lines start with its number; a
-# failed lab keeps its hosts.
+# says, each lab with its cycles from scenario_groups, one after the other,
+# and tear down each cycle's cluster once it has passed. Each lab's output
+# lines start with its number; a failed lab keeps its hosts.
 cmd_live() {
-  local tag="${1:-}" count lab pattern minutes failed=()
-  local -a patterns=() pids=()
+  local tag="${1:-}" count lab layout pattern minutes index failed=()
+  local -a cycle_labs=() cycle_layouts=() cycle_patterns=() pids=()
   count="$(lab_count)"
   for ((lab = 1; lab <= count; lab++)); do
     use_test_lab "${lab}"
@@ -785,22 +858,30 @@ cmd_live() {
     refuse_left_host
   done
   prepare_live "${tag}"
-  while read -r pattern minutes; do
-    patterns+=("${pattern}")
-    echo "bin/dev live: lab ${#patterns[@]} runs ${pattern} (about ${minutes} min)"
+  while read -r lab layout pattern minutes; do
+    cycle_labs+=("${lab}")
+    cycle_layouts+=("${layout}")
+    cycle_patterns+=("${pattern}")
+    echo "bin/dev live: lab ${lab} runs ${pattern} on the layout ${layout} (about ${minutes} min)"
   done < <(scenario_groups "${count}")
-  # an empty pattern would run every scenario in every lab
-  if ((${#patterns[@]} != count)) || [[ " ${patterns[*]} " == *" ^()$ "* ]]; then
-    echo "bin/dev live: cannot split test/live/scenarios among ${count} labs" >&2
-    return 1
-  fi
+  for ((lab = 1; lab <= count; lab++)); do
+    # a lab without a cycle means the split went wrong
+    if [[ " ${cycle_labs[*]} " != *" ${lab} "* ]]; then
+      echo "bin/dev live: cannot split test/live/scenarios among ${count} labs" >&2
+      return 1
+    fi
+  done
   for ((lab = 1; lab <= count; lab++)); do
     # sed -u prints each lab's lines as they come. set -e ends the subshell
     # at the first failure, and with pipefail wait gets the subshell's
     # status, not sed's
     (
       use_test_lab "${lab}"
-      cycle_lab "${tag}" "${patterns[lab - 1]}"
+      for index in "${!cycle_labs[@]}"; do
+        if [[ "${cycle_labs[index]}" == "${lab}" ]]; then
+          cycle_lab "${tag}" "${cycle_layouts[index]}" "${cycle_patterns[index]}"
+        fi
+      done
     ) 2>&1 | sed -u "s/^/[lab ${lab}] /" &
     pids+=("$!")
   done
@@ -817,21 +898,28 @@ cmd_live() {
   echo "bin/dev live: passed in ${count} labs"
 }
 
-# cmd_live_up [--lab <n>] [<tag>]: prepare_live, then up_lab in lab n
-# (default 1). With a tag, use that release; the tests come from the
-# checkout, so the checkout must be at the tag.
+# cmd_live_up [--lab <n>] [--layout <layout>] [<tag>]: prepare_live, then
+# up_lab in lab n (default 1) with the layout (default DEFAULT_LAYOUT).
+# With a tag, use that release; the tests come from the checkout, so the
+# checkout must be at the tag.
 cmd_live_up() {
-  local lab=1
-  if [[ "${1:-}" == --lab ]]; then
-    lab="$(checked_lab "${2:-}")"
+  local lab=1 layout="${DEFAULT_LAYOUT}"
+  while [[ "${1:-}" == --lab || "${1:-}" == --layout ]]; do
+    if [[ "$1" == --lab ]]; then
+      lab="$(checked_lab "${2:-}")"
+    else
+      layout="${2:-}"
+    fi
     shift 2
-  fi
+  done
+  # a layout without scenarios is a typo, or has nothing to run
+  layout_pattern "${layout}" >/dev/null
   use_test_lab "${lab}"
   # checked again under the lock in up_lab; checking here first avoids a
   # useless build and image
   refuse_left_host
   prepare_live "${1:-}"
-  up_lab "${1:-}"
+  up_lab "${layout}" "${1:-}"
 }
 
 # cmd_live_run [--lab <n>] [<go test flags>]: run_lab in lab n (default 1),
@@ -912,7 +1000,7 @@ main() {
         image) cmd_live_image "${@:3}" ;;
         release) cmd_live "${3:?bin/dev live release needs a tag}" ;;
         *)
-          echo "bin/dev live: unknown mode ${2} (up [--lab <n>] [<tag>]," \
+          echo "bin/dev live: unknown mode ${2} (up [--lab <n>] [--layout <layout>] [<tag>]," \
             "run [--lab <n>] [<go test flags>], down [--lab <n>], image [--rebuild], release <tag>)" >&2
           exit 2
           ;;

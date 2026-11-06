@@ -5,6 +5,11 @@
 name: clowder-live-2
 ui_port: 8483
 socks_port: 1083
+# A token of its own: without one, HLab takes any token, and the tests need
+# one that Hetzner refuses (TestSetup, TestAlerts). 64 characters, as
+# Hetzner's.
+api:
+  token: clowder-live-token-0123456789abcdef0123456789abcdef0123456789abc
 # Only the image the hosts start from: a lab loads each of its OS images at
 # its first start, and Ubuntu's would cost minutes for nothing.
 images:

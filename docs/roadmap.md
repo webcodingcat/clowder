@@ -13,7 +13,7 @@ and what comes next. What users meet today, gaps included, is in
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values, access and recovery, still on one host | done, passes the live tests |
 | 2 | three hosts: replication, failover with fencing | done, passes the live tests |
-| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 5c done, the interim live tests next |
+| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 5c done, the interim live tests green, step 6 next |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -51,7 +51,8 @@ steps. It is built on the branch `phase-2b` and goes to `main` only once it is c
 ### Steps 1 to 5c: done
 
 Done on `phase-2b`, each with lint and unit tests green and the full review loop; the
-interim live tests come next. What they built, and the decisions that still hold:
+interim live tests after step 5c are green ([below](#the-live-tests-after-step-5c-and-at-the-end)).
+What they built, and the decisions that still hold:
 
 - **Step 1, access the way of kubeadm.** There is no bootstrap key. The first credentials
   come over SSH (`clowderd credentials`, then `clowder config import`), as kubeadm's
@@ -213,7 +214,8 @@ The last step, before the final live tests, so that they run on what is merged.
   and no bootstrap key. The labs of three hosts with all roles keep today's scenarios.
 - A new lab of five hosts for the roles: three with `control-plane` only, and two with
   `worker,ingress`. `bin/dev live up` takes a lab's layout, and `examples/hetzner` takes
-  each host's roles.
+  each host's roles. A third layout, `single`, is a cluster of one host with every role,
+  which clowder supports as a cluster of its own ([live-tests.md](live-tests.md#layouts)).
 - New scenarios for what is new:
   - a CLI certificate with a name, and its actor in the log
   - the warning before a certificate ends
@@ -229,7 +231,13 @@ The last step, before the final live tests, so that they run on what is merged.
     copies stay. In the lab of roles, the workers' public API port is closed, so
     `test/live` reaches the cluster through control-plane hosts only.
 - The run after step 5c has every scenario except those of steps 6 and 7 (a worker that
-  gets only the secrets of its stacks, the recover with workers).
+  gets only the secrets of its stacks, the recover with workers). It is green. Its faults
+  were all in `test/live` and its labs, none in clowder: the tests had not followed the
+  `ROLES` column of `host list`, a join request's roles, a Volume before its Stack in one
+  apply, the cluster's name in alert mails, and the second copy that waits for a third
+  active host; the labs accepted any Hetzner token; and a test raced the configuration
+  against the host that alerts from its own state. `TestSingleHost` adds the cluster of
+  one host.
 - All live tests must be green; a failure goes back to the step it came from.
 
 ### After phase 2b

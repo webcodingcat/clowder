@@ -10,7 +10,8 @@ tests start in that network share one network namespace with the address `192.0.
 export HLAB=/path/to/hlab/bin/hlab
 bin/dev live                        # every scenario in up to three labs at once, about 40 min
 bin/dev live up                     # lab 1: package, image, first host, cluster, two joins
-bin/dev live run                    # every scenario on lab 1's cluster
+bin/dev live up --lab 2 --layout roles   # lab 2: the cluster of the layout roles
+bin/dev live run                    # every scenario of lab 1's layout on its cluster
 bin/dev live run -run TestIngress   # one scenario; the flags go to go test
 bin/dev live run --lab 2 -run TestQuorum   # on lab 2, left by a failed bin/dev live
 bin/dev live down                   # destroy the hosts, stop every lab
@@ -23,11 +24,28 @@ Run them only at the end of a piece of work, on its finished state. Without HLab
 `bin/dev all` checks everything else: lint, unit tests, renderers and packages.
 
 `up`, `run` and `down` are separate, so a fix only costs the scenario it touches: the hosts
-stay after `up`, and `run -run <test>` repeats a scenario on them. The commands work on
+stay after `up`, and `run -run <test>` repeats a scenario on them. Without `-run`, `run`
+runs the scenarios of the lab's layout. The commands work on
 lab 1 unless `--lab <n>` names another one; `down` without `--lab` removes every lab. After
 `up <tag>`, `run` refuses a checkout that is not at that tag, because the tests must match
 the release on the hosts. While `bin/dev` works on a lab, it holds a lock (`flock` on
 `.lock` in the lab's volume), so a second run on the same lab fails.
+
+## Layouts
+
+A lab's cluster has one of three layouts (`test/live/layouts_test.go`):
+
+| Layout | Hosts | For |
+|---|---|---|
+| `three` (default) | `clowder0` to `clowder2`, each with every role; the joined two drained, so stacks start on the first | most scenarios |
+| `roles` | `clowder0` to `clowder2` with `control-plane` only, `clowder3` and `clowder4` with `worker,ingress` | the roles: `TestRoles`, `TestRolesFailover` |
+| `single` | `clowder0` alone, with every role | a cluster of one host: `TestSingleHost` |
+
+`bin/dev live up --layout <layout>` writes the layout's name into the lab's volume
+(`layout`), and `TestSetup` builds the cluster after it. Every scenario's baseline fails in
+a lab of another layout. In the layout `roles`, the module opens the API's public port on
+the control-plane hosts only, so the test reaches the cluster through those alone, as a
+user would.
 
 ## Several labs at once
 
@@ -38,10 +56,13 @@ per lab in `bin/dev`). Each lab is a separate cluster with its own registry, mai
 and package server. It runs a group of the scenarios, and its output lines start with
 `[lab <n>]`.
 
-`test/live/scenarios` lists every scenario with its run time. `bin/dev live` gives the
-longest remaining scenario to the lab with the least time so far, and prints each lab's
-group. A unit test (`scenarios_test.go`) checks that the file lists every scenario exactly
-once. Measure the times again when one changes a lot (`go test -v` prints them).
+`test/live/scenarios` lists every scenario with its run time and its layout. `bin/dev live`
+gives the longest remaining group to the lab with the least time so far, and prints each
+lab's groups. Each scenario of the layout `three` is a group of its own; the scenarios of
+each other layout form one group, so that their cluster is made once. A lab that gets
+groups of two layouts runs `up`, `run` and `down` for each, one after the other. A unit test
+(`scenarios_test.go`) checks that the file lists every scenario exactly once, with a known
+layout. Measure the times again when one changes a lot (`go test -v` prints them).
 
 The packages and the image are built once. Then each lab comes up, runs its group, and is
 removed if it passed. A failed lab keeps its hosts for inspection: use `run --lab <n> -run
@@ -58,12 +79,16 @@ removed if it passed. A failed lab keeps its hosts for inspection: use `run --la
   CA.
 - It runs mailpit for the alerts on `192.0.2.2:1025`, with STARTTLS from the registry's
   certificate, any login accepted, and its API on `:8025`.
-- It applies `examples/hetzner` with `admin_cidrs` = `192.0.2.2/32`, the storage classes
-  `bulk` at 30 GB (for the 20 GB volume of `TestNoFalseFailover`) and `small` at 10 GB,
-  the published port `udp/9987`, and the image. It also sets the test hook (the package's
-  URL and SHA-256); with a tag, `clowderd_version` names the release instead.
-- It copies the OpenTofu binary to `/work/bin`, for the tests that add and remove hosts.
-- It runs `TestSetup`, which sets up the cluster and lets two more hosts join.
+- It writes the module's variables for `examples/hetzner` (`live.tfvars`): `admin_cidrs` =
+  `192.0.2.2/32`, the storage classes `bulk` at 30 GB (for the 20 GB volume of
+  `TestNoFalseFailover`) and `small` at 10 GB, the published port `udp/9987`, and the
+  image. It also sets the test hook (the package's URL and SHA-256); with a tag,
+  `clowderd_version` names the release instead.
+- It writes the layout and copies the OpenTofu binary to `/work/bin`: the tests make every
+  host with it, because the module takes a host's roles only together with the host
+  (`hosts.tfvars`: the hosts, their join tokens and their roles).
+- It runs `TestSetup`, which makes the first host, sets up the cluster and lets the
+  layout's other hosts join.
 
 The registry and the mail server run until `bin/dev live down`. `run` refuses to start
 without them, because a new registry would not hold the test's image. `up` refuses to run
@@ -113,19 +138,20 @@ repository, so the release's setup runs from scratch once per run.
 
 ## The scenarios
 
-`bin/dev live run` runs the Go tests in `test/live` except `TestSetup` and `TestImage`,
-with `-failfast`. Each test drives the hosts with the real CLI and SSH, in steps that build
+`bin/dev live run` runs the Go tests in `test/live` of the lab's layout, except `TestSetup`
+and `TestImage`, with `-failfast`. Each test drives the hosts with the real CLI and SSH, in steps that build
 on each other; the first failure ends the scenario. Each step has a deadline (the
 constants in `live_test.go`). On a failure, the test prints cloud-init's status and the
 journals of `clowder-setup` and `clowderd`.
 
 Every scenario except `TestSetup` starts by checking the baseline (`baseline`):
 
+- the lab has the scenario's layout;
 - the first host is set up, active, and its agent runs;
-- the cluster has a leader and three voters;
+- the cluster has a leader and the layout's voters (three, or one in `single`);
 - the ClusterConfiguration from `TestSetup` is applied;
-- the joined hosts are drained, so that stacks start on the first host, where the test
-  looks for them;
+- in the layout `three`, the joined hosts are drained, so that stacks start on the first
+  host, where the test looks for them; in `roles`, every host is active;
 - there is no stack or volume in any namespace;
 - there is no fault in the lab and no dead server (HLab's `/status`).
 
@@ -144,7 +170,7 @@ a single step.
 
 ### `TestSetup` (run by `up`)
 
-1. The setup creates the first host.
+1. OpenTofu makes the first host with its roles in the layout, and its setup runs.
 2. The test gets the first credentials from root on that host over SSH
    (`clowderd credentials`, `clowder config import -`). They go to `/work/clowder-config`
    through `$CLOWDER_CONFIG`, mode 600, not to the developer's `~/.clowder/config`.
@@ -160,16 +186,30 @@ a single step.
      again shows no change (exit 0).
    - The host trusts the registry's CA (`/etc/docker/certs.d`). The test pushes its image
      and logs out, so only the namespace's login can pull it.
-3. `clowder1` and `clowder2` join, each with a token from `host join-token` that allows
-   all three roles. The test writes the tokens into `/work/hosts.tfvars` and runs OpenTofu
-   from `/work/bin`. The first joined host becomes active without a vote; once the second
-   joins, all three vote. Each joined host has its `net.json` and reaches the first host's
-   API over the private network. The test drains both, keeps their tokens for `TestJoin`,
-   and fetches new credentials with all three hosts as endpoints. So a scenario that cuts
-   off the first host (the leader after the setup) still reaches the cluster.
+3. The layout's other hosts join, each with a token from `host join-token` for its roles
+   (none in `single`). The test writes the hosts, their tokens and their roles into
+   `/work/hosts.tfvars` and runs OpenTofu from `/work/bin`. The first joined host becomes
+   active without a vote; once three control-plane hosts are in, they vote. Each joined
+   host has its `net.json` and reaches the first host's API over the private network. In
+   the layout `three`, the test drains the joined hosts and keeps their tokens for
+   `TestJoin`. It fetches new credentials, whose endpoints are exactly the control-plane
+   hosts. So a scenario that cuts off the first host (the leader after the setup) still
+   reaches the cluster.
 4. Each host is a separate server, whether it started from the image or from Debian's
    image: cloud-init ran for a new instance, and no two hosts share an instance ID, a
    machine-id or an SSH host key. The DRBD module matches the running kernel.
+
+### `TestAccess`
+
+1. Credentials with `--name live-auditor` apply and delete a Secret. The first host's
+   journal logs the certificate it issued, the journals of the control-plane agents log
+   the CLI's requests, and the audit (`/v1/audit`) has both commands, each with the actor
+   `cli/live-auditor`.
+2. The CLI warns before its certificate ends: with a certificate that ends in ten days
+   (`ends on <date>, in 10 days`) and with one that has ended (`ended on <date>`). The
+   cluster issues CLI certificates for a year, so the test signs these two with a CA of
+   its own; the CLI warns before it connects, and the host then refuses them. The test's
+   own certificate gets no warning.
 
 ### `TestJoin`
 
@@ -184,14 +224,16 @@ a single step.
 
 ### `TestReplace`
 
-The stack `steady` (a volume of two replicas) runs on the first host throughout. Its second
-copy is on `clowder2`, the host that is replaced.
+The stack `steady` (a volume of two replicas) runs on the first host throughout. Both
+joined hosts take stacks, because the second copy waits for a third active host to take
+its tiebreaker. The joined host that gets the second copy is the one that is replaced.
 
 1. A fourth host, `clowder3`, joins: active, without a vote.
-2. `clowder2` is removed. Removing `clowder3` after that is refused, because it would leave
-   two hosts. `clowder2`'s copy moves to `clowder3`, and then the host is gone.
-3. `clowder4` joins in `clowder2`'s place (OpenTofu removes `clowder2`'s server). It takes
-   `clowder2`'s ID once every host has forgotten that ID as a DRBD peer.
+2. The host with the copy is removed. Removing `clowder3` after that is refused, because it
+   would leave two hosts. The copy moves to one of the two other hosts, the tiebreaker to
+   the other, and then the host is gone.
+3. `clowder4` joins in its place (OpenTofu removes its server). It takes the removed host's
+   ID once every host has forgotten that ID as a DRBD peer.
 4. `steady` ran the whole time in the same container, with its data, and still writes.
 
 ### `TestPlacement`
@@ -279,6 +321,10 @@ The stack `echo` exists from step 2 to the last.
    fenced). Filling the pool of `small` beyond 80 % raises `pool-use`, and deleting the
    volume sends its all-clear.
 2. `promtool check metrics` accepts `/metrics`, and a Prometheus on the host scrapes it.
+3. A Hetzner token that HLab refuses (HLab has one project, so this is the token that sees
+   none of the servers): `apply` says that the new token could not be checked and,
+   without `--yes`, applies nothing. With `--yes`, the alert `hetzner-token` opens at the
+   leader's next call to Hetzner, and the right token ends it.
 
 ### `TestPriorities`
 
@@ -416,6 +462,37 @@ The joined hosts take stacks. The stack `echo` (as in `TestIngress`, but on
 6. `lost` is removed. New servers with the same names join while `keeper` runs. The
    cluster grows from one host to three voters, `keeper`'s volume gets its second copy
    and tiebreaker, its container stays, and `no-ha` is resolved.
+
+### `TestRoles` (layout `roles`)
+
+1. The control-plane hosts answer on the API's public port, the workers do not, and the
+   CLI works through the control plane.
+2. A volume of two replicas has its copies with a disk on the two workers and its
+   tiebreaker on a control-plane host; its stack runs on a worker.
+3. A token for `worker,ingress` makes no control-plane host: a join that claims
+   `control-plane` gets 403 before the server is checked.
+4. With a worker's own certificate, used on the worker: a route for every host
+   (`internal/commit-index`) answers, a route for the control plane (`internal/changes`)
+   answers 403, and Raft refuses the certificate in the TLS handshake. A control-plane
+   host's certificate passes Raft's handshake.
+5. From a control-plane host, inside the private network: a worker's API refuses the CLI's
+   certificate in the TLS handshake, the control-plane host's API takes it.
+
+### `TestRolesFailover` (layout `roles`)
+
+1. `keeper` (two replicas) runs on a worker, with its copies on both workers.
+2. Its worker freezes. `keeper` fails over to the other worker within the budget, with its
+   data, and the fenced worker comes back active; the copies are on the workers again.
+
+### `TestSingleHost` (layout `single`)
+
+1. The host leads and votes alone, no alert is open (`no-ha` comes only after
+   `clowderd recover`), the credentials name its address alone, and it issues join tokens.
+2. `solo` (a volume of two replicas) and `loose` (replicas 0) run. `solo`'s volume is
+   `degraded` with its one copy and no tiebreaker, and that raises no alert.
+3. HTTPS and UDP through the Floating IP see the test's own address, as in `TestIngress`.
+4. An agent restart leaves the containers as they are; the host stays active.
+5. After a reboot, the host leads again, and the stacks run with their data.
 
 A split brain has no scenario: with DRBD's quorum, neither a lab fault nor a manual action
 on the hosts can cause one. A copy promoted with `--force` without the newer data has no

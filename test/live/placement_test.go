@@ -15,9 +15,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// firstHost is the module's first host, which TestSetup bootstrapped.
-const firstHost = "clowder0"
-
 // placementDeadline is how long a copy may take to come and sync, or a
 // stack to move: a resync of placedVolumeSize at the resync rate and the
 // passes around it.
@@ -33,7 +30,7 @@ const placedVolumeSize = "2G"
 // off a host that drains; a volume of one replica moves with its stack; and
 // the data stays with them.
 func TestPlacement(t *testing.T) {
-	server, tofu := baseline(t)
+	server, tofu := baseline(t, threeHosts)
 	hosts := map[string]host{firstHost: server}
 	for name, module := range tofu.Hosts.Value {
 		hosts[name] = host{address: module.PublicAddress}

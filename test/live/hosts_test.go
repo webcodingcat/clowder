@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/netip"
 	"os"
@@ -25,17 +26,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/clientconfig"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/jointoken"
 	"github.com/webcodingcat/clowder/internal/pki"
-)
-
-// The hosts that join the first one (clowder0, the module's default name):
-// TestSetup makes two, TestReplace a third and its replacement.
-const (
-	firstJoining  = "clowder1"
-	secondJoining = "clowder2"
-	thirdJoining  = "clowder3"
-	replacement   = "clowder4"
 )
 
 // joinDeadline is how long a joining host may take: the setup as on the
@@ -73,17 +66,36 @@ func listHosts() ([]clusterHost, error) {
 	if err != nil {
 		return nil, err
 	}
-	var hosts []clusterHost
-	for index, line := range strings.Split(strings.TrimSpace(output), "\n") {
-		fields := strings.Fields(line)
-		if index == 0 || len(fields) < 4 {
-			continue // the header
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	// the columns by their header, so a new column does not shift them
+	header := strings.Fields(lines[0])
+	column := map[string]int{}
+	for index, name := range header {
+		column[name] = index
+	}
+	// the last columns may be empty (VERSION, before a host reports), so a
+	// row needs only those that the test reads
+	needed := 0
+	for _, name := range []string{"ID", "NAME", "PHASE", "VOTER"} {
+		index, ok := column[name]
+		if !ok {
+			return nil, fmt.Errorf("host list has no column %s: %q", name, lines[0])
 		}
-		id, err := strconv.Atoi(fields[0])
+		needed = max(needed, index+1)
+	}
+	var hosts []clusterHost
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		if len(fields) < needed {
+			return nil, fmt.Errorf("host list: %q", line)
+		}
+		id, err := strconv.Atoi(fields[column["ID"]])
 		if err != nil {
 			return nil, fmt.Errorf("host list: %q", line)
 		}
-		hosts = append(hosts, clusterHost{ID: id, Name: fields[1], Phase: fields[2], Voter: fields[3] == "yes"})
+		hosts = append(hosts, clusterHost{
+			ID: id, Name: fields[column["NAME"]], Phase: fields[column["PHASE"]], Voter: fields[column["VOTER"]] == "yes",
+		})
 	}
 	return hosts, nil
 }
@@ -97,12 +109,11 @@ func findHost(hosts []clusterHost, name string) (clusterHost, bool) {
 	return hosts[index], true
 }
 
-// joinToken makes a join token with the CLI; the line after it, on stderr,
-// says until when it opens. The token allows every role, as the module
-// gives every host all three.
-func joinToken(t *testing.T, ttl time.Duration) string {
+// joinToken makes a join token for the roles (a comma-separated list) with
+// the CLI; the line after it, on stderr, says until when it opens.
+func joinToken(t *testing.T, ttl time.Duration, roles string) string {
 	t.Helper()
-	output := mustClowder(t, "host", "join-token", "--ttl", ttl.String(), "--roles", "control-plane,worker,ingress")
+	output := mustClowder(t, "host", "join-token", "--ttl", ttl.String(), "--roles", roles)
 	token, _, _ := strings.Cut(output, "\n")
 	if _, err := jointoken.Parse(token); err != nil {
 		t.Fatalf("join-token printed %q: %v", output, err)
@@ -110,26 +121,43 @@ func joinToken(t *testing.T, ttl time.Duration) string {
 	return token
 }
 
-// applyHosts has OpenTofu make the joining hosts, each new one with its
-// token, and remove those left out; then it reads the outputs anew.
+// applyHosts has OpenTofu make the first host and the joining hosts, each
+// new one with its token and each with its roles in the lab's layout, and
+// remove those left out; then it reads the outputs anew. The module takes
+// roles only for the hosts it makes, so they go here with the hosts.
 func applyHosts(t *testing.T, hosts []string, tokens map[string]string) {
 	t.Helper()
-	encodedHosts, err := json.Marshal(hosts)
-	if err != nil {
-		t.Fatal(err)
+	layout := labLayout(t)
+	// JSON's null would set the variables to null, not to their defaults
+	hosts = append([]string{}, hosts...)
+	if tokens == nil {
+		tokens = map[string]string{}
 	}
-	encodedTokens, err := json.Marshal(tokens)
-	if err != nil {
-		t.Fatal(err)
+	roles := map[string]string{firstHost: layout.firstRoles}
+	for _, name := range hosts {
+		roles[name] = layout.rolesOf(name)
 	}
 	// HCL takes JSON's lists and objects as they are
-	variables := fmt.Sprintf("hosts       = %s\njoin_tokens = %s\n", encodedHosts, encodedTokens)
-	if err := os.WriteFile(filepath.Join(workDir, hostsFile), []byte(variables), 0o600); err != nil {
+	var variables strings.Builder
+	for _, variable := range []struct {
+		name  string
+		value any
+	}{{"hosts", hosts}, {"join_tokens", tokens}, {"roles", roles}} {
+		encoded, err := json.Marshal(variable.value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&variables, "%s = %s\n", variable.name, encoded)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, hostsFile), []byte(variables.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	state := "-state=" + filepath.Join(workDir, "terraform.tfstate")
-	before := readOutputs(t).Hosts.Value
-	t.Logf("OpenTofu applies the joining hosts %v (new ones: %d)", hosts, len(tokens))
+	var before map[string]moduleHost // none before the first host
+	if _, err := os.Stat(filepath.Join(workDir, "outputs.json")); err == nil {
+		before = readOutputs(t).Hosts.Value
+	}
+	t.Logf("OpenTofu applies the first host and the joining hosts %v", hosts)
 	tofu(t, "apply", "-input=false", "-auto-approve", state,
 		"-var-file="+filepath.Join(workDir, "live.tfvars"), "-var-file="+filepath.Join(workDir, hostsFile))
 	if err := os.WriteFile(filepath.Join(workDir, "outputs.json"), []byte(tofu(t, "output", "-json", state)), 0o600); err != nil {
@@ -143,6 +171,9 @@ func applyHosts(t *testing.T, hosts []string, tokens map[string]string) {
 // and ssh would refuse the new server's key as a changed one.
 func forgetHostKeys(t *testing.T, before, after map[string]moduleHost) {
 	t.Helper()
+	if _, err := os.Stat(filepath.Join(workDir, "known_hosts")); errors.Is(err, os.ErrNotExist) {
+		return // no host was reached yet, so ssh knows no key
+	}
 	known := map[string]string{} // public address -> server ID
 	for _, server := range before {
 		known[server.PublicAddress] = server.ServerID
@@ -206,24 +237,39 @@ func waitForJoined(t *testing.T, names ...string) {
 	})
 }
 
-// growToThreeHosts joins two hosts with a token each: the second is active
-// without a vote, and with the third all of them vote. The joined
-// hosts are drained, so the stacks of the scenarios start on the first host,
-// where they look for them; TestPlacement undrains them for a while.
-func growToThreeHosts(t *testing.T) {
-	tokens := map[string]string{firstJoining: joinToken(t, time.Hour), secondJoining: joinToken(t, time.Hour)}
-	applyHosts(t, []string{firstJoining}, map[string]string{firstJoining: tokens[firstJoining]})
-	eventually(t, joinDeadline, firstJoining+" active without a vote", func() error {
-		if found, ok := findHost(clusterHosts(t), firstJoining); !ok || found.Phase != "active" || found.Voter {
-			return fmt.Errorf("%s is %+v", firstJoining, found)
-		}
-		return nil
+// joinHosts lets the layout's other hosts join, each with a token for its
+// roles. The first to join is active without a vote; once three
+// control-plane hosts are in, they vote. In the layout three the joined
+// hosts are drained, so the stacks of the scenarios start on the first
+// host, where they look for them; TestPlacement undrains them for a while.
+// Last, the test fetches new credentials, which name every control-plane
+// host.
+func joinHosts(t *testing.T, layout layout) {
+	tokens := map[string]string{}
+	var names []string
+	for _, joining := range layout.joining {
+		tokens[joining.name] = joinToken(t, time.Hour, joining.roles)
+		names = append(names, joining.name)
+	}
+	if len(names) > 0 {
+		first := names[0]
+		applyHosts(t, names[:1], map[string]string{first: tokens[first]})
+		eventually(t, joinDeadline, first+" active without a vote", func() error {
+			if found, ok := findHost(clusterHosts(t), first); !ok || found.Phase != "active" || found.Voter {
+				return fmt.Errorf("%s is %+v", first, found)
+			}
+			return nil
+		})
+		applyHosts(t, names, tokens)
+		waitForJoined(t, names...)
+	}
+	eventually(t, time.Minute, fmt.Sprintf("%d voters", layout.voters), func() error {
+		return checkVoters(clusterHosts(t), layout.voters)
 	})
-	applyHosts(t, []string{firstJoining, secondJoining}, tokens)
-	waitForJoined(t, firstJoining, secondJoining)
-	eventually(t, time.Minute, "three voters", func() error { return checkThreeVoters(clusterHosts(t)) })
-	for _, name := range []string{firstJoining, secondJoining} {
-		mustClowder(t, "host", "drain", name)
+	if layout.drainJoined {
+		for _, name := range names {
+			mustClowder(t, "host", "drain", name)
+		}
 	}
 	encoded, err := json.Marshal(tokens)
 	if err != nil {
@@ -233,28 +279,33 @@ func growToThreeHosts(t *testing.T) {
 		t.Fatal(err)
 	}
 	// each joined host kept its mesh and reaches the first host through the
-	// private network; the outputs are those of the second apply, which
-	// names both hosts
+	// private network; the outputs are those of the last apply, which
+	// names every host
 	tofu := readOutputs(t)
-	for _, name := range []string{firstJoining, secondJoining} {
+	wantEndpoints := []string{tofu.PublicAddress.Value}
+	for _, name := range names {
 		joined := host{address: tofu.Hosts.Value[name].PublicAddress}
 		joined.must(t, "test -s /var/lib/clowder/net.json")
 		if !reaches(t, joined, "", tofu.PrivateAddress.Value+":"+apiPort) {
 			t.Errorf("%s does not reach the first host's API", name)
 		}
+		if layout.hasRole(name, "control-plane") {
+			wantEndpoints = append(wantEndpoints, joined.address)
+		}
 	}
 	// new credentials from the first host, as a user fetches them after the
-	// hosts joined: every host's public address is an endpoint, so a
-	// scenario that cuts off the first host, the leader after TestSetup,
-	// still reaches the cluster through the others
+	// hosts joined: every control-plane host's public address is an
+	// endpoint, so a scenario that cuts off the first host, the leader after
+	// TestSetup, still reaches the cluster through the others
 	first := host{address: tofu.PublicAddress.Value}
 	issued := first.must(t, "clowderd credentials 2>/dev/null") // stdout alone
 	credentials, err := clientconfig.Parse([]byte(issued))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if endpoints := credentials.Contexts[0].Endpoints; len(endpoints) != 3 {
-		t.Fatalf("the credentials name the endpoints %v, want all three hosts", endpoints)
+	endpoints := credentials.Contexts[0].Endpoints
+	if !slices.Equal(slices.Sorted(slices.Values(endpoints)), slices.Sorted(slices.Values(wantEndpoints))) {
+		t.Fatalf("the credentials name the endpoints %v, want the control-plane hosts %v", endpoints, wantEndpoints)
 	}
 	writeCredentials(t, []byte(issued))
 	if err := os.WriteFile(filepath.Join(workDir, baselineConfigFile), clusterConfigJSON(t), 0o600); err != nil {
@@ -262,17 +313,17 @@ func growToThreeHosts(t *testing.T) {
 	}
 }
 
-// checkThreeVoters fails unless three of the hosts vote, as in every
-// cluster of three hosts or more up to five.
-func checkThreeVoters(hosts []clusterHost) error {
+// checkVoters fails unless as many hosts vote as want: one alone, three in
+// a cluster of three to five control-plane hosts.
+func checkVoters(hosts []clusterHost, want int) error {
 	voting := 0
 	for _, host := range hosts {
 		if host.Voter {
 			voting++
 		}
 	}
-	if voting != 3 {
-		return fmt.Errorf("%d hosts vote, want 3: %+v", voting, hosts)
+	if voting != want {
+		return fmt.Errorf("%d hosts vote, want %d: %+v", voting, want, hosts)
 	}
 	return nil
 }
@@ -280,7 +331,7 @@ func checkThreeVoters(hosts []clusterHost) error {
 // TestJoin checks who a join refuses: an unknown, used or expired token, a
 // server of another and a server that a host has.
 func TestJoin(t *testing.T) {
-	_, tofu := baseline(t)
+	_, tofu := baseline(t, threeHosts)
 	runSteps(t, []step{
 		{"an unknown, used or expired token gets no proof", func(t *testing.T) { tokensThatDoNotOpen(t, tofu) }},
 		{"a server that is not the host's is refused", func(t *testing.T) { serversOfOthers(t, tofu) }},
@@ -316,7 +367,7 @@ func tokensThatDoNotOpen(t *testing.T, tofu outputs) {
 		t.Fatal(err)
 	}
 	refused(used[firstJoining], "it is unknown, or a host joined with it")
-	expiring := joinToken(t, time.Minute)
+	expiring := joinToken(t, time.Minute, allRoles)
 	time.Sleep(time.Minute + 5*time.Second)
 	refused(expiring, "it expired")
 }
@@ -324,7 +375,7 @@ func tokensThatDoNotOpen(t *testing.T, tofu outputs) {
 // serversOfOthers joins with an open token, naming a server of the project
 // that is no host's, and the server of a host.
 func serversOfOthers(t *testing.T, tofu outputs) {
-	token, err := jointoken.Parse(joinToken(t, 10*time.Minute))
+	token, err := jointoken.Parse(joinToken(t, 10*time.Minute, allRoles))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +414,8 @@ func serversOfOthers(t *testing.T, tofu outputs) {
 		})
 		cloud(t, http.MethodDelete, "/servers/"+strconv.FormatInt(created.Server.ID, 10), nil, nil)
 	})
-	joined := tofu.Hosts.Value[firstJoining]
+	// any joined host: TestReplace may have replaced either of the first two
+	joined := tofu.Hosts.Value[slices.Sorted(maps.Keys(tofu.Hosts.Value))[0]]
 	// the test's requests come from the lab's address: a join naming the
 	// stranger's server is refused for that, before Hetzner is asked
 	joinedID, err := strconv.ParseInt(joined.ServerID, 10, 64)
@@ -393,9 +445,14 @@ func serversOfOthers(t *testing.T, tofu outputs) {
 	}
 }
 
-// joinRequest is a host named intruder with keys of its own.
+// joinRequest is a host named intruder with keys of its own and every
+// role, as the tokens of TestJoin allow.
 func joinRequest(t *testing.T, serverID int64, underlay string) api.JoinRequest {
 	t.Helper()
+	roles, err := hostrole.Parse(allRoles)
+	if err != nil {
+		t.Fatal(err)
+	}
 	key, err := pki.NewKey()
 	if err != nil {
 		t.Fatal(err)
@@ -407,6 +464,7 @@ func joinRequest(t *testing.T, serverID int64, underlay string) api.JoinRequest 
 	return api.JoinRequest{
 		Name: "intruder", Underlay: netip.MustParseAddr(underlay), PublicAddress: netip.MustParseAddr("192.0.2.250"),
 		ServerID:    serverID,
+		Roles:       roles,
 		PublicKey:   key.Public().(ed25519.PublicKey),
 		WGPublicKey: base64.StdEncoding.EncodeToString(wireGuardKey.PublicKey().Bytes()),
 	}
@@ -418,50 +476,71 @@ func joinRequest(t *testing.T, serverID int64, underlay string) api.JoinRequest 
 // forgot the old one as a DRBD peer, the next host takes its ID. A host
 // remove that would leave fewer than three is refused.
 func TestReplace(t *testing.T) {
-	server, _ := baseline(t)
+	server, _ := baseline(t, threeHosts)
 	var removed clusterHost
 	var container string
+	// replaced is the joined host that gets steady's second copy, kept the
+	// other joined host
+	var replaced, kept string
 	runSteps(t, []step{
 		{"a stack runs with a copy of its volume on the host to replace", func(t *testing.T) {
-			// the joined hosts are drained at the baseline; the host to replace
-			// takes stacks again, so it gets the volume's second copy
-			mustClowder(t, "host", "undrain", secondJoining)
+			// the joined hosts are drained at the baseline; both take stacks
+			// again, because the second copy waits for a third active host
+			// to take its tiebreaker
+			undrainJoined(t)
 			createAndApply(t, "steady", volumeDocument("steady", "fast", failoverVolumeSize, 2)+simpleStack("steady", "steady"))
 			waitRunning(t, "steady", 1)
 			moveTo(t, "steady", firstHost)
-			waitCopies(t, "steady", firstHost, secondJoining)
+			volumeSteady(t, scenarioHosts(server, readOutputs(t)), "steady")
+			for _, volumeCopy := range volumeStatus(t, "steady").Copies {
+				if volumeCopy.Host != firstHost && !volumeCopy.Tiebreaker {
+					replaced = volumeCopy.Host
+				}
+			}
+			kept = otherThan([]string{firstJoining, secondJoining}, replaced)
+			t.Logf("steady has its second copy on %s, which is replaced", replaced)
 			writeProof(t, server, "steady", "before")
 			container = stackContainer(t, server, "steady")
 		}},
 		{"a fourth host joins as a host that does not vote", func(t *testing.T) {
 			applyHosts(t, []string{firstJoining, secondJoining, thirdJoining},
-				map[string]string{thirdJoining: joinToken(t, time.Hour)})
+				map[string]string{thirdJoining: joinToken(t, time.Hour, allRoles)})
 			waitForJoined(t, thirdJoining)
 			if found, _ := findHost(clusterHosts(t), thirdJoining); found.Voter {
 				t.Errorf("the fourth host votes: %+v", found)
 			}
 		}},
 		{"the old host leaves, its copy moves, and no host below three", func(t *testing.T) {
-			removed, _ = findHost(clusterHosts(t), secondJoining)
-			mustClowder(t, "host", "remove", secondJoining, "--yes")
+			removed, _ = findHost(clusterHosts(t), replaced)
+			mustClowder(t, "host", "remove", replaced, "--yes")
 			if output, err := clowder("host", "remove", thirdJoining, "--yes"); err == nil ||
 				!strings.Contains(output, "join a replacement first") {
 				t.Errorf("a remove below three: %v\n%s", err, output)
 			}
-			// the copy goes to the fourth host: it joined active and is not
-			// drained, while the other joined host stays drained from the baseline
-			waitCopies(t, "steady", firstHost, thirdJoining)
-			eventually(t, placementDeadline, secondJoining+" removed and three voters", func() error {
-				hosts := clusterHosts(t)
-				if gone, _ := findHost(hosts, secondJoining); gone.Phase != "removed" {
-					return fmt.Errorf("%s is %s", secondJoining, gone.Phase)
+			// the copy goes to one of the two other hosts, the tiebreaker to
+			// the other
+			eventually(t, placementDeadline, "steady's copy off "+replaced, func() error {
+				for _, volumeCopy := range volumeStatus(t, "steady").Copies {
+					if volumeCopy.Host != firstHost && !volumeCopy.Tiebreaker && volumeCopy.Host != replaced {
+						return nil
+					}
 				}
-				return checkThreeVoters(hosts)
+				return fmt.Errorf("no second copy on %s or %s", kept, thirdJoining)
+			})
+			hosts := scenarioHosts(server, readOutputs(t))
+			delete(hosts, replaced)
+			volumeSteady(t, hosts, "steady")
+			eventually(t, placementDeadline, replaced+" removed and three voters", func() error {
+				hosts := clusterHosts(t)
+				if gone, _ := findHost(hosts, replaced); gone.Phase != "removed" {
+					return fmt.Errorf("%s is %s", replaced, gone.Phase)
+				}
+				return checkVoters(hosts, 3)
 			})
 		}},
 		{"the replacement takes the old host's ID", func(t *testing.T) {
-			applyHosts(t, []string{firstJoining, thirdJoining, replacement},
-				map[string]string{replacement: joinToken(t, time.Hour)})
+			applyHosts(t, []string{kept, thirdJoining, replacement},
+				map[string]string{replacement: joinToken(t, time.Hour, allRoles)})
 			waitForJoined(t, replacement)
 			if found, _ := findHost(clusterHosts(t), replacement); found.ID != removed.ID {
 				t.Errorf("the replacement has ID %d, not the removed host's %d", found.ID, removed.ID)
@@ -482,29 +561,5 @@ func TestReplace(t *testing.T) {
 			removeStack(t, "steady")
 			drainJoined(t)
 		}},
-	})
-}
-
-// waitCopies waits until a volume's copies with a disk are on the hosts
-// named, and no others, each synced.
-func waitCopies(t *testing.T, volume string, hosts ...string) {
-	t.Helper()
-	want := slices.Sorted(slices.Values(hosts))
-	eventually(t, placementDeadline, "volume "+volume+" synced on "+strings.Join(want, ", "), func() error {
-		status := volumeStatus(t, volume)
-		var synced []string
-		for _, volumeCopy := range status.Copies {
-			if volumeCopy.Tiebreaker {
-				continue
-			}
-			if !volumeCopy.Synced {
-				return fmt.Errorf("the copy on %s is not synced yet: %+v", volumeCopy.Host, status.Copies)
-			}
-			synced = append(synced, volumeCopy.Host)
-		}
-		if slices.Sort(synced); !slices.Equal(synced, want) {
-			return fmt.Errorf("%s, copies %+v", status.Status, status.Copies)
-		}
-		return nil
 	})
 }
