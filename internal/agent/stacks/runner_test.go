@@ -38,9 +38,9 @@ func newTestRunner(t *testing.T) (*Runner, *agenttest.Cluster, *agenttest.Docker
 		Files:       files,
 		Host:        0,
 		NodeAddress: netip.MustParseAddr("10.77.0.1"), Cluster: cluster, Docker: docker, Volumes: volumes,
-		Open: cluster.Keys.Decrypt, Registries: NewRegistryConfigs(files, cluster.Keys.Decrypt),
-		DigestKey: []byte("the test's digest key"), Supervisor: fakePauser{&docker.Calls},
-		Signal: loop.NewSignal(), Propose: cluster.Propose, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OpenSecret: cluster.OpenSecret, Registries: NewRegistryConfigs(files, cluster.OpenSecret),
+		Supervisor: fakePauser{&docker.Calls},
+		Signal:     loop.NewSignal(), Propose: cluster.Propose, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	return runner, cluster, docker, volumes
 }

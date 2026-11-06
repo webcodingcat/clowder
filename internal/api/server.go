@@ -103,7 +103,8 @@ type Alerts interface {
 	Failures() []AlertFailure
 }
 
-// Keys is the cluster's data key as the server uses it.
+// Keys is the cluster's data key as the server uses it. It is nil on a host
+// without the control-plane role, which holds no data key.
 type Keys interface {
 	Encrypt(plaintext []byte) (state.Encrypted, error)
 	Decrypt(encrypted state.Encrypted) ([]byte, error)
@@ -192,6 +193,10 @@ func (s *Server) routes() []route {
 		{"GET /v1/internal/beats/{id}", anyHost, s.localSilence},
 		{"GET /v1/internal/commit-index", anyHost, s.localCommitIndex},
 		{"GET /v1/internal/leader", anyHost, s.knownLeader},
+		// what a host needs for the stacks it runs and the Floating IP it
+		// holds, each for itself (hostsecrets.go)
+		{"GET /v1/internal/hosts/self/secrets", anyHost, s.hostSecrets},
+		{"GET /v1/internal/hosts/self/tls", anyHost, s.hostCertificates},
 		// what a control-plane host asks for the CLI, or as the leader
 		{"POST /v1/internal/changes", controlPlaneHost, s.internalChanges},
 		{"POST /v1/internal/join", controlPlaneHost, s.internalJoin},

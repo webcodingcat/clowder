@@ -168,10 +168,23 @@ func (f Files) writeHost(host Host) error {
 type credentials struct {
 	ca          *x509.Certificate
 	certificate tls.Certificate
-	dataKey     *datakey.Key
+	// dataKey is nil on a host without the control-plane role
+	dataKey *datakey.Key
 }
 
-func (f Files) readCredentials() (credentials, error) {
+// decrypt opens a secret of the state with the data key. On a host without
+// it, it fails: only the leader's loops and the API's routes for the CLI
+// decrypt, and both run on the control plane alone.
+func (c credentials) decrypt(encrypted state.Encrypted) ([]byte, error) {
+	if c.dataKey == nil {
+		return nil, fmt.Errorf("this host holds no data key; only %s hosts do", hostrole.ControlPlane)
+	}
+	return c.dataKey.Decrypt(encrypted)
+}
+
+// readCredentials reads the data key only on a control-plane host, the
+// only one that holds it.
+func (f Files) readCredentials(roles hostrole.Set) (credentials, error) {
 	caPEM, err := os.ReadFile(f.caCertificate())
 	if err != nil {
 		return credentials{}, fmt.Errorf("read the CA certificate: %w", err)
@@ -184,9 +197,11 @@ func (f Files) readCredentials() (credentials, error) {
 	if err != nil {
 		return credentials{}, fmt.Errorf("read the host certificate: %w", err)
 	}
-	dataKey, err := datakey.Load(f.dataKey())
-	if err != nil {
-		return credentials{}, err
+	read := credentials{ca: ca, certificate: certificate}
+	if roles.Has(hostrole.ControlPlane) {
+		if read.dataKey, err = datakey.Load(f.dataKey()); err != nil {
+			return credentials{}, err
+		}
 	}
-	return credentials{ca: ca, certificate: certificate, dataKey: dataKey}, nil
+	return read, nil
 }

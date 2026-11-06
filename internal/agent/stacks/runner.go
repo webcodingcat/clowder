@@ -124,11 +124,8 @@ type Parts struct {
 	Cluster     loop.Cluster
 	Docker      Docker
 	Volumes     Volumes
-	// Open decrypts the secrets' values (datakey.Key.Decrypt)
-	Open func(encrypted state.Encrypted) ([]byte, error)
-	// DigestKey is the key for the labels of secret files. It is derived
-	// from the data key for SecretLabelPurpose.
-	DigestKey []byte
+	// OpenSecret gives a Secret's values by key, as the state names it
+	OpenSecret OpenSecret
 	// Supervisor is paused while compose up or down changes a stack's
 	// containers
 	Supervisor loop.Pauser
@@ -158,8 +155,7 @@ type Runner struct {
 	cluster     loop.Cluster
 	docker      Docker
 	volumes     Volumes
-	open        func(encrypted state.Encrypted) ([]byte, error)
-	digestKey   []byte
+	openSecret  OpenSecret
 	supervisor  loop.Pauser
 	signal      *loop.Signal
 	registries  *RegistryConfigs
@@ -186,7 +182,7 @@ type Runner struct {
 func New(parts Parts) *Runner {
 	return &Runner{
 		files: parts.Files, host: parts.Host, nodeAddress: parts.NodeAddress, cluster: parts.Cluster,
-		docker: parts.Docker, volumes: parts.Volumes, open: parts.Open, digestKey: parts.DigestKey,
+		docker: parts.Docker, volumes: parts.Volumes, openSecret: parts.OpenSecret,
 		supervisor: parts.Supervisor, signal: parts.Signal, registries: parts.Registries,
 		volumesReleased: parts.VolumesReleased,
 		propose:         parts.Propose, logger: parts.Logger,
@@ -215,15 +211,10 @@ func readDesired(cluster loop.Cluster, self state.HostID) desiredState {
 		secrets: copied.Secrets, copied: copied,
 	}
 	// a host that was fenced runs nothing until it is active again, because
-	// its stacks may run elsewhere by now (state.KeepsStacks)
-	if host, ok := copied.Hosts[self]; !ok || !state.KeepsStacks(host.Phase) {
-		return desired
-	}
-	for _, stack := range copied.Stacks {
-		// a stack that stops for a move is a leaver here (stopLeavers)
-		if stack.Host != nil && *stack.Host == self && !copied.StopsForMove(stack.ID()) {
-			desired.stacks[stack.Project()] = stack
-		}
+	// its stacks may run elsewhere by now; a stack that stops for a move is
+	// a leaver here (stopLeavers)
+	for _, stack := range copied.StacksToRun(self) {
+		desired.stacks[stack.Project()] = stack
 	}
 	return desired
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/datakey"
 	"github.com/webcodingcat/clowder/internal/hetzner"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/jointoken"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/pki"
@@ -123,9 +124,11 @@ func (j *joiner) Join(ctx context.Context, request api.JoinRequest) (api.JoinAns
 		}
 		return api.JoinAnswer{}, fmt.Errorf("commit the join of %s: %w", host.Name, err)
 	}
-	return api.JoinAnswer{
-		Host: id, Certificate: string(certificatePEM), DataKey: j.dataKey.Text(), Peers: joinPeers(current, id),
-	}, nil
+	answer := api.JoinAnswer{Host: id, Certificate: string(certificatePEM), Peers: joinPeers(current, id)}
+	if host.Roles.Has(hostrole.ControlPlane) {
+		answer.DataKey = j.dataKey.Text()
+	}
+	return answer, nil
 }
 
 // comesFromHost tells whether a request came from one of the host's own

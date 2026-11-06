@@ -13,7 +13,7 @@ and what comes next. What users meet today, gaps included, is in
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values, access and recovery, still on one host | done, passes the live tests |
 | 2 | three hosts: replication, failover with fencing | done, passes the live tests |
-| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 5c done, the interim live tests green, step 6 next |
+| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 6 done, the interim live tests green, step 7 next |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -48,7 +48,7 @@ steps. It is built on the branch `phase-2b` and goes to `main` only once it is c
 - Two keys keep their names apart. The **data key** encrypts the secrets in the state. The
   **sealing key** is the cluster's age key that a `SealedSecret` is encrypted for.
 
-### Steps 1 to 5c: done
+### Steps 1 to 6: done
 
 Done on `phase-2b`, each with lint and unit tests green and the full review loop; the
 interim live tests after step 5c are green ([below](#the-live-tests-after-step-5c-and-at-the-end)).
@@ -94,37 +94,30 @@ What they built, and the decisions that still hold:
   package in `docs/developing/` for developers. Comments keep their reason and lose the
   rest.
 
-Until step 6, every host still holds the data key and with it the CA's key, so the rules
-of step 5 hold against a worker's certificate, and against root on a worker only from
-step 6 on.
-
-### Step 6: keys only on the control plane
-
-- Only control-plane hosts hold the data key, and with it the CA's key and the sealing
-  key. A join's answer carries the data key only for them.
-- Other hosts ask a control-plane host over mTLS for what they need, and get only that, as
-  Kubernetes' node authorizer gives a node only the secrets of its pods
-  (`internal/hosts/self/secrets` and `…/tls`):
-  - A worker gets the secrets and registry logins of the stacks the state places on it.
-    Images that need a login are no longer pulled before a stack moves there, only when it
-    starts, so its failover waits for the pull: a known limit. Images without a login are
-    pulled before, as now.
-  - An ingress host gets the TLS keys of the routes while it holds the Floating IP. So the
-    move of the Floating IP needs a control-plane host, which the leader that moves it is
-    anyway.
-  - Every host gets the key of the secrets' digests, which today is derived from the data
-    key (`agent/run.go`). It becomes a key of its own: made at `init`, kept in the state
-    encrypted with the data key, and handed to every host in its join's answer. It shows
-    when a secret changed and opens none.
-- The routes `internal/hosts/self/secrets` and `internal/hosts/self/tls` take any host, for
-  itself (`api/access.go`).
-- `QuorumWatch` (`agent/run.go`) runs on control-plane hosts only, as its alert channels
-  are secrets. A worker cut off from all of them alerts nobody; the voters see it fail (a
-  known limit).
-- `checkRetired` (`agent/retired.go`) runs on control-plane hosts only, which hold the
-  token (step 7 says why a retired worker needs none).
-- A worker that restarts while the control plane is down starts none of its stacks: on top
-  of the catch-up, their secrets are kept on no disk, by choice.
+- **Step 6, keys only on the control plane.** Only control-plane hosts hold the data key,
+  and with it the CA's key, the sealing key and every secret; a join's answer carries it
+  only for them. The rules of step 5 now hold against root on a worker too. Any other
+  host asks the leader over mTLS for what it needs, and gets only that, as Kubernetes'
+  node authorizer gives a node only the secrets of its pods
+  (`internal/hosts/self/secrets` and `…/tls`, any host, for itself): the secrets and
+  registry logins of the stacks that run on it (`state.SecretsOfHost`), and the routes'
+  TLS keys while the state names it for the Floating IP. The host keeps the answers in
+  memory and asks again only for a new digest or chain. The leader's loops, `QuorumWatch`
+  and `checkRetired` run on control-plane hosts only. Decisions, each for a reason:
+  - No key of the secrets' digests: the containers' label `clowder.secrets` became a
+    SHA-256 over the state's digests, which are keyed already, as Helm's checksum
+    annotations are unkeyed. A key of its own for every host would protect nothing more.
+    The new label recreates every container with secret files once; the phase needs a
+    cluster set up anew anyway.
+  - Logins only for the stacks that run on a host, as Kubernetes does, not for those it
+    may take over. The prefetcher pulls without logins; an image that needs one is pulled
+    when its stack starts, and a move does not wait for it. A failover of such a stack
+    waits for the pull (a known limit).
+  - Only workers prefetch; a control-plane host without the worker role pulled images
+    of stacks it can never take.
+  - A worker that restarts while there is no leader starts none of its stacks: their
+    secrets are kept on no disk, by choice. A worker cut off from every control-plane host
+    alerts nobody; the voters see it fail. Both are known limits.
 
 ### Step 7: recover and fencing with roles
 
@@ -166,7 +159,7 @@ Agreed with the operator before the plan.
     the recovering host.
   - The routes `internal/recover/copies` and `internal/recover/rejoin` take a
     control-plane host.
-- **`checkRetired` only on the control plane** (step 6 moves it). A retired voter is the
+- **`checkRetired` only on the control plane** (step 6 moved it). A retired voter is the
   danger, as two of them could elect each other. Voters hold the token and check at their
   start, as now. A retired worker is harmless: it never votes, its certificate is revoked
   so no control-plane host accepts it, it is out of the WireGuard mesh and the DRBD
@@ -238,6 +231,8 @@ The last step, before the final live tests, so that they run on what is merged.
   active host; the labs accepted any Hetzner token; and a test raced the configuration
   against the host that alerts from its own state. `TestSingleHost` adds the cluster of
   one host.
+- The scenario of step 6 is in `test/live` (`TestRoles`, "a worker gets only the secrets
+  of its stacks") and runs for the first time in the final run.
 - All live tests must be green; a failure goes back to the step it came from.
 
 ### After phase 2b
@@ -251,7 +246,6 @@ The last step, before the final live tests, so that they run on what is merged.
 [operating.md's Known limits](operating.md#known-limits) lists what users meet. These are
 the phases that close them, and the points users do not see:
 
-- **Phase 2b, step 6:** every host holds the data key and the CA's key.
 - **Phase 3 (backup and restore):** no backups; a volume that waits for a restore after a
   recover.
 - **Phase 4 (comfort and operations):** `cluster rotate-keys` for a removed host's keys;

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/controller"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -26,14 +27,18 @@ const retiredCheckTimeout = 20 * time.Second
 // label does not stop it. Without a ClusterConfiguration there is no token,
 // and then recover retires no host either.
 //
+// Only a control-plane host checks, as only it holds the token: a retired
+// voter is the danger. A retired worker never votes, and no control-plane
+// host accepts its revoked certificate.
+//
 // If Hetzner does not answer, the agent starts anyway. An outage at Hetzner
 // must not keep a host down, and a retired host does harm only if it starts
 // during such an outage together with another retired host.
 func checkRetired(ctx context.Context, current *state.State, host Host, credentials credentials, logger *slog.Logger) error {
-	if !current.Configured() {
+	if !current.Configured() || !host.Roles.Has(hostrole.ControlPlane) {
 		return nil
 	}
-	client, err := controller.OpenHetzner(current, credentials.dataKey.Decrypt)
+	client, err := controller.OpenHetzner(current, credentials.decrypt)
 	if err != nil {
 		logger.Warn("start without asking Hetzner whether this host is retired", "error", err)
 		return nil

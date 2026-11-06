@@ -165,9 +165,10 @@ on a host (`compose.Render`). The fields are in [resources.md](../resources.md#s
   configuration changed, and a changed secret file keeps its path, so only the label tells
   Compose about the change. Secret variables are in the second Compose file, which Compose
   compares itself, and a volume's new data generation is a new volume name. The
-  `clowder.secrets` label is an HMAC-SHA256 (`digest.HMAC`) with a key derived from the data
-  key, over the names and the state's digests of the service's secret files. The label is
-  on disk and in `docker inspect`, and it reveals nothing about a short password. A change
+  `clowder.secrets` label is a SHA-256 (`digest.SHA256`) over the names and the state's
+  digests of the service's secret files. The label is on disk and in `docker inspect`. It
+  reveals nothing about a short password, because the state's digests are HMACs with a key
+  that only the control plane holds; so a worker needs no key for it. A change
   to these labels changes every container's configuration, so an agent of a release with
   other labels recreates all containers once after the upgrade.
 - **Golden files.** `testdata/spec/rendered.golden.yaml` and `secrets.golden.yaml` are

@@ -524,7 +524,7 @@ spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
 	if err := stopAgent(); err != nil {
 		t.Fatal(err)
 	}
-	credentials, err := files.readCredentials()
+	credentials, err := files.readCredentials(hostrole.DefaultInit)
 	if err != nil {
 		t.Fatal(err)
 	}

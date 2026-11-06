@@ -79,12 +79,18 @@ func setHetznerToken(t *testing.T, cluster *agenttest.Cluster, token string) {
 // token opens a join token for a worker with ingress, as by default.
 func (j *joinTest) token() jointoken.Token {
 	j.t.Helper()
+	return j.tokenFor(hostrole.DefaultJoin)
+}
+
+// tokenFor opens a join token for the given roles.
+func (j *joinTest) tokenFor(roles hostrole.Set) jointoken.Token {
+	j.t.Helper()
 	token, err := jointoken.New()
 	if err != nil {
 		j.t.Fatal(err)
 	}
 	j.cluster.Apply(state.KindAddJoinToken, state.CLIActor("admin"),
-		state.AddJoinToken{ID: token.ID, Hash: token.Hash(), TTL: time.Hour, Roles: hostrole.DefaultJoin})
+		state.AddJoinToken{ID: token.ID, Hash: token.Hash(), TTL: time.Hour, Roles: roles})
 	return token
 }
 
@@ -125,8 +131,11 @@ func TestALeaderAddsAHostWithAnOpenTokenAndItsOwnServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	if answer.Host != 1 || !certificate.PublicKey.(ed25519.PublicKey).Equal(j.key.Public()) ||
-		answer.DataKey != j.cluster.Keys.Text() || len(answer.Peers) != 1 || answer.Peers[0].ID != 0 {
+		len(answer.Peers) != 1 || answer.Peers[0].ID != 0 {
 		t.Errorf("answer %+v", answer)
+	}
+	if answer.DataKey != "" {
+		t.Error("a worker got the data key")
 	}
 	j.cluster.Read(func(current *state.State) {
 		host := current.Hosts[1]
@@ -139,6 +148,19 @@ func TestALeaderAddsAHostWithAnOpenTokenAndItsOwnServer(t *testing.T) {
 		}
 	})
 	j.refused(j.request(token.String()), "it is unknown, or a host joined with it")
+}
+
+func TestOnlyAControlPlaneHostGetsTheDataKey(t *testing.T) {
+	j := newJoinTest(t)
+	request := j.request(j.tokenFor(hostrole.DefaultInit).String())
+	request.Roles = hostrole.DefaultInit
+	answer, err := j.joiner.Join(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer.DataKey != j.cluster.Keys.Text() {
+		t.Errorf("a control-plane host got the data key %q", answer.DataKey)
+	}
 }
 
 func TestAJoinWithRolesItsTokenDoesNotAllowIsRefused(t *testing.T) {
@@ -281,8 +303,11 @@ func TestAJoinGoesOnFromItsAnswerAndKeepsTheMeshForTheFirstStart(t *testing.T) {
 	if err != nil || host.ID != 1 || host.NodeAddress != network.NodeAddress(1) || host.RaftPort != RaftPort {
 		t.Errorf("host.json %+v, %v", host, err)
 	}
-	if _, err := files.readCredentials(); err != nil {
+	if _, err := files.readCredentials(host.Roles); err != nil {
 		t.Errorf("the credentials: %v", err)
+	}
+	if _, err := os.Stat(files.dataKey()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a worker keeps a data key: %v", err)
 	}
 	if _, err := os.Stat(files.joinFile()); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("join.json is still there: %v", err)

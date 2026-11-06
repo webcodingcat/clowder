@@ -151,14 +151,10 @@ func TestRegistryLoginsComeInTheOrderOfImagePullSecrets(t *testing.T) {
 	}
 	var secrets []string
 	for _, login := range logins {
-		secrets = append(secrets, login.Secret)
+		secrets = append(secrets, login.Name)
 	}
 	if !slices.Equal(secrets, []string{"quay", "ghcr"}) {
 		t.Errorf("logins of %v, want quay, then ghcr", secrets)
-	}
-	if login := logins[1]; ClearSize(login.Server) != len("ghcr"+resource.RegistryServerKey) ||
-		ClearSize(login.Password) != len("ghcr"+resource.RegistryPasswordKey) {
-		t.Errorf("login %s: server and password of %d and %d bytes", login.Secret, ClearSize(login.Server), ClearSize(login.Password))
 	}
 	if logins, err := c.state.RegistryLogins("shop"); err == nil {
 		t.Errorf("logins of a namespace the cluster does not have: %v", logins)

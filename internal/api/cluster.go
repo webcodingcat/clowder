@@ -15,10 +15,10 @@ type PublicSealingKey struct {
 	Recipient string `json:"recipient"`
 }
 
-func (s *Server) publicSealingKey(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) publicSealingKey(w http.ResponseWriter, r *http.Request) {
 	identity, err := s.sealingKey()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		s.writeFailure(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, PublicSealingKey{Recipient: identity.Recipient().String()})
@@ -29,12 +29,13 @@ type SealingKeyAnswer struct {
 	Identity string `json:"identity"`
 }
 
-// internalSealingKey gives root on this host nothing new: the host already
-// holds the data key that opens the sealing key in the state.
+// internalSealingKey gives root on this host nothing new: a control-plane
+// host already holds the data key that opens the sealing key in the state,
+// and any other host has no data key to open it with.
 func (s *Server) internalSealingKey(w http.ResponseWriter, r *http.Request) {
 	identity, err := s.sealingKey()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		s.writeFailure(w, r, err)
 		return
 	}
 	s.config.Logger.Warn("the sealing key was exported", "host", identityOf(r).Name)
@@ -48,8 +49,11 @@ func (s *Server) sealingKey() (*age.X25519Identity, error) {
 			encrypted = current.Keys.SealingKey
 		}
 	})
-	if encrypted == nil {
+	switch {
+	case encrypted == nil:
 		return nil, state.ErrNotBootstrapped
+	case s.config.Keys == nil:
+		return nil, errNoKeys
 	}
 	opened, err := s.config.Keys.Decrypt(encrypted)
 	if err != nil {

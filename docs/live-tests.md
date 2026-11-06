@@ -477,6 +477,11 @@ The joined hosts take stacks. The stack `echo` (as in `TestIngress`, but on
    host's certificate passes Raft's handshake.
 5. From a control-plane host, inside the private network: a worker's API refuses the CLI's
    certificate in the TLS handshake, the control-plane host's API takes it.
+6. `keyed`, which names the Secret `keyed-token`, runs on a worker next to the Secret
+   `keyed-other`, which no stack names. Only the control-plane hosts hold the data key.
+   With its own certificate, the worker gets `keyed-token` from
+   `internal/hosts/self/secrets` with its value, and not `keyed-other`. Not yet run: it
+   comes with the final live tests of phase 2b.
 
 ### `TestRolesFailover` (layout `roles`)
 

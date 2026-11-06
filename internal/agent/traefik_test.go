@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -50,11 +51,31 @@ func newTestTraefik(t *testing.T) (*traefikRunner, *agenttest.Cluster, *agenttes
 	traefik := &traefikRunner{
 		files: Files{Dir: t.TempDir(), SecretsDir: t.TempDir()},
 		host:  Host{ID: 0, Name: "node0", NodeAddress: netip.MustParseAddr("10.77.0.1")}, cluster: cluster,
-		docker: fake, open: cluster.Keys.Decrypt, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		docker: fake, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		keys:       &fakeKeys{cluster: cluster},
 		supervisor: noPause{}, signal: loop.NewSignal(), unopened: map[string]bool{},
 	}
 	return traefik, cluster, fake
 }
+
+// fakeKeys opens the certificates' keys with the cluster's data key, as
+// the control plane does, and counts what it opened and forgot. With down
+// set, it fails as without a leader.
+type fakeKeys struct {
+	cluster         *agenttest.Cluster
+	down            bool
+	opened, forgots int
+}
+
+func (k *fakeKeys) open(_ context.Context, certificate state.Certificate) ([]byte, error) {
+	if k.down {
+		return nil, errors.New("the cluster has no leader right now")
+	}
+	k.opened++
+	return k.cluster.Keys.Decrypt(certificate.Key)
+}
+
+func (k *fakeKeys) forget() { k.forgots++ }
 
 // noPause stands for the supervisor, which the tests do not run.
 type noPause struct{}
@@ -153,19 +174,74 @@ func waitForRoutes(t *testing.T, traefik *traefikRunner, want func(routes string
 	t.Error("the routes did not follow the containers")
 }
 
-func TestACertificateBringsHTTPSAndARenewalComesUnderNewNames(t *testing.T) {
+// putCertificate puts a certificate of shop.example.com with the given
+// chain and the key "key of <chain>".
+func putCertificate(t *testing.T, cluster *agenttest.Cluster, chain string) {
+	t.Helper()
+	key, err := cluster.Keys.Encrypt([]byte("key of " + chain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cluster.Apply(state.KindPutCertificate, state.LeaderActor, state.PutCertificate{Certificate: state.Certificate{
+		Domain: "shop.example.com", Key: key, Chain: []byte(chain),
+		NotBefore: time.Now(), NotAfter: time.Now().Add(time.Hour),
+	}})
+}
+
+func TestOnlyTheHostOfTheFloatingIPWritesTheKeys(t *testing.T) {
 	traefik, cluster, _ := newTestTraefik(t)
-	put := func(chain string) {
-		key, err := cluster.Keys.Encrypt([]byte("key of " + chain))
-		if err != nil {
+	cluster.AddHost(1)
+	putCertificate(t, cluster, "the chain")
+	keys := traefik.keys.(*fakeKeys)
+	for _, step := range []struct {
+		ingress state.HostID
+		want    int
+	}{{1, 0}, {0, 2}, {1, 0}} {
+		cluster.Apply(state.KindSetIngress, state.LeaderActor, state.SetIngress{Host: step.ingress})
+		if err := traefik.pass(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		cluster.Apply(state.KindPutCertificate, state.LeaderActor, state.PutCertificate{Certificate: state.Certificate{
-			Domain: "shop.example.com", Key: key, Chain: []byte(chain),
-			NotBefore: time.Now(), NotAfter: time.Now().Add(time.Hour),
-		}})
+		if files := certificateFiles(t, traefik); len(files) != step.want {
+			t.Errorf("with the Floating IP on host %d, host 0 has the files %v", step.ingress, files)
+		}
 	}
-	put("first chain")
+	if keys.opened != 1 || keys.forgots != 2 {
+		t.Errorf("host 0 opened %d keys and forgot them %d times, want 1 while it held the Floating IP "+
+			"and 2 without it", keys.opened, keys.forgots)
+	}
+}
+
+func TestTheKeysStayWhileTheControlPlaneDoesNotAnswer(t *testing.T) {
+	traefik, cluster, _ := newTestTraefik(t)
+	cluster.Apply(state.KindSetIngress, state.LeaderActor, state.SetIngress{Host: 0})
+	putCertificate(t, cluster, "the chain")
+	if err := traefik.pass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// the agent restarts while there is no leader
+	traefik.keys.(*fakeKeys).down = true
+	if err := traefik.pass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	routes, err := os.ReadFile(filepath.Join(traefik.files.traefikDynamicDir(), "routes.yaml"))
+	if files := certificateFiles(t, traefik); err != nil || len(files) != 2 || !strings.Contains(string(routes), files[0]) {
+		t.Errorf("without the control plane, the certificate's files %v and routes:\n%s", files, routes)
+	}
+	// only the files of a chain the state names stay: a renewal comes from
+	// the leader, so its key comes once a leader answers
+	putCertificate(t, cluster, "the renewed chain")
+	if err := traefik.pass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if files := certificateFiles(t, traefik); len(files) != 0 {
+		t.Errorf("the files of a chain the state no longer has stayed: %v", files)
+	}
+}
+
+func TestACertificateBringsHTTPSAndARenewalComesUnderNewNames(t *testing.T) {
+	traefik, cluster, _ := newTestTraefik(t)
+	cluster.Apply(state.KindSetIngress, state.LeaderActor, state.SetIngress{Host: 0})
+	putCertificate(t, cluster, "first chain")
 	if err := traefik.pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +265,7 @@ func TestACertificateBringsHTTPSAndARenewalComesUnderNewNames(t *testing.T) {
 
 	// Traefik watches only the routes: a renewed certificate comes under
 	// new names, and the old files go
-	put("second chain")
+	putCertificate(t, cluster, "second chain")
 	if err := traefik.pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}

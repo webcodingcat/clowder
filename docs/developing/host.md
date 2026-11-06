@@ -16,6 +16,7 @@ The package holds the daemon and the one-shot host commands. Some files have sim
 | `forget.go` | forgetting removed hosts as DRBD peers |
 | `restart.go` | the supervisor's restart rules, taken from the state |
 | `run.go` | `clowderd run`: what starts in which order |
+| `controlplanecache.go` | what the control plane gave this host (its stacks' secrets, the certificates' keys), kept in memory |
 
 - **Files.** A host's files are under `DefaultDir`: `host.json` (ID, name, addresses, ports),
   `net.json` (the WireGuard mesh the host last applied), `keys/`, `pki/`, `raft/`,
@@ -45,9 +46,9 @@ The package holds the daemon and the one-shot host commands. Some files have sim
   2. Trust the cluster's CA through the token's proof and send the join
      (`api.JoiningCluster.Join`). Write the answer into `join.json` at once. The
      certificate must name the roles that the host asked for (`checkJoinCertificate`).
-  3. From `join.json`, write the keys, the certificate and the data key (`writeKeys`, as
-     init does), `clowder0`, and `net.json` with the other hosts as peers. Then write
-     `host.json` and delete `join.json`.
+  3. From `join.json`, write the keys, the certificate and, on a control-plane host only,
+     the data key (`writeKeys`, as init does), `clowder0`, and `net.json` with the other
+     hosts as peers. Then write `host.json` and delete `join.json`.
 
   If a join fails after step 2, the next attempt continues from `join.json` without asking
   the cluster again. If the answer never arrived, the state shows the host as joining and
@@ -73,13 +74,15 @@ The package holds the daemon and the one-shot host commands. Some files have sim
      (`Host.checkRoles`; a state that does not know the host yet is not compared). The API
      trusts the certificates, but the loops read `host.json` and the state, so the agent
      does not start while they differ. Only a change by hand makes them differ.
-  2. It asks Hetzner whether `clowderd recover` retired this host (`checkRetired`), with
-     the token from the state on disk. A host is retired when its server's label
-     `clowder-retired` names the host's certificate. A retired host's agent ends with
-     `ErrRetired` (exit status 4) before it starts Raft, the mesh or any stack, because two
-     retired hosts would still hold the old cluster's majority. The check is skipped when
-     the cluster has no ClusterConfiguration (no token), and the agent starts normally when
-     Hetzner does not answer within `retiredCheckTimeout`.
+  2. A control-plane host asks Hetzner whether `clowderd recover` retired it
+     (`checkRetired`), with the token from the state on disk. A host is retired when its
+     server's label `clowder-retired` names the host's certificate. A retired host's agent
+     ends with `ErrRetired` (exit status 4) before it starts Raft, the mesh or any stack,
+     because two retired voters would still hold the old cluster's majority. Other hosts
+     hold no token and never vote; no control-plane host takes a retired worker's revoked
+     certificate. The check is skipped when the cluster has no ClusterConfiguration (no
+     token), and the agent starts normally when Hetzner does not answer within
+     `retiredCheckTimeout`.
   3. It sets up `clowder0`, a dummy interface, with the node address, so the address
      exists even without peers. Then it restores the WireGuard mesh from `net.json`
      (`restoreMesh`). Raft runs over the mesh, so without this file a rebooted host would
@@ -91,7 +94,8 @@ The package holds the daemon and the one-shot host commands. Some files have sim
      entry later, when it applies the leader's log.
   5. It starts the containers' DNS resolver.
   6. `newDaemon` creates the parts from what they all share (`shared`: the files, this
-     host, its keys, the Raft member, the host's parts, the logger). It starts the API on
+     host, its keys (the data key on a control-plane host only), the Raft member, the
+     host's parts, the logger). It starts the API on
      the underlay, the node address and, on a control-plane host, the public address
      (`Host.apiAddresses`). Other hosts serve only the control plane, which calls them
      over the private network. The listeners use `IP_FREEBIND` (`freeBind`), because at
@@ -103,7 +107,10 @@ The package holds the daemon and the one-shot host commands. Some files have sim
   7. It starts the loops (`startLoops`):
      - this host's loops that start no container: the network, the supervisor, and the
        beats to the voters;
-     - the leader's loops, which do nothing while this host does not lead;
+     - on a control-plane host only (`startControlPlaneLoops`), which holds the data key:
+       the leader's loops, which do nothing while this host does not lead, and the watch
+       that alerts while there is no leader (`QuorumWatch`). Other hosts never vote, so
+       they never lead;
      - after the state has caught up with the leader's commit index (`runOnceCaughtUp`,
        `waitForState`; [Raft](cluster.md#raft-internalraftnode-and-the-data-key-internaldatakey)):
        the report, Traefik, the volume reconciler and its trim, forgetting removed hosts
@@ -202,13 +209,29 @@ The package holds the daemon and the one-shot host commands. Some files have sim
 
   Files: the pass is in `runner.go`, one stack's steps in `apply.go`, and the leavers in
   `leavers.go`. The agent hands the runner its parts (`stacks.Parts`): the file locations
-  (`stacks.Files`), this host, the Raft member, Docker, the volume reconciler, the data key
-  and the supervisor.
+  (`stacks.Files`), this host, the Raft member, Docker, the volume reconciler,
+  `OpenSecret` and the supervisor.
+- **Secrets from the control plane.** `OpenSecret` gives a Secret's values for the digest
+  that the state names. The agent (`newSecretOpener`, `controlPlaneCache`) keeps what
+  `api.Server.SecretsOfThisHost` gave it in memory, and asks again only when the state
+  names a digest it does not have, as the kubelet keeps its pods' secrets. Each answer
+  replaces all it kept. After a failed call it waits `askAgainAfter` before it asks
+  again, so a pass does not wait for the API's timeout each time. Traefik's runner keeps
+  the certificates' keys the same way and drops them once the host no longer holds the
+  Floating IP; while no leader answers, it keeps the key files it wrote before. On a
+  control-plane host
+  the API server opens the values itself; elsewhere it asks the leader
+  ([api.md](api.md#keys-only-on-the-control-plane)). A stack whose secrets do not come
+  waits, and `get stacks` says why.
 - **The prefetcher** (`stacks.Prefetcher`) pulls the images of the stacks that this host
   may take in a failover or a move, before it needs them (`docker.Client.PullMissing`).
-  These are the stacks whose volumes with data all have a copy with a disk here, the
-  stacks without such volumes (on any host that runs stacks), and the stack that moves
-  here. It pulls one image at a time in its own loop, so a long pull blocks nothing else.
+  These are, on a worker in service, the stacks whose volumes with data all have a copy
+  with a disk here, the stacks without such volumes, and the stack that moves here. It
+  pulls one image at a time in its own loop, so a long pull blocks nothing else. It pulls
+  without logins (`RegistryConfigs.WithoutLogins`), because a host gets a namespace's
+  logins only for the stacks that run on it. An image that fails to pull in a namespace
+  with image pull secrets is left for the stack's start, and a move does not wait for it
+  (`Ready`).
 - **The steps of moves** (`agent/moves.go`, `moveSteps`) record each step of a move that
   this host owns, once its loops have done it. On the new host, the steps are: each copy
   synced (or the volume never held data), and the images present. On the old host: the
@@ -266,18 +289,18 @@ The package holds the daemon and the one-shot host commands. Some files have sim
   `compose up`, it runs `compose up` for every stack again. This starts what died and
   leaves the rest alone.
 - **Registry logins belong to a namespace**, as Kubernetes pulls with the
-  `imagePullSecrets` of a namespace's default service account. Before every pull or
-  `compose up` (runner and prefetcher), the agent writes the Docker config of the stack's
-  namespace (`RegistryConfigs.Write`), by rename into the registries' directory on the
-  secrets' tmpfs. It holds the decrypted logins of the namespace's image pull secrets
-  (`state.RegistryLogins`), and Docker pulls with it (`docker --config`). The runner and
-  the prefetcher share this one value, and its lock keeps their writes apart.
+  `imagePullSecrets` of a namespace's default service account. Before every `compose up`,
+  the runner writes the Docker config of the stack's namespace (`RegistryConfigs.Write`),
+  by rename into the registries' directory on the secrets' tmpfs. It holds the logins of
+  the namespace's image pull secrets in clear (`state.RegistryLogins`, opened through
+  `OpenSecret`), and Docker pulls with it (`docker --config`). The runner and the
+  prefetcher share this one value, and its lock keeps their writes apart.
   - A namespace without logins gets an empty config, so no stack pulls with root's own
     logins or another namespace's.
   - Like the kubelet, the agent skips a missing Secret or key and pulls without it. A
     pull that then fails names what was skipped, in `get stacks`.
-  - The runner removes the configs of namespaces with no stack here and none this host
-    may take (`removeRegistryConfigsOfOthers`), so logins stay no longer than needed.
+  - The runner removes the configs of namespaces with no stack here
+    (`removeRegistryConfigsOfOthers`), so logins stay no longer than needed.
 - **Other loops.** The agent also runs the supervisor and, while it leads, the leader's
   loops: the placement (`controller.RunPlacement`) and those in [Ingress, certificates,
   alerts and metrics](loops.md).

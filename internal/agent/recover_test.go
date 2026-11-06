@@ -61,7 +61,7 @@ func lostCluster(t *testing.T) (Files, *hetznertest.API) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	credentials, err := files.readCredentials()
+	credentials, err := files.readCredentials(host.Roles)
 	if err != nil {
 		t.Fatal(err)
 	}

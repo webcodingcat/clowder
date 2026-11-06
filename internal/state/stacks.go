@@ -500,3 +500,23 @@ func (s *State) checkWorker(id *HostID) error {
 	}
 	return nil
 }
+
+// StacksToRun returns the stacks that a host runs, sorted by ID: those
+// placed on it, except a stack that its old host stops for a move. A host
+// whose phase keeps no stacks (KeepsStacks) runs none. The host's stack
+// runner and the control plane, which gives a host only the secrets of these
+// stacks (SecretsOfHost), read the same list.
+func (s *State) StacksToRun(id HostID) []*Stack {
+	host, ok := s.Hosts[id]
+	if !ok || !KeepsStacks(host.Phase) {
+		return nil
+	}
+	var stacks []*Stack
+	for _, stackID := range slices.Sorted(maps.Keys(s.Stacks)) {
+		stack := s.Stacks[stackID]
+		if stack.Host != nil && *stack.Host == id && !s.StopsForMove(stackID) {
+			stacks = append(stacks, stack)
+		}
+	}
+	return stacks
+}

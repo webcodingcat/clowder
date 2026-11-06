@@ -53,6 +53,12 @@ A host has roles, as a Kubernetes node does:
 | `worker` | runs stacks and holds volume copies with a disk |
 | `ingress` | may take the Floating IP |
 
+- **Keys.** Only control-plane hosts hold the cluster's keys. Any other host asks the
+  leader for what it needs, and gets only that: the secrets and registry logins of the
+  stacks that run on it, and the certificates' keys while it holds the Floating IP, as a
+  Kubernetes node gets only the secrets of its pods. Put the control plane on hosts of its
+  own (three for a cluster that stays up), so that no host that runs stacks holds the
+  keys.
 - **Join.** `clowder host join-token` makes a token that opens once, for an hour (`--ttl`
   up to a day). It allows `worker,ingress` unless `--roles` says more, so a token for a
   control-plane host needs `--roles control-plane,worker,ingress`. The roles are fixed
@@ -116,11 +122,15 @@ instead of skipping it, but this does not make mixing minor versions safe.
 
 **Keys and access**
 
-- Every host holds the data key, and with it the CA's key, the sealing key and so every
-  secret. Root on any host, a worker too, can issue itself any certificate.
-- A removed host keeps these keys. A host that kept its disk can still issue certificates
-  that the revocations do not name. Wipe a removed host's disk. A new sealing key would
-  need every file sealed anew with `secret rekey`; there is no key rotation yet.
+- Every control-plane host holds the data key, and with it the CA's key, the sealing key
+  and so every secret. Root on a control-plane host can issue itself any certificate. A
+  host without the control plane holds none of these keys: it gets the secrets and
+  registry logins of the stacks that run on it, and the certificates' keys while it holds
+  the Floating IP, and nothing else.
+- A removed control-plane host keeps these keys. If it kept its disk, it can still issue
+  certificates that the revocations do not name. Wipe a removed host's disk. A new
+  sealing key would need every file sealed anew with `secret rekey`; there is no key
+  rotation yet. A removed worker holds no keys: revoking its certificate is enough.
 - The CLI checks an agent's certificate against the CA, not against the revocations. So a
   removed host could answer the CLI as the cluster, with a sealing key of its own for
   `secret seal`, or take the values of `create secret` and of a `Secret` in clear. Remove
@@ -133,8 +143,16 @@ instead of skipping it, but this does not make mixing minor versions safe.
 
 - A host's roles are fixed once it has joined. To change them, remove the host and let it
   join anew.
-- With one control-plane host, a worker that restarts while that host is down starts none
-  of its stacks; it waits for the leader. The stacks that run keep running.
+- A worker that restarts while the control plane has no leader starts none of its
+  stacks: it waits for the leader, and its stacks' secrets are kept on no disk. The stacks
+  that run keep running.
+- A worker asks the leader for its stacks' secrets. While there is no leader, a stack
+  whose secrets changed waits, and a stack that moves to a worker starts only once there
+  is a leader again.
+- A worker cut off from every control-plane host alerts nobody; the voters see it fail.
+- An image that needs a registry login is pulled only when its stack starts on a host, as
+  that host gets the login only then. So a failover or move of such a stack waits for the
+  pull. Images without a login are pulled ahead.
 - A drained host that fails comes back active, not drained.
 - While the leader tries to power off a failed host (up to a few minutes when Hetzner's
   API does not answer), it notices no other failure. A second host that fails then is
@@ -149,7 +167,7 @@ instead of skipping it, but this does not make mixing minor versions safe.
   that the others added after this one fell behind.
 - `examples/hetzner` ignores later changes to a server's user data, so a storage class
   added later gets no thin pool on an existing host.
-- Images are never pruned, and every host pulls the images of the stacks it may take
+- Images are never pruned, and every worker pulls the images of the stacks it may take
   over, so the root file system fills up over time (alert `root-use`).
 
 **Volumes**

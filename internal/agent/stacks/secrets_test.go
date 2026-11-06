@@ -17,16 +17,15 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-func TestSecretLabelsAreKeyedAndUnambiguous(t *testing.T) {
+func TestSecretLabelsAreUnambiguous(t *testing.T) {
 	digests := map[string]string{"a": "bc", "ab": "c", "x": "1"}
-	label := secretLabel([]byte("key"), digests, []string{"a", "x"})
-	if label != secretLabel([]byte("key"), digests, []string{"x", "a"}) {
+	label := secretLabel(digests, []string{"a", "x"})
+	if label != secretLabel(digests, []string{"x", "a"}) {
 		t.Error("the order of the names changed the label")
 	}
 	for what, other := range map[string]string{
-		"another key":                    secretLabel([]byte("other"), digests, []string{"a", "x"}),
-		"another digest":                 secretLabel([]byte("key"), map[string]string{"a": "bc", "x": "2"}, []string{"a", "x"}),
-		"the same bytes split elsewhere": secretLabel([]byte("key"), digests, []string{"ab", "x"}),
+		"another digest":                 secretLabel(map[string]string{"a": "bc", "x": "2"}, []string{"a", "x"}),
+		"the same bytes split elsewhere": secretLabel(digests, []string{"ab", "x"}),
 	} {
 		if other == label {
 			t.Errorf("%s gave the same label", what)
@@ -43,8 +42,15 @@ func TestAStackWhoseSecretsDoNotOpenDoesNotComeUp(t *testing.T) {
 		// lose makes the secret db-password fail to open
 		lose func(runner *Runner, cluster *agenttest.Cluster)
 	}{
-		{"the data key does not open it", func(runner *Runner, _ *agenttest.Cluster) {
-			runner.open = func(state.Encrypted) ([]byte, error) { return nil, errors.New("no identity matched") }
+		{"the control plane does not open it", func(runner *Runner, _ *agenttest.Cluster) {
+			runner.openSecret = func(context.Context, *state.Secret) (map[string][]byte, error) {
+				return nil, errors.New("the control plane gives this host no secret default/db-password")
+			}
+		}},
+		{"the control plane leaves out a key", func(runner *Runner, _ *agenttest.Cluster) {
+			runner.openSecret = func(context.Context, *state.Secret) (map[string][]byte, error) {
+				return map[string][]byte{}, nil
+			}
 		}},
 		{"the state lost it", func(_ *Runner, cluster *agenttest.Cluster) {
 			// a bug, not a command: the state refuses to delete a secret a
@@ -59,7 +65,7 @@ func TestAStackWhoseSecretsDoNotOpenDoesNotComeUp(t *testing.T) {
 			runner, cluster, docker, _ := newTestRunner(t)
 			cluster.PutSecret("db-password", "first")
 			cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{Secrets: []string{"db-password"}}))
-			open := runner.open
+			open := runner.openSecret
 			test.lose(runner, cluster)
 			runner.passAndWait(context.Background())
 			if ups := docker.Count("up " + shopProject); ups != 0 {
@@ -73,7 +79,7 @@ func TestAStackWhoseSecretsDoNotOpenDoesNotComeUp(t *testing.T) {
 			}
 
 			// once the secret opens, the next pass brings the stack up
-			runner.open = open
+			runner.openSecret = open
 			cluster.PutSecret("db-password", "first")
 			runner.passAndWait(context.Background())
 			if ups := docker.Count("up " + shopProject); ups != 1 {

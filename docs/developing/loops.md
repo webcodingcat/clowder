@@ -47,8 +47,11 @@ fencing), ACME and the alert channels.
 - **HTTPS.** A route whose domain has a certificate gets a router on `websecure` and a
   router on `web` that redirects to it. Until the certificate exists, the route has only a
   plain router on `web`, so nobody sees Traefik's self-signed default certificate.
-- The runner writes every certificate in the state, with its decrypted key, into
-  `/run/clowder-secrets/clowder-traefik/`. This is the tmpfs of the stacks' secrets (0700),
+- On the host that the state names for the Floating IP (`State.Ingress`), the runner
+  writes every certificate in the state, with its key in clear, into
+  `/run/clowder-secrets/clowder-traefik/`. It gets the keys from the control plane, which
+  gives them to that host alone ([api.md](api.md#keys-only-on-the-control-plane)); every
+  other host removes them. This is the tmpfs of the stacks' secrets (0700),
   mounted read-only. It writes the certificates before the routes that name them. Traefik
   watches only the routes, so each file is named after a hash of its chain: a renewed
   certificate changes the routes, and Traefik reloads it. Old files are removed after the
@@ -315,8 +318,9 @@ better and then worse again, up to the severity already sent, sends nothing new.
 reminders and its all-clear go out.
 
 **Without a leader** the alerts above are silent: either a majority of the voters is gone
-(two hosts of three), or this host is cut off. So every agent also watches for itself
-(`QuorumWatch`). Once it has had no Raft leader for `noLeaderFor`, it sends
+(two hosts of three), or this host is cut off. So every control-plane agent also watches
+for itself (`QuorumWatch`); only it holds the channels' secrets. A worker cut off from all
+of them alerts nobody, and the voters see it fail. Once it has had no Raft leader for `noLeaderFor`, it sends
 `no-leader/<host>` (critical) to the channels in its own last state. It sends a reminder
 every `remindEvery`, and the all-clear once a leader is back. It keeps what it has sent in
 memory, not in the state, so an agent that restarts without a leader sends the alert again.

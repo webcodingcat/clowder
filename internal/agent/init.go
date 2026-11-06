@@ -181,7 +181,8 @@ func createKeys(files Files, clusterName string, host Host) (state.ClusterKeys, 
 	return keys, entry, nil
 }
 
-// writeKeys is shared by init and join.
+// writeKeys is shared by init and join. dataKey is nil on a host without
+// the control-plane role.
 func (f Files) writeKeys(caPEM, certificatePEM, hostKeyPEM []byte, wireGuardKey *ecdh.PrivateKey,
 	dataKey *datakey.Key,
 ) error {
@@ -199,13 +200,16 @@ func (f Files) writeKeys(caPEM, certificatePEM, hostKeyPEM []byte, wireGuardKey 
 			return err
 		}
 	}
+	if dataKey == nil {
+		return nil
+	}
 	return dataKey.Save(f.dataKey())
 }
 
 func bootstrapRaft(ctx context.Context, files Files, host Host, keys state.ClusterKeys, entry state.Host,
 	clusterName string, logger *slog.Logger,
 ) error {
-	credentials, err := files.readCredentials()
+	credentials, err := files.readCredentials(host.Roles)
 	if err != nil {
 		return err
 	}

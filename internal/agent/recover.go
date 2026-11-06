@@ -109,7 +109,7 @@ func Recover(ctx context.Context, files Files, parts RecoverParts, options Recov
 	if err := r.host.checkControlPlane("recover"); err != nil {
 		return err
 	}
-	if r.credentials, err = files.readCredentials(); err != nil {
+	if r.credentials, err = files.readCredentials(r.host.Roles); err != nil {
 		return err
 	}
 	if err := r.parts.Service(ctx, "stop"); err != nil {
@@ -282,7 +282,7 @@ func (r recovery) describe(current *state.State, gone []*state.Host, notReached 
 }
 
 func (r recovery) retire(ctx context.Context, current *state.State, gone []*state.Host) error {
-	client, err := controller.OpenHetzner(current, r.credentials.dataKey.Decrypt)
+	client, err := controller.OpenHetzner(current, r.credentials.decrypt)
 	if err != nil {
 		return err
 	}

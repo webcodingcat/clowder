@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/webcodingcat/clowder/internal/agent/agenttest"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
@@ -17,10 +18,14 @@ import (
 )
 
 // newTestPrefetcher is the prefetcher of host 1, with the Docker configs
-// in a directory of the test.
+// in a directory of the test. It fails the test if it opens a secret.
 func newTestPrefetcher(t *testing.T, cluster *agenttest.Cluster, docker *agenttest.Docker) *Prefetcher {
 	t.Helper()
-	registries := NewRegistryConfigs(Files{SecretsDir: t.TempDir()}, cluster.Keys.Decrypt)
+	openSecret := func(_ context.Context, secret *state.Secret) (map[string][]byte, error) {
+		t.Errorf("the prefetcher opened secret %s", secret.Name)
+		return nil, errors.New("no secrets for the prefetcher")
+	}
+	registries := NewRegistryConfigs(Files{SecretsDir: t.TempDir()}, openSecret)
 	return NewPrefetcher(1, cluster, docker, registries, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
@@ -50,8 +55,8 @@ func TestAHostPullsTheImagesOfTheStacksItMayTake(t *testing.T) {
 	docker := &agenttest.Docker{}
 	prefetcher := newTestPrefetcher(t, cluster, docker)
 	prefetcher.pass(context.Background())
-	// with the Docker config of the stacks' namespace
-	if want := []string{"pull missing ghost with default", "pull missing nginx with default"}; !slices.Equal(docker.Lines(), want) {
+	// with the Docker config without logins
+	if want := []string{"pull missing ghost with clowder-no-logins", "pull missing nginx with clowder-no-logins"}; !slices.Equal(docker.Lines(), want) {
 		t.Errorf("pulled %q, want %q", docker.Lines(), want)
 	}
 	if !prefetcher.Ready("default/blog") {
@@ -65,27 +70,46 @@ func TestAHostPullsTheImagesOfTheStacksItMayTake(t *testing.T) {
 	}
 }
 
-func TestAHostPullsWithoutAPullSecretThatIsMissing(t *testing.T) {
+func TestAPrivateImageIsLeftForTheStart(t *testing.T) {
 	cluster := blogWithCopyOn(t, 1)
+	docker := &agenttest.Docker{Private: []string{"ghost"}}
+	prefetcher := newTestPrefetcher(t, cluster, docker)
+	prefetcher.pass(context.Background())
+	if prefetcher.Ready("default/blog") {
+		t.Error("an image that does not pull is ready, in a namespace without image pull secrets")
+	}
+
+	// with image pull secrets, the image pulls with them once blog runs
+	// here, so a move does not wait for it
 	cluster.PutIn("", resource.KindNamespace, names.Default, resource.NamespaceSpec{
 		ImagePullSecrets: []resource.LocalObjectReference{{Name: "ghcr"}},
 	})
+	prefetcher.pass(context.Background())
+	if !prefetcher.Ready("default/blog") {
+		t.Errorf("a move waits for a private image: %q", docker.Lines())
+	}
+}
+
+func TestOnlyAWorkerPullsForTheStacksItMayTake(t *testing.T) {
+	// shop has a throw-away volume, so any worker may take it
+	cluster := agenttest.NewCluster(t)
+	cluster.AddHostWithRoles(1, hostrole.Set{hostrole.ControlPlane, hostrole.Ingress})
 	docker := &agenttest.Docker{}
 	prefetcher := newTestPrefetcher(t, cluster, docker)
 	prefetcher.pass(context.Background())
-	if !prefetcher.Ready("default/blog") {
-		t.Errorf("as the kubelet, public images pull without the login: %q", docker.Lines())
+	if len(docker.Lines()) != 0 {
+		t.Errorf("a host that is no worker pulled %q", docker.Lines())
 	}
 }
 
 func TestTheLoginsOfANamespaceWithoutStacksHereGo(t *testing.T) {
 	cluster := blogWithCopyOn(t, 1)
 	files := Files{SecretsDir: t.TempDir()}
-	registries := NewRegistryConfigs(files, cluster.Keys.Decrypt)
+	registries := NewRegistryConfigs(files, cluster.OpenSecret)
 	var current *state.State
 	cluster.Read(func(read *state.State) { current = read })
 	for _, namespace := range []string{names.Default, "gone"} {
-		if _, _, err := registries.Write(current, namespace); err != nil {
+		if _, _, err := registries.Write(context.Background(), current, namespace); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -100,12 +124,12 @@ func TestTheLoginsOfANamespaceWithoutStacksHereGo(t *testing.T) {
 	}
 }
 
-func TestAHostWithoutTheDataPullsNothingForTheStack(t *testing.T) {
+func TestAHostWithoutACopyPullsNothingForTheStack(t *testing.T) {
 	cluster := blogWithCopyOn(t, 0)
 	docker := &agenttest.Docker{}
 	prefetcher := newTestPrefetcher(t, cluster, docker)
 	prefetcher.pass(context.Background())
-	if slices.Contains(docker.Lines(), "pull missing ghost with default") || prefetcher.Ready("default/blog") {
+	if slices.Contains(docker.Lines(), "pull missing ghost with clowder-no-logins") || prefetcher.Ready("default/blog") {
 		t.Errorf("pulled %q for a stack host 1 cannot take", docker.Lines())
 	}
 }

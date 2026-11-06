@@ -36,7 +36,7 @@ authorizer. A refused caller gets 403.
 |---|---|
 | the CLI's (`/v1/…` except `internal`) | a CLI certificate (`cliCaller`) |
 | `GET` and `POST /v1/join` | anyone with an open join token (`handleOpen`, limited per sender) |
-| `internal/propose`, `internal/beats` (both), `internal/commit-index`, `internal/leader` | any host (`anyHost`) |
+| `internal/propose`, `internal/beats` (both), `internal/commit-index`, `internal/leader`, `internal/hosts/self/secrets`, `internal/hosts/self/tls` | any host (`anyHost`) |
 | `internal/changes`, `internal/join`, `internal/hand-over`, `internal/alerts/failures`, `internal/stacks/…/ps\|logs`, `internal/volumes/progress`, `internal/volumes/…/resolve-splitbrain` | a control-plane host (`controlPlaneHost`) |
 | `internal/credentials`, `internal/sealing-key` | this host's own certificate (`thisHost`) |
 
@@ -48,7 +48,7 @@ without its callers.
   `pki.ServerTLSForControlPlane`), so it serves neither the CLI nor the join. It listens
   only on the underlay and the node address. Only the control plane calls it (a stack's
   `ps` and `logs`, the copies' progress, a split brain, `clowderd recover`). Its own calls
-  go to the voters (beats) and to the leader (its reports, the commit index).
+  go to the voters (beats) and to the leader (its reports, the commit index, its secrets).
   `TestAWorkerTakesOnlyTheControlPlane` checks this.
 - **Who speaks.** The actor of a command is the caller of the first agent, and its time
   (`At`) is the leader's clock. `/v1/internal/propose` accepts only three things
@@ -72,8 +72,39 @@ without its callers.
   CLI request", in that agent's journal only). The record that every agent keeps is the
   actor of the Raft command and the state's `Audit`. What keeps strangers out is the CA,
   and removing a host revokes its certificate. A worker can speak neither for the CLI nor
-  for another host. For now, every host still holds the CA's key
-  ([Known limits](../operating.md#known-limits)).
+  for another host. Only control-plane hosts hold the CA's key
+  ([Keys only on the control plane](#keys-only-on-the-control-plane)).
+
+## Keys only on the control plane
+
+Only control-plane hosts hold the data key, and with it the CA's key, the sealing key and
+every secret. A join's answer carries the data key only for them (`agent/joiner.go`), and
+the agent reads it only on them (`agent.Files.readCredentials`). On any other host
+`ServerConfig.Keys` is nil, and whatever needs a key refuses with 503 (`errNoKeys`,
+answered through `writeFailure`).
+
+Any other host asks the leader for what it needs, and gets only that, as Kubernetes' node
+authorizer gives a node only the secrets of its pods (`api/hostsecrets.go`):
+
+- **`GET /v1/internal/hosts/self/secrets`** opens the secrets that the caller may read
+  (`state.SecretsOfHost`): those that the stacks it runs name (`state.StacksToRun`, the
+  same list the host's stack runner reads), and the image pull secrets of their
+  namespaces. The answer gives each with its digest (`HostSecret`).
+- **`GET /v1/internal/hosts/self/tls`** opens the certificates' keys, by domain, only while
+  the state names the caller as the host of the Floating IP (`state.Ingress`). The host
+  that takes over the Floating IP gets the keys from the control plane. The leader moves
+  the Floating IP and is on the control plane, so it can always give them.
+- **Each for itself.** Both take any host (`anyHost`) and answer for the caller's own
+  certificate. The host sends its state's index (`X-Clowder-Min-Index`), so the leader
+  does not judge from an older state than the host's.
+- **One way on every host.** `Server.SecretsOfThisHost` and `CertificatesOfThisHost` open
+  the values themselves on a control-plane host, with the same rules, and ask the leader
+  on any other. The agent keeps the answers in memory and asks again only for a new
+  digest or chain ([A host](host.md)).
+- **Deviations from Kubernetes.** A host asks for all it may read in one call, not secret
+  by secret, because the answer is small and replaces what the host kept. The
+  `clowder.secrets` label of a container is a SHA-256 over the state's digests, which are
+  keyed already, so the host needs no key of its own for it ([specs.md](specs.md)).
 
 ## Resources
 
@@ -325,10 +356,12 @@ describes the format of a sealed value.
 - **Who can read a secret:**
   - whoever holds the sealing key, because every SealedSecret in the files is sealed for
     it;
-  - every host, because a stack must be able to start anywhere;
+  - every control-plane host, which holds the data key;
+  - any other host while it runs a stack that names the secret
+    ([Keys only on the control plane](#keys-only-on-the-control-plane));
   - whoever holds the CLI's credentials, through a stack that names the secret, or through
-    a stack in `stacks.privileged`, whose containers reach the secrets and the data key on
-    their host.
+    a stack in `stacks.privileged`, whose containers reach the secrets on their host, and
+    the data key on a control-plane host.
 - **`GET /v1/sealing-key`** names the public half of the sealing key
   (`{"recipient":"age1..."}`, `api/cluster.go`). **`secret seal`** (`cli/secret.go`) asks
   for it each time, unless `--cert <file>` gives it, and seals each value for the ID of its

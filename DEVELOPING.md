@@ -146,8 +146,9 @@ Each word is explained here once, in alphabetical order.
 - **data generation**: of a volume, a number in its LV's name that grows with each new,
   empty LV. A new LV comes when a volume of replicas 0 moves, fails over, or starts anew
   after a recover.
-- **data key**: the age key that every host keeps (`datakey`). It encrypts secrets before
-  they go into the state ("encrypted with the data key").
+- **data key**: the age key that every control-plane host keeps (`datakey`). It encrypts
+  secrets before they go into the state ("encrypted with the data key"). Other hosts ask
+  the leader for what they may read ([Keys only on the control plane](docs/developing/api.md#keys-only-on-the-control-plane)).
 - **desired**: what the state wants on this host, read once per pass. The agent compares
   the host with it.
 - **endpoint**: an agent address that the CLI asks, from a context's `endpoints`: a host's
@@ -228,8 +229,9 @@ The package layout is planned for all of v1; packages appear as the phases add t
   keeps out the clock (`time.Now`, `time.Since`, `time.Until`).
 - **Decides**: `controller` (the leader's loops) writes Raft commands. It talks to external
   services that only the leader uses (Hetzner's API, ACME, alert channels),
-  but it never changes the host. One of its loops runs on every agent, not only on the
-  leader: `QuorumWatch`, which alerts through the alert channels while there is no leader.
+  but it never changes the host. Its loops run only on control-plane hosts, which hold the
+  data key. One of them runs on every control-plane agent, not only on the leader:
+  `QuorumWatch`, which alerts through the alert channels while there is no leader.
   The clients of these services are separate packages: `hetzner`, `notify` and
   `x/crypto/acme`. Hetzner is the only cloud clowder runs on, with no layer in between;
   `hetzner/hetznertest` fakes its API for the tests. depguard keeps these

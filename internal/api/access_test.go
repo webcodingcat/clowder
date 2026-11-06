@@ -43,6 +43,8 @@ func TestEachRouteTakesItsCallers(t *testing.T) {
 		"GET /v1/internal/beats/{id}":                                     anyHost,
 		"GET /v1/internal/commit-index":                                   anyHost,
 		"GET /v1/internal/leader":                                         anyHost,
+		"GET /v1/internal/hosts/self/secrets":                             anyHost,
+		"GET /v1/internal/hosts/self/tls":                                 anyHost,
 		"POST /v1/internal/changes":                                       controlPlaneHost,
 		"POST /v1/internal/join":                                          controlPlaneHost,
 		"POST /v1/internal/hand-over":                                     controlPlaneHost,

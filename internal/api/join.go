@@ -62,8 +62,10 @@ const joinMaxAge = 5 * time.Minute
 type JoinAnswer struct {
 	Host        state.HostID `json:"host"`
 	Certificate string       `json:"certificate"`
-	// DataKey is the cluster's data key in age's text form.
-	DataKey string `json:"data_key"`
+	// DataKey is the cluster's data key in age's text form, only for a
+	// control-plane host. Any other host asks the control plane for what it
+	// needs (hostsecrets.go).
+	DataKey string `json:"data_key,omitempty"`
 	// Peers are the other hosts. The new host sets up its WireGuard
 	// interfaces to them before Raft can tell it anything.
 	Peers []JoinPeer `json:"peers"`

@@ -20,6 +20,14 @@ func WriteParts(hash io.Writer, parts ...[]byte) {
 	}
 }
 
+// SHA256 returns the SHA-256 of the parts, in hex. It hides nothing about a
+// short value, so it is only for parts that are digests already.
+func SHA256(parts ...[]byte) string {
+	hash := sha256.New()
+	WriteParts(hash, parts...)
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
 // HMAC returns the HMAC-SHA256 of the parts under key, in hex. Without the
 // key, the digest reveals nothing about a secret, even a short one.
 func HMAC(key []byte, parts ...[]byte) string {

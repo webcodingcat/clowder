@@ -47,7 +47,7 @@ func (s *Server) internalCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	ca, err := s.authority()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		s.writeFailure(w, r, err)
 		return
 	}
 	name := cmp.Or(request.Name, pki.DefaultCLIName)
@@ -113,8 +113,11 @@ func (s *Server) authority() (*pki.CA, error) {
 			keys = &copied
 		}
 	})
-	if keys == nil {
+	switch {
+	case keys == nil:
 		return nil, state.ErrNotBootstrapped
+	case s.config.Keys == nil:
+		return nil, errNoKeys
 	}
 	keyPEM, err := s.config.Keys.Decrypt(keys.CAKey)
 	if err != nil {

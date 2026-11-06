@@ -29,6 +29,22 @@ import (
 // it turns unhealthy, because the host's ingress depends on it.
 var traefikRule = supervisor.Rule{Restart: "always", RestartUnhealthy: true}
 
+// certificateKeys gives the certificates' keys in clear while this host
+// holds the Floating IP (cachedCertificateKeys).
+type certificateKeys interface {
+	open(ctx context.Context, certificate state.Certificate) ([]byte, error)
+	// forget drops the keys kept in memory, once the host no longer holds
+	// the Floating IP
+	forget()
+}
+
+// chainDigest tells the certificates of one domain apart: a renewal has a
+// new chain.
+func chainDigest(chain []byte) string {
+	sum := sha256.Sum256(chain)
+	return hex.EncodeToString(sum[:])
+}
+
 // traefikRunner has its own loop next to the stack runner, so that a
 // stack's long image pull does not hold up the ingress.
 type traefikRunner struct {
@@ -36,9 +52,8 @@ type traefikRunner struct {
 	host    Host
 	cluster loop.Cluster
 	docker  Docker
-	// open decrypts the certificates' keys (datakey.Key.Decrypt)
-	open   func(encrypted state.Encrypted) ([]byte, error)
-	logger *slog.Logger
+	keys    certificateKeys
+	logger  *slog.Logger
 	// supervisor is paused while compose up recreates Traefik
 	supervisor loop.Pauser
 	// signal is how the supervisor starts a pass: after each Docker event,
@@ -91,7 +106,10 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	}
 	// the certificates first, then the routes that name them, so Traefik
 	// finds both when it starts or reloads
-	certificates, err := t.writeCertificates(input.certificates)
+	if !input.ingress {
+		t.keys.forget()
+	}
+	certificates, err := t.writeCertificates(ctx, input.certificates)
 	if err != nil {
 		return err
 	}
@@ -146,7 +164,10 @@ type traefikInput struct {
 	// forwarded are the routes of the stacks on other hosts, which lead to
 	// those hosts' Traefik. Every host routes every stack, so the Floating
 	// IP may move to any host
-	forwarded    []ingress.Route
+	forwarded []ingress.Route
+	// ingress says whether the state names this host for the Floating IP;
+	// certificates are empty unless it does
+	ingress      bool
 	certificates []state.Certificate
 }
 
@@ -178,8 +199,12 @@ func (t *traefikRunner) read() traefikInput {
 				}
 			}
 		}
-		// every certificate, because the ingress host answers for the
-		// stacks of every host
+		// only the host that holds the Floating IP terminates TLS, and the
+		// control plane gives the keys to it alone. It needs every
+		// certificate, because it answers for the stacks of every host.
+		if input.ingress = current.Ingress != nil && *current.Ingress == t.host.ID; !input.ingress {
+			return
+		}
 		for _, domain := range slices.Sorted(maps.Keys(current.Certificates)) {
 			// a copy is safe: Apply replaces a certificate, it never changes one
 			input.certificates = append(input.certificates, *current.Certificates[domain])
@@ -190,8 +215,11 @@ func (t *traefikRunner) read() traefikInput {
 
 // writeCertificates names the files after the certificate's chain, so
 // that a renewed certificate gets new files. A key that cannot be
-// decrypted leaves only its domain on plain HTTP.
-func (t *traefikRunner) writeCertificates(certificates []state.Certificate) ([]ingress.CertificateFiles, error) {
+// opened, and has no files from an earlier pass, leaves only its domain on
+// plain HTTP.
+func (t *traefikRunner) writeCertificates(ctx context.Context, certificates []state.Certificate) (
+	[]ingress.CertificateFiles, error,
+) {
 	// create the directory even without certificates: Traefik's Compose
 	// file mounts it, and Docker would create a missing directory that
 	// everyone can read. Restrict it to root each time, even if it already
@@ -202,7 +230,9 @@ func (t *traefikRunner) writeCertificates(certificates []state.Certificate) ([]i
 	}
 	var written []ingress.CertificateFiles
 	for _, certificate := range certificates {
-		key, err := t.open(certificate.Key)
+		name := certificate.Domain + "-" + chainDigest(certificate.Chain)[:16]
+		files := ingress.CertificateFiles{Domain: certificate.Domain, Chain: name + ".crt", Key: name + ".key"}
+		key, err := t.keys.open(ctx, certificate)
 		if err != nil {
 			// log once per certificate, not at every pass: the runner runs a
 			// pass at every Docker event
@@ -210,11 +240,14 @@ func (t *traefikRunner) writeCertificates(certificates []state.Certificate) ([]i
 				t.logger.Error("open the key of a certificate", "domain", certificate.Domain, "error", err)
 				t.unopened[string(certificate.Key)] = true
 			}
+			// the files of this chain from an earlier pass stay, so HTTPS
+			// goes on while the control plane does not answer (after the
+			// agent restarted without a leader)
+			if fileExists(filepath.Join(dir, files.Key)) && fileExists(filepath.Join(dir, files.Chain)) {
+				written = append(written, files)
+			}
 			continue
 		}
-		sum := sha256.Sum256(certificate.Chain)
-		name := certificate.Domain + "-" + hex.EncodeToString(sum[:8])
-		files := ingress.CertificateFiles{Domain: certificate.Domain, Chain: name + ".crt", Key: name + ".key"}
 		if err := atomicfile.WriteChanged(filepath.Join(dir, files.Key), key, 0o600); err != nil {
 			return nil, err
 		}
@@ -224,6 +257,11 @@ func (t *traefikRunner) writeCertificates(certificates []state.Certificate) ([]i
 		written = append(written, files)
 	}
 	return written, nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // removeOtherCertificates runs after the routes are written, so that no

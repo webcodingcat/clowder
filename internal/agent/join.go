@@ -177,9 +177,12 @@ func writeJoined(ctx context.Context, files Files, saved joining, hostNetwork Ho
 	if err := checkJoinCertificate(saved.CA, answer, hostKey, host.Roles); err != nil {
 		return err
 	}
-	dataKey, err := datakey.Parse(answer.DataKey)
-	if err != nil {
-		return err
+	// only a control-plane host keeps the data key
+	var dataKey *datakey.Key
+	if host.Roles.Has(hostrole.ControlPlane) {
+		if dataKey, err = datakey.Parse(answer.DataKey); err != nil {
+			return err
+		}
 	}
 	if err := files.writeKeys([]byte(saved.CA), []byte(answer.Certificate), saved.HostKey, wireGuardKey, dataKey); err != nil {
 		return err

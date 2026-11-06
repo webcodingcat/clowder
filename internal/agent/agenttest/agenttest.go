@@ -284,6 +284,9 @@ type Docker struct {
 	// FailedUps and FailedDowns are how many compose ups and downs fail
 	// before one succeeds
 	FailedUps, FailedDowns int
+	// Private are the images that PullMissing cannot pull, as without a
+	// login
+	Private []string
 	// Down makes Ping fail as if refused, Hangs as if it timed out
 	Down, Hangs bool
 	// UpFiles and LeftOut are the files and the services left out of the
@@ -355,9 +358,13 @@ func (f *Docker) ComposePull(_ context.Context, _, stack string, _, services []s
 }
 
 // PullMissing records the call, with the base name of the Docker config
-// directory: the namespace whose logins it pulls with.
+// directory: the namespace whose logins it pulls with. It fails for the
+// images in Private.
 func (f *Docker) PullMissing(_ context.Context, config, image string) error {
 	f.Add("pull missing %s with %s", image, filepath.Base(config))
+	if slices.Contains(f.Private, image) {
+		return errors.New("pull access denied for " + image)
+	}
 	return nil
 }
 
@@ -427,7 +434,8 @@ func NewCluster(t *testing.T) *Cluster {
 		ClusterName: "prod",
 		Host: state.Host{
 			ID: 0, Name: "node0", Roles: hostrole.DefaultInit, Underlay: netip.MustParseAddr("10.0.0.2"),
-			PublicAddress: netip.MustParseAddr("198.51.100.2"), ServerID: 40, WGPublicKey: "wg", CertificateSerial: "s0", CertificateNotAfter: time.Now().AddDate(1, 0, 0),
+			PublicAddress: netip.MustParseAddr("198.51.100.2"), ServerID: 40, ServerChecked: true, WGPublicKey: "wg",
+			CertificateSerial: "s0", CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
 	cluster.PutSecretIn(names.System, "hetzner", map[string]string{"token": "t"})
@@ -447,12 +455,18 @@ func NewCluster(t *testing.T) *Cluster {
 // AddHost joins an active host with every role and a token of its own.
 func (c *Cluster) AddHost(id state.HostID) {
 	c.t.Helper()
+	c.AddHostWithRoles(id, hostrole.DefaultInit)
+}
+
+// AddHostWithRoles adds an active host with the given roles.
+func (c *Cluster) AddHostWithRoles(id state.HostID, roles hostrole.Set) {
+	c.t.Helper()
 	token := "token-" + strconv.Itoa(int(id))
 	c.Apply(state.KindAddJoinToken, state.CLIActor("admin"), state.AddJoinToken{
-		ID: token, Hash: strings.Repeat("ab", 32), TTL: time.Hour, Roles: hostrole.DefaultInit,
+		ID: token, Hash: strings.Repeat("ab", 32), TTL: time.Hour, Roles: roles,
 	})
 	c.Apply(state.KindAddHost, state.LeaderActor, state.AddHost{Token: token, Host: state.Host{
-		ID: id, Name: "node" + strconv.Itoa(int(id)), Roles: hostrole.DefaultInit, Underlay: netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
+		ID: id, Name: "node" + strconv.Itoa(int(id)), Roles: roles, Underlay: netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
 		PublicAddress: netip.AddrFrom4([4]byte{198, 51, 100, byte(id + 2)}),
 		WGPublicKey:   "wg", CertificateSerial: "s" + strconv.Itoa(int(id)), CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		ServerID: 40 + int64(id), ServerChecked: true,
@@ -539,6 +553,20 @@ func (c *Cluster) PutSecret(name, value string) {
 func (c *Cluster) PutSecretIn(namespace, name string, values map[string]string) {
 	c.t.Helper()
 	c.PutIn(namespace, resource.KindSecret, name, c.encrypted(values))
+}
+
+// OpenSecret opens a secret with the cluster's keys, as the control plane
+// does for a host that may read it (stacks.OpenSecret).
+func (c *Cluster) OpenSecret(_ context.Context, secret *state.Secret) (map[string][]byte, error) {
+	opened := map[string][]byte{}
+	for _, key := range secret.Spec.Keys() {
+		value, err := c.Keys.Decrypt(secret.Spec.Data[key])
+		if err != nil {
+			return nil, err
+		}
+		opened[key] = value
+	}
+	return opened, nil
 }
 
 // encrypted makes a digest that only stands in for the one that the API

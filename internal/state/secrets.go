@@ -163,3 +163,22 @@ func ClearSize(encrypted Encrypted) int {
 	chunks := (body + encryptedChunk + encryptedTag - 1) / (encryptedChunk + encryptedTag)
 	return body - chunks*encryptedTag
 }
+
+// SecretsOfHost returns the IDs of the Secrets that a host may read: those
+// that the stacks it runs name (StacksToRun), and the image pull secrets of
+// their namespaces. Like Kubernetes' node authorizer, the control plane
+// opens only these for a host.
+func (s *State) SecretsOfHost(id HostID) map[string]bool {
+	readable := map[string]bool{}
+	for _, stack := range s.StacksToRun(id) {
+		for _, name := range stack.Spec.SecretNames() {
+			readable[names.ID(stack.Namespace, name)] = true
+		}
+		if namespace, ok := s.Namespaces[stack.Namespace]; ok {
+			for _, ref := range namespace.Spec.ImagePullSecrets {
+				readable[names.ID(stack.Namespace, ref.Name)] = true
+			}
+		}
+	}
+	return readable
+}

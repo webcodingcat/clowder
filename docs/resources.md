@@ -108,8 +108,9 @@ spec:
 | `imagePullSecrets` | registry logins: Secrets of this namespace, each named once, with the keys `server`, `username` and `password` | none |
 
 A Namespace may have no `spec` at all. The registry logins belong to the namespace, as
-Kubernetes puts `imagePullSecrets` on a namespace's default service account. The hosts pull
-every image of the namespace's stacks with them. A missing Secret or key does not stop a pull,
+Kubernetes puts `imagePullSecrets` on a namespace's default service account. A host pulls
+every image of the namespace's stacks with them once a stack starts there; as with the
+kubelet, only then does it get the logins. A missing Secret or key does not stop a pull,
 as with the kubelet. If the pull then fails, `clowder get stacks` names the missing login.
 
 A namespace can be deleted only when it holds no stacks, volumes or Secrets.

@@ -22,6 +22,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/docker"
 	"github.com/webcodingcat/clowder/internal/hetzner"
+	"github.com/webcodingcat/clowder/internal/hostrole"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/raftnode"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -81,11 +83,11 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		return err
 	}
 	// a join that wrote host.json but could not remove join.json leaves a
-	// second copy of the data key in join.json
+	// second copy of the keys in join.json
 	if err := os.Remove(files.joinFile()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		logger.Warn("remove what the join left", "file", files.joinFile(), "error", err)
 	}
-	credentials, err := files.readCredentials()
+	credentials, err := files.readCredentials(host.Roles)
 	if err != nil {
 		return err
 	}
@@ -124,12 +126,9 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		err = errors.Join(err, stopLoops(cancelLoops, &loops, loopsTimeout, logger, resolver, node))
 	}()
 
-	daemon, err := newDaemon(shared{
+	daemon := newDaemon(shared{
 		files: files, host: host, credentials: credentials, node: node, parts: parts, logger: logger,
 	})
-	if err != nil {
-		return err
-	}
 	// serve first: if a port is taken, the agent ends before it has
 	// started any container
 	servers, serveErrors, err := daemon.serve()
@@ -198,7 +197,7 @@ type shared struct {
 type daemon struct {
 	shared
 	// propose commits a command for every part, through the API server's
-	// leader forwarding (serverProposer)
+	// leader forwarding (lateServer)
 	propose    controller.Propose
 	volumes    *volumes.Reconciler
 	runner     *stacks.Runner
@@ -222,14 +221,15 @@ type daemon struct {
 //	stack runner ──wakes (loop.Signal) once a leaver let go──▶ volume reconciler
 //	stack runner ──asks (Mounted)──▶ volume reconciler
 //	stack runner, Traefik ──call Pause on──▶ supervisor
-//	stack runner, volume reconciler, report, alerts, leader's loops ──commit through (serverProposer)──▶ API server
+//	stack runner, volume reconciler, report, alerts, leader's loops ──commit through (lateServer)──▶ API server
+//	stack runner, Traefik ──open secrets and keys through (lateServer)──▶ API server
 //	API server ──answers for──▶ stack runner (containers), volume reconciler (progress), alerts
 //	move steps ──ask──▶ prefetcher, stack runner's files, volume reconciler
 //
 // The signals are created first, so the supervisor does not need the
-// runners. The proposer gets the server last, because the server needs the
+// runners. lateServer gets the server last, because the server needs the
 // stack runner and the alerts. No loop runs before newDaemon returns.
-func newDaemon(base shared) (*daemon, error) {
+func newDaemon(base shared) *daemon {
 	stacksSignal, traefikSignal, volumesSignal := loop.NewSignal(), loop.NewSignal(), loop.NewSignal()
 	dockerRestarted := func() {
 		stacksSignal.DockerRestarted()
@@ -237,49 +237,86 @@ func newDaemon(base shared) (*daemon, error) {
 	}
 	watcher := supervisor.New(base.parts.Docker, restartRules{base.node, base.host.ID}.of, supervisor.DefaultBackoff,
 		dockerRestarted, traefikSignal.Now, base.logger)
-	proposer := &serverProposer{}
+	late := &lateServer{}
 
-	reconciler := newVolumeReconciler(base, volumesSignal, stacksSignal, proposer.propose)
+	reconciler := newVolumeReconciler(base, volumesSignal, stacksSignal, late.propose)
+	openSecret := newSecretOpener(late)
 	// the runner and the prefetcher write the namespaces' Docker configs
-	registries := stacks.NewRegistryConfigs(base.files.stackFiles(), base.credentials.dataKey.Decrypt)
-	runner, err := newStackRunner(base, watcher, stacksSignal, volumesSignal, registries, reconciler, proposer.propose)
-	if err != nil {
-		return nil, err
-	}
+	registries := stacks.NewRegistryConfigs(base.files.stackFiles(), openSecret)
+	runner := newStackRunner(base, watcher, stacksSignal, volumesSignal, registries, reconciler, openSecret, late.propose)
 	conditions := controller.NewConditions()
-	alerts := controller.NewAlerts(base.node, proposer.propose, base.credentials.dataKey.Decrypt, conditions, base.logger)
-	joins := &joiner{cluster: base.node, propose: proposer.propose, dataKey: base.credentials.dataKey}
+	alerts := controller.NewAlerts(base.node, late.propose, base.credentials.decrypt, conditions, base.logger)
+	joins := &joiner{cluster: base.node, propose: late.propose, dataKey: base.credentials.dataKey}
 	heard := controller.NewHeard()
 	caughtUp := make(chan struct{})
-	proposer.server = newAPIServer(base, runner, reconciler, alerts, heard, joins, caughtUp)
+	late.server = newAPIServer(base, runner, reconciler, alerts, heard, joins, caughtUp)
 
 	return &daemon{
 		shared:     base,
-		propose:    proposer.propose,
+		propose:    late.propose,
 		volumes:    reconciler,
 		runner:     runner,
 		prefetcher: stacks.NewPrefetcher(base.host.ID, base.node, base.parts.Docker, registries, base.logger),
-		traefik:    newTraefikRunner(base, watcher, traefikSignal),
-		reporter:   newHostReporter(base, proposer.propose, reconciler.Seen),
+		traefik:    newTraefikRunner(base, watcher, traefikSignal, newCertificateKeys(late)),
+		reporter:   newHostReporter(base, late.propose, reconciler.Seen),
 		supervisor: watcher,
 		conditions: conditions,
 		heard:      heard,
 		alerts:     alerts,
-		server:     proposer.server,
+		server:     late.server,
 		caughtUp:   caughtUp,
-	}, nil
+	}
 }
 
-// serverProposer commits through the API server's Propose. newDaemon sets
-// the server last, because the server needs parts that already commit
-// through the proposer.
-type serverProposer struct {
+// lateServer reaches the API server, which newDaemon sets last, because
+// the server needs parts that already commit and open secrets through it.
+// No part calls it before newDaemon returns.
+type lateServer struct {
 	server *api.Server
 }
 
-func (p *serverProposer) propose(ctx context.Context, cmd state.Command) (uint64, error) {
-	return p.server.Propose(ctx, cmd)
+func (l *lateServer) propose(ctx context.Context, cmd state.Command) (uint64, error) {
+	return l.server.Propose(ctx, cmd)
 }
+
+// newSecretOpener opens the secrets of the stacks that this host runs,
+// through what the control plane gives it.
+func newSecretOpener(late *lateServer) stacks.OpenSecret {
+	secrets := &controlPlaneCache[api.HostSecret]{
+		what: "secret",
+		fetch: func(ctx context.Context) (map[string]api.HostSecret, error) {
+			return late.server.SecretsOfThisHost(ctx)
+		},
+		version: func(secret api.HostSecret) string { return secret.Digest },
+	}
+	return func(ctx context.Context, secret *state.Secret) (map[string][]byte, error) {
+		opened, err := secrets.get(ctx, names.ID(secret.Namespace, secret.Name), secret.Spec.Digest)
+		return opened.Data, err
+	}
+}
+
+// cachedCertificateKeys opens the certificates' keys while this host holds
+// the Floating IP, through what the control plane gives it.
+type cachedCertificateKeys struct {
+	cache *controlPlaneCache[api.HostCertificate]
+}
+
+func newCertificateKeys(late *lateServer) cachedCertificateKeys {
+	return cachedCertificateKeys{cache: &controlPlaneCache[api.HostCertificate]{
+		what: "certificate",
+		fetch: func(ctx context.Context) (map[string]api.HostCertificate, error) {
+			return late.server.CertificatesOfThisHost(ctx)
+		},
+		version: func(certificate api.HostCertificate) string { return chainDigest(certificate.Chain) },
+	}}
+}
+
+func (k cachedCertificateKeys) open(ctx context.Context, certificate state.Certificate) ([]byte, error) {
+	opened, err := k.cache.get(ctx, certificate.Domain, chainDigest(certificate.Chain))
+	return opened.Key, err
+}
+
+func (k cachedCertificateKeys) forget() { k.cache.forget() }
 
 func newVolumeReconciler(base shared, signal, stacksSignal *loop.Signal, propose controller.Propose,
 ) *volumes.Reconciler {
@@ -297,12 +334,8 @@ func newVolumeReconciler(base shared, signal, stacksSignal *loop.Signal, propose
 }
 
 func newStackRunner(base shared, watcher loop.Pauser, signal, volumesSignal *loop.Signal,
-	registries *stacks.RegistryConfigs, volumes stacks.Volumes, propose controller.Propose,
-) (*stacks.Runner, error) {
-	digestKey, err := base.credentials.dataKey.Derive(stacks.SecretLabelPurpose)
-	if err != nil {
-		return nil, fmt.Errorf("derive the key of the secrets' labels: %w", err)
-	}
+	registries *stacks.RegistryConfigs, volumes stacks.Volumes, openSecret stacks.OpenSecret, propose controller.Propose,
+) *stacks.Runner {
 	return stacks.New(stacks.Parts{
 		Files:           base.files.stackFiles(),
 		Host:            base.host.ID,
@@ -310,24 +343,23 @@ func newStackRunner(base shared, watcher loop.Pauser, signal, volumesSignal *loo
 		Cluster:         base.node,
 		Docker:          base.parts.Docker,
 		Volumes:         volumes,
-		Open:            base.credentials.dataKey.Decrypt,
-		DigestKey:       digestKey,
+		OpenSecret:      openSecret,
 		Supervisor:      watcher,
 		Signal:          signal,
 		Registries:      registries,
 		VolumesReleased: volumesSignal.Now,
 		Propose:         propose,
 		Logger:          base.logger,
-	}), nil
+	})
 }
 
-func newTraefikRunner(base shared, watcher loop.Pauser, signal *loop.Signal) *traefikRunner {
+func newTraefikRunner(base shared, watcher loop.Pauser, signal *loop.Signal, keys certificateKeys) *traefikRunner {
 	return &traefikRunner{
 		files:      base.files,
 		host:       base.host,
 		cluster:    base.node,
 		docker:     base.parts.Docker,
-		open:       base.credentials.dataKey.Decrypt,
+		keys:       keys,
 		logger:     base.logger,
 		supervisor: watcher,
 		signal:     signal,
@@ -352,13 +384,18 @@ func newHostReporter(base shared, propose controller.Propose, seen func() map[st
 func newAPIServer(base shared, runner *stacks.Runner, volumes api.Volumes, alerts *controller.Alerts,
 	heard *controller.Heard, joins api.Joins, caughtUp <-chan struct{},
 ) *api.Server {
+	// a nil *datakey.Key in the interface would not compare as nil
+	var keys api.Keys
+	if base.credentials.dataKey != nil {
+		keys = base.credentials.dataKey
+	}
 	return api.NewServer(api.ServerConfig{
 		Cluster: base.node, CA: base.credentials.ca, Certificate: base.credentials.certificate, Roles: base.host.Roles,
 		APIAddress: func(id state.HostID) string {
 			// every host has the same API port; tests on 127.0.0.1 have one host
 			return net.JoinHostPort(network.NodeAddress(id).String(), strconv.Itoa(base.host.APIPort))
 		},
-		Keys: base.credentials.dataKey, Version: buildinfo.Version, Logger: base.logger,
+		Keys: keys, Version: buildinfo.Version, Logger: base.logger,
 		HostID: base.host.ID, Containers: runner, Volumes: volumes, Alerts: alertsAPI{alerts}, Beats: heard,
 		Joins: joins, CaughtUp: caughtUp,
 		HetznerServers: func(ctx context.Context, hetznerAPI, token string) ([]int64, error) {
@@ -374,13 +411,27 @@ func newAPIServer(base shared, runner *stacks.Runner, volumes api.Volumes, alert
 const hetznerCheckTimeout = 20 * time.Second
 
 func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup) {
-	node, propose, logger := d.node, d.propose, d.logger
+	node, logger := d.node, d.logger
 
 	// this host's loops that start no container
 	loops.Go(func() { reconcileNetwork(ctx, node, d.files, d.host.ID, d.parts.Network, logger) })
 	loops.Go(func() { d.supervisor.Run(ctx, compose.LabelStack) })
 	loops.Go(func() { sendBeats(ctx, node, d.host.ID, d.server.Beat, logger) })
+	if d.host.Roles.Has(hostrole.ControlPlane) {
+		d.startControlPlaneLoops(ctx, loops)
+	}
 
+	// the loops that wait for the state
+	loops.Go(func() { d.runOnceCaughtUp(ctx, loops) })
+}
+
+// startControlPlaneLoops starts the loops that need the data key: the
+// leader's, and the watch that alerts while there is no leader. A host
+// without the control-plane role never votes, so it never leads, and it
+// holds neither the token nor the alert channels' secrets. A worker cut off
+// from every control-plane host alerts nobody; the voters see it fail.
+func (d *daemon) startControlPlaneLoops(ctx context.Context, loops *sync.WaitGroup) {
+	node, propose, logger := d.node, d.propose, d.logger
 	// the leader's loops: each does nothing while this host does not lead
 	loops.Go(func() {
 		// every host has the same Raft port
@@ -392,18 +443,18 @@ func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup) {
 	loops.Go(func() { controller.RunPlacement(ctx, node, propose, d.conditions, logger) })
 	loops.Go(func() { controller.RunMoves(ctx, node, propose, d.server.Progress, logger) })
 	loops.Go(func() {
-		controller.RunFloatingIP(ctx, node, propose, d.credentials.dataKey.Decrypt, d.conditions, logger)
+		controller.RunFloatingIP(ctx, node, propose, d.credentials.decrypt, d.conditions, logger)
 	})
 	loops.Go(func() { controller.RunACME(ctx, node, propose, d.credentials.dataKey, logger) })
 	loops.Go(func() {
 		controller.RunFencing(ctx, controller.FenceParts{
-			Cluster: node, Propose: propose, Open: d.credentials.dataKey.Decrypt,
+			Cluster: node, Propose: propose, Open: d.credentials.decrypt,
 			Heard: d.heard, Ask: d.server.AskSilence, Self: d.host.ID, Conditions: d.conditions, Logger: logger,
 		})
 	})
 	loops.Go(func() { d.alerts.Run(ctx) })
 	loops.Go(func() { d.alerts.RunHeartbeat(ctx) })
-	// on every agent, leading or not: it alerts while there is no leader
+	// leading or not: it alerts while there is no leader
 	loops.Go(func() {
 		knowsLeader := func() bool {
 			_, ok := d.node.Leader()
@@ -411,9 +462,6 @@ func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup) {
 		}
 		controller.NewQuorumWatch(d.alerts, d.host.Name, knowsLeader).Run(ctx)
 	})
-
-	// the loops that wait for the state
-	loops.Go(func() { d.runOnceCaughtUp(ctx, loops) })
 }
 
 // runOnceCaughtUp waits because until the state has caught up, it may still

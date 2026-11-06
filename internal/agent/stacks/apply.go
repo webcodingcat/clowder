@@ -27,7 +27,7 @@ import (
 // apply leaves alone the LVs in inUse: a stack that failed to stop may
 // still write to them.
 func (r *Runner) apply(ctx context.Context, desired desiredState, stack *state.Stack, inUse volumesInUse) error {
-	secrets, err := r.openSecrets(desired, stack)
+	secrets, err := r.openSecrets(ctx, desired, stack)
 	if err != nil {
 		return err
 	}
@@ -39,7 +39,7 @@ func (r *Runner) apply(ctx context.Context, desired desiredState, stack *state.S
 	if err != nil {
 		return err
 	}
-	config, missing, err := r.registries.Write(desired.copied, stack.Namespace)
+	config, missing, err := r.registries.Write(ctx, desired.copied, stack.Namespace)
 	if err != nil {
 		return err
 	}

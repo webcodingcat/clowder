@@ -121,9 +121,11 @@ replicated, and how a cluster that lost its majority goes on. The state itself i
   seconds with two voters. During those seconds, the loss of either one stops the cluster
   until it is back. The leader handles one join at a time (`joiner.mu`), so two hosts
   never get the same ID.
-- **The data key** is an age identity in a file that only root can read. `Encrypt` and
-  `Decrypt` turn secrets into `state.Encrypted` and back. A joining host receives the key
-  with its join answer.
+- **The data key** is an age identity in a file that only root can read, on control-plane
+  hosts only. `Encrypt` and `Decrypt` turn secrets into `state.Encrypted` and back. A
+  joining control-plane host receives the key with its join answer; any other host gets
+  none and asks the leader for what it may read
+  ([api.md](api.md#keys-only-on-the-control-plane)).
 - **For recover.** `ReadState` reads the state from the log on disk without Raft (the last
   snapshot, then the commands after it). `Recover` makes the member its cluster's only
   voter (`raft.RecoverCluster`). Both are for `clowderd recover`, while the agent is

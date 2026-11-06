@@ -45,19 +45,13 @@ func (s *State) HetznerToken() (Encrypted, error) {
 	return token, nil
 }
 
-// RegistryLogin is the login for one private image registry. Each part is
-// encrypted, as its Secret stores it.
-type RegistryLogin struct {
-	Secret                     string
-	Server, Username, Password Encrypted
-}
-
-// RegistryLogins returns the logins that a namespace's stacks pull their
-// images with, in the order of its imagePullSecrets. Like the kubelet, it
-// skips a Secret that is missing or lacks a key, and goes on. So an image
-// that needs no login still pulls. missing says which Secrets it skipped
-// and why. The stack's host names them when a pull fails.
-func (s *State) RegistryLogins(namespace string) (logins []RegistryLogin, missing error) {
+// RegistryLogins returns the Secrets that a namespace's stacks pull their
+// images with, in the order of its imagePullSecrets; each has the keys of
+// resource.RegistryLoginKeys. Like the kubelet, it skips a Secret that is
+// missing or lacks a key, and goes on. So an image that needs no login
+// still pulls. missing says which Secrets it skipped and why. The stack's
+// host names them when a pull fails.
+func (s *State) RegistryLogins(namespace string) (logins []*Secret, missing error) {
 	held, ok := s.Namespaces[namespace]
 	if !ok {
 		return nil, fmt.Errorf("no namespace %s", namespace)
@@ -70,7 +64,6 @@ func (s *State) RegistryLogins(namespace string) (logins []RegistryLogin, missin
 				namespace, ref.Name))
 			continue
 		}
-		var parts [3]Encrypted
 		lacks := slices.IndexFunc(resource.RegistryLoginKeys, func(key string) bool {
 			_, has := secret.Spec.Data[key]
 			return !has
@@ -80,10 +73,7 @@ func (s *State) RegistryLogins(namespace string) (logins []RegistryLogin, missin
 				ref.Name, namespace, resource.RegistryLoginKeys[lacks]))
 			continue
 		}
-		for index, key := range resource.RegistryLoginKeys {
-			parts[index] = secret.Spec.Data[key]
-		}
-		logins = append(logins, RegistryLogin{Secret: ref.Name, Server: parts[0], Username: parts[1], Password: parts[2]})
+		logins = append(logins, secret)
 	}
 	return logins, errors.Join(problems...)
 }

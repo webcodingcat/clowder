@@ -1,6 +1,7 @@
 package stacks
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -14,6 +15,12 @@ import (
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/state"
 )
+
+// OpenSecret gives a Secret's values by key. It fails unless the values are
+// those of the digest that secret names. A host that holds no data key gets
+// them from the control plane, which opens only the secrets of the stacks
+// that the host runs (state.SecretsOfHost).
+type OpenSecret func(ctx context.Context, secret *state.Secret) (map[string][]byte, error)
 
 // stackSecrets is what compose up needs from a stack's secrets.
 type stackSecrets struct {
@@ -35,23 +42,20 @@ type stackSecrets struct {
 	digests map[string]string
 }
 
-// SecretLabelPurpose is the purpose for which the key of the secret files'
-// labels is derived from the data key (Parts.DigestKey).
-const SecretLabelPurpose = "clowder secrets label"
-
-// secretLabel is an HMAC-SHA256 over the names and the state's digests of
-// one service's secret files, in name order. It changes when any of them
-// changes, so that Compose recreates the container. It reveals nothing about
-// the values to anyone who reads docker inspect.
-func secretLabel(key []byte, digests map[string]string, secretNames []string) string {
+// secretLabel is a SHA-256 over the names and the state's digests of one
+// service's secret files, in name order. It changes when any of them
+// changes, so that Compose recreates the container. It needs no key of its
+// own: the state's digests are keyed already, so the label reveals nothing
+// about the values to anyone who reads docker inspect.
+func secretLabel(digests map[string]string, secretNames []string) string {
 	var parts [][]byte
 	for _, name := range slices.Sorted(slices.Values(secretNames)) {
 		parts = append(parts, []byte(name), []byte(digests[name]))
 	}
-	return digest.HMAC(key, parts...)
+	return digest.SHA256(parts...)
 }
 
-func (r *Runner) openSecrets(desired desiredState, stack *state.Stack) (stackSecrets, error) {
+func (r *Runner) openSecrets(ctx context.Context, desired desiredState, stack *state.Stack) (stackSecrets, error) {
 	values := map[names.SecretKeyRef]string{}
 	secrets := stackSecrets{
 		files: map[string]map[string][]byte{}, keys: map[string][]string{},
@@ -62,12 +66,16 @@ func (r *Runner) openSecrets(desired desiredState, stack *state.Stack) (stackSec
 		if !ok {
 			return stackSecrets{}, fmt.Errorf("stack %s names secret %s, which its namespace does not have", stack.ID(), name)
 		}
+		opened, err := r.openSecret(ctx, secret)
+		if err != nil {
+			return stackSecrets{}, fmt.Errorf("open secret %s of stack %s: %w", name, stack.ID(), err)
+		}
 		for _, key := range secret.Spec.Keys() {
-			opened, err := r.open(secret.Spec.Data[key])
-			if err != nil {
-				return stackSecrets{}, fmt.Errorf("open secret %s of stack %s: %w", name, stack.ID(), err)
+			value, ok := opened[key]
+			if !ok {
+				return stackSecrets{}, fmt.Errorf("open secret %s of stack %s: no value of %s", name, stack.ID(), key)
 			}
-			values[names.SecretKeyRef{Name: name, Key: key}] = string(opened)
+			values[names.SecretKeyRef{Name: name, Key: key}] = string(value)
 		}
 		secrets.digests[name] = secret.Spec.Digest
 	}
@@ -86,7 +94,7 @@ func (r *Runner) openSecrets(desired desiredState, stack *state.Stack) (stackSec
 			}
 		}
 		if len(service.Secrets) > 0 {
-			secrets.labels[serviceName] = secretLabel(r.digestKey, secrets.digests, service.Secrets)
+			secrets.labels[serviceName] = secretLabel(secrets.digests, service.Secrets)
 		}
 	}
 	return secrets, nil

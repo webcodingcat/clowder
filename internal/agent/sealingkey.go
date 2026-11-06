@@ -48,7 +48,7 @@ func printSealingKey(ctx context.Context, out io.Writer, files Files, public boo
 	if err := host.checkControlPlane("sealing-key"); err != nil {
 		return err
 	}
-	hostCredentials, err := files.readCredentials()
+	hostCredentials, err := files.readCredentials(host.Roles)
 	if err != nil {
 		return err
 	}

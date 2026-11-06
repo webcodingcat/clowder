@@ -4,10 +4,13 @@ package live
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +20,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/clientconfig"
 	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/jointoken"
+	"github.com/webcodingcat/clowder/internal/resource"
 )
 
 // The host's own certificate and its key, as the agent keeps them
@@ -30,7 +34,8 @@ const (
 // only, a volume's copies with a disk go on the workers and its tiebreaker
 // on the control plane, and a worker gets no further than its own part: its
 // token makes no control-plane host, the control plane's routes and Raft
-// refuse its certificate, and its own API refuses the CLI.
+// refuse its certificate, its own API refuses the CLI, and it holds no data
+// key and gets only the secrets of its stacks.
 func TestRoles(t *testing.T) {
 	server, tofu := baseline(t, splitRoles)
 	hosts := scenarioHosts(server, tofu)
@@ -48,6 +53,9 @@ func TestRoles(t *testing.T) {
 			workerRefusedByControlPlane(t, hosts)
 		}},
 		{"a worker refuses the CLI", func(t *testing.T) { workerRefusesTheCLI(t, hosts, tofu) }},
+		{"a worker gets only the secrets of its stacks", func(t *testing.T) {
+			workerGetsOnlyItsSecrets(t, hosts, layout)
+		}},
 		{"the stack and its volume go", func(t *testing.T) { removeStack(t, "spread") }},
 	})
 }
@@ -218,5 +226,52 @@ func workerRefusesTheCLI(t *testing.T, hosts map[string]host, tofu outputs) {
 	if output := call(tofu.Hosts.Value[firstJoining].PrivateAddress); strings.HasSuffix(output, "000") ||
 		strings.HasSuffix(output, "403") {
 		t.Errorf("the control-plane host refused the CLI's certificate: %s", output)
+	}
+}
+
+// dataKeyFile is the data key, as the agent keeps it (agent.Files).
+const dataKeyFile = "/var/lib/clowder/keys/data-key.txt"
+
+// workerGetsOnlyItsSecrets runs the stack keyed, which names the secret
+// keyed-token, next to the secret keyed-other, which no stack names. The
+// worker that runs keyed holds no data key, and the control plane gives it
+// keyed-token and not keyed-other, as Kubernetes' node authorizer gives a
+// node only the secrets of its pods.
+func workerGetsOnlyItsSecrets(t *testing.T, hosts map[string]host, layout layout) {
+	stack := document(resource.KindStack, "keyed", "services:\n  app:\n    image: "+publicImage+
+		"\n    command: [sleep, infinity]\n    stopGracePeriod: 1s\n    secrets: [keyed-token]\n"+
+		"    resources: {reserve: {cpus: 0.01, memory: 16M}}\n")
+	// a sealed secret is a document without a separator of its own
+	createAndApply(t, "keyed", sealSecret(t, "keyed-token", "the token")+"\n---\n"+
+		sealSecret(t, "keyed-other", "another")+"\n"+stack)
+	t.Cleanup(func() { removeStack(t, "keyed") })
+	waitRunning(t, "keyed", 1)
+	on := stackInfo(t, "keyed").Host
+	worker := hosts[on]
+	if layout.hasRole(on, "control-plane") {
+		t.Fatalf("keyed runs on %s, a control-plane host", on)
+	}
+	for name, server := range hosts {
+		_, err := server.run("test -e " + dataKeyFile)
+		switch controlPlane := layout.hasRole(name, "control-plane"); {
+		case controlPlane && err != nil:
+			t.Errorf("the control-plane host %s has no data key", name)
+		case !controlPlane && err == nil:
+			t.Errorf("the worker %s has a data key", name)
+		}
+	}
+	// as root on the worker could ask, with the worker's own certificate
+	first := nodeAddressOf(t, hosts[firstHost])
+	output := worker.must(t, fmt.Sprintf("curl -sS -k --fail-with-body --cert %s --key %s https://%s/v1/internal/hosts/self/secrets",
+		hostCertificateFile, hostKeyFile, net.JoinHostPort(first, apiPort)))
+	var secrets map[string]api.HostSecret
+	if err := json.Unmarshal([]byte(output), &secrets); err != nil {
+		t.Fatalf("the worker's secrets: %v: %s", err, output)
+	}
+	if token, ok := secrets["default/keyed-token"]; !ok || string(token.Data[stackSecretKey]) != "the token" {
+		t.Errorf("the worker did not get the secret of its stack: %v", slices.Sorted(maps.Keys(secrets)))
+	}
+	if _, ok := secrets["default/keyed-other"]; ok {
+		t.Error("the worker got a secret that none of its stacks names")
 	}
 }

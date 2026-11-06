@@ -1,8 +1,9 @@
 // Package datakey is the cluster's data key: an age identity that every
-// host keeps (only root may read it). Secrets are encrypted with it before
-// they go into the cluster state. So a Raft snapshot that ends up in the
-// wrong hands holds no secret in plain text. A joining host gets the key in
-// the answer to its join.
+// control-plane host keeps (only root may read it). Secrets are encrypted
+// with it before they go into the cluster state. So a Raft snapshot that
+// ends up in the wrong hands holds no secret in plain text. A joining
+// control-plane host gets the key in the answer to its join; other hosts
+// never hold it.
 package datakey
 
 import (

@@ -163,11 +163,13 @@ the configuration.
   the heartbeat's URL) are Secrets of `clowder-system`. The configuration names them by
   `{name, key}` (`names.SecretKeyRef`); `clusterspec.SecretPlaces` lists the fields that
   do. Readers find a value through such a reference or a spec, never by taking a name
-  apart: `SystemSecret(ref)`, `HetznerToken`, and `RegistryLogins(namespace)` (the
-  encrypted `server`, `username` and `password` of each image pull secret). Until the
+  apart: `SystemSecret(ref)`, `HetznerToken`, and `RegistryLogins(namespace)` (each
+  image pull secret with the keys `server`, `username` and `password`). Until the
   first configuration, the loops that need the Hetzner token or a Floating IP get
   `ErrNotConfigured` and wait.
-- Who can read a secret is in [Secret values](api.md#secret-values).
+- Who can read a secret is in [Secret values](api.md#secret-values). A host without the
+  data key may read only `SecretsOfHost`: the secrets that the stacks it runs
+  (`StacksToRun`) name, and their namespaces' image pull secrets.
 
 ### Stacks
 
@@ -392,7 +394,7 @@ reports that (`report-peer-forgotten`); `Forgetting` holds the hosts that have n
 yet. Only then is its ID free for a new host (`HostIDFree`), because DRBD's node-id is the
 host ID and a peer's slot in the metadata outlives the host. A host that is down reports
 nothing, so the ID waits for it; once that host is removed too, nobody waits for it. A
-removed host keeps the data key ([Known limits](../operating.md#known-limits)).
+removed control-plane host keeps the data key ([Known limits](../operating.md#known-limits)).
 
 ## Hosts, certificates and tokens
 

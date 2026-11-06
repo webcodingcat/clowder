@@ -24,8 +24,10 @@ Until `v1.0.0`, a new release may need a cluster set up anew.
 - **Failover with fencing:** when the other hosts stop hearing a host with stacks for
   45 s, clowder powers it off through Hetzner's API and starts its stacks on a host with a
   synced copy of their data, within about three minutes.
-- **Host roles as in Kubernetes:** `control-plane`, `worker` and `ingress`. Workers serve
-  only the control plane, over the private network.
+- **Host roles as in Kubernetes:** `control-plane`, `worker` and `ingress`. Only
+  control-plane hosts hold the cluster's keys. A worker gets only the secrets of its own
+  stacks, as Kubernetes' node authorizer allows, and serves only the control plane, over
+  the private network.
 - **HTTP routes with certificates:** Traefik on the Floating IP, with the client's address
   in `X-Forwarded-For`, and certificates from Let's Encrypt once the domain's DNS points
   at the Floating IP (not through a proxying CDN). The cluster accepts Let's Encrypt's
