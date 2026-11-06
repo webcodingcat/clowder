@@ -131,64 +131,104 @@ replicated, and how a cluster that lost its majority goes on. The state itself i
   voter (`raft.RecoverCluster`). Both are for `clowderd recover`, while the agent is
   stopped.
 - **Tests** run real members on 127.0.0.1: a restart from disk, three hosts over mTLS,
-  strangers refused, and a member that recovers alone.
+  strangers refused, a member that recovers alone, and a non-voter that was ahead of it and
+  follows it with a fresh log.
 
 ## Recover (`clowderd recover`, `agent/recover.go`)
 
 A cluster that has lost the majority of its voters for good decides nothing, but the
-control-plane host that is left still has current copies of its volumes. `clowderd
-recover --power-off` lets it go on alone, and only on a human's word.
+control-plane host that is left still has current copies of its volumes, and so may the
+workers. `clowderd recover --power-off` lets this host go on as the only control-plane
+host, and only on a human's word. The workers that answer stay, with their stacks and
+copies.
 
-The danger is the hosts that are gone. If they were switched on again, two of them would
-still have the old Raft configuration's majority, and their copies would have DRBD's
-quorum. They would elect a leader and fence the host that recovered. So `Recover` takes
-them out at Hetzner, in this order. Each step is safe to run again after a failure.
+The danger is the hosts that are gone. If they were switched on again, two voters among
+them would still have the old Raft configuration's majority, and their copies would have
+DRBD's quorum. They would elect a leader and fence the host that recovered. So `Recover`
+takes every host out at Hetzner that takes no connection, whatever its roles. A worker
+that answers is no danger: it never voted, so it cannot form an old majority. Recover runs
+in this order, and each step is safe to run again after a failure.
 
 1. It stops `clowderd.service` and reads the state from the log on disk
-   (`raftnode.ReadState`). The hosts to retire are all hosts except this one that are not
+   (`raftnode.ReadState`). The other hosts are all hosts except this one that are not
    removed. A cluster of one host that never recovered has nothing to recover.
-2. It asks each of them over its underlay whether it knows a leader (`api.KnowsLeader`,
-   `/v1/internal/leader`: a leader answers once a majority has confirmed it, a follower
-   names the leader it hears).
+2. It asks each of them over its underlay whether it knows a leader
+   (`api.RecoverCaller.KnowsLeader`, `/v1/internal/leader`: a leader answers once a
+   majority has confirmed it, a follower names the leader it hears).
    - It refuses if one does, because that cluster is not lost, even when this host reaches
      only a follower of it. Its hosts leave with `host remove`.
    - It also refuses if a host answers without saying, such as with a refused certificate
      (the others may have removed this host) or too late.
-   - Only a host that accepts no connection at all (`api.ErrNotReached`) counts as gone.
+   - It refuses if a control-plane host answers, voter or not: the state's `Voter` may be
+     behind Raft's configuration, so any control-plane host may hold a vote of the old
+     majority. Its server must be powered off by hand, or the majority brought back.
+   - A host that accepts no connection at all (`api.ErrNotReached`) is retired.
+   - A worker that answers stays. Recover asks it for its copies
+     (`RecoverCaller.Copies`, `/v1/internal/recover/copies`: DRBD's disk state of each
+     resource that is up there). The resource's name holds the data generation, so a copy
+     counts as synced (`syncedCopies`) only if it is `UpToDate` in the generation of this
+     host's state. A worker reads its disks, not its state, which may be behind.
+   - If no host is retired and the cluster never recovered, nothing is gone, and recover
+     refuses.
+   - This host's own copies count the same way, by its DRBD (`Driver.DiskStates`), not by
+     the state's flag, which may be behind too.
 3. It shows what the remap will do, worked out on a copy of the state, and asks for this
-   host's name, which confirms which host goes on alone (`--yes` for scripts). Up to this
-   point nothing has changed, and a refusal starts the agent again.
-4. For each host, it sets the label `clowder-retired` with the serial of the host's
+   host's name, which confirms which host goes on (`--yes` for scripts). Up to this point
+   nothing has changed, and a refusal starts the agent again.
+4. For each retired host, it sets the label `clowder-retired` with the serial of the host's
    certificate (`hetzner.Client.SetRetired`), then powers the server off; Hetzner confirms
    both. The label comes first, because a server that is off but not labeled could come
    back. A server that the leader never checked is checked first.
 5. It restarts Raft with this host as the only voter (`raftnode.Recover`). The member opens
    on its own and commits `recover-remap` as the leader. The API forwards no such command.
-6. DRBD goes on without the other hosts (`storage.Driver.DropPeers`): `del-peer` for each,
-   then quorum off (DRBD refuses that while a peer is configured), then `resume-io` for a
-   resource whose writes were suspended. Quorum is off only until the agent adjusts the
-   resource to its file, which now names this host alone.
-7. It starts the agent. Its loops do the rest: the mesh drops the removed hosts, the
-   Floating IP comes here, the placement places what waits, and `forgetPeers` runs
-   `forget-peer`.
+6. DRBD goes on without the gone hosts (`storage.Driver.DropPeers`; gone are the hosts that
+   neither are this one nor stay): `del-peer` for each, then quorum off (DRBD refuses that
+   while a peer is configured), then `resume-io` for a resource whose writes were
+   suspended. Quorum is off only until the agent adjusts the resource to its file, which
+   then names only the hosts that are left.
+7. It tells each worker that stays to rejoin (`RecoverCaller.Rejoin`,
+   `/v1/internal/recover/rejoin`, with the gone hosts). A worker may hold a higher term, or
+   entries that the old majority committed without this host; its state applied them
+   already, and the new leader would never send them, and a higher term would end its
+   lead. A non-voter's log is only a copy, so the worker sets it aside and follows the new
+   leader from its snapshot ([A rejoin](host.md#the-agent-internalagent)): it runs
+   `DropPeers` as step 6 does, stops its Raft member before it answers, ends its agent,
+   and at the next start moves `raft/` aside. The worker refuses while it knows a leader,
+   and a control-plane host refuses to rejoin. This step comes before this host's agent
+   starts, so the new leader never meets a worker of the old term.
+8. It starts the agent. Its loops do the rest: the members loop adds the workers to Raft
+   as non-voters, the mesh drops the removed hosts, the Floating IP comes to an ingress
+   host, the placement places what waits, and `forgetPeers` runs `forget-peer` on every
+   host that is left.
 
-`recover-remap` (`state/recover.go`) makes every other host `removed` (its certificate
-revoked, its ID free once this host has forgotten it) and fits the rest to what this host
-holds:
+`recover-remap` (`state/recover.go`, `RecoverRemap`: the survivor, the retired hosts and
+the copies that DRBD found synced) makes the retired hosts `removed` (their certificates
+revoked, their IDs free once the hosts that are left have forgotten them). It refuses if a
+control-plane host other than this one would stay. It fits the rest to what the hosts that
+are left hold:
 
-- A volume of replicas 1 or more keeps a synced copy with a disk here. A volume without one
-  waits for a restore (`VolumeRestorePending`): the placement gives it no copy, and its
-  stack waits with the reason. A tiebreaker of it here is retired. An unsynced copy here
-  stays a copy, because the state never removes what may hold older data: `get volumes`
-  shows it, and a delete of the volume removes it.
-- A volume of replicas 0 whose LV was on another host starts anew, empty, as after a
-  failover.
-- Every stack that is not on this host, or that names a volume without data, is placed
-  anew. Every running operation ends as failed and frees its locks.
+- A volume of replicas 1 or more keeps its copies on the hosts that are left. A copy with
+  a disk is synced only if recover found it synced on its host, this one included. A volume without a synced copy waits for a restore (`VolumeRestorePending`): the
+  placement gives it no copy, and its stack waits with the reason. Its tiebreakers are
+  retired. Its unsynced copies stay copies, because the state never removes what may hold
+  older data: `get volumes` shows them, and a delete of the volume removes them.
+- A volume of replicas 0 keeps its LV on a host that is left. One whose LV was on a retired
+  host starts anew, empty, as after a failover.
+- Every stack on a retired host, or that names a volume without data, is placed anew; the
+  others run on. When only control-plane hosts were lost, the workers' stacks and volumes
+  run on, and recover only brings Raft back. Every running operation ends as failed and
+  frees its locks. A worker that stays and was `failed` or `fencing` is `active`: it
+  answered recover, and left failed it could be fenced before the new leader hears it.
 - This host, which must be a control-plane host (`clowderd recover` refuses on any other),
-  is active and the only voter, and the ingress host if it has that role. `HA` is false
-  again, so the cluster grows as a new one does, and `RecoveredAt` raises the alert `no-ha`
-  until three control-plane hosts are in service.
+  is active and the only voter. The ingress host stays if it is left; otherwise this host
+  takes the role if it has it. `HA` is false again, so the cluster grows as a new one does,
+  and `RecoveredAt` raises the alert `no-ha` until three control-plane hosts are in
+  service.
+
+When every control-plane host is gone, the cluster is lost, as a Kubernetes cluster without
+its etcd is: the workers hold the log but no key. The way back is a new cluster, the
+SealedSecrets sealed anew with the exported sealing key, and the data from backups
+([Known limits](../operating.md#known-limits)).
 
 A retired host's agent ends at its start (`checkRetired`,
 [The agent](host.md#the-agent-internalagent)), because the label names its certificate. A

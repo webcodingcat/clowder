@@ -13,7 +13,7 @@ and what comes next. What users meet today, gaps included, is in
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values, access and recovery, still on one host | done, passes the live tests |
 | 2 | three hosts: replication, failover with fencing | done, passes the live tests |
-| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 6 done, the interim live tests green, step 7 next |
+| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 7 done, the interim live tests green, step 8 next |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -48,7 +48,7 @@ steps. It is built on the branch `phase-2b` and goes to `main` only once it is c
 - Two keys keep their names apart. The **data key** encrypts the secrets in the state. The
   **sealing key** is the cluster's age key that a `SealedSecret` is encrypted for.
 
-### Steps 1 to 6: done
+### Steps 1 to 7: done
 
 Done on `phase-2b`, each with lint and unit tests green and the full review loop; the
 interim live tests after step 5c are green ([below](#the-live-tests-after-step-5c-and-at-the-end)).
@@ -119,56 +119,29 @@ What they built, and the decisions that still hold:
     secrets are kept on no disk, by choice. A worker cut off from every control-plane host
     alerts nobody; the voters see it fail. Both are known limits.
 
-### Step 7: recover and fencing with roles
-
-Agreed with the operator before the plan.
-
-- **Fencing and failover stay as they are.** Every host sends beats to the voters. A host that
-  a majority of the voters has not heard from for 45 s is failed (with one control-plane host, that one
-  decides). A failed host with stacks, a worker, is fenced. A control-plane host without
-  the worker role has no stacks, so it is never fenced and keeps its vote. The leader
-  fences and moves the Floating IP with the token, both on the control plane; the Floating
-  IP goes to an `ingress` host only.
-- **A power-off no longer holds up the fencing loop.** Today `tryPowerOff` tries for up to
-  about 2.5 minutes within the loop's own pass, and meanwhile the loop reads no beats: a
-  second host that fails then is found late, not only fenced late. The power-off of each
-  host will run in a job of its own, as the volume reconciler's jobs do. The fence
-  operation in the state records how far it got, so a new leader picks it up. The loop
-  goes on reading beats and failing hosts, and starts no second job for a host that has
-  one. A unit test fails a second host while the first host's power-off hangs.
-- **`clowderd recover --power-off`** runs, as now, on a control-plane host that is left
-  when the majority of the voters is gone for good, and asks for the host's name.
-  - A host that takes no connection is retired, whatever its roles: labeled and powered
-    off as now. A voter that answers stops the recover, as a host that knows a leader does
-    now. A worker that answers stays in the cluster: it never voted, so it cannot form an
-    old majority.
-  - The remap keeps the copies that are left. Before it changes anything, recover asks
-    each worker that stayed for its copies (`internal/recover/copies`: DRBD's disk state,
-    the data generation), and a synced copy there counts as a synced copy on this host does
-    now. Only copies on retired hosts go, and stacks there are placed anew, as after a
-    failover. When only control-plane hosts were lost, the workers' stacks and volumes run
-    on, and recover only brings Raft back.
-  - Raft goes on with this host as its only voter. A worker that stayed may hold a higher
-    term, or entries that the old majority committed without this host; its state applied
-    them already, and the new leader would never send them. So recover tells each worker
-    (`internal/recover/rejoin`, with the retired hosts) to do three things: drop the
-    retired hosts from its DRBD resources (`DropPeers`: `del-peer`, quorum off,
-    `resume-io`, as the recovering host does), set its Raft directory aside, and follow the
-    new leader from its snapshot as a fresh non-voter. A non-voter's log is only a copy,
-    so nothing is lost that the remap keeps. A unit test runs a worker that is ahead of
-    the recovering host.
-  - The routes `internal/recover/copies` and `internal/recover/rejoin` take a
-    control-plane host.
-- **`checkRetired` only on the control plane** (step 6 moved it). A retired voter is the
-  danger, as two of them could elect each other. Voters hold the token and check at their
-  start, as now. A retired worker is harmless: it never votes, its certificate is revoked
-  so no control-plane host accepts it, it is out of the WireGuard mesh and the DRBD
-  resources, and it starts no stack before it has caught up with a leader it never
-  reaches.
-- **Every control-plane host gone:** the cluster is lost, as a Kubernetes cluster without
-  its etcd is. The workers hold the log but no key. The way back is a new cluster, the
-  `SealedSecret`s sealed anew with the exported sealing key, and the data from phase 3's
-  backups. This is a known limit; three control-plane hosts are the advice.
+- **Step 7, recover and fencing with roles.** Fencing and failover stay as they were; a
+  failed host is fenced only if another active *worker* can take its stacks, so a
+  control-plane host without the worker role is never fenced and keeps its vote. Each
+  power-off runs in a job of its own (`startPowerOff`), so the fencing loop goes on reading
+  beats and failing hosts while Hetzner is slow; the fence operation records how far it
+  got, and a new leader starts the job again. `clowderd recover --power-off` retires only
+  the hosts that take no connection. A worker that answers stays: recover asks it for its
+  copies (`internal/recover/copies`, DRBD's disk state by resource name, which holds the
+  data generation), counts its synced copies in the remap, and tells it to rejoin
+  (`internal/recover/rejoin`: `DropPeers`, the agent ends, and at its next start it sets
+  `raft/` aside and follows the new leader as a fresh non-voter). Recover sends the
+  rejoin before its own agent starts, so the new leader never meets a worker of the old
+  term. `checkRetired` stays on the control plane. Losing every control-plane host is a
+  known limit; three control-plane hosts are the advice. The operator's decisions:
+  - Fences of several hosts run at the same time, each with its own job; the check that a
+    majority of the voters stays active is unchanged.
+  - Any control-plane host that answers stops the recover, voter or not, because the
+    state's `Voter` may be behind Raft's configuration.
+  - The recovering host's copies count by its DRBD too, not by the state's flag as before
+    (a deviation from the plan, after the review): the state may be behind on any copy,
+    and every host is judged one way.
+  - A worker refuses a rejoin while it knows a leader (recover's own check, at the moment
+    the worker acts), and a control-plane host refuses every rejoin.
 
 ### Step 8: clean up
 
@@ -233,6 +206,15 @@ The last step, before the final live tests, so that they run on what is merged.
   one host.
 - The scenario of step 6 is in `test/live` (`TestRoles`, "a worker gets only the secrets
   of its stacks") and runs for the first time in the final run.
+- The scenario of step 7 is written for the final run, in the lab of roles: a stack with a
+  volume of replicas 2 runs on a worker (copies on both workers); two control-plane hosts
+  other than the first freeze; `clowderd recover --power-off --yes` on the first host says
+  it retired those two and that both workers stay. Then: the first host leads alone; the
+  two retired servers are off, labeled and removed; both workers are active, without a
+  vote, with `raft.set-aside-*` on disk; the stack's container is the same as before and
+  writes; its volume keeps both copies synced and has its tiebreaker on the first host; the
+  Floating IP stays on an ingress worker; `no-ha` is open. New control-plane hosts join
+  under the old names, and `no-ha` resolves.
 - All live tests must be green; a failure goes back to the step it came from.
 
 ### After phase 2b

@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -68,7 +69,11 @@ type Node struct {
 	leads atomic.Bool
 	// closed ends followLead
 	closed chan struct{}
-	logger *slog.Logger
+	// closeOnce and closeErr make Close safe to call twice: a rejoin closes
+	// the member before the agent stops (agent/rejoin.go)
+	closeOnce sync.Once
+	closeErr  error
+	logger    *slog.Logger
 }
 
 // Open starts the member with what is on disk. A new member does nothing
@@ -353,9 +358,13 @@ func (n *Node) Leader() (id state.HostID, ok bool) {
 	return state.HostID(number), true
 }
 
-// Close stops the member. The log and snapshots stay on disk.
+// Close stops the member. The log and snapshots stay on disk. A second
+// call returns the first one's error.
 func (n *Node) Close() error {
-	close(n.closed)
-	shutdownErr := n.raft.Shutdown().Error()
-	return errors.Join(shutdownErr, n.transport.Close(), n.store.Close())
+	n.closeOnce.Do(func() {
+		close(n.closed)
+		shutdownErr := n.raft.Shutdown().Error()
+		n.closeErr = errors.Join(shutdownErr, n.transport.Close(), n.store.Close())
+	})
+	return n.closeErr
 }

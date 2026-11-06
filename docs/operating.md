@@ -89,11 +89,20 @@ A host has roles, as a Kubernetes node does:
   take it over.
 - **The majority of the control-plane hosts is gone for good** (two of three).
   The cluster decides nothing. Run `clowderd recover --power-off` as root on the
-  control-plane host that is left. It refuses while another host still knows a leader. It
-  labels and powers off the servers of the other hosts, asks for this host's name to
-  confirm, and goes on with this host alone. The alert `no-ha` stays until three
-  control-plane hosts are in service again. Set the retired servers up anew or delete
-  them.
+  control-plane host that is left.
+  - It refuses while another host still knows a leader, and while another control-plane
+    host answers: power that one's server off first.
+  - It labels and powers off the servers of the hosts that take no connection, asks for
+    this host's name to confirm, and goes on with this host as the only control-plane host.
+  - Workers that answer stay, with their stacks and their synced copies. They follow this
+    host with a fresh Raft log; their old one stays in `/var/lib/clowder/raft.set-aside-*`
+    until you delete it. When only control-plane hosts were lost, the workers' stacks run on.
+  - The alert `no-ha` stays until three control-plane hosts are in service again. Join two
+    control-plane hosts, and set the retired servers up anew or delete them.
+- **Every control-plane host is gone for good.** The cluster is lost, as a Kubernetes
+  cluster without its etcd is: the workers hold the log, but no key. Set up a new cluster,
+  seal the `SealedSecret`s anew with the sealing key you exported, and apply your files
+  ([Known limits](#known-limits)). Three control-plane hosts make this unlikely.
 
 The alerts and when they are raised are listed in
 [loops.md](developing/loops.md#alerts-internalnotify-controllerwantedgo-controlleralertsgo).
@@ -154,10 +163,9 @@ instead of skipping it, but this does not make mixing minor versions safe.
   that host gets the login only then. So a failover or move of such a stack waits for the
   pull. Images without a login are pulled ahead.
 - A drained host that fails comes back active, not drained.
-- While the leader tries to power off a failed host (up to a few minutes when Hetzner's
-  API does not answer), it notices no other failure. A second host that fails then is
-  fenced late.
 - A disabled voter keeps its vote until it is removed.
+- A cluster that loses every control-plane host is lost: the workers cannot go on alone,
+  and there is no backup of the volumes yet. Run three control-plane hosts.
 - If no replacement can join, a cluster that had three control-plane hosts stays at two.
   `clowderd recover --power-off` is the way out only when two are gone.
 - A retired host whose agent starts while Hetzner's API does not answer starts as before,
@@ -174,9 +182,9 @@ instead of skipping it, but this does not make mixing minor versions safe.
 
 - There are no backups: a volume's data is only on its hosts' disks.
 - `replicas` cannot change after a volume is created.
-- After a recover, a volume without a synced copy on the recovering host waits for a
-  restore. Deleting it and applying it anew gives an empty volume. An unsynced copy on the
-  recovering host stays as it is, for you to handle.
+- After a recover, a volume without a synced copy on the recovering host or a worker that
+  stayed waits for a restore. Deleting it and applying it anew gives an empty volume. Its
+  unsynced copies stay as they are, for you to handle.
 - With two workers and no third host, a volume of replicas 1 that moves has two copies
   without a tiebreaker for the length of the move. If either host fails then, the volume's
   writes stop until the host is back.

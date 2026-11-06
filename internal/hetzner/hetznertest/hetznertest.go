@@ -34,6 +34,9 @@ type API struct {
 	// failing counts, per server, how many more actions will end in an
 	// error
 	failing map[int64]int
+	// held holds, per server, a channel that its power actions wait for
+	// (HoldActions)
+	held map[int64]chan struct{}
 }
 
 type server struct {
@@ -43,7 +46,10 @@ type server struct {
 
 // New starts the fake for the test. Each request must carry the token.
 func New(t testing.TB, token string) *API {
-	api := &API{token: token, servers: map[int64]*server{}, floatingIPs: map[netip.Addr]int64{}, failing: map[int64]int{}}
+	api := &API{
+		token: token, servers: map[int64]*server{}, floatingIPs: map[netip.Addr]int64{}, failing: map[int64]int{},
+		held: map[int64]chan struct{}{},
+	}
 	httpServer := httptest.NewServer(http.HandlerFunc(api.serve))
 	t.Cleanup(httpServer.Close)
 	api.URL = httpServer.URL
@@ -81,6 +87,22 @@ func (a *API) FailActions(serverID int64, count int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.failing[serverID] = count
+}
+
+// HoldActions makes the server's power actions wait, as when Hetzner does
+// not answer, until release is called or the client gives up. The action
+// is in Changes while it waits.
+func (a *API) HoldActions(serverID int64) (release func()) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	held := make(chan struct{})
+	a.held[serverID] = held
+	return sync.OnceFunc(func() {
+		a.mu.Lock()
+		delete(a.held, serverID)
+		a.mu.Unlock()
+		close(held)
+	})
 }
 
 // SetLabel sets a label on the server.
@@ -207,6 +229,14 @@ func (a *API) serveServer(w http.ResponseWriter, r *http.Request, parts []string
 		a.writeServer(w, id, found)
 	case len(parts) == 4 && r.Method == http.MethodPost && (parts[3] == "poweroff" || parts[3] == "poweron"):
 		a.changes = append(a.changes, fmt.Sprintf("%s %d", parts[3], id))
+		if held := a.held[id]; held != nil {
+			a.mu.Unlock() // serve holds the lock; other requests go on meanwhile
+			select {
+			case <-held:
+			case <-r.Context().Done():
+			}
+			a.mu.Lock()
+		}
 		if a.actionFails(id) {
 			writeFailedAction(w)
 			return

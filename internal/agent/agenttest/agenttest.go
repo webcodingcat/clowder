@@ -242,6 +242,26 @@ func (f *Storage) ForgetPeer(_ context.Context, peer int) error {
 	return nil
 }
 
+// DiskStates reports the disk state of each copy in Copies that has one, by
+// its LV, which is the name of its DRBD resource.
+func (f *Storage) DiskStates(context.Context) (map[string]string, error) {
+	f.Lock()
+	defer f.Unlock()
+	disks := map[string]string{}
+	for lv, observed := range f.Copies {
+		if observed.Disk != "" {
+			disks[lv] = observed.Disk
+		}
+	}
+	return disks, nil
+}
+
+// DropPeers records the call.
+func (f *Storage) DropPeers(_ context.Context, peers []int) error {
+	f.Add("drop-peers %v", peers)
+	return nil
+}
+
 // PoolUsage reports 100 GiB, DataPercent full.
 func (f *Storage) PoolUsage(context.Context, string) (int64, float64, float64, error) {
 	f.Lock()

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/netip"
 	"slices"
 	"strings"
@@ -24,13 +25,19 @@ import (
 	"github.com/webcodingcat/clowder/internal/raftnode"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
+	"github.com/webcodingcat/clowder/internal/storage"
 )
 
-// recordedStorage records the peers recover drops.
+// recordedStorage records the peers recover drops. Its DRBD has no
+// resource up.
 type recordedStorage struct {
 	dropped [][]int
 	// fails fails the next drop, once
 	fails error
+}
+
+func (s *recordedStorage) DiskStates(context.Context) (map[string]string, error) {
+	return map[string]string{}, nil
 }
 
 func (s *recordedStorage) DropPeers(_ context.Context, peers []int) error {
@@ -41,10 +48,16 @@ func (s *recordedStorage) DropPeers(_ context.Context, peers []int) error {
 }
 
 // lostCluster makes a host, node0, whose Raft log has a cluster of three
-// hosts in a Hetzner project (the fake it returns): hosts 1 and 2 on
-// servers 41 and 42. Its agent does not run. The hosts' private network is
-// the loopback's.
+// hosts with every role in a Hetzner project (the fake it returns): hosts 1
+// and 2 on servers 41 and 42. Its agent does not run. The hosts' private
+// network is the loopback's.
 func lostCluster(t *testing.T) (Files, *hetznertest.API) {
+	t.Helper()
+	return lostClusterWith(t, hostrole.DefaultInit)
+}
+
+// lostClusterWith is lostCluster with host 2's roles.
+func lostClusterWith(t *testing.T, rolesOfTwo hostrole.Set) (Files, *hetznertest.API) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	loopback := netip.MustParseAddr("127.0.0.1")
@@ -123,11 +136,15 @@ func lostCluster(t *testing.T) (Files, *hetznertest.API) {
 		name := "node" + string(rune('0'+id))
 		underlay, public := netip.AddrFrom4([4]byte{127, 0, 0, byte(id + 2)}), netip.AddrFrom4([4]byte{198, 51, 100, byte(id + 2)})
 		project.AddServer(40+int64(id), underlay, public)
+		roles := hostrole.DefaultInit
+		if id == 2 {
+			roles = rolesOfTwo
+		}
 		commit(state.KindAddJoinToken, state.CLIActor("admin"), state.AddJoinToken{
-			ID: name, Hash: strings.Repeat("ab", 32), TTL: time.Hour, Roles: hostrole.DefaultInit,
+			ID: name, Hash: strings.Repeat("ab", 32), TTL: time.Hour, Roles: roles,
 		})
 		commit(state.KindAddHost, state.LeaderActor, state.AddHost{Token: name, Host: state.Host{
-			ID: id, Name: name, Roles: hostrole.DefaultInit, Underlay: underlay, PublicAddress: public, WGPublicKey: "wg",
+			ID: id, Name: name, Roles: roles, Underlay: underlay, PublicAddress: public, WGPublicKey: "wg",
 			CertificateSerial: "s" + name, CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 			ServerID: 40 + int64(id), ServerChecked: true,
 		}})
@@ -136,16 +153,61 @@ func lostCluster(t *testing.T) (Files, *hetznertest.API) {
 	return files, project
 }
 
-// recoverParts are fakes for recover; no other host leads.
-func recoverParts(driver *recordedStorage, service *[]string) RecoverParts {
+// recoverParts are fakes for recover; hosts answers for the other hosts.
+func recoverParts(driver *recordedStorage, service *[]string, hosts *fakeOtherHosts) RecoverParts {
 	return RecoverParts{
 		Storage: driver,
 		Service: func(_ context.Context, action string) error {
 			*service = append(*service, action)
 			return nil
 		},
-		KnowsLeader: func(context.Context, string, tls.Certificate, *x509.Certificate) (bool, error) { return false, nil },
+		Hosts: func(tls.Certificate, *x509.Certificate) OtherHosts { return hosts },
 	}
+}
+
+// fakeOtherHosts answers for the other hosts of lostCluster, by their
+// underlay 127.0.0.<2+id>. A host without an answer takes no connection.
+type fakeOtherHosts struct {
+	answers map[state.HostID]hostAnswer
+	// rejoined holds the retired hosts that each host was told of
+	rejoined map[state.HostID][]state.HostID
+}
+
+type hostAnswer struct {
+	knows bool
+	err   error // KnowsLeader's
+	disks map[string]string
+	// copiesErr and rejoinErr are the errors of Copies and Rejoin
+	copiesErr, rejoinErr error
+}
+
+func (f *fakeOtherHosts) host(address string) state.HostID {
+	host, _, _ := net.SplitHostPort(address)
+	return state.HostID(netip.MustParseAddr(host).As4()[3] - 2)
+}
+
+func (f *fakeOtherHosts) KnowsLeader(_ context.Context, address string) (bool, error) {
+	answer, ok := f.answers[f.host(address)]
+	if !ok {
+		return false, fmt.Errorf("%w: connection refused", api.ErrNotReached)
+	}
+	return answer.knows, answer.err
+}
+
+func (f *fakeOtherHosts) Copies(_ context.Context, address string) (map[string]string, error) {
+	answer := f.answers[f.host(address)]
+	return answer.disks, answer.copiesErr
+}
+
+func (f *fakeOtherHosts) Rejoin(_ context.Context, address string, retired []state.HostID) error {
+	if err := f.answers[f.host(address)].rejoinErr; err != nil {
+		return err
+	}
+	if f.rejoined == nil {
+		f.rejoined = map[state.HostID][]state.HostID{}
+	}
+	f.rejoined[f.host(address)] = retired
+	return nil
 }
 
 func TestRecoverRetiresTheOthersAndGoesOnAlone(t *testing.T) {
@@ -155,7 +217,8 @@ func TestRecoverRetiresTheOthersAndGoesOnAlone(t *testing.T) {
 	var out bytes.Buffer
 	options := RecoverOptions{In: strings.NewReader("node0\n"), Out: &out}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if err := Recover(context.Background(), files, recoverParts(driver, &service), options, logger); err != nil {
+	hosts := &fakeOtherHosts{}
+	if err := Recover(context.Background(), files, recoverParts(driver, &service, hosts), options, logger); err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
 	// the label first: a server that is off but not labeled could come back
@@ -166,7 +229,10 @@ func TestRecoverRetiresTheOthersAndGoesOnAlone(t *testing.T) {
 	if !slices.Equal(service, []string{"stop", "start"}) || len(driver.dropped) != 1 || !slices.Equal(driver.dropped[0], []int{1, 2}) {
 		t.Errorf("service %q, dropped peers %v", service, driver.dropped)
 	}
-	for _, text := range []string{"node1 (server 41, active)", "Type this host's name", "Recover cluster prod", "only host now"} {
+	for _, text := range []string{
+		"node1 (server 41, active)", "node2 (server 42, active)", "Type this host's name", "Recover cluster prod",
+		"only control-plane host now",
+	} {
 		if !strings.Contains(out.String(), text) {
 			t.Errorf("the output lacks %q:\n%s", text, out.String())
 		}
@@ -182,7 +248,7 @@ func TestRecoverRetiresTheOthersAndGoesOnAlone(t *testing.T) {
 	// again, as after a failure: nothing left to retire or to ask
 	service = nil
 	options = RecoverOptions{In: strings.NewReader(""), Out: io.Discard}
-	if err := Recover(context.Background(), files, recoverParts(driver, &service), options, logger); err != nil {
+	if err := Recover(context.Background(), files, recoverParts(driver, &service, hosts), options, logger); err != nil {
 		t.Fatal(err)
 	}
 	if len(project.Changes()) != len(want) || !slices.Equal(service, []string{"stop", "start"}) {
@@ -190,30 +256,134 @@ func TestRecoverRetiresTheOthersAndGoesOnAlone(t *testing.T) {
 	}
 }
 
-func TestRecoverChangesNothingWhenItIsRefused(t *testing.T) {
-	// knowsIf has the host with the underlay 127.0.0.<2+id> know a leader
-	knowsIf := func(id state.HostID, err error) knowsLeader {
-		return func(_ context.Context, address string, _ tls.Certificate, _ *x509.Certificate) (bool, error) {
-			return strings.HasPrefix(address, fmt.Sprintf("127.0.0.%d:", id+2)), err
+// TestRecoverKeepsAWorkerThatAnswers loses control-plane host 1. Worker 2
+// answers: it stays, and it rejoins before this host's agent starts.
+func TestRecoverKeepsAWorkerThatAnswers(t *testing.T) {
+	files, project := lostClusterWith(t, hostrole.DefaultJoin)
+	driver := &recordedStorage{}
+	var service []string
+	var out bytes.Buffer
+	hosts := &fakeOtherHosts{answers: map[state.HostID]hostAnswer{2: {}}}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	options := RecoverOptions{Yes: true, Out: &out}
+	if err := Recover(context.Background(), files, recoverParts(driver, &service, hosts), options, logger); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if want := []string{"label 41 clowder-retired=snode1", "poweroff 41"}; !slices.Equal(project.Changes(), want) {
+		t.Errorf("changes at Hetzner %q, want %q", project.Changes(), want)
+	}
+	if len(driver.dropped) != 1 || !slices.Equal(driver.dropped[0], []int{1}) {
+		t.Errorf("dropped peers %v, want host 1's", driver.dropped)
+	}
+	if retired := hosts.rejoined[2]; !slices.Equal(retired, []state.HostID{1}) {
+		t.Errorf("the worker was told of the retired hosts %v, want host 1", retired)
+	}
+	for _, text := range []string{"workers answer and stay", "  node2 (active)", "Host node2 stays and follows this host"} {
+		if !strings.Contains(out.String(), text) {
+			t.Errorf("the output lacks %q:\n%s", text, out.String())
 		}
 	}
+	current, err := raftnode.ReadState(files.raftDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Hosts[1].Phase != state.Removed || current.Hosts[2].Phase != state.Active {
+		t.Errorf("hosts %v, %v; want host 1 removed and the worker active", current.Hosts[1].Phase, current.Hosts[2].Phase)
+	}
+
+	// again, as after a failure: the worker rejoins again
+	service, hosts.rejoined = nil, nil
+	if err := Recover(context.Background(), files, recoverParts(driver, &service, hosts), options, logger); err != nil {
+		t.Fatal(err)
+	}
+	if len(project.Changes()) != 2 || !slices.Equal(service, []string{"stop", "start"}) ||
+		!slices.Equal(hosts.rejoined[2], []state.HostID{1}) {
+		t.Errorf("a second recover: changes at Hetzner %q, service %q, rejoined %v", project.Changes(), service,
+			hosts.rejoined)
+	}
+}
+
+func TestRecoverStopsWhenAWorkerThatStaysFails(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	options := RecoverOptions{Yes: true, Out: io.Discard}
+
+	// before anything changed: the agent runs again
+	files, project := lostClusterWith(t, hostrole.DefaultJoin)
+	var service []string
+	hosts := &fakeOtherHosts{answers: map[state.HostID]hostAnswer{2: {copiesErr: errors.New("lvs timed out")}}}
+	err := Recover(context.Background(), files, recoverParts(&recordedStorage{}, &service, hosts), options, logger)
+	if err == nil || !strings.Contains(err.Error(), "host node2 stays, but does not tell its copies") ||
+		len(project.Changes()) != 0 || !slices.Equal(service, []string{"stop", "start"}) {
+		t.Errorf("copies refused: %v, changes at Hetzner %q, service %q", err, project.Changes(), service)
+	}
+
+	// after the remap: the agent stays stopped, and a second run goes on
+	files, _ = lostClusterWith(t, hostrole.DefaultJoin)
+	service = nil
+	hosts = &fakeOtherHosts{answers: map[state.HostID]hostAnswer{2: {rejoinErr: errors.New("this host knows a leader")}}}
+	err = Recover(context.Background(), files, recoverParts(&recordedStorage{}, &service, hosts), options, logger)
+	if err == nil || !strings.Contains(err.Error(), "tell host node2 to follow this host") ||
+		!strings.Contains(err.Error(), "run recover again") || !slices.Equal(service, []string{"stop"}) {
+		t.Errorf("rejoin refused: %v, service %q", err, service)
+	}
+	service, hosts.answers[2] = nil, hostAnswer{}
+	if err := Recover(context.Background(), files, recoverParts(&recordedStorage{}, &service, hosts), options, logger); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(hosts.rejoined[2], []state.HostID{1}) || !slices.Equal(service, []string{"stop", "start"}) {
+		t.Errorf("the second run: rejoined %v, service %q", hosts.rejoined, service)
+	}
+}
+
+func TestRecoverCountsOnlyTheSyncedCopiesOfTheStatesGeneration(t *testing.T) {
+	minor := 1
+	volume := func(generation int64, copies ...state.VolumeCopy) *state.Volume {
+		return &state.Volume{Minor: &minor, DataGeneration: generation, Copies: copies}
+	}
+	onTwo, tiebreakerOnTwo := state.VolumeCopy{Host: 2}, state.VolumeCopy{Host: 2, Tiebreaker: true}
+	current := &state.State{Volumes: map[string]*state.Volume{
+		"default/synced":     volume(3, onTwo),
+		"default/older":      volume(2, onTwo),
+		"default/outdated":   volume(1, onTwo),
+		"default/tiebreaker": volume(1, tiebreakerOnTwo),
+		"default/elsewhere":  volume(1, state.VolumeCopy{Host: 3}),
+		"default/plain":      {DataGeneration: 1, Copies: []state.VolumeCopy{onTwo}},
+	}}
+	disks := map[string]string{
+		names.VolumeName("default/synced", 3):     storage.DiskUpToDate,
+		names.VolumeName("default/older", 1):      storage.DiskUpToDate,
+		names.VolumeName("default/outdated", 1):   "Outdated",
+		names.VolumeName("default/tiebreaker", 1): storage.DiskUpToDate,
+		names.VolumeName("default/elsewhere", 1):  storage.DiskUpToDate,
+		names.VolumeName("default/plain", 1):      storage.DiskUpToDate,
+	}
+	want := []state.SyncedCopy{{Volume: "default/synced", DataGeneration: 3, Host: 2}}
+	if synced := syncedCopies(current, 2, disks); !slices.Equal(synced, want) {
+		t.Errorf("synced %v, want %v", synced, want)
+	}
+}
+
+func TestRecoverChangesNothingWhenItIsRefused(t *testing.T) {
 	for _, test := range []struct {
 		name, answer, want string
-		knows              knowsLeader
+		answers            map[state.HostID]hostAnswer
 	}{
-		{"another host knows a leader", "node0\n", "host node2 knows a leader", knowsIf(2, nil)},
+		{"another host knows a leader", "node0\n", "host node2 knows a leader", map[state.HostID]hostAnswer{2: {knows: true}}},
 		{
 			"another host answers without saying", "node0\n", "host node1 answers, but not whether it knows a leader",
-			knowsIf(-1, errors.New("certificate refused")),
+			map[state.HostID]hostAnswer{1: {err: errors.New("certificate refused")}},
 		},
-		{"the host's name is not typed", "prod\n", "not confirmed", knowsIf(-1, nil)},
+		{
+			"a control-plane host answers", "node0\n", "host node1 is a control-plane host and answers",
+			map[state.HostID]hostAnswer{1: {}},
+		},
+		{"the host's name is not typed", "prod\n", "not confirmed", nil},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			files, project := lostCluster(t)
 			driver := &recordedStorage{}
 			var service []string
-			parts := recoverParts(driver, &service)
-			parts.KnowsLeader = test.knows
+			parts := recoverParts(driver, &service, &fakeOtherHosts{answers: test.answers})
 			options := RecoverOptions{In: strings.NewReader(test.answer), Out: io.Discard}
 			err := Recover(context.Background(), files, parts, options, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			if err == nil || !strings.Contains(err.Error(), test.want) {
@@ -231,35 +401,34 @@ func TestRecoverChangesNothingWhenItIsRefused(t *testing.T) {
 	}
 }
 
-func TestRecoverNamesTheHostsItDoesNotReach(t *testing.T) {
-	files, _ := lostCluster(t)
-	var service []string
-	parts := recoverParts(&recordedStorage{}, &service)
-	parts.KnowsLeader = func(context.Context, string, tls.Certificate, *x509.Certificate) (bool, error) {
-		return false, fmt.Errorf("%w: connection refused", api.ErrNotReached)
-	}
-	var out bytes.Buffer
-	options := RecoverOptions{Yes: true, Out: &out}
-	if err := Recover(context.Background(), files, parts, options, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.String(), "Not reached, so not asked whether they lead: node1, node2") {
-		t.Errorf("output:\n%s", out.String())
-	}
-}
-
 func TestRecoverHasNothingToDoForASingleHostOrBeforeTheConfiguration(t *testing.T) {
 	one := &state.State{Keys: &state.ClusterKeys{}, Hosts: map[state.HostID]*state.Host{0: {ID: 0, Phase: state.Active}}}
-	if _, err := hostsToRetire(one, Host{ID: 0, Name: "node0"}); err == nil || !strings.Contains(err.Error(), "nothing to recover") {
+	if _, err := otherHosts(one, Host{ID: 0, Name: "node0"}); err == nil || !strings.Contains(err.Error(), "nothing to recover") {
 		t.Errorf("a single host: %v", err)
 	}
 	one.RecoveredAt = time.Now()
-	if gone, err := hostsToRetire(one, Host{ID: 0, Name: "node0"}); err != nil || len(gone) != 0 {
-		t.Errorf("a single host after a recover: %v, %v", gone, err)
+	if others, err := otherHosts(one, Host{ID: 0, Name: "node0"}); err != nil || len(others) != 0 {
+		t.Errorf("a single host after a recover: %v, %v", others, err)
 	}
 	one.Hosts[1] = &state.Host{ID: 1, Phase: state.Active}
-	if _, err := hostsToRetire(one, Host{ID: 0, Name: "node0"}); err == nil || !strings.Contains(err.Error(), "no ClusterConfiguration names the Hetzner token") {
+	if _, err := otherHosts(one, Host{ID: 0, Name: "node0"}); err == nil || !strings.Contains(err.Error(), "no ClusterConfiguration names the Hetzner token") {
 		t.Errorf("before the configuration: %v", err)
+	}
+}
+
+func TestRecoverHasNothingToDoWhileEveryOtherHostAnswers(t *testing.T) {
+	files, _ := lostClusterWith(t, hostrole.DefaultJoin)
+	var service []string
+	hosts := &fakeOtherHosts{answers: map[state.HostID]hostAnswer{2: {}}}
+	parts := recoverParts(&recordedStorage{}, &service, hosts)
+	current, err := raftnode.ReadState(files.raftDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := recovery{parts: parts, others: hosts, host: Host{ID: 0, Name: "node0", APIPort: APIPort}}
+	if _, err := r.ask(context.Background(), current, []*state.Host{current.Hosts[2]}); err == nil ||
+		!strings.Contains(err.Error(), "nothing to recover") {
+		t.Errorf("got %v, want nothing to recover", err)
 	}
 }
 
@@ -282,7 +451,8 @@ func TestRecoverEndsWhereItFailedWhenItRunsAgain(t *testing.T) {
 			test.breaks(project, driver)
 			var service []string
 			options := RecoverOptions{Yes: true, Out: io.Discard}
-			err := Recover(context.Background(), files, recoverParts(driver, &service), options, logger)
+			hosts := &fakeOtherHosts{}
+			err := Recover(context.Background(), files, recoverParts(driver, &service, hosts), options, logger)
 			if err == nil || !strings.Contains(err.Error(), "clowderd.service is stopped: run recover again") {
 				t.Errorf("the first run: %v", err)
 			}
@@ -291,7 +461,7 @@ func TestRecoverEndsWhereItFailedWhenItRunsAgain(t *testing.T) {
 				t.Errorf("service %q", service)
 			}
 			service = nil
-			if err := Recover(context.Background(), files, recoverParts(driver, &service), options, logger); err != nil {
+			if err := Recover(context.Background(), files, recoverParts(driver, &service, hosts), options, logger); err != nil {
 				t.Fatal(err)
 			}
 			current, err := raftnode.ReadState(files.raftDir())
@@ -301,6 +471,3 @@ func TestRecoverEndsWhereItFailedWhenItRunsAgain(t *testing.T) {
 		})
 	}
 }
-
-// knowsLeader is RecoverParts.KnowsLeader.
-type knowsLeader = func(ctx context.Context, address string, certificate tls.Certificate, ca *x509.Certificate) (bool, error)

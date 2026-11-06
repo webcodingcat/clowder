@@ -53,6 +53,8 @@ func TestEachRouteTakesItsCallers(t *testing.T) {
 		"GET /v1/internal/stacks/{project}/logs":                          controlPlaneHost,
 		"GET /v1/internal/volumes/progress":                               controlPlaneHost,
 		"POST /v1/internal/volumes/{namespace}/{name}/resolve-splitbrain": controlPlaneHost,
+		"GET /v1/internal/recover/copies":                                 controlPlaneHost,
+		"POST /v1/internal/recover/rejoin":                                controlPlaneHost,
 		"POST /v1/internal/credentials":                                   thisHost,
 		"GET /v1/internal/sealing-key":                                    thisHost,
 	}

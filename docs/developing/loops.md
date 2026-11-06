@@ -164,12 +164,13 @@ it may still write.
   ([Host phases](state.md#host-phases)). A failed host keeps running its stacks
   (`state.KeepsStacks`).
 - **Only what needs it** (`needsFence`). A failed host is fenced only if it has a stack
-  that another active host could take over. A power cycle gains nothing for a host without
-  stacks (for example one drained and rebooting for maintenance), or for one whose stacks
-  no other host could take. Such a host stays failed, with its alert, and becomes active
-  again once a majority hears it.
+  that another active worker could take over. A power cycle gains nothing for a host without
+  stacks (for example one drained and rebooting for maintenance, or a control-plane host
+  without the worker role), or for one whose stacks no other worker could take. Such a host
+  stays failed, with its alert, and becomes active again once a majority hears it. A
+  control-plane host is never fenced for its vote: it keeps it while it is down.
 - **Fenced** (`fencer.fence`, `fencer.step`). The leader starts a fence-host operation for
-  the first failed host that may be fenced (`whyNotFence`). A host may be fenced when:
+  each failed host that may be fenced (`whyNotFence`). A host may be fenced when:
   - a configuration names the Hetzner token;
   - Hetzner has confirmed the host's server;
   - no operation holds the host;
@@ -177,10 +178,15 @@ it may still write.
     network is the likely cause, and powering hosts off would not help);
   - the last attempt to power it off was at least `fenceAgain` ago.
 
-  Only one host is fenced at a time; the next waits until the operation is over.
-- Starting the operation makes the host `fencing`. The leader checks that it still leads
-  (`VerifyLeader`) and powers the server off, up to `powerOffTries` times with a pause that
-  doubles. Once the server is off, the host is `fenced` and its stacks fail over
+  Several hosts may be fenced at the same time.
+- Starting the operation makes the host `fencing`. A job of its own powers the server off
+  (`startPowerOff`), at most one per host, as the volume reconciler's jobs do. A power-off
+  may take minutes, and meanwhile the loop goes on reading beats and failing hosts. The job
+  checks that the leader still leads (`VerifyLeader`) and powers the server off, up to
+  `powerOffTries` times with a pause that doubles. A leader that loses its lead ends its
+  jobs (`stopJobs`). The operation records how far the fence got (`FenceStart` and the
+  phase `fencing`), so a new leader starts the job again; powering off a server that is off
+  does no harm. Once the server is off, the host is `fenced` and its stacks fail over
   ([Failover](placement.md#failover)). If the power-off fails, the host goes back to
   `failed`, the operation fails, and the alert `fencing-blocked` is raised. A user can then
   run `clowder host fence-confirm` to state that the server is off. The operation ends once

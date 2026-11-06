@@ -2,9 +2,24 @@ package storage
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"testing"
 )
+
+func TestDiskStatesNameEachResourceThatIsUp(t *testing.T) {
+	host := &forgetHost{
+		status: `[{"name": "clw-a", "devices": [{"disk-state": "UpToDate"}]},
+			{"name": "clw-b", "devices": [{"disk-state": "Outdated"}]}]`,
+	}
+	disks, err := Driver{Run: host.run}.DiskStates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"clw-a": DiskUpToDate, "clw-b": "Outdated"}; !maps.Equal(disks, want) {
+		t.Errorf("disk states %v, want %v", disks, want)
+	}
+}
 
 func TestDroppedPeersLeaveTheQuorumOffAndTheWritesResumed(t *testing.T) {
 	host := &forgetHost{

@@ -6,6 +6,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/stackspec"
 )
 
 // lostMajority makes a highly available cluster of three hosts that is
@@ -34,33 +35,42 @@ func lostMajority(t *testing.T) *cluster {
 	c.put(resource.KindStack, "default", "web", shopSpec())
 	c.state.Stacks["default/web"].Host = &one
 	c.state.Stacks["default/web"].Status = StackRunning
-	minor := func(n int) *int { return &n }
-	volume := func(name string, replicas int, copies ...VolumeCopy) {
-		spec := testVolumeSpec()
-		spec.Replicas = replicas
-		var deviceMinor *int
-		if replicas > 0 {
-			deviceMinor = minor(len(c.state.Volumes) + 1)
-		}
-		c.state.Volumes["default/"+name] = &Volume{
-			Meta: Meta{Namespace: "default", Name: name, Owner: OwnerCLI}, Spec: spec, Status: VolumeOK, Minor: deviceMinor,
-			Copies: copies, DataGeneration: 1, Initialized: true,
-		}
-	}
-	volume("db", 2, VolumeCopy{Host: 0, Class: "fast", Synced: true}, VolumeCopy{Host: 1, Class: "fast", Synced: true})
-	volume("logs", 1, VolumeCopy{Host: 1, Class: "fast", Synced: true}, VolumeCopy{Host: 0, Tiebreaker: true})
-	volume("cache", 2, VolumeCopy{Host: 1, Class: "fast", Synced: true}, VolumeCopy{Host: 0, Class: "fast"})
-	volume("tmp", 0, VolumeCopy{Host: 2, Class: "fast"})
+	c.volume("db", 2, VolumeCopy{Host: 0, Class: "fast", Synced: true}, VolumeCopy{Host: 1, Class: "fast", Synced: true})
+	c.volume("logs", 1, VolumeCopy{Host: 1, Class: "fast", Synced: true}, VolumeCopy{Host: 0, Tiebreaker: true})
+	c.volume("cache", 2, VolumeCopy{Host: 1, Class: "fast", Synced: true}, VolumeCopy{Host: 0, Class: "fast"})
+	c.volume("tmp", 0, VolumeCopy{Host: 2, Class: "fast"})
 	c.mustApply(KindStartOperation, LeaderActor, StartOperation{
 		Kind: OperationMoveStack, Locks: []string{StackLock("default/web")}, Move: &StackMove{Stack: "default/web", From: &one, To: 2},
 	})
 	return c
 }
 
+// volume adds a volume of the default namespace, in data generation 1,
+// with the given copies.
+func (c *cluster) volume(name string, replicas int, copies ...VolumeCopy) {
+	spec := testVolumeSpec()
+	spec.Replicas = replicas
+	var minor *int
+	if replicas > 0 {
+		next := len(c.state.Volumes) + 1
+		minor = &next
+	}
+	c.state.Volumes["default/"+name] = &Volume{
+		Meta: Meta{Namespace: "default", Name: name, Owner: OwnerCLI}, Spec: spec, Status: VolumeOK, Minor: minor,
+		Copies: copies, DataGeneration: 1, Initialized: true,
+	}
+}
+
+// retiringBoth retires hosts 1 and 2 of lostMajority. DRBD says that
+// default/db is synced on the survivor, and default/cache is not.
+var retiringBoth = RecoverRemap{Survivor: 0, Retired: []HostID{1, 2}, Synced: []SyncedCopy{
+	{Volume: "default/db", DataGeneration: 1, Host: 0},
+}}
+
 func TestARecoverKeepsWhatTheSurvivorHolds(t *testing.T) {
 	c := lostMajority(t)
 	operation := c.index
-	c.mustApply(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 0})
+	c.mustApply(KindRecoverRemap, LeaderActor, retiringBoth)
 
 	for id := HostID(1); id <= 2; id++ {
 		host := c.state.Hosts[id]
@@ -113,7 +123,8 @@ func TestARecoverKeepsWhatTheSurvivorHolds(t *testing.T) {
 		t.Errorf("the move: %s, locks %v", moving.State, c.state.Locks)
 	}
 
-	// once more, as recover after a failure: nothing changes
+	// once more, as recover after a failure: nothing is left to retire,
+	// and nothing changes
 	before := c.encoded()
 	c.mustApply(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 0})
 	if after := c.encoded(); after != before {
@@ -128,6 +139,97 @@ func TestOnlyClowderdRecoverRemapsTheCluster(t *testing.T) {
 	c.refuse(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 7}, "no host 7")
 }
 
+// TestARecoverKeepsTheWorkersThatAnswer retires host 1 and keeps worker 2
+// with its copies and stacks.
+func TestARecoverKeepsTheWorkersThatAnswer(t *testing.T) {
+	c := lostMajority(t)
+	two := HostID(2)
+	worker := c.state.Hosts[2]
+	worker.Roles, worker.Voter, worker.Phase = hostrole.DefaultJoin, false, Fencing
+	c.state.Ingress = &two
+	// files: reported synced on the worker; media: not reported; old:
+	// reported in another data generation
+	c.volume("files", 2, VolumeCopy{Host: 2, Class: "fast"}, VolumeCopy{Host: 1, Class: "fast", Synced: true},
+		VolumeCopy{Host: 0, Tiebreaker: true})
+	c.volume("media", 1, VolumeCopy{Host: 2, Class: "fast", Synced: true}, VolumeCopy{Host: 1, Tiebreaker: true})
+	c.volume("old", 1, VolumeCopy{Host: 2, Class: "fast", Synced: true}, VolumeCopy{Host: 0, Tiebreaker: true})
+	for _, name := range []string{"blog", "news"} {
+		c.put(resource.KindStack, "default", name, shopSpec())
+		stack := c.state.Stacks["default/"+name]
+		stack.Host, stack.Status = &two, StackRunning
+	}
+	c.state.Stacks["default/blog"].Spec = stackspec.Spec{Services: map[string]stackspec.Service{
+		"app": {Image: "x", Volumes: []stackspec.Mount{{Volume: "files", Path: "/f"}}},
+	}}
+	c.state.Stacks["default/news"].Spec = stackspec.Spec{Services: map[string]stackspec.Service{
+		"app": {Image: "x", Volumes: []stackspec.Mount{{Volume: "media", Path: "/m"}}},
+	}}
+
+	c.mustApply(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 0, Retired: []HostID{1}, Synced: []SyncedCopy{
+		{Volume: "default/db", DataGeneration: 1, Host: 0},
+		{Volume: "default/files", DataGeneration: 1, Host: 2},
+		{Volume: "default/old", DataGeneration: 2, Host: 2},
+	}})
+
+	if worker := c.state.Hosts[2]; worker.Phase != Active || worker.Voter {
+		t.Errorf("the worker: %s, voter %v; want it active, its fence ended, without a vote", worker.Phase, worker.Voter)
+	}
+	if c.state.Ingress == nil || *c.state.Ingress != 2 {
+		t.Errorf("the ingress is %v, want the worker that holds it", c.state.Ingress)
+	}
+	volumes := c.state.Volumes
+	files := volumes["default/files"]
+	if want := []VolumeCopy{{Host: 2, Class: "fast", Synced: true}, {Host: 0, Tiebreaker: true}}; files.Status != VolumeOK ||
+		!slices.Equal(files.Copies, want) {
+		t.Errorf("default/files: %s %+v, want %+v", files.Status, files.Copies, want)
+	}
+	for _, name := range []string{"default/media", "default/old"} {
+		volume := volumes[name]
+		if want := []VolumeCopy{{Host: 2, Class: "fast"}}; volume.Status != VolumeRestorePending ||
+			!slices.Equal(volume.Copies, want) {
+			t.Errorf("%s: %s %+v, want it waiting for a restore with the worker's copy kept", name, volume.Status,
+				volume.Copies)
+		}
+	}
+	if tmp := volumes["default/tmp"]; tmp.Status != VolumeOK || tmp.DataGeneration != 1 || len(tmp.Copies) != 1 {
+		t.Errorf("default/tmp: %s %+v, generation %d; want its LV on the worker kept", tmp.Status, tmp.Copies,
+			tmp.DataGeneration)
+	}
+	if want := []RetiredCopy{
+		{Volume: "default/logs", DataGeneration: 1, Host: 0}, {Volume: "default/old", DataGeneration: 1, Host: 0},
+	}; !slices.Equal(c.state.Retired, want) {
+		t.Errorf("retired %v, want %v", c.state.Retired, want)
+	}
+	if blog := c.state.Stacks["default/blog"]; blog.Host == nil || *blog.Host != 2 || blog.Status != StackRunning {
+		t.Errorf("default/blog: %v %s, want it running on the worker", blog.Host, blog.Status)
+	}
+	if news := c.state.Stacks["default/news"]; news.Host != nil {
+		t.Errorf("default/news is on %d, want it placed anew: its volume waits for a restore", *news.Host)
+	}
+}
+
+func TestARecoverCountsACopyByDRBDNotByTheStatesFlag(t *testing.T) {
+	c := lostMajority(t)
+	// the state says db is synced on the survivor, but DRBD did not
+	c.mustApply(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 0, Retired: []HostID{1, 2}})
+	db := c.state.Volumes["default/db"]
+	if want := []VolumeCopy{{Host: 0, Class: "fast"}}; db.Status != VolumeRestorePending || !slices.Equal(db.Copies, want) {
+		t.Errorf("default/db: %s %+v, want it waiting for a restore with its unsynced copy kept", db.Status, db.Copies)
+	}
+}
+
+func TestARecoverRetiresEveryOtherControlPlaneHost(t *testing.T) {
+	c := lostMajority(t)
+	c.refuse(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 0, Retired: []HostID{1}},
+		"host node2 is a control-plane host and is not retired")
+	c.state.Hosts[2].Roles = hostrole.DefaultJoin
+	c.refuse(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 0, Retired: []HostID{1}, Synced: []SyncedCopy{
+		{Volume: "default/db", DataGeneration: 1, Host: 1},
+	}}, "host 1 does not stay")
+	c.refuse(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 0, Retired: []HostID{0, 1}},
+		"host node0 survives the recover")
+}
+
 func TestOnlyAControlPlaneHostSurvivesARecover(t *testing.T) {
 	c := lostMajority(t)
 	c.state.Hosts[1].Roles = hostrole.DefaultJoin
@@ -138,7 +240,9 @@ func TestOnlyAControlPlaneHostSurvivesARecover(t *testing.T) {
 func TestASurvivorWithoutIngressHoldsNoFloatingIP(t *testing.T) {
 	c := lostMajority(t)
 	c.state.Hosts[0].Roles = hostrole.Set{hostrole.ControlPlane, hostrole.Worker}
-	c.mustApply(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 0})
+	one := HostID(1)
+	c.state.Ingress = &one
+	c.mustApply(KindRecoverRemap, LeaderActor, retiringBoth)
 	if c.state.Ingress != nil {
 		t.Errorf("the ingress is host %d, which has no ingress role", *c.state.Ingress)
 	}
@@ -146,7 +250,7 @@ func TestASurvivorWithoutIngressHoldsNoFloatingIP(t *testing.T) {
 
 func TestTheClusterIsHighlyAvailableAgainWithThreeHosts(t *testing.T) {
 	c := lostMajority(t)
-	c.mustApply(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 0})
+	c.mustApply(KindRecoverRemap, LeaderActor, retiringBoth)
 	for id := HostID(3); id <= 4; id++ {
 		c.addHost(testHost(id))
 	}
@@ -162,7 +266,7 @@ func TestTheClusterIsHighlyAvailableAgainWithThreeHosts(t *testing.T) {
 
 func TestAVolumeWithoutDataTakesNoNewCopy(t *testing.T) {
 	c := lostMajority(t)
-	c.mustApply(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 0})
+	c.mustApply(KindRecoverRemap, LeaderActor, retiringBoth)
 	placed := *c.state.Volumes["default/logs"]
 	placed.Status, placed.Copies = VolumeOK, []VolumeCopy{{Host: 0, Class: "fast"}}
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: placed}, "waits for a restore")
@@ -170,7 +274,7 @@ func TestAVolumeWithoutDataTakesNoNewCopy(t *testing.T) {
 
 func TestAVolumeThatWaitsForARestoreIsDeletedWithItsCopy(t *testing.T) {
 	c := lostMajority(t)
-	c.mustApply(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 0})
+	c.mustApply(KindRecoverRemap, LeaderActor, retiringBoth)
 	// until a restore, a user may delete the volume, its copy here with it
 	c.del(resource.KindVolume, "default", "cache")
 	if _, ok := c.state.Volumes["default/cache"]; ok {

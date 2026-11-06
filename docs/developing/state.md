@@ -258,7 +258,8 @@ An operation is a long task in steps, such as moving a stack or fencing a host.
   back to failed and fails.
 - The leader finishes it once the stacks the host had (`HostFence.Stacks`, recorded at the
   fence) run elsewhere, or after `StepTime`.
-- Its lock limits fencing to one host at a time.
+- Its lock keeps a second fence of the same host from starting; fences of different hosts
+  may run at the same time.
 
 ### Moving a stack
 
@@ -336,10 +337,11 @@ phase it starts from (`From`), so of two changes that race, only the first passe
 | `recovering` | `active` | the host | every copy of it with a disk is synced (`checkCaughtUp`) |
 | `fenced` | `disabled` | fencing loop | fenced `FlapLimit` times within `FlapWindow` (`Host.Flapping`) |
 | `disabled` | `fenced` | user | `host enable`: clears `FencedAt`; the leader powers it on |
-| any | `removed` | `clowderd recover` | `recover-remap`: every host except the one that recovers |
+| any | `removed` | `clowderd recover` | `recover-remap`: the hosts it retired |
+| `failed`, `fencing` | `active` | `clowderd recover` | `recover-remap`, for a worker that answered and stays; its fence ends |
 
 `failed` to `fencing` happens only for a failed host with a checked server and a stack
-that another host can take (`needsFence`). At `fencing` to `fenced`, the time is added to
+that another worker can take (`needsFence`). At `fencing` to `fenced`, the time is added to
 `FencedAt`, the host's copies are no longer synced, and the operation records the host's
 stacks.
 

@@ -63,6 +63,8 @@ type Storage interface {
 	volumes.Storage
 	PoolUsage(ctx context.Context, pool string) (sizeBytes int64, dataPercent, metadataPercent float64, err error)
 	ForgetPeer(ctx context.Context, peer int) error
+	DiskStates(ctx context.Context) (map[string]string, error)
+	DropPeers(ctx context.Context, peers []int) error
 }
 
 // Run runs the agent until ctx ends, in the order docs/developing/host.md
@@ -89,6 +91,9 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	}
 	credentials, err := files.readCredentials(host.Roles)
 	if err != nil {
+		return err
+	}
+	if err := files.setRaftAsideToRejoin(time.Now(), logger); err != nil {
 		return err
 	}
 	// Raft is not running yet, so the state comes from its log on disk
@@ -142,7 +147,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		logger.Warn("systemd", "error", err)
 	}
 
-	err = watch(ctx, node, serveErrors, logger)
+	err = watch(ctx, node, serveErrors, daemon.rejoiner.rejoined, logger)
 	daemon.server.EndStreams() // Shutdown would wait for them
 	shutdown, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
@@ -209,6 +214,7 @@ type daemon struct {
 	heard      *controller.Heard
 	alerts     *controller.Alerts
 	server     *api.Server
+	rejoiner   *rejoiner
 	// caughtUp is closed once the state has caught up after the start. The
 	// API holds users' calls until then (api.ServerConfig.CaughtUp).
 	caughtUp chan struct{}
@@ -249,7 +255,8 @@ func newDaemon(base shared) *daemon {
 	joins := &joiner{cluster: base.node, propose: late.propose, dataKey: base.credentials.dataKey}
 	heard := controller.NewHeard()
 	caughtUp := make(chan struct{})
-	late.server = newAPIServer(base, runner, reconciler, alerts, heard, joins, caughtUp)
+	rejoiner := newRejoiner(base)
+	late.server = newAPIServer(base, runner, reconciler, alerts, heard, joins, rejoiner, caughtUp)
 
 	return &daemon{
 		shared:     base,
@@ -264,6 +271,7 @@ func newDaemon(base shared) *daemon {
 		heard:      heard,
 		alerts:     alerts,
 		server:     late.server,
+		rejoiner:   rejoiner,
 		caughtUp:   caughtUp,
 	}
 }
@@ -382,7 +390,7 @@ func newHostReporter(base shared, propose controller.Propose, seen func() map[st
 }
 
 func newAPIServer(base shared, runner *stacks.Runner, volumes api.Volumes, alerts *controller.Alerts,
-	heard *controller.Heard, joins api.Joins, caughtUp <-chan struct{},
+	heard *controller.Heard, joins api.Joins, recover api.RecoverHost, caughtUp <-chan struct{},
 ) *api.Server {
 	// a nil *datakey.Key in the interface would not compare as nil
 	var keys api.Keys
@@ -397,7 +405,7 @@ func newAPIServer(base shared, runner *stacks.Runner, volumes api.Volumes, alert
 		},
 		Keys: keys, Version: buildinfo.Version, Logger: base.logger,
 		HostID: base.host.ID, Containers: runner, Volumes: volumes, Alerts: alertsAPI{alerts}, Beats: heard,
-		Joins: joins, CaughtUp: caughtUp,
+		Joins: joins, Recover: recover, CaughtUp: caughtUp,
 		HetznerServers: func(ctx context.Context, hetznerAPI, token string) ([]int64, error) {
 			ctx, cancel := context.WithTimeout(ctx, hetznerCheckTimeout)
 			defer cancel()
@@ -550,8 +558,11 @@ func haltError(err error) error {
 }
 
 // watch feeds systemd's watchdog only while the state answers, so that
-// systemd restarts a deadlocked agent.
-func watch(ctx context.Context, node *raftnode.Node, serveErrors <-chan error, logger *slog.Logger) error {
+// systemd restarts a deadlocked agent. It ends the agent after a rejoin,
+// which takes effect at the next start.
+func watch(ctx context.Context, node *raftnode.Node, serveErrors <-chan error, rejoined <-chan struct{},
+	logger *slog.Logger,
+) error {
 	interval := watchdogInterval()
 	var tick <-chan time.Time
 	if interval > 0 {
@@ -567,6 +578,8 @@ func watch(ctx context.Context, node *raftnode.Node, serveErrors <-chan error, l
 			return err
 		case <-node.Halted():
 			return haltError(node.HaltError())
+		case <-rejoined:
+			return errRejoining
 		case <-tick:
 			node.Read(func(*state.State) {}) // hangs if the state's lock does
 			if err := notify("WATCHDOG=1"); err != nil {

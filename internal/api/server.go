@@ -77,6 +77,9 @@ type ServerConfig struct {
 	Containers Containers
 	// Volumes is nil on an agent without a volume reconciler.
 	Volumes Volumes
+	// Recover answers clowderd recover on a control-plane host; it is nil
+	// in tests that do not need it.
+	Recover RecoverHost
 	Alerts  Alerts
 	Beats   Beats
 	// Joins adds joining hosts while this agent leads.
@@ -206,6 +209,10 @@ func (s *Server) routes() []route {
 		{"GET /v1/internal/stacks/{project}/logs", controlPlaneHost, s.localLogs},
 		{"GET /v1/internal/volumes/progress", controlPlaneHost, s.localProgress},
 		{"POST /v1/internal/volumes/{namespace}/{name}/resolve-splitbrain", controlPlaneHost, s.localResolve},
+		// what clowderd recover on a control-plane host asks of a worker
+		// that stays (recover.go)
+		{"GET /v1/internal/recover/copies", controlPlaneHost, s.localCopies},
+		{"POST /v1/internal/recover/rejoin", controlPlaneHost, s.localRejoin},
 		// what root on this host asks for
 		{"POST /v1/internal/credentials", thisHost, s.internalCredentials},
 		{"GET /v1/internal/sealing-key", thisHost, s.internalSealingKey},

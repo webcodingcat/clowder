@@ -60,7 +60,7 @@ var lockCases = []lockCase{
 	{
 		// it ends every operation and frees its locks (endOperations)
 		name: "clowderd recover remaps the cluster", kind: KindRecoverRemap, actor: LeaderActor, lock: "host/1",
-		payload: func(*cluster, uint64) any { return RecoverRemap{Survivor: 0} },
+		payload: func(*cluster, uint64) any { return RecoverRemap{Survivor: 0, Retired: []HostID{1}} },
 		free:    true,
 	},
 	{

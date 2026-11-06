@@ -8,6 +8,22 @@ import (
 	"strconv"
 )
 
+// DiskStates returns DRBD's disk state (DiskUpToDate, ...) of each resource
+// that is up on this host, by its name, for clowderd recover. It reads the
+// host, not the state, which may be behind on a host without a leader. It
+// only reads.
+func (d Driver) DiskStates(ctx context.Context) (map[string]string, error) {
+	resources, err := d.resources(ctx)
+	if err != nil {
+		return nil, err
+	}
+	disks := map[string]string{}
+	for name, resource := range resources {
+		disks[name] = resource.disk()
+	}
+	return disks, nil
+}
+
 // DropPeers lets every DRBD resource that is up on this host continue
 // without the given peers, which are gone for good (clowderd recover). DRBD
 // accepts the steps only in this order:

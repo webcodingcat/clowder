@@ -11,6 +11,7 @@ The package holds the daemon and the one-shot host commands. Some files have sim
 | `init.go`, `join.go` | `clowderd init` and `clowderd join`, run on the new host |
 | `joiner.go` | the leader's side of a join |
 | `recover.go` | `clowderd recover` |
+| `rejoin.go` | a worker's part of a recover: drop the retired hosts, follow the new leader |
 | `recovery.go` | a fenced host's report that it is back (`recovering`, then `active`) |
 | `retired.go` | the check at start whether `clowderd recover` retired this host |
 | `forget.go` | forgetting removed hosts as DRBD peers |
@@ -20,7 +21,9 @@ The package holds the daemon and the one-shot host commands. Some files have sim
 
 - **Files.** A host's files are under `DefaultDir`: `host.json` (ID, name, addresses, ports),
   `net.json` (the WireGuard mesh the host last applied), `keys/`, `pki/`, `raft/`,
-  `stacks/`, `storage/`, `volume-records/` and `volumes/`. init and join write `host.json`
+  `stacks/`, `storage/`, `volume-records/` and `volumes/`. After a rejoin there is also
+  `rejoin` until the next start, and then the old `raft.set-aside-<time>/`, which nothing
+  reads again. init and join write `host.json`
   last, so a host with `host.json` has all the other files too.
 - **`clowderd init`** (run from cloud-init) creates the first host. It creates the CA, the
   data key, the cluster's sealing key, the host's certificate and WireGuard key. It also
@@ -64,12 +67,19 @@ The package holds the daemon and the one-shot host commands. Some files have sim
   sealing-key export` and `clowderd recover`, it runs only on a control-plane host, as
   `host.json` says (`Host.checkControlPlane`; the join wrote the roles from its
   certificate).
-- **`clowderd recover --power-off`** makes this host the only member of its cluster when the
-  other hosts are gone for good. It powers them off and labels their servers
-  `clowder-retired` ([Recover](cluster.md#recover-clowderd-recover-agentrecovergo)). It
-  stops the agent while it changes Raft's files and starts it again afterwards.
+- **`clowderd recover --power-off`** makes this host the only control-plane host of its
+  cluster when the majority of the voters is gone for good. It powers off the hosts that
+  take no connection and labels their servers `clowder-retired`; workers that answer stay
+  ([Recover](cluster.md#recover-clowderd-recover-agentrecovergo)). It stops the agent
+  while it changes Raft's files and starts it again afterwards.
+- **A rejoin** (`rejoin.go`) is a worker's part of a recover on a control-plane host
+  (`/v1/internal/recover/rejoin`). The worker drops the retired hosts from its DRBD
+  resources (`DropPeers`), writes the marker `rejoin`, stops its Raft member before it
+  answers, and ends its agent (`errRejoining`); systemd starts it again.
 - **`clowderd run`** (the service) starts in this order:
-  1. It reads the state from its Raft log on disk (`raftnode.ReadState`) and checks that
+  1. After a rejoin, it moves its Raft directory aside to `raft.set-aside-<time>`
+     (`setRaftAsideToRejoin`), so it follows the new leader as a fresh non-voter. Then it
+     reads the state from its Raft log on disk (`raftnode.ReadState`) and checks that
      `host.json`, the host's certificate and the state name the same roles
      (`Host.checkRoles`; a state that does not know the host yet is not compared). The API
      trusts the certificates, but the loops read `host.json` and the state, so the agent

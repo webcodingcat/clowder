@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/hetzner/hetznertest"
+	"github.com/webcodingcat/clowder/internal/hostrole"
+	"github.com/webcodingcat/clowder/internal/resource"
+	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -49,23 +52,35 @@ func newTestFencer(t *testing.T) *testFencer {
 		}
 		return silence, nil
 	}
-	test.fencer = &fencer{
-		FenceParts: FenceParts{
-			Cluster: l, Propose: l.propose, Heard: heard, Ask: ask, Self: 0, Conditions: NewConditions(),
-			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-			Open:   openPadded,
-		},
-		fenceAfter: map[state.HostID]time.Time{}, powerOnAfter: map[state.HostID]time.Time{},
-		poweredOn: map[state.HostID]bool{}, pause: time.Millisecond,
-	}
+	test.fencer = newFencer(FenceParts{
+		Cluster: l, Propose: l.propose, Heard: heard, Ask: ask, Self: 0, Conditions: NewConditions(),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Open:   openPadded,
+	}, time.Millisecond)
 	return test
 }
 
-// pass runs one pass of the loop, which must not fail.
+// pass runs one pass of the loop, which must not fail, and waits for the
+// power-offs it started.
 func (f *testFencer) pass(t *testing.T) {
 	t.Helper()
-	if err := f.fencer.pass(context.Background()); err != nil {
-		t.Fatal(err)
+	f.passWithin(t)
+	f.jobs.Wait()
+}
+
+// passWithin runs one pass of the loop, which must not fail and must not
+// wait for a power-off.
+func (f *testFencer) passWithin(t *testing.T) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- f.fencer.pass(context.Background()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pass waits for a power-off")
 	}
 }
 
@@ -172,9 +187,7 @@ func TestAHostThatCannotBePoweredOffStaysFailed(t *testing.T) {
 	f.api.FailActions(41, 2*powerOffTries)
 	f.l.apply(state.KindSetHostPhase, state.LeaderActor, state.SetHostPhase{Host: 1, Phase: state.Failed})
 	f.pass(t)
-	if err := f.fencer.pass(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	f.pass(t)
 	if phase := f.phase(1); phase != state.Failed {
 		t.Errorf("phase %s, want failed", phase)
 	}
@@ -187,6 +200,57 @@ func TestAHostThatCannotBePoweredOffStaysFailed(t *testing.T) {
 	}
 	if _, blocked := f.Conditions.Since(fencingBlockedKey(1)); !blocked {
 		t.Error("no condition for the alert")
+	}
+}
+
+// TestAHangingPowerOffHoldsUpNoOtherHost hangs the power-off of worker 1.
+// Meanwhile worker 2 fails, is fenced and powered off. Host 0 is the only
+// voter and a worker too.
+func TestAHangingPowerOffHoldsUpNoOtherHost(t *testing.T) {
+	f := newTestFencer(t)
+	putResource(f.l, resource.KindStack, "blog", stackspec.Spec{Services: map[string]stackspec.Service{
+		"app": {Image: "x"},
+	}})
+	f.l.mu.Lock()
+	for id := state.HostID(1); id <= 2; id++ {
+		f.l.state.Hosts[id].Roles, f.l.state.Hosts[id].Voter = hostrole.Set{hostrole.Worker}, false
+	}
+	two := state.HostID(2)
+	f.l.state.Stacks["default/blog"].Host = &two
+	f.l.mu.Unlock()
+	release := f.api.HoldActions(41)
+	defer release()
+
+	f.silent(FailAfter)
+	f.passWithin(t) // fails host 1
+	f.passWithin(t) // starts its fence
+	f.passWithin(t) // and its power-off, which hangs
+	waitFor(t, f.l, "the power-off of host 1", func(*state.State) bool {
+		return slices.Contains(f.api.Changes(), "poweroff 41")
+	})
+
+	f.clock = f.clock.Add(FailAfter) // the leader hears only itself
+	f.Heard.Beat(0)
+	f.passWithin(t) // fails host 2
+	if phase := f.phase(2); phase != state.Failed {
+		t.Fatalf("host 2 is %s while host 1's power-off hangs, want failed", phase)
+	}
+	f.passWithin(t) // starts the fence of host 2
+	f.passWithin(t) // and its power-off
+	waitFor(t, f.l, "host 2 fenced", func(current *state.State) bool {
+		return current.Hosts[2].Phase == state.Fenced
+	})
+	if phase := f.phase(1); phase != state.Fencing {
+		t.Errorf("host 1 is %s, want fencing while its power-off hangs", phase)
+	}
+
+	release()
+	f.jobs.Wait()
+	if phase := f.phase(1); phase != state.Fenced {
+		t.Errorf("host 1 is %s after its power-off, want fenced", phase)
+	}
+	if want := []string{"poweroff 41", "poweroff 42"}; !slices.Equal(f.api.Changes(), want) {
+		t.Errorf("power actions %v, want %v", f.api.Changes(), want)
 	}
 }
 
@@ -256,6 +320,17 @@ func TestAHostWithoutAStackToTakeOverIsNotFenced(t *testing.T) {
 	f.l.state.Stacks["default/shop"].Host = &one
 	f.l.state.Hosts[2].Phase = state.Draining
 	f.l.state.Hosts[0].Phase = state.Draining
+	f.l.mu.Unlock()
+	f.pass(t)
+	if phase := f.phase(1); phase != state.Failed || len(f.api.Changes()) != 0 {
+		t.Errorf("phase %s, power actions %v", phase, f.api.Changes())
+	}
+	// nor one whose stacks only control-plane hosts without the worker
+	// role could take
+	f.l.mu.Lock()
+	for _, id := range []state.HostID{0, 2} {
+		f.l.state.Hosts[id].Phase, f.l.state.Hosts[id].Roles = state.Active, hostrole.Set{hostrole.ControlPlane}
+	}
 	f.l.mu.Unlock()
 	f.pass(t)
 	if phase := f.phase(1); phase != state.Failed || len(f.api.Changes()) != 0 {

@@ -37,7 +37,7 @@ authorizer. A refused caller gets 403.
 | the CLI's (`/v1/…` except `internal`) | a CLI certificate (`cliCaller`) |
 | `GET` and `POST /v1/join` | anyone with an open join token (`handleOpen`, limited per sender) |
 | `internal/propose`, `internal/beats` (both), `internal/commit-index`, `internal/leader`, `internal/hosts/self/secrets`, `internal/hosts/self/tls` | any host (`anyHost`) |
-| `internal/changes`, `internal/join`, `internal/hand-over`, `internal/alerts/failures`, `internal/stacks/…/ps\|logs`, `internal/volumes/progress`, `internal/volumes/…/resolve-splitbrain` | a control-plane host (`controlPlaneHost`) |
+| `internal/changes`, `internal/join`, `internal/hand-over`, `internal/alerts/failures`, `internal/stacks/…/ps\|logs`, `internal/volumes/progress`, `internal/volumes/…/resolve-splitbrain`, `internal/recover/copies`, `internal/recover/rejoin` | a control-plane host (`controlPlaneHost`) |
 | `internal/credentials`, `internal/sealing-key` | this host's own certificate (`thisHost`) |
 
 `TestEachRouteTakesItsCallers` holds the table a second time, so a new route cannot come

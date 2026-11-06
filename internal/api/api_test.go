@@ -148,6 +148,8 @@ type testCluster struct {
 	healths []*fakeHealth
 	// volumes are the servers' volume copies, by host
 	volumes []*fakeVolumes
+	// recovers are what the servers do for clowderd recover, by host
+	recovers []*fakeRecover
 	// caughtUp closes once the agents caught up after their start
 	caughtUp chan struct{}
 }
@@ -191,6 +193,8 @@ func newCatchingUpCluster(t *testing.T) *testCluster {
 		c.healths = append(c.healths, health)
 		volumes := &fakeVolumes{}
 		c.volumes = append(c.volumes, volumes)
+		recover := &fakeRecover{}
+		c.recovers = append(c.recovers, recover)
 		server := httptest.NewUnstartedServer(nil)
 		api := NewServer(ServerConfig{
 			Cluster: cluster, CA: ca.Certificate, Certificate: c.hostCertificate(id), Roles: rolesOf(id), HostID: id,
@@ -200,6 +204,7 @@ func newCatchingUpCluster(t *testing.T) *testCluster {
 			Joins:      c.joins,
 			Beats:      health,
 			Volumes:    volumes,
+			Recover:    recover,
 			CaughtUp:   c.caughtUp,
 			Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		})
@@ -736,7 +741,8 @@ func TestKnowsLeaderTellsWhoKnowsALeaderAndWhoIsNotReached(t *testing.T) {
 	ctx := context.Background()
 	host := cluster.hostCertificate(1)
 	ask := func(server int, certificate tls.Certificate) (bool, error) {
-		return KnowsLeader(ctx, cluster.servers[server].Listener.Addr().String(), certificate, cluster.ca.Certificate, testVersion)
+		caller := NewRecoverCaller(certificate, cluster.ca.Certificate, testVersion)
+		return caller.KnowsLeader(ctx, cluster.servers[server].Listener.Addr().String())
 	}
 	// the leader, and a follower that hears it
 	for server := range 2 {
@@ -756,7 +762,7 @@ func TestKnowsLeaderTellsWhoKnowsALeaderAndWhoIsNotReached(t *testing.T) {
 	}
 	gone := cluster.servers[1].Listener.Addr().String()
 	cluster.servers[1].Close()
-	if _, err := KnowsLeader(ctx, gone, host, cluster.ca.Certificate, testVersion); !errors.Is(err, ErrNotReached) {
+	if _, err := NewRecoverCaller(host, cluster.ca.Certificate, testVersion).KnowsLeader(ctx, gone); !errors.Is(err, ErrNotReached) {
 		t.Errorf("a host that is gone: %v", err)
 	}
 }
