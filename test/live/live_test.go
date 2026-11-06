@@ -20,12 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"go.yaml.in/yaml/v3"
-
-	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
-	"github.com/webcodingcat/clowder/internal/yamlpath"
 )
 
 // The host's files, as setup.sh and the agent lay them out. They are copied,
@@ -61,7 +58,7 @@ func shopStack(greeting string) string {
     stopGracePeriod: 1s
     volumes: [{volume: data, path: /data}, {volume: scratch, path: /scratch}]
     secrets: [password]
-    secretEnv: {API_TOKEN: api-token}
+    secretEnv: {API_TOKEN: {name: api-token, key: ` + stackSecretKey + `}}
 `
 	if greeting != "" {
 		// the file comes back at every start: a restart keeps the
@@ -135,14 +132,14 @@ func watchHost(t *testing.T, server host) {
 	})
 }
 
-// baselineConfigFile holds cluster.yaml as TestSetup applied it, without
-// the values of its secrets, for baseline to compare.
+// baselineConfigFile holds the ClusterConfiguration's spec as TestSetup
+// applied it, for baseline to compare.
 const baselineConfigFile = "baseline-config.json"
 
 // baseline checks where every scenario starts, so each runs alone and in any
 // order (bin/dev live run -run <test>): the hosts that bin/dev live up made,
-// its cluster set up with a leader and cluster.yaml applied as
-// TestSetup left it, the first host active and the others drained (so
+// its cluster set up with a leader and the configuration's directory
+// applied as TestSetup left it, the first host active and the others drained (so
 // stacks start on the first), three voters, no stack or volume in any
 // namespace, and no fault in the lab. A scenario that fails leaves what it
 // made for a look; the next one stops here and names it.
@@ -160,10 +157,12 @@ func baseline(t *testing.T) (host, outputs) {
 		t.Fatalf("the cluster has no leader:\n%s", status)
 	}
 	if got := clusterConfigJSON(t); !bytes.Equal(got, want) {
-		t.Fatalf("an earlier scenario left cluster.yaml changed:\n%s\nwant, as TestSetup applied it:\n%s", got, want)
+		t.Fatalf("an earlier scenario left the configuration changed:\n%s\nwant, as TestSetup applied it:\n%s", got, want)
 	}
-	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "nothing to apply") {
-		t.Fatalf("cluster.yaml is not applied:\n%s", diff)
+	// diff ends with exit code 1 if anything would change; its error has
+	// the output
+	if _, err := clowder("diff", "-f", configDir()); err != nil {
+		t.Fatalf("the configuration's directory is not applied as it is: %v", err)
 	}
 	hosts := clusterHosts(t)
 	for _, found := range hosts {
@@ -255,7 +254,7 @@ func TestSetup(t *testing.T) {
 	watchHost(t, server)
 	runSteps(t, []step{
 		{"the setup makes the first host", func(t *testing.T) { waitForSetup(t, server) }},
-		{"the user gets credentials over SSH and applies the cluster", func(t *testing.T) { setUpCluster(t, server, tofu) }},
+		{"the user gets credentials over SSH and applies the configuration", func(t *testing.T) { setUpCluster(t, server, tofu) }},
 		{"two hosts join with a token each", growToThreeHosts},
 		{"each host starts fresh, with a DRBD module for its kernel", hostsStartFresh},
 	})
@@ -319,9 +318,10 @@ func waitForSetup(t *testing.T, server host) {
 }
 
 // setUpCluster gives the test the CLI's first credentials from root on the
-// first host, as over SSH, and the recovery key in a file; then it fills in
-// cluster.yaml from the module's outputs, with the Hetzner token and the
-// registry's login encrypted, and applies it.
+// first host, as over SSH, and the recovery key in a file; then it writes
+// the configuration's directory, the ClusterConfiguration filled in from
+// the module's outputs and the Secret of the Hetzner token, and the
+// namespace default with the registry's login, and applies it.
 func setUpCluster(t *testing.T, server host, tofu outputs) {
 	// gone before, so a step run again starts as the first time: import
 	// refuses a context that is there, --recovery-out a file
@@ -330,7 +330,7 @@ func setUpCluster(t *testing.T, server host, tofu outputs) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.MkdirAll(clusterDir(), 0o755); err != nil {
+	if err := os.MkdirAll(configDir(), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// stdout alone: must's output has the command's stderr too
@@ -339,76 +339,84 @@ func setUpCluster(t *testing.T, server host, tofu outputs) {
 		t.Fatal(err)
 	}
 	mustClowder(t, "recovery", "rotate", "--recovery-out", filepath.Join(workDir, "recovery-key"))
+	if status := mustClowder(t, "cluster", "status"); !strings.Contains(status, "no configuration") {
+		t.Errorf("a new cluster has a configuration:\n%s", status)
+	}
 
-	// the module's part of cluster.yaml, read strictly into the real type, so a
-	// renamed field fails here and not only in the cluster
-	fromModule, err := yaml.Marshal(tofu.ClusterYAML.Value)
-	if err != nil {
-		t.Fatal(err)
+	config := tofu.moduleConfig(t)
+	config.Hetzner = clusterspec.Hetzner{
+		TokenSecretRef: setSystemSecret(t, "hetzner", "token", os.Getenv("HCLOUD_TOKEN")),
+		API:            os.Getenv("HCLOUD_ENDPOINT"),
 	}
-	var config clusterspec.Config
-	decoder := yaml.NewDecoder(bytes.NewReader(fromModule))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&config); err != nil {
-		t.Fatalf("the module's cluster_yaml: %v", err)
-	}
-	config.Hetzner = clusterspec.Hetzner{Token: "hetzner.token", API: os.Getenv("HCLOUD_ENDPOINT")}
+	writeConfig(t, config)
 	password := pushPrivateImage(t, server)
-	registryPassword := yamlpath.Key(yamlpath.Key("registries", registry), "password")
-	config.Registries = map[string]clusterspec.Registry{
-		registry: {Username: registryUser, Password: clusterspec.SecretRef(registryPassword)},
-	}
-	setClusterSecrets(t, map[string]string{"hetzner.token": os.Getenv("HCLOUD_TOKEN"), registryPassword: password})
-	writeConfig(t, config, nil)
+	writeRegistryLogin(t, password)
 	checkNothingPersonal(t, os.Getenv("HCLOUD_TOKEN"), password)
 
-	// HLab's API is plain http: the CLI warns about it, on stderr before the diff
+	// HLab's API is plain http: the CLI warns about it, on stderr before the
+	// diff, and tells what the new token sees: the first host's server
 	httpWarning := "warning: hetzner.api is set: clowder uses " + os.Getenv("HCLOUD_ENDPOINT") +
 		" instead of Hetzner's own API, which is meant for test labs; over http the Hetzner token crosses the network unencrypted\n"
-	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "never applied") || !strings.HasPrefix(diff, httpWarning) {
-		t.Errorf("diff before the first apply:\n%s", diff)
+	diff, err := clowder("diff", "-f", configDir())
+	if exitCode(err) != 1 || !strings.HasPrefix(diff, httpWarning) ||
+		!strings.Contains(diff, "The new Hetzner token sees the servers of 1 of 1 hosts.\n") ||
+		!strings.Contains(diff, "Secret clowder-system/hetzner: new\n") ||
+		!strings.Contains(diff, "ClusterConfiguration cluster: new\n") ||
+		!strings.Contains(diff, "Namespace default: differs in spec.imagePullSecrets\n") ||
+		!strings.Contains(diff, "Secret default/"+registrySecret+": new\n") {
+		t.Errorf("diff before the first apply: %v\n%s", err, diff)
 	}
-	mustClowder(t, "cluster", "apply")
-	// another token is named, its value not
-	setClusterSecrets(t, map[string]string{"hetzner.token": "another token"})
-	writeConfig(t, config, nil)
-	if diff := mustClowder(t, "cluster", "diff"); diff != httpWarning+"the secret hetzner.token differs\n" {
-		t.Errorf("diff after the token changed:\n%s", diff)
+	// a new token is asked for; without a terminal only --yes applies it
+	if output, err := clowder("apply", "-f", configDir()); err == nil || !strings.Contains(output, "confirm it with --yes") {
+		t.Errorf("an apply of a new token without --yes: %v\n%s", err, output)
+	}
+	if status := mustClowder(t, "cluster", "status"); !strings.Contains(status, "no configuration") {
+		t.Errorf("the apply without --yes applied the configuration:\n%s", status)
+	}
+	applyConfig(t)
+
+	// another token: the Secret differs in its value, which the diff never
+	// shows, and the new token sees none of the hosts' servers
+	setSystemSecret(t, "hetzner", "token", "another token")
+	diff, err = clowder("diff", "-f", configDir())
+	if exitCode(err) != 1 || !strings.Contains(diff, "Secret clowder-system/hetzner: differs in data.token\n") ||
+		!strings.Contains(diff, "The new Hetzner token ") || strings.Contains(diff, "sees the servers of 1 of 1 hosts") ||
+		strings.Contains(diff, "ClusterConfiguration cluster:") || strings.Contains(diff, "another token") {
+		t.Errorf("diff after the token changed: %v\n%s", err, diff)
 	}
 	// encrypted anew, the same token is no change
-	setClusterSecrets(t, map[string]string{"hetzner.token": os.Getenv("HCLOUD_TOKEN")})
-	writeConfig(t, config, nil)
-	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "nothing to apply") {
-		t.Errorf("diff after the token was encrypted anew:\n%s", diff)
+	setSystemSecret(t, "hetzner", "token", os.Getenv("HCLOUD_TOKEN"))
+	if diff, err := clowder("diff", "-f", configDir()); err != nil || !strings.Contains(diff, "nothing would change") {
+		t.Errorf("diff after the token was encrypted anew: %v\n%s", err, diff)
 	}
 	status := mustClowder(t, "cluster", "status")
-	if strings.Contains(status, "leader none") {
-		t.Errorf("the cluster has no leader:\n%s", status)
+	if strings.Contains(status, "leader none") || !strings.Contains(status, "configuration generation 1") {
+		t.Errorf("the cluster has no leader or not the configuration:\n%s", status)
 	}
 }
 
 // checkNothingPersonal checks what the setup leaves where a repository
-// would hold it: cluster.yaml alone in the cluster directory, none of the
-// values in clear; the credentials are in the user's own file, for the
-// user alone.
+// would hold it: the configuration's directory with resources alone, none
+// of the values in clear; the credentials are in the user's own file, for
+// the user alone.
 func checkNothingPersonal(t *testing.T, values ...string) {
 	t.Helper()
-	entries, err := os.ReadDir(clusterDir())
+	entries, err := os.ReadDir(configDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
-		if entry.Name() != clusterdir.ConfigFile {
-			t.Errorf("the cluster directory has %s", entry.Name())
+		content, err := os.ReadFile(filepath.Join(configDir(), entry.Name()))
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	config, err := os.ReadFile(filepath.Join(clusterDir(), clusterdir.ConfigFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for index, value := range values {
-		if strings.Contains(string(config), value) {
-			t.Errorf("cluster.yaml has value %d in clear", index)
+		if objects, err := resource.ParseDocuments(content); err != nil || len(objects) == 0 {
+			t.Errorf("the configuration's directory has %s, which holds no resources: %v", entry.Name(), err)
+		}
+		for index, value := range values {
+			if strings.Contains(string(content), value) {
+				t.Errorf("%s has value %d in clear", entry.Name(), index)
+			}
 		}
 	}
 	credentials, err := os.Stat(credentialsFile())
@@ -422,8 +430,9 @@ func checkNothingPersonal(t *testing.T, values ...string) {
 
 // pushPrivateImage makes the host trust the registry (Docker's trust per
 // registry; daemon.json stays as it is) and puts the test's image there.
-// Then it logs out and removes the image, so only the agent's own login
-// (the same /root/.docker of root) can pull it. It returns the password.
+// Then it logs out and removes the image, so only the login of the
+// namespace default (writeRegistryLogin), which the agent hands Docker for
+// the namespace's stacks, can pull it. It returns the password.
 func pushPrivateImage(t *testing.T, server host) string {
 	server.upload(t, filepath.Join(workDir, registryCAFile), "/etc/docker/certs.d/"+registry+"/ca.crt")
 	password, err := os.ReadFile(filepath.Join(workDir, registryPWFile))
@@ -438,6 +447,29 @@ func pushPrivateImage(t *testing.T, server host) string {
 	server.must(t, fmt.Sprintf("docker tag %s %s && docker push -q %s", publicImage, privateImage, privateImage))
 	server.must(t, fmt.Sprintf("docker logout %s && docker rmi %s", registry, privateImage))
 	return strings.TrimSpace(string(password))
+}
+
+// registrySecret is the Secret of the namespace default with the login to
+// the private registry.
+const registrySecret = "registry"
+
+// writeRegistryLogin writes the namespace default to the configuration's
+// directory, naming the registry's login in imagePullSecrets, and the
+// login below it: the server and the user in clear, the password from
+// stdin.
+func writeRegistryLogin(t *testing.T, password string) {
+	t.Helper()
+	login, err := clowderWithInput(strings.NewReader(password), "secret", "encrypt", registrySecret,
+		"--from-literal", resource.RegistryServerKey+"="+registry,
+		"--from-literal", resource.RegistryUsernameKey+"="+registryUser,
+		"--from-file", resource.RegistryPasswordKey+"=-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	namespace := documentIn("", resource.KindNamespace, names.Default, "imagePullSecrets: [{name: "+registrySecret+"}]")
+	if err := os.WriteFile(filepath.Join(configDir(), defaultNamespaceFile), []byte(namespace+"---\n"+login), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // The stack's secrets in each generation; a $ must reach the container as
@@ -550,61 +582,69 @@ func runStack(t *testing.T, server host) {
 	rekeyAndDecrypt(t, server, filepath.Join(workDir, "recovery-key"))
 }
 
-// rekeyAndDecrypt encrypts the values of the stack's files and of
-// cluster.yaml anew through the cluster, which changes nothing the cluster
-// keeps and recreates no container, and reads a value back with the
-// recovery key, as in an emergency.
+// rekeyAndDecrypt encrypts the values of the stack's files and of the
+// configuration's directory anew through the cluster, which changes
+// nothing the cluster keeps and recreates no container, and reads a value
+// back with the recovery key, as in an emergency.
 func rekeyAndDecrypt(t *testing.T, server host, recoveryKey string) {
 	t.Helper()
 	before := shopContainers(t, server)
 	mustClowder(t, "secret", "rekey", "-f", stackDir("shop"))
-	mustClowder(t, "secret", "rekey", "-f", clusterDir())
-	if diff := mustClowder(t, "cluster", "diff"); !strings.Contains(diff, "nothing to apply") {
-		t.Errorf("cluster.yaml encrypted anew:\n%s", diff)
+	mustClowder(t, "secret", "rekey", "-f", configDir())
+	if diff, err := clowder("diff", "-f", configDir()); err != nil {
+		t.Errorf("the configuration's directory encrypted anew: %v\n%s", err, diff)
 	}
 	if out := mustClowder(t, "apply", "-f", stackDir("shop")); !strings.Contains(out, "Secret default/password: unchanged") {
 		t.Errorf("the stack's files encrypted anew:\n%s", out)
 	}
 	checkUnchanged(t, before, shopContainers(t, server))
 	out := mustClowder(t, "secret", "decrypt", "--identity", recoveryKey, "-f", stackFile("shop"))
-	if want := "default/password\t" + firstSecrets["password"] + "\n"; out != want {
+	if want := "default/password[" + stackSecretKey + "]\t" + firstSecrets["password"] + "\n"; out != want {
 		t.Errorf("decrypt: %q, want %q", out, want)
 	}
 }
 
 // refuseSecretsOutOfPlace applies what the cluster must refuse: a Secret in
-// clear, in a file and on stdin, and a value of cluster.yaml (the Hetzner
-// token) copied into a Secret, which a container would then read.
+// clear, in a file and on stdin, and a value of a Secret of clowder-system
+// (the Hetzner token) copied into a Secret of default, which a container
+// would then read.
 func refuseSecretsOutOfPlace(t *testing.T) {
 	t.Helper()
-	clear := "apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: copied}\nspec: {value: s3cret}\n"
+	clear := "apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: copied}\nspec: {data: {value: s3cret}}\n"
 	clearFile := filepath.Join(workDir, "clear.yaml")
 	if err := os.WriteFile(clearFile, []byte(clear), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := clowder("apply", "-f", clearFile); err == nil || !strings.Contains(err.Error(), "write its value encrypted") {
+	if _, err := clowder("apply", "-f", clearFile); err == nil || !strings.Contains(err.Error(), "encrypted, tagged !secret") {
 		t.Errorf("a Secret in clear in a file: %v", err)
 	}
 	if _, err := clowderWithInput(strings.NewReader(clear), "apply", "-f", "-"); err == nil ||
-		!strings.Contains(err.Error(), "write its value encrypted") {
+		!strings.Contains(err.Error(), "encrypted, tagged !secret") {
 		t.Errorf("a Secret in clear on stdin: %v", err)
 	}
-	block, err := clowderWithInput(strings.NewReader("the Hetzner token"), "secret", "encrypt", "--cluster-yaml")
+	system := names.ID(names.System, "hetzner")
+	secret, err := clowderWithInput(strings.NewReader("the Hetzner token"), "secret", "encrypt", system,
+		"--from-file", "token=-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	copied := "apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: copied}\nspec:\n  value: " + block
+	copied := strings.Replace(secret, "metadata: {namespace: "+names.System+", name: hetzner}",
+		"metadata: {namespace: "+names.Default+", name: copied}", 1)
+	if copied == secret {
+		t.Fatalf("secret encrypt printed metadata the test does not know:\n%s", secret)
+	}
 	if output, err := clowderWithInput(strings.NewReader(copied), "apply", "-f", "-"); err == nil ||
-		!strings.Contains(output, "the value is for cluster, not for default/copied") {
-		t.Errorf("a value of cluster.yaml as a Secret: %v\n%s", err, output)
+		!strings.Contains(output, "the value is for "+system+", not for default/copied") {
+		t.Errorf("a value of clowder-system as a Secret of default: %v\n%s", err, output)
 	}
 }
 
 func checkSecrets(t *testing.T, server host, want map[string]string) {
 	t.Helper()
 	app := server.service(t, "app")
-	if got := server.must(t, "docker exec "+app+" cat /run/secrets/password"); got != want["password"] {
-		t.Errorf("/run/secrets/password = %q, want %q", got, want["password"])
+	passwordFile := "/run/secrets/password/" + stackSecretKey
+	if got := server.must(t, "docker exec "+app+" cat "+passwordFile); got != want["password"] {
+		t.Errorf("%s = %q, want %q", passwordFile, got, want["password"])
 	}
 	if got := server.must(t, "docker exec "+app+" printenv API_TOKEN"); got != want["api-token"] {
 		t.Errorf("API_TOKEN = %q, want %q", got, want["api-token"])
@@ -757,9 +797,9 @@ func reboot(t *testing.T, server host, tofu outputs) {
 	}
 	checkStartOrder(t, server)
 
-	classes, ok := tofu.ClusterYAML.Value["storage_classes"].(map[string]any)
-	if !ok {
-		t.Fatalf("the module's cluster_yaml has no storage_classes")
+	classes := tofu.moduleConfig(t).StorageClasses
+	if len(classes) == 0 {
+		t.Fatal("the module's cluster_configuration has no storageClasses")
 	}
 	var pools []string
 	for class := range classes {
@@ -854,7 +894,7 @@ func changeSecrets(t *testing.T, server host) {
 // agent writes the secrets anew and brings the stack up as after a boot.
 func missingSecretFile(t *testing.T, server host) {
 	server.must(t, "systemctl stop clowderd")
-	server.must(t, "rm "+stackSecretsDir+"/files/password")
+	server.must(t, "rm "+stackSecretsDir+"/files/password/"+stackSecretKey)
 	output, err := server.run("docker compose --project-name " + project("shop") + " --file " + renderedStackFile +
 		" --file " + stackSecretsDir + "/env.yaml up --detach --force-recreate")
 	if err == nil {
@@ -978,8 +1018,8 @@ func deleteStack(t *testing.T, server host) {
 }
 
 // checkMemory logs what the agent and Traefik use and fails above the
-// goals, so a regression shows. Before the first cluster apply Traefik does
-// not run yet.
+// goals, so a regression shows. Before the first apply of the
+// configuration Traefik does not run yet.
 func checkMemory(t *testing.T, server host, when string) {
 	t.Helper()
 	agent := residentKiB(t, server, "$(systemctl show clowderd --property=MainPID --value)")

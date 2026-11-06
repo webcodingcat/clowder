@@ -15,14 +15,15 @@ import (
 // itself.
 const noLeaderFor = 2 * time.Minute
 
-// QuorumWatch alerts from this agent, not the leader, while it knows no
-// Raft leader: without a majority of the voters there is none, and the
-// leader's alerts are silent then (two hosts of three down, or this host
-// cut off). It tells the channels once no leader lasted noLeaderFor,
-// reminds every remindEvery and gives the all-clear when a leader is back.
-// The channels and their secrets come from this agent's own state, the
-// last it applied. What it told is in memory: an agent that restarts
-// without a leader tells again.
+// QuorumWatch alerts from this agent, not from the leader, while this agent
+// knows no Raft leader. Without a majority of the voters there is no
+// leader, so the leader's alerts are silent (for example, two hosts of
+// three are down, or this host is cut off). It tells the channels once
+// there has been no leader for noLeaderFor, reminds them every remindEvery,
+// and gives the all-clear when a leader is back. The channels and their
+// secrets come from this agent's own state, the last one it applied. What
+// it told is kept in memory only, so an agent that restarts without a
+// leader tells the channels again.
 type QuorumWatch struct {
 	alerts *Alerts
 	host   string
@@ -34,15 +35,16 @@ type QuorumWatch struct {
 	// lostAt is when this agent last stopped knowing a leader; zero while
 	// it knows one
 	lostAt time.Time
-	// open says the channels were told, and toldAt when last
+	// open says that the channels were told, and toldAt says when they
+	// were told last
 	open   bool
 	toldAt time.Time
-	// pending is the message each channel, by index, has not taken yet:
-	// a newer one replaces it
+	// pending is the message that each channel, by index, has not taken
+	// yet; a newer message replaces it
 	pending map[int]notify.Message
 }
 
-// NewQuorumWatch is the watch of the agent of host, by its name.
+// NewQuorumWatch makes the watch of the agent on host, given by its name.
 func NewQuorumWatch(alerts *Alerts, host string, leader func() bool) *QuorumWatch {
 	return &QuorumWatch{alerts: alerts, host: host, leader: leader, pending: map[int]notify.Message{}}
 }
@@ -59,9 +61,9 @@ func (w *QuorumWatch) Run(ctx context.Context) {
 	}
 }
 
-// round notes whether a leader is known, puts the message that is due for
-// each channel, and sends what the channels have not taken yet; a channel
-// that fails gets it again next round.
+// round notes whether a leader is known, queues the message that is due
+// for each channel, and sends what the channels have not taken yet. A
+// channel that fails gets the message again in the next round.
 func (w *QuorumWatch) round(ctx context.Context, now time.Time) {
 	if w.leader() {
 		if w.open && w.tell(notify.Resolved, now) {
@@ -82,10 +84,10 @@ func (w *QuorumWatch) round(ctx context.Context, now time.Time) {
 	w.deliver(ctx)
 }
 
-// tell puts a message for every channel that takes critical alerts, and
-// tells whether it could; without channels there is nobody to tell, which
-// counts as told. A channel that has not taken the raised message yet gets
-// no all-clear either.
+// tell queues a message for every channel that takes critical alerts, and
+// tells whether it could. Without channels there is nobody to tell, which
+// counts as told. A channel that has not taken the raised message yet does
+// not get the all-clear either.
 func (w *QuorumWatch) tell(event string, now time.Time) bool {
 	copied, err := w.alerts.cluster.SharedCopy()
 	if err != nil {

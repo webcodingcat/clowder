@@ -1,239 +1,312 @@
 # Ingress, fencing, certificates, alerts and metrics
 
 Part of [DEVELOPING.md](../../DEVELOPING.md): Traefik on every host, and the leader's
-loops that talk to the world outside: Hetzner Cloud (Floating IP, fencing), ACME, the
+loops that talk to the outside world: Hetzner Cloud (Floating IP, fencing), ACME and the
 alert channels.
 
 ## Traefik (`internal/ingress`, `agent/traefik.go`)
 
 - Every agent runs Traefik (`ingress.Image`, pinned) as the Compose project
-  `clowder-traefik` in the host network, with `restart: "no"` like every container. It is no
-  stack: the state knows nothing of it, its files live in `<Dir>/traefik/` beside `stacks/`
-  (so the search for stacks that left never finds it), and a stack's project starts with its
-  namespace, which `names` refuses to start with `clowder-`. `names.ClowdersOwn` answers whether a
-  project is clowder's own; every place that treats Traefik apart asks it: the
-  supervisor's rule (restart always, also when unhealthy) and the stack runner's clean-up
-  of secrets.
-- `ingress.RenderStatic` writes `traefik.yml`: the entrypoints `web` and `websecure` on the
-  Floating IP :80 and :443, `internal` on the node address :7480 trusting
-  `X-Forwarded-For` only from the node network, and `ping` on 127.0.0.1:7446 for the health
-  check. The public entrypoints trust no `X-Forwarded-For`, so Traefik sets the client's
-  address itself. `ingress.RenderCompose` writes the Compose file.
-- `traefikRunner` has a loop of its own beside the stack runner, so a long image pull of a
-  stack never holds up the ingress. It runs compose up as the stack runner does
-  (`loop.WhilePaused`, with the supervisor paused for it) when the hash of the Compose file and
-  `traefik.yml` differs from the one Traefik came up with: at the first pass after the agent
-  started, after Docker restarted (`loop.Signal.DockerRestarted`), and after a new image pin or Floating IP. Each
-  of its files is compared with what is on disk, so one removed or changed by hand comes
-  back at the next pass. It reads only the Floating IP, the stacks' routes and the
-  certificates from the state, no copy of all of it: it passes at every event of Docker's.
-- **Routes.** `ingress.RenderDynamic` writes the file provider's `routes.yaml`: per service
-  with `http` a service `<project>.<service>` whose servers are the containers of that
-  service on this host that run and, if they have a health check, are healthy
-  (`docker.Inspect`; the address in the network whose name sorts first), and routers
-  `<entrypoint>.<project>.<service>`. A route without such a container keeps its routers with
-  no servers, so Traefik answers 503, not 404. Traefik watches the directory, so new routes
-  need no restart. Every host routes every stack, as the Floating IP may move to any: a
-  stack on this host also gets a router on `internal`, and one on another host goes to that
-  host's `internal` entrypoint (`Route.Forwarded`), from the public entrypoints only, so a
-  request is forwarded once at most. TLS ends on the ingress host; the request goes on as
-  HTTP from its node address; `X-Forwarded-For` starts with the client, and the stack
-  host's Traefik adds the ingress host's node address after it.
-- **HTTPS.** A route whose domain has a certificate gets a router on `websecure` and one on
-  `web` that redirects to it; before that only a plain router on `web`, so nobody sees
-  Traefik's self-signed default certificate. The runner writes every certificate of the
-  state and its opened key into `/run/clowder-secrets/clowder-traefik/` (the tmpfs of the
-  stacks' secrets, 0700; mounted read-only), before the routes that name them. Traefik
-  watches only the routes, so the files are named after a hash of the chain: a renewed
-  certificate changes the routes, and Traefik reads it; old files go after the routes.
+  `clowder-traefik` in the host network, with `restart: "no"` like every container. Traefik
+  is not a stack. The state knows nothing about it, and its files live in `<Dir>/traefik/`
+  next to `stacks/`, so the search for stacks that left never finds it. A stack's project
+  name starts with its namespace, and `names` refuses namespaces that start with
+  `clowder-`. `names.ClowdersOwn` answers whether a project is clowder's own, and every
+  place that treats Traefik differently asks it: the supervisor's rule (always restart,
+  also when unhealthy) and the stack runner's clean-up of secrets.
+- `ingress.RenderStatic` writes `traefik.yml` with these entrypoints:
+  - `web` and `websecure` on the Floating IP, ports 80 and 443;
+  - `internal` on the node address, port 7480, which trusts `X-Forwarded-For` only from the
+    node network;
+  - `ping` on 127.0.0.1:7446 for the health check.
+
+  The public entrypoints trust no `X-Forwarded-For`, so Traefik sets the client's address
+  itself. `ingress.RenderCompose` writes the Compose file.
+- `traefikRunner` has its own loop next to the stack runner, so a long image pull for a
+  stack never holds up the ingress. It runs compose up the same way the stack runner does
+  (`loop.WhilePaused`, with the supervisor paused meanwhile) whenever the hash of the
+  Compose file and `traefik.yml` differs from the hash Traefik was started with. That
+  happens at the first pass after the agent starts, after Docker restarts
+  (`loop.Signal.DockerRestarted`), and after a new image pin or Floating IP. Each of its
+  files is compared with the file on disk, so a file removed or changed by hand comes back
+  at the next pass. The runner reads only the Floating IP, the stacks' routes and the
+  certificates from the state, not a copy of the whole state, because it runs a pass at
+  every Docker event.
+- **Routes.** `ingress.RenderDynamic` writes the file provider's `routes.yaml`. For each
+  service with `http` it writes:
+  - a Traefik service `<project>.<service>`, whose servers are the containers of that
+    service on this host that are running and, if they have a health check, healthy
+    (`docker.Inspect`; the address is taken from the network whose name sorts first);
+  - routers `<entrypoint>.<project>.<service>`.
+
+  A route without such a container keeps its routers with no servers, so Traefik answers
+  503, not 404. Traefik watches the directory, so new routes need no restart. Every host
+  routes every stack, because the Floating IP may move to any host. A stack on this host
+  also gets a router on `internal`. A stack on another host is forwarded to that host's
+  `internal` entrypoint (`Route.Forwarded`), but only from the public entrypoints, so a
+  request is forwarded at most once. TLS ends on the ingress host, which passes the request
+  on as HTTP from its node address. `X-Forwarded-For` starts with the client, and the stack
+  host's Traefik appends the ingress host's node address.
+- **HTTPS.** A route whose domain has a certificate gets a router on `websecure` and a
+  router on `web` that redirects to it. Until the certificate exists, the route has only a
+  plain router on `web`, so nobody sees Traefik's self-signed default certificate. The
+  runner writes every certificate in the state, with its opened key, into
+  `/run/clowder-secrets/clowder-traefik/` (the tmpfs of the stacks' secrets, 0700, mounted
+  read-only), before it writes the routes that name them. Traefik watches only the routes,
+  so the files are named after a hash of the chain. A renewed certificate therefore
+  changes the routes, and Traefik reads it. Old files are removed after the routes.
 - **ACME challenges.** The router `acme-challenge` on `web` and `internal` sends
-  `/.well-known/acme-challenge/` of every domain, before every stack's router, to the agent
-  on 127.0.0.1:7445, which answers from the state (`State.Challenges`): whichever host
-  holds the Floating IP can answer the CA.
-- The runner's passes come at every change of the state, every 30 s, and at once when the
-  supervisor sees an event of Docker's (`loop.Signal.Now`: start, die, health status): a container that
-  turns unhealthy leaves its route within seconds.
-- Golden files in `internal/ingress/testdata`; `bin/dev test-tools` checks the Compose file
-  with Debian's docker-compose.
+  `/.well-known/acme-challenge/` of every domain to the agent on 127.0.0.1:7445, ahead of
+  every stack's router. The agent answers from the state (`State.Challenges`), so whichever
+  host holds the Floating IP can answer the CA.
+- The runner runs a pass at every change of the state, every 30 s, and immediately when the
+  supervisor sees a Docker event (`loop.Signal.Now`: start, die, health status). So a
+  container that turns unhealthy leaves its route within seconds.
+- Golden files are in `internal/ingress/testdata`; `bin/dev test-tools` checks the Compose
+  file with Debian's docker-compose.
 
 ## Hetzner and ingress (`internal/hetzner`, `internal/controller`)
 
-clowder runs on Hetzner Cloud only, with a Hetzner private network between the hosts: no
-layer stands between it and Hetzner's API.
+clowder runs only on Hetzner Cloud, with a Hetzner private network between the hosts. No
+abstraction layer sits between clowder and Hetzner's API.
 
-- `cluster.yaml` has the project's token in `hetzner: {token: !secret ...}`, and `api`
-  for a lab's API instead of Hetzner's (a full `http://` or `https://` URL: the token
-  goes there). `private_network` is the private network's range; every host's underlay
-  is in it, which the state checks at each join and each `cluster apply`.
-- `hetzner.Client` is what clowder asks of Hetzner: where the Floating IP is routed, route
-  it, check a server, power a server off and on (fencing). A server is its `ServerID`,
-  which `clowderd init` and `join --server-id` record. A host names it itself, so
-  `Client.CheckServer` makes sure the server's private address is the host's underlay
-  and its public IPv4 the host's public address (`ErrOtherServer` if not): the join
-  checks it, the Floating IP's loop the first host's. `SetRetired` and `RetiredSerial`
-  are the label `clowder-retired` of a server `clowderd recover` took out of the
-  cluster, with the serial of the retired host's certificate; the leader never uses them.
-- It is a small client on `net/http`: the official
-  SDK would bring Prometheus' client and more into clowderd. It finds the Floating IP among
-  the project's (the API cannot look one up by its address) and waits for each action to
+- The ClusterConfiguration names the project's token in `hetzner.tokenSecretRef`, a
+  `{name, key}` of a Secret in `clowder-system`, just as the hcloud controller reads
+  `kube-system/hcloud`. `hetzner.api` points to a lab's API instead of Hetzner's; it is a
+  full `http://` or `https://` URL, and the token is sent there. `privateNetwork` is the
+  private network's range. Every host's underlay must lie in it, and the state checks that
+  at each join and each apply of the configuration.
+- `hetzner.api` and `acme.directory` point clowder somewhere other than Hetzner's API and
+  Let's Encrypt, which is meant for test labs. `clusterspec.ServiceURLWarnings` warns about
+  that, and also that over `http://` the token or the ACME requests cross the network
+  unencrypted. An apply that changes the configuration returns the warnings, and a dry run
+  always does. The leader logs them once for each configuration that has them
+  (`warnServiceURLs`, in the Floating IP's loop, because the leader is the one that talks
+  to both services).
+- `hetzner.Client` covers what clowder asks of Hetzner: where the Floating IP is routed,
+  routing it, checking a server, and powering a server off and on (fencing). A server is
+  identified by its `ServerID`, which `clowderd init` and `join --server-id` record. A host
+  names its server itself, so `Client.CheckServer` makes sure that the server's private
+  address is the host's underlay and its public IPv4 is the host's public address
+  (`ErrOtherServer` if not). The join checks the joining host's server; the Floating IP's
+  loop checks the first host's. `SetRetired` and `RetiredSerial` manage the label
+  `clowder-retired` on a server that `clowderd recover` took out of the cluster; the label
+  holds the serial of the retired host's certificate. The leader never uses them.
+- The client is small and built on `net/http`, because the official SDK would pull
+  Prometheus' client and more into clowderd. It finds the Floating IP among the project's
+  Floating IPs (the API cannot look one up by its address) and waits for each action to
   finish. It sends a request again, up to `attempts` times with a growing wait and jitter,
-  while the API answers 429 (until `RateLimit-Reset`; Hetzner sends no `Retry-After`), 5xx
-  or `locked`, or the network fails: one busy moment of the API must not hold up a fence.
-  Every request clowder sends may go twice (a read, an assignment to the same server, a
-  power action on a server in that state, the same labels). `SetRetired` reads the
-  server's labels and writes them back with its own, as the API replaces all at once. It
-  reads every answer to its end, so the connection carries the next request. Its
-  errors carry the API's message, never the token.
+  while the API answers 429, 5xx or `locked`, or the network fails. For 429 it waits until
+  `RateLimit-Reset`, as Hetzner sends no `Retry-After`. One busy moment of the API must not
+  hold up a fence. Every request clowder sends is safe to send twice: a read, an assignment
+  to the same server, a power action on a server already in that state, the same labels.
+  `SetRetired` reads the server's labels and writes them back with its own added, because
+  the API replaces all labels at once. The client reads every response to the end, so the
+  connection can carry the next request. Its errors carry the API's message, never the
+  token.
+- **A token Hetzner refuses** raises the condition `hetzner-token`. `hetzner.TokenRefused`
+  covers 401 or 403, and also a server or Floating IP the project does not have
+  (`ErrNoSuchServer`, `ErrNoSuchFloatingIP`), because a token of another project has none
+  of the cluster's. Only the calls that fencing and the Floating IP make anyway observe
+  it; no loop sends extra requests to Hetzner for it. Before a new token is applied, the
+  cluster checks it once with `ServerIDs` (one request for the project's servers), and the
+  CLI asks the user (cluster.md, Resources and The CLI).
 - `hetzner/hetznertest` is a fake of the API for the tests of the packages that use the
-  client: servers, Floating IPs, power actions that finish at once, labels, and what the
-  requests changed. A test names it in `hetzner.api`, so the real client talks to it.
-- `controller.RunFloatingIP` (`floatingip.go`) acts only on the leader. The ingress host (`State.Ingress`,
-  `set-ingress`) is the recorded one while it is active, so the
-  Floating IP never switches back by itself; otherwise the first of
-  `ingress.preferred_hosts` that can, else the one with the lowest ID that can. A host
-  whose server Hetzner has not confirmed yet is checked first
-  (`confirm-server`); one that fails the check gets no Floating IP. At a change
-  of the state and every 30 s it asks Hetzner where the Floating IP is and routes it to
-  the ingress host when it is elsewhere (moved by hand, or a new ingress host); it reads
-  the API at most once per 30 s, about 120 of Hetzner's 3600 requests an hour. Before it
-  routes the address, it confirms its lead (`VerifyLeader`): a leader cut off from the
-  others must not take the address back from the host the new leader routed it to.
-- Every host has the Floating IP on its public interface, held or not (`clowderd check`
-  requires it): Hetzner routes it to one host only, so whatever binds it (published
-  ports, Traefik) can bind it on every host and at boot.
-- The leader's loops, the leader's side of a join, `clowderd recover` and the agent's
-  start call Hetzner: each opens the token from the state and makes the client
-  (`controller.OpenHetzner`). depguard keeps `hetzner` out of the CLI, the state and the
-  scheduler.
-- **clowder's ports** lie in 7400-7499, which `stackspec.ReservedPort` keeps from the stacks:
-  Raft 7400 and the API 7443 (node address and underlay), `/metrics` 7444 and Traefik's
-  internal entrypoint 7480 (node address), the ACME challenges 7445 and Traefik's health
-  check 7446 (127.0.0.1). On the Floating IP, 80 and 443 are Traefik's.
+  client. It has servers, Floating IPs, power actions that finish at once, labels, and a
+  record of what the requests changed. A test names it in `hetzner.api`, so the real
+  client talks to it.
+- `controller.RunFloatingIP` (`floatingip.go`) acts only on the leader. It picks the
+  ingress host (`State.Ingress`, `set-ingress`) this way:
+  - the recorded ingress host while it is active, so the Floating IP never switches back
+    by itself;
+  - otherwise the first host in `ingress.preferredHosts` that can take it;
+  - otherwise the host with the lowest ID that can take it.
+
+  A host whose server Hetzner has not confirmed yet is checked first (`confirm-server`); a
+  host that fails the check gets no Floating IP. At each change of the state and every
+  30 s, the loop asks Hetzner where the Floating IP is, and routes it to the ingress host
+  if it is elsewhere (moved by hand, or a new ingress host). It reads the API at most once
+  per 30 s, which is about 120 of Hetzner's 3600 requests an hour. Before it routes the
+  address, it confirms that it still leads (`VerifyLeader`). A leader cut off from the
+  others must not take the address back from the host that the new leader routed it to.
+- Every host has the Floating IP on its public interface, whether it holds it or not
+  (`clowderd check` requires this). Hetzner routes it to one host only, so whatever binds
+  it (published ports, Traefik) can bind it on every host and at boot.
+- The leader's loops, the leader's side of a join, `clowderd recover` and the agent's start
+  call Hetzner. Each opens the token from its Secret in the state and creates the client
+  (`controller.OpenHetzner`, `State.HetznerToken`). depguard keeps `hetzner` out of the
+  CLI, the state and the scheduler.
+- **clowder's ports** are in the range 7400-7499, which `stackspec.ReservedPort` keeps
+  away from the stacks:
+
+  | Port | Use | Listens on |
+  |---|---|---|
+  | 7400 | Raft | node address and underlay |
+  | 7443 | the API | node address and underlay |
+  | 7444 | `/metrics` | node address |
+  | 7480 | Traefik's internal entrypoint | node address |
+  | 7445 | the ACME challenges | 127.0.0.1 |
+  | 7446 | Traefik's health check | 127.0.0.1 |
+
+  On the Floating IP, ports 80 and 443 belong to Traefik.
 
 ## Fencing (`controller/health.go`, `controller/fencing.go`, `agent/health.go`)
 
 A host that fails is powered off through Hetzner's API before any of its stacks or volumes
-start elsewhere: until then it is the only one that runs them, and it may still write.
+start elsewhere. Until then it is the only host that runs them, and it may still write.
 
 - **Beats.** Every agent tells every voter every `BeatInterval` that it is alive
-  (`sendBeats`, `POST /v1/internal/beats`), from its start on, before its state caught
-  up: the beat says the agent runs, not what it runs. The beats are not in the Raft log:
-  each voter keeps the last one of each host in memory (`controller.Heard`), and after its
-  own start counts from the start. As every voter has them, a new leader knows at once how
-  long each host has been silent, and the time runs on across a change of leader.
-- **Failed** (`fencer.watch`): a host that is active, draining or recovering, and that a
-  majority of the voters (the leader counts itself; the others it asks with
-  `GET /v1/internal/beats/{id}`, `askTimeout` each) has not heard for `FailAfter`, is
-  `failed`. A voter that does not answer, and the host itself, count against the change
-  either way: as having heard it for `failed`, as not having heard it for `active`.
-  So a cut between the leader and one host alone fails no host, and a pause of all hosts
-  shorter than `FailAfter` fails none. A failed host that a majority hears again within
-  `backWithin` is `active` again; the leader decides that, never the host (cluster.md,
-  Host phases). A failed host keeps running its stacks (`state.KeepsStacks`).
+  (`sendBeats`, `POST /v1/internal/beats`). It starts at agent start, before its state has
+  caught up: the beat says that the agent runs, not what it runs. The beats are not in the
+  Raft log. Each voter keeps the last beat of each host in memory (`controller.Heard`), and
+  after its own start it counts from that start. Because every voter has them, a new leader
+  knows at once how long each host has been silent, and the time carries over across a
+  change of leader.
+- **Failed** (`fencer.watch`): a host that is active, draining or recovering becomes
+  `failed` when a majority of the voters has not heard from it for `FailAfter`. The leader
+  counts itself and asks the others with `GET /v1/internal/beats/{id}`, with `askTimeout`
+  each. A voter that does not answer, and the host itself, always count against the
+  change: as having heard the host when the change is to `failed`, and as not having heard
+  it when the change is to `active`. So a cut between the leader and one host alone fails
+  no host, and a pause of all hosts shorter than `FailAfter` fails none. A failed host that
+  a majority hears again within `backWithin` is `active` again. The leader decides that,
+  never the host (cluster.md, Host phases). A failed host keeps running its stacks
+  (`state.KeepsStacks`).
 - **Only what needs it** (`needsFence`): a failed host is fenced only if it has a stack that
-  another active host could take over. A host without stacks (drained and rebooting for
-  maintenance) or whose stacks no other host could take gains nothing from a power cycle:
-  it stays failed, with its alert, and is active again once a majority hears it.
+  another active host could take over. A power cycle gains nothing for a host without
+  stacks (for example one drained and rebooting for maintenance), or for one whose stacks
+  no other host could take. Such a host stays failed, with its alert, and is active again
+  once a majority hears it.
 - **Fenced** (`fencer.fence`, `fencer.step`): the leader starts a fence-host operation for
-  the first failed host that may be fenced (`whyNotFence`): `cluster.yaml` brought the
-  Hetzner token, Hetzner confirmed the host's server, no operation holds the host, a majority of the
-  voters stays active without it (more hosts failed at once points to the network, and
-  powering hosts off would not help), and the last try to power it off is `fenceAgain`
-  ago. One host at a time: the next waits until the operation is over. The start makes the
-  host `fencing`; the leader confirms its lead (`VerifyLeader`) and powers the server off,
-  up to `powerOffTries` times with a pause that doubles. Once it is off, the host is
-  `fenced` and its stacks fail over (cluster.md, Placement); if it cannot, the host goes
-  back to `failed` and the operation fails, with the alert `fencing-blocked`. Then
-  `clowder host fence-confirm` lets a user say the server is off. The operation ends
-  once the host's stacks run elsewhere, or after `StepTime`.
+  the first failed host that may be fenced (`whyNotFence`). A host may be fenced when:
+  - a configuration names the Hetzner token;
+  - Hetzner has confirmed the host's server;
+  - no operation holds the host;
+  - a majority of the voters stays active without it (if more hosts fail at once, the
+    network is the likely cause, and powering hosts off would not help);
+  - the last attempt to power it off was at least `fenceAgain` ago.
+
+  Only one host is fenced at a time; the next waits until the operation is over. Starting
+  the operation makes the host `fencing`. The leader confirms that it still leads
+  (`VerifyLeader`) and powers the server off, up to `powerOffTries` times with a pause that
+  doubles. Once the server is off, the host is `fenced` and its stacks fail over
+  (cluster.md, Placement). If the server cannot be powered off, the host goes back to
+  `failed` and the operation fails, with the alert `fencing-blocked`. A user can then run
+  `clowder host fence-confirm` to state that the server is off. The operation ends once the
+  host's stacks run elsewhere, or after `StepTime`.
 - **Back** (`fencer.powerOn`, `agent/recovery.go`): a fenced host whose operation is over
-  is powered on, once per fence and leader, if Hetzner confirmed its server (after
-  a user's `fence-confirm` it may not have: then the user powers it on). It boots, starts
-  nothing (no container runs after a boot, and `stacks.Runner` runs none on a host that is
-  not `KeepsStacks`), catches up with the leader (cluster.md, Raft), and reports itself
-  `recovering`. Its copies are no longer synced since the fence; the volume reconciler
-  reports each synced once DRBD caught it up, and then the host reports itself `active`.
-  Its stacks stay where they went, apart from those with replicas 1, which waited for it.
+  is powered on, once per fence and leader, if Hetzner confirmed its server. After a user's
+  `fence-confirm` it may not have; then the user powers the server on. The host boots and
+  starts nothing: no container runs after a boot, and `stacks.Runner` runs none on a host
+  that is not `KeepsStacks`. It catches up with the leader (cluster.md, Raft) and reports
+  itself `recovering`. Its copies have not been synced since the fence. The volume
+  reconciler reports each copy synced once DRBD has caught it up, and then the host reports
+  itself `active`. Its stacks stay where they went, except those with replicas 1, which
+  waited for it.
 - **The flapping brake:** a host fenced `FlapLimit` times within `FlapWindow` (`FencedAt`)
-  is not powered on again but `disabled`, with the alert `host-disabled`, until a user runs
-  `clowder host enable`. A host whose agent crashes at once after each start is fenced
-  once and stays `fenced`, as it never reports: no reboot loop.
+  is not powered on again. It becomes `disabled`, with the alert `host-disabled`, until a
+  user runs `clowder host enable`. A host whose agent crashes right after each start is
+  fenced once and stays `fenced`, because it never reports. So there is no reboot loop.
 - **Voters keep their vote** while they are down (cluster.md, Raft, step 4).
-- `fencing_test.go` runs the loop against the fake leader and the fake API: the majority,
-  a host that is back, the fence through to power on, a power-off that fails, several
-  hosts down at once, the brake.
+- `fencing_test.go` runs the loop against the fake leader and the fake API. It covers the
+  majority, a host that comes back, a fence through to power-on, a power-off that fails,
+  several hosts down at once, and the brake.
 
 ## Certificates of the routes (`controller/acme.go`)
 
-- `controller.RunACME` acts only on the leader, with `golang.org/x/crypto/acme`, at a
-  change of the state and every 30 s. It keeps one certificate per domain of an HTTP route
-  (`State.Certificates`, the key sealed) and deletes those of domains no stack names.
-- The account (`State.ACMEAccount`, the key sealed) is made at the first order and belongs
-  to its directory: a new `acme.directory` gets a new account. `acme.ca` (a file next to
-  `cluster.yaml`) is trusted besides the system's CAs: a test CA such as Pebble.
-- An order, one domain after the other: the domain must resolve to the Floating IP and
-  nothing else, or no order (retry in 10 minutes: it never reached the CA, so it does not
-  count towards the backoff, and Let's Encrypt's limit on failed validations stays
-  untouched). Then the answer to the HTTP-01 challenge goes into the state, and the leader
-  asks the ingress host's Traefik for it, on its internal entrypoint (node address :7480,
-  `checkAddress`), with the domain as host until it returns it (at most 2 minutes): that
-  is where the CA's request through the Floating IP lands, and that host may apply the
-  challenge later than the leader. Without an ingress host it asks the Floating IP :80.
-  Only then may the CA validate. When the order ends, the leader removes the
-  answer from the state; a new leader removes answers an old one left behind. A failed
-  account makes the pass end: Let's Encrypt allows few new accounts per address.
+- `controller.RunACME` acts only on the leader and uses `golang.org/x/crypto/acme`. It runs
+  at each change of the state and every 30 s. It keeps one certificate per domain of an
+  HTTP route (`State.Certificates`, with the key sealed) and deletes the certificates of
+  domains that no stack names.
+- The account (`State.ACMEAccount`, with the key sealed) is created at the first order and
+  belongs to its directory, so a new `acme.directory` gets a new account. `acme.ca` is
+  trusted in addition to the system's CAs, for a test CA such as Pebble. It is a PEM
+  certificate in the configuration, like Kubernetes' `caBundle`, and at most
+  `clusterspec.MaxCASize`.
+- Orders run one domain after another:
+  1. The domain must resolve to the Floating IP and nothing else. Otherwise there is no
+     order, and the leader retries in 10 minutes. This does not count towards the backoff,
+     because the order never reached the CA, and Let's Encrypt's limit on failed
+     validations stays untouched.
+  2. The answer to the HTTP-01 challenge goes into the state.
+  3. The leader asks the ingress host's Traefik for the answer on its internal entrypoint
+     (node address, port 7480, `checkAddress`), with the domain as host, until it returns
+     it (at most 2 minutes). That is where the CA's request through the Floating IP lands,
+     and that host may apply the challenge later than the leader. Without an ingress host,
+     the leader asks the Floating IP on port 80.
+  4. Only then may the CA validate.
+
+  When the order ends, the leader removes the answer from the state; a new leader removes
+  answers an old leader left behind. A failed account ends the pass, because Let's Encrypt
+  allows only a few new accounts per address.
 - A failed order backs off per domain: 10 minutes, doubling up to 24 hours, kept in the
-  leader's memory. A new leader starts again at none, so even a leader that changes often
-  stays well below Let's Encrypt's limits.
-- **Renewal** is relative to the lifetime (`NotAfter` minus `NotBefore`, both in the
-  state), because Let's Encrypt makes lifetimes shorter: by default when a third is left.
-  `acme.renew_before` overrides that while it is shorter than the lifetime; a longer one
-  would renew every new certificate at once, so the leader keeps the default for that
-  certificate and raises the alert `renew-before-ignored`. Both follow from the state
-  alone, so no setting and no change of leader can make it renew in a loop.
+  leader's memory. A new leader starts again with no backoff, but even a leader that
+  changes often stays well below Let's Encrypt's limits.
+- **Renewal** depends on the lifetime (`NotAfter` minus `NotBefore`, both in the state),
+  because Let's Encrypt is shortening lifetimes. By default a certificate is renewed when a
+  third of its lifetime is left. `acme.renewBefore` overrides that while it is shorter than
+  the lifetime. A longer value would renew every new certificate at once, so for that
+  certificate the leader keeps the default and raises the alert `renew-before-ignored`.
+  Both follow from the state alone, so no setting and no change of leader can cause a
+  renewal loop.
 - The tests run the whole order against a small ACME CA of their own
-  (`controller/acme_test.go`), which validates by asking for the challenge.
+  (`controller/acme_test.go`), which validates by requesting the challenge.
 
 ## Alerts (`internal/notify`, `controller/wanted.go`, `controller/alerts.go`)
 
-- **Channels** (`alerts.channels` in `cluster.yaml`, each with an optional
-  `min_severity`): Discord (an embed colored by severity), webhook (a JSON POST of
-  `notify.Message`) and email (port 465 with TLS from the start, any other port only with
-  STARTTLS; `smtp.ca` is a file next to `cluster.yaml`). URLs and passwords are secrets;
-  errors never name a URL. `http://` works, as the live test's receivers need.
-- **In the state** only the open alerts (`State.Alerts`, `put-alert`, `resolve-alert`): a
-  key of kind and subject (`pool-use/node0/vg/thin/data`), so one condition never has two
-  open alerts; a condition that gets worse keeps its key and changes its severity.
-  Subjects and messages hold no value that changes from report to report: each change is
-  a Raft write.
-- **In the leader's memory** (`controller.Alerts`): the deliveries. A message goes out when
-  an alert is raised or gets worse, every 6 h while it is open, and when it is resolved,
-  to each channel whose `min_severity` it reaches; the all-clear goes with the highest
-  severity told, so a channel for critical alerts gets it after a downgrade too. A failed
-  message is tried again after 1 minute, doubling up to an hour, and its channel gets
-  nothing more in that pass, so a dead mail server cannot hold up the loop; the heartbeat
-  goes first. Messages wait by the channel's place in `alerts.channels`, so a new
-  `cluster.yaml` drops them. `clowder cluster status` shows the failed ones: a follower
-  asks the leader (`GET /v1/internal/alerts/failures`).
-  After a change of leader the new leader reminds of each open alert once: a duplicate
-  rather than a lost alert. The heartbeat (`alerts.heartbeat`) is a GET every `interval`
-  (default 1m), in a loop of its own, so a slow channel cannot make it late.
-  `clowder alert test` sends a test alert to every channel at once, from the agent the CLI
-  asks: the one exception to "only the leader calls external services", so a channel can be
-  tried also while the cluster has no leader.
+- **Channels** are listed in `alerts.channels` of the configuration, each with an optional
+  `minSeverity`:
+  - Discord: an embed colored by severity;
+  - webhook: a JSON POST of `notify.Message`;
+  - email: port 465 with TLS from the start, any other port only with STARTTLS; `smtp.ca`
+    is a PEM certificate in the configuration.
+
+  URLs and passwords are values of Secrets in `clowder-system`, which a channel names
+  (`webhookSecretRef`, `urlSecretRef`, `smtp.passwordSecretRef`; the heartbeat's
+  `urlSecretRef`). `notify.New` opens them through `notify.Secrets`. Errors never name a
+  URL. `http://` works, because the live test's receivers need it.
+- **The state** holds only the open alerts (`State.Alerts`, `put-alert`, `resolve-alert`).
+  Each has a key made of kind and subject (`pool-use/node0/vg/thin/data`), so one condition
+  never has two open alerts. A condition that gets worse keeps its key and changes its
+  severity. Subjects and messages hold no value that changes from report to report, because
+  each change is a Raft write.
+- **The leader's memory** (`controller.Alerts`) holds the deliveries.
+  - A message goes out when an alert is raised or gets worse, every 6 h while it is open,
+    and when it is resolved. It goes to each channel whose `minSeverity` it reaches. The
+    all-clear carries the highest severity that was sent, so a channel for critical alerts
+    gets it after a downgrade too.
+  - A failed message is retried after 1 minute, doubling up to an hour, and its channel
+    gets nothing more in that pass, so a dead mail server cannot hold up the loop. The
+    heartbeat goes first.
+  - Waiting messages are keyed by the channel's position in `alerts.channels` and the
+    configuration's generation, so a new generation drops them. `clowder cluster status`
+    shows the failed deliveries; a follower asks the leader for them
+    (`GET /v1/internal/alerts/failures`).
+  - After a change of leader, the new leader sends one reminder for each open alert: a
+    duplicate is better than a lost alert.
+  - The heartbeat (`alerts.heartbeat`) is a GET every `interval` (default 1m), in its own
+    loop, so a slow channel cannot delay it.
+  - `clowder alert test` sends a test alert to every channel at once, from the agent the
+    CLI asks. This is the one exception to "only the leader calls external services", so
+    that a channel can be tested while the cluster has no leader.
 - **Conditions** that the state does not show are kept in memory (`controller.Conditions`)
-  with the time they began, observed by the loop that sees them (`Observe`): the Floating
-  IP not held (the Floating IP's loop), a host over capacity (the placement), a failed host
-  that cannot be fenced (the fencing loop), Docker not answering and a stack failing (the
-  alerts, from `report-host` and `set-stack-status`). After a change of leader they start
-  again, so a new alert comes a little later rather than wrongly; one that is open stays
-  until the loop that observes its condition has looked (`Conditions.Seen`). An agent that
-  leads no more forgets them, and each alerts pass forgets those of stacks and hosts that
-  are gone or removed (`conditionKeys`, `Conditions.Keep`).
+  with the time they began. The loop that sees a condition observes it (`Observe`):
+  - the Floating IP not held (the Floating IP's loop);
+  - Hetzner refusing the token (the Floating IP's loop and the fencing loop);
+  - a host over capacity (the placement);
+  - a failed host that cannot be fenced (the fencing loop);
+  - Docker not answering and a stack failing (the alerts, from `report-host` and
+    `set-stack-status`).
+
+  After a change of leader the conditions start again, so a new alert comes a little later
+  rather than wrongly. An open alert stays until the loop that observes its condition has
+  looked (`Conditions.Seen`). An agent that no longer leads forgets the conditions, and
+  each alerts pass forgets those of stacks and hosts that are gone or removed
+  (`conditionKeys`, `Conditions.Keep`).
 - `wanted_test.go` and `conditions_test.go` check `wantedAlerts` and `Conditions` on a
-  state in memory: the thresholds, how long a condition must last, what keeps an open
-  alert; `alerts_test.go` checks the loop: delivery, retries, channels, and the conditions
-  of a deleted stack and a removed host forgotten.
+  state in memory: the thresholds, how long a condition must last, and what keeps an open
+  alert. `alerts_test.go` checks the loop: delivery, retries, channels, and that the
+  conditions of a deleted stack and a removed host are forgotten.
 
 | Alert | Severity | Raised | Resolved |
 |---|---|---|---|
@@ -241,6 +314,7 @@ start elsewhere: until then it is the only one that runs them, and it may still 
 | `root-use` | warning | ≥ 90 % | < 85 % |
 | `docker-down` | critical | 2 min without an answer | answers |
 | `ingress-not-held` | critical | 5 min | held again |
+| `hetzner-token` | critical | Hetzner refuses the token for a fencing or Floating IP call (`hetzner.TokenRefused`) | the next such call is not refused |
 | `over-capacity` | warning | at once | fits again |
 | `certificate-not-renewed` | warning | less than half the renewal window left | renewed |
 | `renew-before-ignored` | warning | for any certificate | value changed |
@@ -250,34 +324,36 @@ start elsewhere: until then it is the only one that runs them, and it may still 
 | `fencing-blocked` | critical | a failed host the leader cannot fence (`whyNotFence`) | fenced, active again |
 | `host-fenced` | critical | `fenced` or `recovering` | active again |
 | `host-disabled` | critical | `disabled` (flapping brake) | enabled |
-| `split-brain` | critical | a host reports a copy that stands alone from a peer (`Host.SplitBrain`) | connected again (`volume resolve-splitbrain`) |
-| `no-quorum` | critical | 2 min a primary copy without DRBD's quorum (`Host.NoQuorum`) | quorum back |
+| `split-brain` | critical | a host reports a copy that has split from a peer (`Host.SplitBrain`) | connected again (`volume resolve-splitbrain`) |
+| `no-quorum` | critical | a primary copy without DRBD's quorum for 2 min (`Host.NoQuorum`) | quorum back |
 | `no-ha` | critical | `clowderd recover` left one host (`RecoveredAt`) | three hosts run stacks |
 
-A value is resolved below its raise threshold, so one that hovers there does not raise and
-resolve at every report. Likewise an alert that gets better and then worse again, up to the
-severity the channels were told of, sends nothing new: only its reminder and its
-all-clear.
+An alert is resolved below its raise threshold, so a value that hovers near the threshold
+does not raise and resolve the alert at every report. Likewise, an alert that gets better
+and then worse again, up to the severity already sent to the channels, sends nothing new;
+only its reminder and its all-clear go out.
 
-**Without a leader** the alerts above are silent: a majority of the voters is gone (two
-hosts of three), or this host is cut off. So every agent watches for itself
-(`QuorumWatch`): once it has known no Raft leader for `noLeaderFor`, it sends
-`no-leader/<host>` (critical) to the channels of its own last state, reminds every
-`remindEvery` and gives the all-clear once a leader is back. What it told is in its memory, not the
-state: an agent that restarts without a leader tells again.
+**Without a leader** the alerts above are silent: either a majority of the voters is gone
+(two hosts of three), or this host is cut off. So every agent watches for itself
+(`QuorumWatch`). Once it has known no Raft leader for `noLeaderFor`, it sends
+`no-leader/<host>` (critical) to the channels of its own last state, sends a reminder every
+`remindEvery`, and sends the all-clear once a leader is back. What it has sent is kept in
+its memory, not in the state, so an agent that restarts without a leader sends the alert
+again.
 
 ## Metrics (`internal/metrics`, `agent/metrics.go`)
 
-- Every agent serves `/metrics` on its node address, port 7444 (`MetricsPort`), plain HTTP
-  without authentication: only the cluster's hosts reach the node address, through
-  WireGuard; containers do not (the nft table). Nothing in `cluster.yaml` changes that.
+- Every agent serves `/metrics` on its node address, port 7444 (`MetricsPort`), over plain
+  HTTP without authentication. Only the cluster's hosts reach the node address, through
+  WireGuard; containers do not (the nft table). Nothing in the configuration changes that.
 - `internal/metrics` writes Prometheus' text format by hand, sorted, so it is tested
-  against golden files (`agent/testdata/metrics-*.golden.txt`); the official client
-  library would bring more into clowderd than the few dozen values need.
-- Each agent exports what is about its own host: its phase and whether it leads, the Raft
-  index, the pools' use, Docker, the root file system, the containers of its stacks by
-  state, the supervisor's restarts per service and its own resident memory. What the
-  cluster has once only the leader exports, so a Prometheus that scrapes every host
-  counts it once: each host's room as the scheduler counts it (`scheduler.Rooms`), the
-  certificates' expiry, the open alerts by severity and the failed deliveries.
-- `promtool check metrics` and a scraping Prometheus come with the live tests.
+  against golden files (`agent/testdata/metrics-*.golden.txt`). The official client
+  library would pull more into clowderd than the few dozen values need.
+- Each agent exports the values about its own host: its phase and whether it leads, the
+  Raft index, the pools' use, Docker, the root file system, the containers of its stacks by
+  state, the supervisor's restarts per service, and its own resident memory. Values the
+  cluster has only once are exported by the leader alone, so a Prometheus that scrapes
+  every host counts them once: each host's room as the scheduler counts it
+  (`scheduler.Rooms`), the certificates' expiry, the open alerts by severity, and the
+  failed deliveries.
+- The live tests run `promtool check metrics` and a scraping Prometheus.

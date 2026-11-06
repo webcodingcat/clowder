@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -88,9 +87,9 @@ var echoStack = document(resource.KindStack, "echo", `services:
 // check, the self-check through Traefik, the CA's validation.
 const certificateDeadline = 5 * time.Minute
 
-// acmeCAFile is HLab's ACME CA bundle next to cluster.yaml (acme.ca): the
-// lab's CA for Pebble's HTTPS, and Pebble's roots, which sign the
-// certificates.
+// acmeCAFile is the file of HLab's ACME CA bundle on the host and in a
+// container; the configuration has it inline (acme.ca): the lab's CA for
+// Pebble's HTTPS, and Pebble's roots, which sign the certificates.
 const acmeCAFile = "pebble.pem"
 
 // holdFloatingIP moves the Floating IP away by hand, through the Cloud API:
@@ -154,9 +153,9 @@ func serveHTTPS(t *testing.T, tofu outputs) {
 			"name": "shop", "type": "A", "records": []map[string]string{{"value": tofu.FloatingIP.Value}},
 		}},
 	}, nil)
-	writeClusterFile(t, acmeCAFile, download(t, os.Getenv("HLAB_ACME_CA")))
+	acmeCA := string(download(t, os.Getenv("HLAB_ACME_CA")))
 	changeConfig(t, func(config *clusterspec.Config) {
-		config.ACME = clusterspec.ACME{Directory: os.Getenv("HLAB_ACME_DIRECTORY"), CA: acmeCAFile, Email: "ops@" + zone}
+		config.ACME = clusterspec.ACME{Directory: os.Getenv("HLAB_ACME_DIRECTORY"), CA: acmeCA, Email: "ops@" + zone}
 	})
 	createAndApply(t, "echo", echoStack)
 	waitRunning(t, "echo", 1)
@@ -182,13 +181,12 @@ func serveHTTPS(t *testing.T, tofu outputs) {
 }
 
 // ingressClient asks the Floating IP whatever the URL's host, and trusts
-// HLab's ACME CA.
+// HLab's ACME CA, as the configuration has it.
 func ingressClient(t *testing.T, floatingIP string) *http.Client {
 	t.Helper()
 	pool := x509.NewCertPool()
-	content, err := os.ReadFile(filepath.Join(clusterDir(), acmeCAFile))
-	if err != nil || !pool.AppendCertsFromPEM(content) {
-		t.Fatalf("read the ACME CA: %v", err)
+	if !pool.AppendCertsFromPEM([]byte(readConfig(t).ACME.CA)) {
+		t.Fatal("the configuration's acme.ca holds no certificate")
 	}
 	var dialer net.Dialer
 	transport := &http.Transport{
@@ -265,7 +263,9 @@ func udpSeesClient(t *testing.T, tofu outputs) {
 // hairpin asks the domain from inside a container: the request goes to the
 // Floating IP on its own host and through Traefik back to the stack.
 func hairpin(t *testing.T, server host) {
-	server.upload(t, filepath.Join(clusterDir(), acmeCAFile), "/tmp/"+acmeCAFile)
+	if _, err := server.runWithInput("cat > /tmp/"+acmeCAFile, strings.NewReader(readConfig(t).ACME.CA)); err != nil {
+		t.Fatal(err)
+	}
 	web := server.must(t, "docker ps -q --filter label=com.docker.compose.project="+project("echo")+
 		" --filter label=com.docker.compose.service=web")
 	server.must(t, "docker cp /tmp/"+acmeCAFile+" "+web+":/tmp/"+acmeCAFile)
@@ -277,15 +277,15 @@ func hairpin(t *testing.T, server host) {
 	}
 }
 
-// renewCertificate sets acme.renew_before between the certificate's time
+// renewCertificate sets acme.renewBefore between the certificate's time
 // left and its lifetime: one new certificate comes, and none after it,
-// whose time left is above the value again. Then renew_before above the
+// whose time left is above the value again. Then renewBefore above the
 // lifetime: no renewal, the alert renew-before-ignored instead, gone with
 // the value.
 func renewCertificate(t *testing.T, tofu outputs) {
 	first := peerCertificate(t, tofu.FloatingIP.Value)
 	lifetime := first.NotAfter.Sub(first.NotBefore)
-	// renew_before = lifetime less half the certificate's age: more than
+	// renewBefore = lifetime less half the certificate's age: more than
 	// its time left (lifetime less its age), so it is due; less than a new
 	// certificate's time left as long as that one is younger than half the
 	// first one's age. Four minutes of age give the test two to look.
@@ -293,7 +293,7 @@ func renewCertificate(t *testing.T, tofu outputs) {
 		time.Sleep(4*time.Minute - age)
 	}
 	renewBefore := lifetime - time.Since(first.NotBefore)/2
-	t.Logf("certificate %s: lifetime %s, renew_before %s", first.SerialNumber, lifetime, renewBefore.Round(time.Minute))
+	t.Logf("certificate %s: lifetime %s, renewBefore %s", first.SerialNumber, lifetime, renewBefore.Round(time.Minute))
 	changeConfig(t, func(config *clusterspec.Config) {
 		config.ACME.RenewBefore = fmt.Sprintf("%dm", renewBefore/time.Minute)
 	})
@@ -329,6 +329,6 @@ func renewCertificate(t *testing.T, tofu outputs) {
 		return nil
 	})
 	if now := peerCertificate(t, tofu.FloatingIP.Value); now.SerialNumber.Cmp(second.SerialNumber) != 0 {
-		t.Errorf("renewed with renew_before above the lifetime: %s", now.SerialNumber)
+		t.Errorf("renewed with renewBefore above the lifetime: %s", now.SerialNumber)
 	}
 }

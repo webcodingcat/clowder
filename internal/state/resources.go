@@ -12,8 +12,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
-// Change is a resource a command changed: its spec, its status, or that it
-// is gone.
+// Change is a resource that a command changed: its spec, its status, or
+// the fact that it is gone.
 type Change struct {
 	Kind            string `json:"kind"`
 	Namespace       string `json:"namespace,omitempty"`
@@ -32,16 +32,16 @@ func (s *State) changed(kind string, meta *Meta) {
 }
 
 // ErrStale is the answer to a leader's command that was planned on a state
-// in which a stack or a volume it changes was another: the leader plans
-// again on the new one.
+// in which a stack or a volume that it changes was different. The leader
+// then plans again on the new state.
 var ErrStale = errors.New("changed since the plan")
 
 // checkPlanned refuses a leader's change to a resource that changed after
-// the state the leader planned with (the index plannedAt): changed, or
-// deleted and made anew under the same name, whose ResourceVersion is then
-// the index of its making. The leader plans on a copy of the state and
-// commits after, so without this check it would write over what came in
-// between.
+// the state the leader planned with (the index plannedAt). The resource may
+// have changed, or been deleted and made anew under the same name; then its
+// ResourceVersion is the index at which it was made. The leader plans on a
+// copy of the state and commits later, so without this check it would
+// overwrite what came in between.
 func checkPlanned(kind, id string, stored *Meta, plannedAt uint64) error {
 	switch {
 	case plannedAt == 0:
@@ -60,7 +60,7 @@ func (s *State) deleted(kind string, meta Meta) {
 }
 
 // PutResource creates or changes a resource. A spec equal to the stored
-// one changes nothing: not the generation, not the resource version, so
+// one changes nothing, neither the generation nor the resource version, so
 // applying the same files again restarts nothing.
 type PutResource struct {
 	// Kind is the resource's (resource.KindVolume), not the command's.
@@ -69,8 +69,8 @@ type PutResource struct {
 	Namespace string `json:"namespace,omitempty"`
 	Name      string `json:"name"`
 	Owner     string `json:"owner"` // the channel: OwnerCLI so far
-	// Spec is the kind's: none for a namespace, resource.VolumeSpec,
-	// SealedSecret, stackspec.Spec.
+	// Spec is the kind's spec: none for a namespace, otherwise
+	// resource.VolumeSpec, SealedSecret or stackspec.Spec.
 	Spec json.RawMessage `json:"spec,omitempty"`
 }
 
@@ -82,8 +82,8 @@ type DeleteResource struct {
 	Owner     string `json:"owner"`
 }
 
-// resourceKind is how the state keeps one kind of resource, by its ID
-// (resourceID). put and remove only check; they return the change as a
+// resourceKind says how the state keeps one kind of resource, by its ID
+// (resourceID). put and remove only check. They return the change as a
 // function that the handler runs once every check has passed, so a refused
 // command leaves no trace (docs/developing/cluster.md, Cluster state).
 type resourceKind struct {
@@ -92,10 +92,10 @@ type resourceKind struct {
 	// put and remove only read the state and return their change, as a
 	// handler does, so a refused command leaves no trace.
 	//
-	// put decodes the spec and compares it with the stored one first: for
-	// an equal one it returns errUnchanged. Then it checks the spec against
-	// the state and returns the change that stores it; the change returns
-	// the stored Meta, for the handler to count the generation.
+	// put first decodes the spec and compares it with the stored one; for
+	// an equal spec it returns errUnchanged. Then it checks the spec against
+	// the state and returns the change that stores it. The change returns
+	// the stored Meta, so that the handler can count the generation.
 	put func(s *State, id string, payload PutResource) (store func() *Meta, err error)
 	// remove checks that nothing uses the resource, then returns the change
 	// that removes it.
@@ -103,10 +103,82 @@ type resourceKind struct {
 }
 
 var resourceKinds = map[string]resourceKind{
-	resource.KindNamespace: {find: findNamespace, put: putNamespace, remove: removeNamespace},
-	resource.KindVolume:    {find: findVolume, put: putVolumeResource, remove: removeVolumeResource},
-	resource.KindSecret:    {find: findSecret, put: putSecret, remove: removeSecret},
-	resource.KindStack:     {find: findStack, put: putStack, remove: removeStack},
+	resource.KindClusterConfiguration: {find: findConfig, put: putConfig, remove: removeConfig},
+	resource.KindNamespace:            {find: findNamespace, put: putNamespace, remove: removeNamespace},
+	resource.KindVolume:               {find: findVolume, put: putVolumeResource, remove: removeVolumeResource},
+	resource.KindSecret:               {find: findSecret, put: putSecret, remove: removeSecret},
+	resource.KindStack:                {find: findStack, put: putStack, remove: removeStack},
+}
+
+// ChangeResources puts and deletes resources in order, all of them or none.
+// Each change is checked against the state with the changes before it
+// applied. So a Secret placed before the configuration that names it, or a
+// namespace placed before its stacks, goes in together with them. Every
+// apply and delete of a user comes in this way (api's runChanges).
+type ChangeResources struct {
+	Changes []ResourceChange `json:"changes"`
+}
+
+// ResourceChange is one put or one delete.
+type ResourceChange struct {
+	Put    *PutResource    `json:"put,omitempty"`
+	Delete *DeleteResource `json:"delete,omitempty"`
+}
+
+// ChangeError is a change-resources command that was refused at one of its
+// changes, given by index. None of its changes went in.
+type ChangeError struct {
+	Index int
+	Err   error
+}
+
+func (e *ChangeError) Error() string { return fmt.Sprintf("change %d: %v", e.Index+1, e.Err) }
+
+func (e *ChangeError) Unwrap() error { return e.Err }
+
+// applyChangeResources applies the changes to a copy of the state, one
+// after the other, because each needs the changes before it. The function
+// it returns puts the copy in place. This is the one handler that works on
+// a copy, because what a change checks depends on the changes before it. A
+// change that changes nothing does not count, and a batch of only such
+// changes is unchanged.
+func applyChangeResources(s *State, cmd Command, payload ChangeResources) (func(), error) {
+	if len(payload.Changes) == 0 {
+		return nil, errors.New("no changes")
+	}
+	copied, err := s.Copy()
+	if err != nil {
+		return nil, err
+	}
+	copied.makeMaps()
+	for index, each := range payload.Changes {
+		var change func()
+		switch {
+		case (each.Put == nil) == (each.Delete == nil):
+			err = errors.New("a change is one put or one delete")
+		case each.Put != nil:
+			change, err = applyPutResource(copied, *each.Put)
+		default:
+			change, err = applyDeleteResource(copied, *each.Delete)
+		}
+		switch {
+		case errors.Is(err, errUnchanged):
+			continue
+		case err != nil:
+			return nil, &ChangeError{Index: index, Err: err}
+		}
+		change()
+	}
+	if len(copied.changes) == 0 {
+		return nil, errUnchanged
+	}
+	return func() {
+		// Copy leaves the audit out (snapshot.go), and Apply adds this
+		// command's entry to the state's own
+		audit := s.Audit
+		*s = *copied
+		s.Audit = audit
+	}, nil
 }
 
 // applyPutResource checks in a fixed order: whether the actor may put the
@@ -115,7 +187,7 @@ var resourceKinds = map[string]resourceKind{
 // channel's spec, only that the resource belongs to another channel. And an
 // unchanged resource passes even if the state has changed since in a way
 // that would make the same spec fail the other checks.
-func applyPutResource(s *State, cmd Command, payload PutResource) (func(), error) {
+func applyPutResource(s *State, payload PutResource) (func(), error) {
 	kind, ok := resourceKinds[payload.Kind]
 	if !ok {
 		return nil, fmt.Errorf("no kind of resource %q", payload.Kind)
@@ -126,6 +198,9 @@ func applyPutResource(s *State, cmd Command, payload PutResource) (func(), error
 	}
 	if payload.Owner == "" {
 		return nil, fmt.Errorf("%s %s needs an owner", payload.Kind, id)
+	}
+	if payload.Namespace == names.System && (payload.Kind == resource.KindStack || payload.Kind == resource.KindVolume) {
+		return nil, fmt.Errorf("namespace %s holds the cluster's Secrets only, no %ss", names.System, payload.Kind)
 	}
 	if err := checkOwner(kind.find(s, id), payload.Kind, id, payload.Owner); err != nil {
 		return nil, err
@@ -141,7 +216,7 @@ func applyPutResource(s *State, cmd Command, payload PutResource) (func(), error
 	}, nil
 }
 
-func applyDeleteResource(s *State, cmd Command, payload DeleteResource) (func(), error) {
+func applyDeleteResource(s *State, payload DeleteResource) (func(), error) {
 	kind, ok := resourceKinds[payload.Kind]
 	if !ok {
 		return nil, fmt.Errorf("no kind of resource %q", payload.Kind)
@@ -168,15 +243,15 @@ func applyDeleteResource(s *State, cmd Command, payload DeleteResource) (func(),
 	}, nil
 }
 
-// resourceID is a resource's key in its map: a namespace's name, else
-// names.ID. It refuses names that are not valid and a namespace the cluster
-// does not have.
+// resourceID returns a resource's key in its map: a namespace's name, or
+// else names.ID. It refuses names that are not valid and a namespace that
+// the cluster does not have.
 func (s *State) resourceID(kind, namespace, name string) (string, error) {
 	if !resource.Namespaced(kind) {
 		switch {
 		case namespace != "":
 			return "", fmt.Errorf("a %s lives in no namespace", kind)
-		case !names.ValidNamespace(name):
+		case kind == resource.KindNamespace && name != names.System && !names.ValidNamespace(name):
 			return "", fmt.Errorf("namespace name %q: %s", name, names.NamespaceRule)
 		}
 		return name, nil
@@ -191,7 +266,7 @@ func (s *State) resourceID(kind, namespace, name string) (string, error) {
 }
 
 // checkOwner refuses a channel other than the resource's owner. A resource
-// without one (names.Default) is every channel's.
+// without an owner (names.Default) belongs to every channel.
 func checkOwner(stored *Meta, kind, id, owner string) error {
 	if stored != nil && stored.Owner != "" && stored.Owner != owner {
 		return fmt.Errorf("%s %s belongs to %s, not to %s", kind, id, stored.Owner, owner)
@@ -219,33 +294,41 @@ func findNamespace(s *State, id string) *Meta {
 	return nil
 }
 
-// putNamespace makes a namespace; it has no spec, so an existing one is
-// unchanged. Its owner owns only the namespace: any channel may put
-// resources into it.
+// putNamespace makes a namespace or changes its spec. Its owner owns only
+// the namespace: any channel may put resources into it. names.System holds
+// no stacks, so it takes no image pull secrets.
 func putNamespace(s *State, id string, payload PutResource) (func() *Meta, error) {
-	spec, err := decodeSpec[map[string]json.RawMessage](payload.Kind, id, payload.Spec)
+	spec, err := decodeSpec[resource.NamespaceSpec](payload.Kind, id, payload.Spec)
 	if err != nil {
 		return nil, err
 	}
-	if len(spec) > 0 {
-		return nil, fmt.Errorf("namespace %s: a namespace has no spec", id)
-	}
-	if _, ok := s.Namespaces[id]; ok {
+	stored, exists := s.Namespaces[id]
+	if exists && sameJSON(stored.Spec, spec) {
 		return nil, errUnchanged
 	}
+	if err := spec.Check(); err != nil {
+		return nil, fmt.Errorf("namespace %s: %w", id, err)
+	}
+	if id == names.System {
+		return nil, fmt.Errorf("namespace %s holds no stacks, so it takes no image pull secrets", id)
+	}
 	return func() *Meta {
-		namespace := &Namespace{Meta: Meta{Name: id, Owner: payload.Owner}}
-		s.Namespaces[id] = namespace
-		return &namespace.Meta
+		if !exists {
+			stored = &Namespace{Meta: Meta{Name: id, Owner: payload.Owner}}
+			s.Namespaces[id] = stored
+		}
+		stored.Spec = spec
+		return &stored.Meta
 	}, nil
 }
 
-// removeNamespace refuses names.Default and a namespace that holds
-// resources: nothing cascades, the user empties it first. Retired copies
-// of its volumes do not count; they stay in the state until their hosts
-// removed them, also for a namespace made again under the same name.
+// removeNamespace refuses names.Default, names.System and a namespace that
+// holds resources. Nothing cascades; the user empties the namespace first.
+// Retired copies of its volumes do not count. They stay in the state until
+// their hosts have removed them, even if a namespace of the same name is
+// made again.
 func removeNamespace(s *State, id string) (func(), error) {
-	if id == names.Default {
+	if id == names.Default || id == names.System {
 		return nil, fmt.Errorf("namespace %s belongs to the cluster", id)
 	}
 	inNamespace := func(resourceID string) bool {
@@ -268,10 +351,10 @@ func removeNamespace(s *State, id string) (func(), error) {
 	return func() { delete(s.Namespaces, id) }, nil
 }
 
-// sameJSON tells whether two values encode alike. The state compares what
-// it stores this way, not field by field: an agent that read its state from
-// a snapshot (JSON, where an empty list and none read back alike) must
-// decide as one that applied the whole log.
+// sameJSON tells whether two values encode to the same JSON. The state
+// compares what it stores this way, not field by field. An agent that read
+// its state from a snapshot (JSON, where an empty list and no list read
+// back the same) must decide like one that applied the whole log.
 func sameJSON(a, b any) bool {
 	encodedA, errA := json.Marshal(a)
 	encodedB, errB := json.Marshal(b)
@@ -281,7 +364,7 @@ func sameJSON(a, b any) bool {
 // stackNaming returns the first stack, by ID, that names the volume or
 // secret name of a namespace, or "" if none does. named returns what a stack
 // names (its volumes or its secrets). The stack with the ID except is left
-// out: it is the one being put.
+// out, because it is the one being put.
 func (s *State) stackNaming(namespace, name, except string, named func(stack *Stack) []string) string {
 	for _, id := range slices.Sorted(maps.Keys(s.Stacks)) {
 		stack := s.Stacks[id]

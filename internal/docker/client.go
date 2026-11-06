@@ -203,7 +203,7 @@ func (c *Client) Inspect(ctx context.Context, id string) (Details, error) {
 		details.Health = raw.State.Health.Status
 	}
 	for network, settings := range raw.NetworkSettings.Networks {
-		// a network the container has left an address in yet
+		// skip a network in which the container has no address (yet)
 		if address, err := netip.ParseAddr(settings.IPAddress); err == nil {
 			details.Addresses[network] = address
 		}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/agent/agenttest"
 	"github.com/webcodingcat/clowder/internal/ingress"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -90,7 +91,7 @@ func TestOnlyChangedSecretFilesAreReplaced(t *testing.T) {
 	runner.passAndWait(context.Background())
 	stat := func(name string) os.FileInfo {
 		t.Helper()
-		info, err := os.Stat(runner.files.secretFile(shopProject, name))
+		info, err := os.Stat(runner.files.secretFile(shopProject, name, "value"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -117,7 +118,8 @@ func TestTheSecretsGetTheirRightsBackAtEachPass(t *testing.T) {
 	cluster.PutSecret("db-password", "password")
 	cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{Secrets: []string{"db-password"}}))
 	dirs := []string{runner.files.secretsDir(shopProject), runner.files.secretFilesDir(shopProject)}
-	file := runner.files.secretFile(shopProject, "db-password")
+	secretDir := filepath.Join(runner.files.secretFilesDir(shopProject), "db-password")
+	file := runner.files.secretFile(shopProject, "db-password", "value")
 	// a directory that was there before the agent, with other rights
 	if err := os.Mkdir(dirs[0], 0o700); err != nil {
 		t.Fatal(err)
@@ -139,12 +141,14 @@ func TestTheSecretsGetTheirRightsBackAtEachPass(t *testing.T) {
 		for _, dir := range dirs {
 			assertMode(dir, 0o700)
 		}
+		// the container's user reads the secret's directory and its files
+		assertMode(secretDir, 0o755)
 		assertMode(file, 0o444)
 	}
 	assertModes()
 
 	// the secrets are unchanged, so nothing is written, but the rights come back
-	for _, path := range []string{dirs[0], dirs[1], file} {
+	for _, path := range []string{dirs[0], dirs[1], secretDir, file} {
 		if err := os.Chmod(path, 0o777); err != nil {
 			t.Fatal(err)
 		}
@@ -171,14 +175,14 @@ func TestASecretFileTheStackNoLongerAsksForGoes(t *testing.T) {
 	docker.FailedUps = 1
 	runner.passAndWait(context.Background())
 	// until compose up worked, the old containers may still read it
-	if _, err := os.Stat(runner.files.secretFile(shopProject, "api-key")); err != nil {
+	if _, err := os.Stat(runner.files.secretFile(shopProject, "api-key", "value")); err != nil {
 		t.Errorf("the secret file went before compose up worked: %v", err)
 	}
 	runner.passAndWait(context.Background())
-	if _, err := os.Stat(runner.files.secretFile(shopProject, "api-key")); !os.IsNotExist(err) {
-		t.Errorf("the secret file no service asks for stayed: %v", err)
+	if _, err := os.Stat(filepath.Join(runner.files.secretFilesDir(shopProject), "api-key")); !os.IsNotExist(err) {
+		t.Errorf("the secret no service asks for stayed: %v", err)
 	}
-	if _, err := os.Stat(runner.files.secretFile(shopProject, "db-password")); err != nil {
+	if _, err := os.Stat(runner.files.secretFile(shopProject, "db-password", "value")); err != nil {
 		t.Errorf("the secret file the stack still asks for: %v", err)
 	}
 }
@@ -216,5 +220,58 @@ func TestTheSecretsOfAStackThatLeftGoOnlyOnceItStopped(t *testing.T) {
 	}
 	if !exists(ingress.Project) {
 		t.Error("the secrets of clowder's own Traefik went")
+	}
+}
+
+func TestEachKeyOfASecretIsAFileAndStaleKeysGo(t *testing.T) {
+	runner, cluster, _, _ := newTestRunner(t)
+	cluster.PutSecretIn(names.Default, "db", map[string]string{"user": "shop", "password": "first"})
+	cluster.PutSecret("tls", "cert")
+	cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{Secrets: []string{"db", "tls"}}))
+	runner.passAndWait(context.Background())
+	// at <files>/<secret>/<key>, which the Compose file mounts at
+	// /run/secrets/<secret>/<key>
+	assertContent := func(name, key, want string) {
+		t.Helper()
+		path := filepath.Join(runner.files.secretFilesDir(shopProject), name, key)
+		if content, err := os.ReadFile(path); err != nil || string(content) != want {
+			t.Errorf("%s/%s: %q, %v; want %q", name, key, content, err, want)
+		}
+	}
+	assertContent("db", "user", "shop")
+	assertContent("db", "password", "first")
+	assertContent("tls", "value", "cert")
+
+	// db loses its key user, and the stack no longer asks for tls
+	cluster.PutSecretIn(names.Default, "db", map[string]string{"password": "second"})
+	cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{Secrets: []string{"db"}}))
+	runner.passAndWait(context.Background())
+	assertContent("db", "password", "second")
+	if _, err := os.Stat(runner.files.secretFile(shopProject, "db", "user")); !os.IsNotExist(err) {
+		t.Errorf("the key the secret lost stayed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runner.files.secretFilesDir(shopProject), "tls")); !os.IsNotExist(err) {
+		t.Errorf("the secret the stack no longer asks for stayed: %v", err)
+	}
+}
+
+func TestASecretVariableTakesTheValueOfItsKey(t *testing.T) {
+	runner, cluster, _, _ := newTestRunner(t)
+	cluster.PutSecretIn(names.Default, "db", map[string]string{"user": "shop", "password": "pw"})
+	cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{SecretEnv: map[string]names.SecretKeyRef{
+		"DB_USER": {Name: "db", Key: "user"}, "DB_PASSWORD": {Name: "db", Key: "password"},
+	}}))
+	runner.passAndWait(context.Background())
+	content, err := os.ReadFile(runner.files.secretEnvFile(shopProject))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"DB_USER: shop", "DB_PASSWORD: pw"} {
+		if !strings.Contains(string(content), want) {
+			t.Errorf("no %q in the secret variables:\n%s", want, content)
+		}
+	}
+	if stack := cluster.Stack("shop"); stack.Status != state.StackRunning {
+		t.Errorf("the stack is %s: %q", stack.Status, stack.UpError)
 	}
 }

@@ -4,8 +4,6 @@ package live
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -58,20 +56,9 @@ func TestQuorum(t *testing.T) {
 // first host knows no leader, fences nothing and mails no-leader, and the
 // all-clear once they are back.
 func twoHostsGo(t *testing.T, joined []string) {
-	caCert, err := os.ReadFile(filepath.Join(workDir, registryCAFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeClusterFile(t, mailCAFile, caCert)
-	setClusterSecrets(t, map[string]string{"alerts.channels[0].smtp.password": "any"})
+	channel := emailChannel(t)
 	changeConfig(t, func(config *clusterspec.Config) {
-		config.Alerts = &clusterspec.Alerts{Channels: []clusterspec.AlertChannel{{
-			Type: "email", From: "clowder@" + zone, To: []string{"ops@" + zone},
-			SMTP: &clusterspec.SMTP{
-				Host: labAddress, Port: mailServerPort, User: "clowder",
-				Password: "alerts.channels[0].smtp.password", CA: mailCAFile,
-			},
-		}}}
+		config.Alerts = &clusterspec.Alerts{Channels: []clusterspec.AlertChannel{channel}}
 	})
 	subject := "no quorum as seen from " + firstHost
 	for _, name := range joined {

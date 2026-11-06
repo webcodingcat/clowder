@@ -27,6 +27,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/ingress"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -262,16 +263,14 @@ func newACMERunner(t *testing.T, ca *fakeCA) (*acmeRunner, *leader) {
 			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
-	l.apply(state.KindApplyConfig, state.CLIActor("admin"), state.ApplyConfig{
-		Spec: clusterspec.Config{
-			Hetzner:        clusterspec.Hetzner{Token: "hetzner.token"},
-			PrivateNetwork: "10.0.0.0/16",
-			Ingress:        clusterspec.Ingress{FloatingIP: "127.0.0.1"},
-			StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
-			ACME:           clusterspec.ACME{Directory: ca.server.URL + "/directory", CA: "ca.pem", Email: "ops@example.com"},
-		},
-		Secrets: map[string]state.SealedSecret{"hetzner.token": {Value: state.Sealed("t"), Digest: "d"}},
-		Files:   map[string][]byte{"ca.pem": ca.trust()},
+	putSystemSecret(l, "hetzner", map[string]string{"token": "t"})
+	// the fake CA's TLS certificate is trusted only through the inline acme.ca
+	putConfig(l, clusterspec.Config{
+		Hetzner:        clusterspec.Hetzner{TokenSecretRef: names.SecretKeyRef{Name: "hetzner", Key: "token"}},
+		PrivateNetwork: "10.0.0.0/16",
+		Ingress:        clusterspec.Ingress{FloatingIP: "127.0.0.1"},
+		StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
+		ACME:           clusterspec.ACME{Directory: ca.server.URL + "/directory", CA: string(ca.trust()), Email: "ops@example.com"},
 	})
 	putResource(l, resource.KindStack, "shop", stackspec.Spec{Services: map[string]stackspec.Service{
 		"app": {Image: "x", HTTP: &stackspec.HTTP{Host: "shop.example.com", Port: 80}},

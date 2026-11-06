@@ -2,6 +2,7 @@ package stacks
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"maps"
 	"slices"
@@ -12,31 +13,38 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Puller pulls an image unless Docker has it (docker.Client.PullMissing).
+// Puller pulls an image unless Docker has it (docker.Client.PullMissing),
+// with the logins of the Docker config directory config.
 type Puller interface {
-	PullMissing(ctx context.Context, image string) error
+	PullMissing(ctx context.Context, config, image string) error
 }
 
-// Prefetcher pulls the images of the stacks this host may take over, before
-// it needs them: a failover or a move then starts the containers at once.
-// It runs a loop of its own, one pull at a time, so a long pull holds up
-// neither the runner nor a pass of anything else. The runner logs Docker
-// in to the registries; a pull before that fails and is tried again at the
-// next pass.
+// Prefetcher pulls the images of the stacks that this host may take over,
+// before it needs them, so that a failover or a move starts the containers
+// at once. It runs its own loop, one pull at a time, so a long pull holds up
+// neither the runner nor a pass of anything else. Like the runner, it pulls
+// with the registry logins of each stack's namespace.
 type Prefetcher struct {
-	host    state.HostID
-	cluster loop.Cluster
-	docker  Puller
-	logger  *slog.Logger
+	host       state.HostID
+	cluster    loop.Cluster
+	docker     Puller
+	registries *RegistryConfigs
+	logger     *slog.Logger
 
 	mu sync.Mutex
-	// pulled are the images Docker had at the last pass
+	// pulled holds the images that Docker had at the last pass
 	pulled map[string]bool
 }
 
-// NewPrefetcher makes the prefetcher; it starts nothing.
-func NewPrefetcher(host state.HostID, cluster loop.Cluster, docker Puller, logger *slog.Logger) *Prefetcher {
-	return &Prefetcher{host: host, cluster: cluster, docker: docker, logger: logger, pulled: map[string]bool{}}
+// NewPrefetcher makes the prefetcher, which shares the runner's
+// registries; it starts nothing.
+func NewPrefetcher(host state.HostID, cluster loop.Cluster, docker Puller, registries *RegistryConfigs,
+	logger *slog.Logger,
+) *Prefetcher {
+	return &Prefetcher{
+		host: host, cluster: cluster, docker: docker, registries: registries, logger: logger,
+		pulled: map[string]bool{},
+	}
 }
 
 // Run pulls at every change of the state and every interval, until ctx
@@ -45,8 +53,8 @@ func (p *Prefetcher) Run(ctx context.Context) {
 	loop.Run(ctx, p.cluster, nil, func() { p.pass(ctx) })
 }
 
-// Ready tells whether Docker has every image of a stack, by its ID: a move
-// to this host waits for it.
+// Ready tells whether Docker has every image of a stack, by its ID. A move
+// to this host waits until it does.
 func (p *Prefetcher) Ready(stackID string) bool {
 	copied, err := p.cluster.SharedCopy()
 	if err != nil {
@@ -66,50 +74,67 @@ func (p *Prefetcher) Ready(stackID string) bool {
 	return true
 }
 
-// pass makes sure Docker has the images of the stacks this host may take:
-// PullMissing pulls only what is missing, so an image removed by hand comes
-// back. A tag that changed under the same name is pulled again only when
-// a user restarts the stack (Runner.pullRestarted).
+// pass makes sure that Docker has the images of the stacks this host may
+// take. PullMissing pulls only what is missing, so an image removed by hand
+// comes back. A tag that changed under the same name is pulled again only
+// when a user restarts the stack (Runner.pullRestarted).
 func (p *Prefetcher) pass(ctx context.Context) {
 	copied, err := p.cluster.SharedCopy()
 	if err != nil {
 		p.logger.Error("read the state", "error", err)
 		return
 	}
-	// the stacks that move here first: a move waits for them
-	var moving, others []string
+	// the stacks that move here come first, because a move waits for them
+	var moving, others []*state.Stack
 	for _, id := range slices.Sorted(maps.Keys(copied.Stacks)) {
 		stack := copied.Stacks[id]
 		switch move := copied.MoveOf(id); {
 		case move != nil && move.Move.To == p.host:
-			moving = append(moving, images(stack)...)
+			moving = append(moving, stack)
 		case mayTake(copied, stack, p.host):
-			others = append(others, images(stack)...)
+			others = append(others, stack)
 		}
 	}
 	present := map[string]bool{}
-	for _, image := range slices.Concat(moving, others) {
-		if present[image] {
+	for _, stack := range slices.Concat(moving, others) {
+		config, missing, err := p.registries.Write(copied, stack.Namespace)
+		if err != nil {
+			p.logger.Warn("pull the images of a stack this host may take", "stack", stack.ID(), "error", err)
 			continue
 		}
-		if err := p.docker.PullMissing(ctx, image); err != nil {
-			if ctx.Err() == nil {
-				p.logger.Warn("pull the image of a stack this host may take", "image", image, "error", err)
-			}
-			continue
-		}
-		present[image] = true
+		p.pullMissing(ctx, config, images(stack), missing, present)
 	}
 	p.mu.Lock()
 	p.pulled = present
 	p.mu.Unlock()
 }
 
+// pullMissing pulls the images that Docker lacks and records the ones it
+// has in present. The warning for a failed pull names the image pull
+// secrets that were left out (missing).
+func (p *Prefetcher) pullMissing(ctx context.Context, config string, stackImages []string, missing error,
+	present map[string]bool,
+) {
+	for _, image := range stackImages {
+		if present[image] {
+			continue
+		}
+		if err := p.docker.PullMissing(ctx, config, image); err != nil {
+			if ctx.Err() == nil {
+				p.logger.Warn("pull the image of a stack this host may take", "image", image,
+					"error", errors.Join(err, missing))
+			}
+			continue
+		}
+		present[image] = true
+	}
+}
+
 // mayTake tells whether a host may take a stack that runs elsewhere, in a
-// failover or a move: it has a copy with a disk of each of the stack's
-// volumes that holds data (replicas 1 and more). A stack without such
-// volumes may go to any host that takes stacks. A stack that runs here
-// already gets its images from compose up.
+// failover or a move. That is the case when the host has a copy with a disk
+// of each of the stack's volumes that hold data (replicas 1 and more). A
+// stack without such volumes may go to any host that takes stacks. A stack
+// that already runs here gets its images from compose up.
 func mayTake(current *state.State, stack *state.Stack, host state.HostID) bool {
 	if stack.Host != nil && *stack.Host == host {
 		return false
@@ -130,7 +155,7 @@ func mayTake(current *state.State, stack *state.Stack, host state.HostID) bool {
 	return ok && state.RunsStacks(self.Phase)
 }
 
-// images are the images of a stack's services.
+// images returns the images of a stack's services.
 func images(stack *state.Stack) []string {
 	var all []string
 	for _, name := range slices.Sorted(maps.Keys(stack.Spec.Services)) {

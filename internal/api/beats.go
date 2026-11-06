@@ -11,26 +11,28 @@ import (
 )
 
 // Beats keeps the hosts' beats on this agent (controller.Heard is the real
-// one): every agent beats to every voter, and the leader asks the voters
-// how long they have not heard a host before it takes it for failed.
+// implementation). Every agent sends beats to every voter, and the leader
+// asks the voters how long they have not heard from a host before it
+// treats the host as failed.
 type Beats interface {
 	Beat(host state.HostID)
 	Silence(host state.HostID) time.Duration
 }
 
-// Silence is a voter's answer to how long it has not heard a host; JSON
-// has the duration in nanoseconds, as time.Duration encodes.
+// Silence is a voter's answer to how long it has not heard from a host. The
+// JSON holds the duration in nanoseconds, as time.Duration encodes it.
 type Silence struct {
 	SilentFor time.Duration `json:"silent_for"`
 }
 
-// localBeat records the caller's beat: the host its certificate names.
+// localBeat records the caller's beat, for the host that its certificate
+// names.
 func (s *Server) localBeat(w http.ResponseWriter, r *http.Request) {
 	s.config.Beats.Beat(state.HostID(identityOf(r).HostID))
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// localSilence answers how long this agent has not heard a host.
+// localSilence answers how long this agent has not heard from a host.
 func (s *Server) localSilence(w http.ResponseWriter, r *http.Request) {
 	number, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil {
@@ -54,7 +56,7 @@ func (s *Server) Beat(ctx context.Context, voter state.HostID) error {
 	return nil
 }
 
-// AskSilence asks a voter how long it has not heard a host
+// AskSilence asks a voter how long it has not heard from a host
 // (controller.AskSilence).
 func (s *Server) AskSilence(ctx context.Context, voter, host state.HostID) (time.Duration, error) {
 	url := fmt.Sprintf("https://%s/v1/internal/beats/%d", s.config.APIAddress(voter), host)

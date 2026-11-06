@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/hetzner/hetznertest"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -56,7 +58,10 @@ func withHetzner(t *testing.T, l *leader, token string) *hetznertest.API {
 // holdOnce runs one pass against the fake; the token must arrive opened.
 func holdOnce(t *testing.T, l *leader) {
 	t.Helper()
-	open := func(sealed state.Sealed) ([]byte, error) { return append([]byte("opened-"), sealed...), nil }
+	open := func(sealed state.Sealed) ([]byte, error) {
+		opened, err := openPadded(sealed)
+		return append([]byte("opened-"), opened...), err
+	}
 	asked, err := holdFloatingIP(context.Background(), l, l.propose, open, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil || !asked {
 		t.Fatalf("asked the API %v, %v", asked, err)
@@ -98,8 +103,7 @@ func TestTheFloatingIPGoesToNoServerOfAnotherHost(t *testing.T) {
 	api := withHetzner(t, l, "t")
 	// server 40 has another private address: host 0 named a stranger
 	api.AddServer(40, netip.MustParseAddr("10.0.0.99"), publicAddressOf(0))
-	open := func(sealed state.Sealed) ([]byte, error) { return sealed, nil }
-	asked, err := holdFloatingIP(context.Background(), l, l.propose, open, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	asked, err := holdFloatingIP(context.Background(), l, l.propose, openPadded, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if !asked || err == nil || !strings.Contains(err.Error(), "not the host's underlay 10.0.0.2: it is another server") {
 		t.Errorf("asked %v, %v", asked, err)
 	}
@@ -150,5 +154,83 @@ func TestTheIngressHostIsKeptThenPreferredThenTheLowestID(t *testing.T) {
 	current := &state.State{Hosts: map[state.HostID]*state.Host{1: hosts[1], 2: checked}, Ingress: recorded(1)}
 	if got, ok := ingressHost(current); !ok || got.ID != 2 {
 		t.Errorf("with a checked host: got %v", got)
+	}
+}
+
+// runFloatingIPUntil runs the Floating IP's loop until done holds for the
+// conditions, then stops it; a loop asks Hetzner at once when it starts.
+func runFloatingIPUntil(t *testing.T, l *leader, open Open, conditions *Conditions, what string, done func() bool) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		RunFloatingIP(ctx, l, l.propose, open, conditions, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}()
+	defer func() {
+		cancel()
+		<-stopped
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !done() {
+		if time.Now().After(deadline) {
+			t.Error(what)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestARefusedHetznerTokenRaisesItsAlertUntilHetznerTakesItAgain(t *testing.T) {
+	l := newLeader(t, 100<<30)
+	withHetzner(t, l, "t") // the token of the Secret hetzner
+	conditions := NewConditions()
+	wrongToken := func(state.Sealed) ([]byte, error) { return []byte("another project's"), nil }
+	refused := func() bool {
+		_, holds := conditions.Since(hetznerTokenRefused)
+		return holds
+	}
+	runFloatingIPUntil(t, l, wrongToken, conditions, "a token Hetzner refused raised no condition", refused)
+	l.Read(func(current *state.State) {
+		alert, ok := wantedAlerts(current, conditions, time.Now())[hetznerTokenRefused]
+		if !ok || alert.Severity != clusterspec.SeverityCritical {
+			t.Errorf("alert %+v, %v", alert, ok)
+		}
+	})
+
+	runFloatingIPUntil(t, l, openPadded, conditions, "a token Hetzner took again kept the condition",
+		func() bool { return !refused() })
+	l.Read(func(current *state.State) {
+		if _, ok := wantedAlerts(current, conditions, time.Now())[hetznerTokenRefused]; ok {
+			t.Error("the alert stayed")
+		}
+	})
+}
+
+func TestTheServiceURLWarningsAreLoggedOncePerConfiguration(t *testing.T) {
+	l := newLeader(t, 100<<30)
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, nil))
+	count := func() int { return strings.Count(logged.String(), "acme.directory is set") }
+
+	warned := warnServiceURLs(l, nil, logger)
+	if count() != 0 || len(warned) != 0 {
+		t.Fatalf("a configuration without service URLs warned: %s", logged.String())
+	}
+	var config clusterspec.Config
+	l.Read(func(current *state.State) { config = current.Config.Spec })
+	config.ACME.Directory = "http://ca.lab/directory"
+	putConfig(l, config)
+	warned = warnServiceURLs(l, warned, logger)
+	warned = warnServiceURLs(l, warned, logger)
+	if count() != 1 || !strings.Contains(logged.String(), "over http the ACME account's requests") {
+		t.Errorf("after one new configuration:\n%s", logged.String())
+	}
+
+	config.ACME.Directory = "https://ca.lab/directory"
+	putConfig(l, config)
+	warnServiceURLs(l, warned, logger)
+	if count() != 2 {
+		t.Errorf("a configuration with another warning was not logged:\n%s", logged.String())
 	}
 }

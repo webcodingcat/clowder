@@ -1,17 +1,18 @@
-// Package volumes is the agent's volume reconciler: it keeps every copy of
-// a volume that the state places on this host, whether or not a stack here
-// uses it. A copy that a stack here names is primary and mounted; any other
-// is unmounted and secondary, so a stack on another host can take the
-// volume; a retired one is removed. The stack runner asks it whether a
-// copy is mounted (Mounted) and waits until it is.
+// Package volumes is the agent's volume reconciler. It keeps every copy of
+// a volume that the state places on this host, whether or not a stack on
+// this host uses it. A copy that a local stack names is primary and
+// mounted. Any other copy is unmounted and secondary, so that a stack on
+// another host can take the volume. A retired copy is removed. The stack
+// runner asks the reconciler whether a copy is mounted (Mounted) and waits
+// until it is.
 //
 // A pass only reads: what the state wants (desired.go), what the host has
 // (storage.Driver.Observe), and which steps lead from one to the other
-// (plan.go). The steps run in a job per volume, in a goroutine of its own
-// that the pass does not wait for: mkfs, a mount or an unmount write to the
-// volume and hang while DRBD suspends I/O, and that must hold up neither
-// the other volumes nor the agent. The copies' records are in records.go,
-// the weekly trim in trim.go.
+// (plan.go). The steps run in one job per volume, in a separate goroutine
+// that the pass does not wait for. The reason: mkfs, a mount or an unmount
+// writes to the volume and hangs while DRBD suspends I/O, and that must
+// block neither the other volumes nor the agent. The records of the copies
+// are in records.go, the weekly trim is in trim.go.
 package volumes
 
 import (
@@ -43,28 +44,28 @@ type Storage interface {
 	MountPoint(volume storage.Volume) string
 }
 
-// Files are where the reconciler keeps what it knows of the copies; the
-// agent's files say where each is.
+// Files are the files where the reconciler keeps what it knows about the
+// copies. The agent's files give their paths.
 type Files struct {
-	// RecordsDir has a file per volume with its copies on this host
+	// RecordsDir has one file per volume that lists its copies on this host
 	RecordsDir string
-	// LastTrim is the file whose time is the last trim
+	// LastTrim is the file whose modification time is the time of the last trim
 	LastTrim string
 }
 
-// Parts are what the reconciler works with, from the agent.
+// Parts are what the agent gives the reconciler to work with.
 type Parts struct {
 	Files   Files
 	Host    state.HostID
 	Cluster loop.Cluster
 	Storage Storage
-	// Held returns the LVs that stacks' containers on this host may hold
-	// (stacks.Files.HeldLVs): such a copy stays as it is
+	// Held returns the LVs that the containers of stacks on this host may
+	// hold (stacks.Files.HeldLVs); the reconciler leaves such a copy as it is
 	Held func() (map[string]bool, error)
-	// Signal starts the reconciler's next pass; a job fires it when done
+	// Signal starts the reconciler's next pass; a job fires it when it is done
 	Signal *loop.Signal
-	// StacksReady starts a pass of the stack runner: a copy it waits for
-	// is mounted
+	// StacksReady starts a pass of the stack runner when a copy that the
+	// runner waits for is mounted
 	StacksReady func()
 	// Propose commits a command (a controller.Propose, spelled out as in
 	// loop.CommitAsHost)
@@ -85,37 +86,39 @@ type Reconciler struct {
 	propose     func(context.Context, state.Command) (uint64, error)
 	logger      *slog.Logger
 
-	// jobs counts the running jobs, so Run returns only after them
+	// jobs counts the running jobs, so that Run returns only after they end
 	jobs sync.WaitGroup
 
-	// mu guards what the pass, the jobs, Mounted and Trim share.
+	// mu guards the fields that the pass, the jobs, Mounted and Trim share.
 	mu sync.Mutex
-	// busy are the volumes, by ID, that have a job running: one job per
-	// volume at a time, so its steps and its record never interleave
+	// busy holds the IDs of the volumes that have a job running. Only one
+	// job runs per volume at a time, so its steps and its record never
+	// interleave with another job's
 	busy map[string]bool
-	// copies are what the last pass found of each copy, by LV
+	// copies holds what the last pass found about each copy, by LV
 	copies map[string]copyStatus
-	// mounted are the copies the last pass saw mounted, for the trim
+	// mounted holds the copies that the last pass saw mounted, for the trim
 	mounted []storage.Volume
-	// volumes are the copies here as the last pass described them, by
-	// volume ID, and seen what it found of each (Seen)
+	// volumes holds the copies on this host as the last pass described
+	// them, by volume ID; seen holds what the pass observed about each
+	// (Seen)
 	volumes map[string]storage.Volume
 	seen    map[string]storage.Observed
-	// reporting are the copies, by LV, whose set-copy-synced is on its way
+	// reporting holds the LVs of the copies whose set-copy-synced is on its way
 	reporting map[string]bool
 
-	// unexplained are the LVs of copies kept without a reason, warned
-	// about once; only the pass uses it
+	// unexplained holds the LVs of copies that are kept without a reason
+	// and were warned about once; only the pass uses it
 	unexplained map[string]bool
 }
 
-// copyStatus is what the stack runner learns of a copy (Mounted).
+// copyStatus is what the stack runner learns about a copy (Mounted).
 type copyStatus struct {
 	dir   string // the mount point
-	ready bool   // primary and mounted, as a stack here needs it
-	// released: unmounted and secondary, so a stack elsewhere can take it
+	ready bool   // primary and mounted, as a local stack needs it
+	// released: unmounted and secondary, so a stack on another host can take it
 	released bool
-	err      error // why the copy cannot get there
+	err      error // why the copy cannot reach its target
 }
 
 // New makes the reconciler; it starts nothing.
@@ -128,10 +131,10 @@ func New(parts Parts) *Reconciler {
 	}
 }
 
-// Mounted tells the stack runner about a copy, by its LV: its mount point
-// and ready once it is primary and mounted; an error if it cannot get
-// there. Not ready without an error means it is on its way: the stack
-// waits.
+// Mounted tells the stack runner about a copy, by its LV. It returns the
+// mount point, and ready once the copy is primary and mounted. It returns
+// an error if the copy cannot get there. Not ready and no error means that
+// the copy is on its way, and the stack waits.
 func (r *Reconciler) Mounted(lv string) (dir string, ready bool, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -139,9 +142,9 @@ func (r *Reconciler) Mounted(lv string) (dir string, ready bool, err error) {
 	return status.dir, status.ready, status.err
 }
 
-// Run runs passes until ctx ends (loop.Run), then waits for the jobs: a job
-// left hanging on a suspended volume holds up the agent's stop only as long
-// as the agent waits for its loops.
+// Run runs passes until ctx ends (loop.Run), then waits for the jobs. A job
+// that hangs on a suspended volume delays the agent's stop only as long as
+// the agent waits for its loops.
 func (r *Reconciler) Run(ctx context.Context) {
 	loop.Run(ctx, r.cluster, r.signal.Wake(), func() { r.pass(ctx) })
 	r.jobs.Wait()
@@ -156,7 +159,7 @@ func (r *Reconciler) pass(ctx context.Context) {
 		return
 	}
 	held, err := r.held()
-	// not knowing what the stacks hold, any copy may be in use
+	// without knowing what the stacks hold, any copy may be in use
 	holdAll := err != nil
 	if holdAll {
 		r.logger.Error("read the volumes the stacks hold", "error", err)
@@ -191,14 +194,14 @@ func (r *Reconciler) pass(ctx context.Context) {
 	}
 	r.mu.Lock()
 	r.mounted, r.volumes, r.seen = mounted, described, seenNow
-	// a copy the state no longer places here is no stack's to use
+	// no stack may use a copy that the state no longer places here
 	maps.DeleteFunc(r.copies, func(lv string, _ copyStatus) bool { return !placed[lv] })
 	r.mu.Unlock()
 	r.removeRetired(ctx, copied, held, holdAll)
 }
 
-// reconcile starts the steps a copy needs, unless its volume has a job
-// running already; with none needed, it tells what the copy is.
+// reconcile starts the steps that a copy needs, unless its volume already
+// has a job running. If no step is needed, it records the copy's status.
 func (r *Reconciler) reconcile(ctx context.Context, want wantedCopy, seen storage.Observed) {
 	volume := want.volume
 	if r.isBusy(volume.ID) {
@@ -231,8 +234,8 @@ func (r *Reconciler) isBusy(volumeID string) bool {
 	return r.busy[volumeID]
 }
 
-// claim marks a volume busy, unless it is already; the trim claims one too,
-// so no job unmounts a copy while fstrim runs on it.
+// claim marks a volume busy, unless it is busy already. The trim claims
+// volumes too, so that no job unmounts a copy while fstrim runs on it.
 func (r *Reconciler) claim(volumeID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -244,9 +247,9 @@ func (r *Reconciler) claim(volumeID string) bool {
 }
 
 // release marks a volume free again. After a job that worked, the next pass
-// comes at once and takes the copy on; after one that failed, it comes with
-// the next change of the state or loop.Interval: tried again at once, a step
-// that keeps failing would spin.
+// starts at once and continues with the copy. After a job that failed, the
+// next pass waits for the next change of the state or for loop.Interval: a
+// step that keeps failing would spin if it were tried again at once.
 func (r *Reconciler) release(ctx context.Context, volumeID string, failed bool) {
 	r.mu.Lock()
 	delete(r.busy, volumeID)
@@ -256,7 +259,7 @@ func (r *Reconciler) release(ctx context.Context, volumeID string, failed bool) 
 	}
 }
 
-// start runs a job for a volume in a goroutine of its own; the pass
+// start runs a job for a volume in a separate goroutine. The pass has
 // checked that the volume is not busy, and only the pass starts jobs.
 func (r *Reconciler) start(ctx context.Context, volumeID string, job func() error) {
 	if !r.claim(volumeID) {
@@ -268,9 +271,9 @@ func (r *Reconciler) start(ctx context.Context, volumeID string, job func() erro
 	})
 }
 
-// setStatus records what a copy is. An error is logged only when it is
-// new, so a copy stuck on the same error does not fill the log at every
-// pass. When a copy becomes ready, the stack runner starts a pass.
+// setStatus records a copy's status. It logs an error only when the error
+// is new, so that a copy stuck on the same error does not fill the log at
+// every pass. When a copy becomes ready, the stack runner starts a pass.
 func (r *Reconciler) setStatus(volume storage.Volume, status copyStatus) {
 	r.mu.Lock()
 	old := r.copies[volume.LV]
@@ -285,12 +288,12 @@ func (r *Reconciler) setStatus(volume storage.Volume, status copyStatus) {
 	}
 }
 
-// runSteps runs a copy's steps in order and stops at the first that fails;
-// the next pass plans afresh.
+// runSteps runs a copy's steps in order and stops at the first one that
+// fails. The next pass makes a new plan.
 func (r *Reconciler) runSteps(ctx context.Context, want wantedCopy, steps []step) error {
 	volume := want.volume
 	if want.target != targetMounted {
-		// the job gives the copy up: no stack may take it meanwhile
+		// the job gives up the copy, so no stack may take it in the meantime
 		r.setStatus(volume, copyStatus{})
 	}
 	for _, step := range steps {
@@ -309,8 +312,8 @@ func (r *Reconciler) runStep(ctx context.Context, want wantedCopy, step step) er
 	volume := want.volume
 	switch step {
 	case stepEnsure:
-		// recorded before it exists, so a copy made by a crashed job is
-		// still found and removed later
+		// recorded before it exists, so that a copy made by a crashed job
+		// is still found and removed later
 		if err := r.recordCopy(volume); err != nil {
 			return err
 		}
@@ -334,7 +337,7 @@ func (r *Reconciler) runStep(ctx context.Context, want wantedCopy, step step) er
 
 // removeRetired removes the recorded copies on this host that the state
 // retired here, each in a job of its volume, and forgets them in the state.
-// A copy a stack may still hold waits until it stopped.
+// A copy that a stack may still hold waits until the stack has stopped.
 func (r *Reconciler) removeRetired(ctx context.Context, copied *state.State, held map[string]bool, holdAll bool) {
 	recorded, err := r.recordedCopies()
 	if err != nil {
@@ -348,8 +351,8 @@ func (r *Reconciler) removeRetired(ctx context.Context, copied *state.State, hel
 			}
 			retired, ok := r.retiredHere(copied, volume)
 			if !ok {
-				// neither placed nor retired: a state that lost it by
-				// mistake must not cost the data
+				// neither placed nor retired: if the state lost the copy
+				// by mistake, the data must not be lost too
 				r.warnUnexplained(volume)
 				continue
 			}
@@ -358,9 +361,9 @@ func (r *Reconciler) removeRetired(ctx context.Context, copied *state.State, hel
 	}
 }
 
-// removeCopy removes a retired copy, forgets it in the state and then in
-// its record. Remove picks up where it left, so a copy whose forgetting
-// failed stays recorded and is tried again at the next pass.
+// removeCopy removes a retired copy, then forgets it in the state and then
+// in its record. Remove continues where it stopped before, so a copy that
+// could not be forgotten stays recorded, and the next pass tries again.
 func (r *Reconciler) removeCopy(ctx context.Context, volume storage.Volume, retired state.RetiredCopy) error {
 	err := r.storage.Remove(ctx, volume)
 	if err == nil {
@@ -379,8 +382,8 @@ func (r *Reconciler) removeCopy(ctx context.Context, volume storage.Volume, reti
 	return err
 }
 
-// warnUnexplained says once per agent run that a copy is kept which the
-// state neither places nor retires here.
+// warnUnexplained warns once per agent run that the agent keeps a copy that
+// the state neither places nor retires here.
 func (r *Reconciler) warnUnexplained(volume storage.Volume) {
 	if r.unexplained[volume.LV] {
 		return
@@ -390,10 +393,10 @@ func (r *Reconciler) warnUnexplained(volume storage.Volume) {
 		"volume", volume.ID, "lv", volume.LV)
 }
 
-// reportSynced tells the state when a copy with a disk became synced or
-// stopped being so (set-copy-synced): a move waits for it, and users see
-// it. A resource that is down says nothing either way, so a restart of
-// the agent writes nothing. A failed commit is tried again at the next
+// reportSynced tells the state when a copy with a disk becomes synced or
+// stops being synced (set-copy-synced). A move waits for this, and users
+// see it. A resource that is down reports nothing either way, so a restart
+// of the agent writes nothing. A failed commit is tried again at the next
 // pass, which compares with the state again.
 func (r *Reconciler) reportSynced(ctx context.Context, want wantedCopy, seen storage.Observed) {
 	volume := want.volume
@@ -411,8 +414,8 @@ func (r *Reconciler) reportSynced(ctx context.Context, want wantedCopy, seen sto
 	if reporting {
 		return // the last report is on its way
 	}
-	// in a goroutine of its own: without Raft's quorum a commit waits for
-	// its timeout, and the pass must not
+	// in a separate goroutine: without Raft's quorum a commit waits for
+	// its timeout, and the pass must not wait with it
 	r.jobs.Go(func() {
 		defer func() {
 			r.mu.Lock()
@@ -437,10 +440,11 @@ func (r *Reconciler) Released(lv string) bool {
 	return r.copies[lv].released
 }
 
-// Progress is what each copy on this host, by volume ID, differed by from
-// a peer at the last pass: while it resyncs, what is left of the resync,
-// in bytes. It is the part of Seen that the API passes on to the leader's
-// moves; the API is portable and does not know storage's types.
+// Progress returns, for each copy on this host by volume ID, how many bytes
+// it differed from a peer at the last pass: while a copy resyncs, this is
+// what is left of the resync. It is the part of Seen that the API passes on
+// to the leader's moves; the API is portable and does not know storage's
+// types.
 func (r *Reconciler) Progress() map[string]int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -451,22 +455,22 @@ func (r *Reconciler) Progress() map[string]int64 {
 	return progress
 }
 
-// Seen is what the last pass found of each copy on this host, by volume
-// ID: its DRBD role, disk state, quorum and split brain, for the host's
-// report and /metrics.
+// Seen returns what the last pass found about each copy on this host, by
+// volume ID: its DRBD role, disk state, quorum and split brain. The host's
+// report and /metrics use it.
 func (r *Reconciler) Seen() map[string]storage.Observed {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return maps.Clone(r.seen)
 }
 
-// ResolveSplitBrain connects this host's copy of a volume again to the
-// peers it stands alone from (storage.Driver.ResolveSplitBrain); with
-// discard, the copy takes their data; connected is false when no peer was
-// StandAlone. It runs while no job holds the
-// volume, and holds it meanwhile: the command touches no data on the copy
-// to keep, and a copy that discards is secondary, so neither waits on a
-// write.
+// ResolveSplitBrain reconnects this host's copy of a volume to the peers
+// it stands alone from (storage.Driver.ResolveSplitBrain). With discard,
+// the copy takes their data. connected is false when no peer was
+// StandAlone. It runs only while no job holds the volume, and it holds the
+// volume while it runs. It never waits on a write: the command touches no
+// data on the copy that keeps its data, and a copy that discards is
+// secondary.
 func (r *Reconciler) ResolveSplitBrain(ctx context.Context, volumeID string, discard bool) (connected bool, err error) {
 	r.mu.Lock()
 	volume, ok := r.volumes[volumeID]

@@ -38,11 +38,11 @@ output "floating_ip" {
   value       = hcloud_floating_ip.ingress.ip_address
 }
 
-output "cluster_yaml" {
-  description = "What cluster.yaml needs from this module."
+output "cluster_configuration" {
+  description = "The fields of the ClusterConfiguration's spec that come from this module."
   value = {
-    private_network = var.network_ip_range
-    ingress         = { floating_ip = hcloud_floating_ip.ingress.ip_address }
-    storage_classes = { for name in keys(var.storage_classes) : name => { pool = "vg-${name}/thin" } }
+    privateNetwork = var.network_ip_range
+    ingress        = { floatingIP = hcloud_floating_ip.ingress.ip_address }
+    storageClasses = { for name in keys(var.storage_classes) : name => { pool = "vg-${name}/thin" } }
   }
 }

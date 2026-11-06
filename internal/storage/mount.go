@@ -11,9 +11,9 @@ import (
 )
 
 // Mount mounts the copy's file system and creates data/ inside it. format
-// allows a new file system on a device that has none: right only for a
-// volume that never held data. Otherwise a missing file system means the
-// data is not on this copy, and a human must look.
+// allows a new file system on a device that has none, which is right only
+// for a volume that never held data. Otherwise a missing file system means
+// that the data is not on this copy, and a human must check it.
 //
 // The mount guard: data/ exists only inside the mounted file system. A
 // container whose volume is not mounted fails to start instead of writing
@@ -25,10 +25,10 @@ func (d Driver) Mount(ctx context.Context, volume Volume, format bool) error {
 	return d.ensureMounted(ctx, volume)
 }
 
-// ensureFilesystem makes ext4 on a device that has no file system, and only
-// then: blkid must say so with its exit code, format must allow it, and
-// clowder must have made the LV below it. A foreign LV without a file
-// system may hold raw data.
+// ensureFilesystem creates ext4 on a device that has no file system, and
+// only then. blkid must report this with its exit code, format must allow
+// it, and clowder must have created the LV below it. A foreign LV without a
+// file system may hold raw data.
 func (d Driver) ensureFilesystem(ctx context.Context, volume Volume, format bool) error {
 	device := d.device(volume)
 	kind, err := d.Run(ctx, shortTimeout, "blkid", "--output", "value", "--match-tag", "TYPE", device)
@@ -66,8 +66,8 @@ func (d Driver) ensureMounted(ctx context.Context, volume Volume) error {
 		return err
 	}
 	if isMounted {
-		// what is there must be this copy's device: another one's data
-		// would reach the containers as if it were the volume's
+		// the mounted device must be this copy's device; otherwise another
+		// device's data would reach the containers as the volume's data
 		_, err := d.Run(ctx, shortTimeout, "findmnt", "--noheadings", "--source", device, "--mountpoint", mountPoint)
 		if code, exited := command.ExitCode(err); exited && code == findmntNotFound {
 			return fmt.Errorf("%s has another device mounted, not %s: a human must look", mountPoint, device)
@@ -85,7 +85,8 @@ func (d Driver) ensureMounted(ctx context.Context, volume Volume) error {
 			return fmt.Errorf("mount %s: %w", volume.ID, err)
 		}
 	}
-	// a write to the volume: a process, not the agent, so a hang stays there
+	// a write to the volume runs in a separate process, not in the agent,
+	// so a hang stays in that process
 	if _, err := d.Run(ctx, shortTimeout, "mkdir", "-p", filepath.Join(mountPoint, "data")); err != nil {
 		return fmt.Errorf("create data/ in %s: %w", volume.ID, err)
 	}

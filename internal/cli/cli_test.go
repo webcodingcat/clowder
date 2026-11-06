@@ -19,12 +19,10 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"go.yaml.in/yaml/v3"
 
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/clientconfig"
-	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -85,9 +83,13 @@ func recoveryKeyFile() string {
 	return filepath.Join(os.Getenv("HOME"), "recovery-key")
 }
 
-// startCluster runs an agent's API with one host and writes a cluster
-// directory for alice that points at it.
-func startCluster(t *testing.T) string {
+// testServers are the servers the fake Hetzner token of startCluster sees:
+// node0's.
+var testServers = []int64{40}
+
+// startCluster runs an agent's API with one host and writes alice's
+// credentials for it into the test's home.
+func startCluster(t *testing.T) {
 	t.Helper()
 	ca, err := pki.NewCA("test", time.Now())
 	if err != nil {
@@ -166,20 +168,13 @@ func startCluster(t *testing.T) string {
 		APIAddress: func(state.HostID) string { return server.Listener.Addr().String() },
 		Version:    buildinfo.Version, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Alerts: fakeAlerts{}, Keys: ageKeys{dataKey},
+		HetznerServers: func(context.Context, string, string) ([]int64, error) { return testServers, nil },
 	})
 	server.Config.Handler = agent
 	server.Config.ErrorLog = log.New(io.Discard, "", 0)
 	server.TLS = agent.TLSConfig()
 	server.StartTLS()
 	t.Cleanup(server.Close)
-
-	dir := t.TempDir()
-	// no secret in it: the commands of these tests do not apply it
-	config := clusterspec.Config{
-		Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.11"},
-		StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
-	}
-	writeYAML(t, filepath.Join(dir, clusterdir.ConfigFile), config)
 
 	cliCertificate, cliKey := issue(func(public ed25519.PublicKey) ([]byte, error) {
 		return ca.IssueCLI(public, "alice", time.Now())
@@ -210,7 +205,6 @@ func startCluster(t *testing.T) string {
 	if err := clientconfig.Write(filepath.Join(home, ".clowder", "config"), credentials); err != nil {
 		t.Fatal(err)
 	}
-	return dir
 }
 
 // ageKeys seal as the agent's data key does (the CLI may not import
@@ -260,29 +254,18 @@ func (fakeAlerts) Failures() []api.AlertFailure {
 }
 
 func TestAlertsShowInTheStatusAndTheTestNamesEachChannel(t *testing.T) {
-	dir := startCluster(t)
-	out, err := run(t, "--cluster", dir, "cluster", "status")
+	startCluster(t)
+	out, err := run(t, "cluster", "status")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out, "no open alert") || !strings.Contains(out, "pool-use/node0/vg/thin/data") {
 		t.Errorf("cluster status:\n%s", out)
 	}
-	out, err = run(t, "--cluster", dir, "alert", "test")
+	out, err = run(t, "alert", "test")
 	if err == nil || !strings.Contains(err.Error(), "1 of 2 channels") ||
 		!strings.Contains(out, "alerts.channels[0] (discord): sent") || !strings.Contains(out, "failed: no STARTTLS") {
 		t.Errorf("alert test: %v\n%s", err, out)
-	}
-}
-
-func writeYAML(t *testing.T, path string, value any) {
-	t.Helper()
-	encoded, err := yaml.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, encoded, 0o600); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -298,12 +281,12 @@ func run(t *testing.T, args ...string) (string, error) {
 }
 
 func TestTheConnectTimeoutMustBePositive(t *testing.T) {
-	dir := startCluster(t)
-	_, err := run(t, "--cluster", dir, "--connect-timeout", "0s", "host", "list")
+	startCluster(t)
+	_, err := run(t, "--connect-timeout", "0s", "host", "list")
 	if ExitCode(err) != 2 || !strings.Contains(err.Error(), "--connect-timeout") {
 		t.Errorf("want a wrong call that names --connect-timeout, got %v", err)
 	}
-	if _, err := run(t, "--cluster", dir, "--connect-timeout", "2s", "host", "list"); err != nil {
+	if _, err := run(t, "--connect-timeout", "2s", "host", "list"); err != nil {
 		t.Errorf("with --connect-timeout 2s: %v", err)
 	}
 }
@@ -323,8 +306,8 @@ func TestHostListShowsTheAddresses(t *testing.T) {
 }
 
 func TestHostCommandsTalkToTheCluster(t *testing.T) {
-	dir := startCluster(t)
-	out, err := run(t, "--cluster", dir, "host", "list")
+	startCluster(t)
+	out, err := run(t, "host", "list")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,34 +315,35 @@ func TestHostCommandsTalkToTheCluster(t *testing.T) {
 		t.Errorf("host list:\n%s", out)
 	}
 
-	if _, err := run(t, "--cluster", dir, "host", "drain", "node0"); err != nil {
+	if _, err := run(t, "host", "drain", "node0"); err != nil {
 		t.Fatal(err)
 	}
-	out, err = run(t, "--cluster", dir, "cluster", "status")
+	out, err = run(t, "cluster", "status")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "leader node0") || !strings.Contains(out, "draining") {
+	if !strings.Contains(out, "leader node0") || !strings.Contains(out, "draining") ||
+		!strings.Contains(out, "cluster test, no configuration,") {
 		t.Errorf("cluster status:\n%s", out)
 	}
 
-	if _, err := run(t, "--cluster", dir, "host", "drain", "node0"); err == nil ||
+	if _, err := run(t, "host", "drain", "node0"); err == nil ||
 		!strings.Contains(err.Error(), "drain works on a host that is active") {
 		t.Errorf("want the state's refusal, got %v", err)
 	}
-	if _, err := run(t, "--cluster", dir, "host", "drain", "node9"); err == nil || !strings.Contains(err.Error(), `no host "node9"`) {
+	if _, err := run(t, "host", "drain", "node9"); err == nil || !strings.Contains(err.Error(), `no host "node9"`) {
 		t.Errorf("want an unknown host, got %v", err)
 	}
 }
 
 func TestRemovingAHostNeedsAConfirmation(t *testing.T) {
-	dir := startCluster(t)
+	startCluster(t)
 	// the test's stdin is no terminal, so only --yes confirms
-	if _, err := run(t, "--cluster", dir, "host", "remove", "node0"); err == nil ||
+	if _, err := run(t, "host", "remove", "node0"); err == nil ||
 		!strings.Contains(err.Error(), "confirm it with --yes") {
 		t.Errorf("want a refusal without --yes, got %v", err)
 	}
-	if _, err := run(t, "--cluster", dir, "host", "remove", "node0", "--yes"); err == nil ||
+	if _, err := run(t, "host", "remove", "node0", "--yes"); err == nil ||
 		!strings.Contains(err.Error(), "the last that runs stacks") {
 		t.Errorf("want the state's refusal for the only host, got %v", err)
 	}

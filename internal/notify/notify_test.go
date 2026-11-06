@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/names"
 )
 
 var testMessage = Message{
@@ -28,8 +29,10 @@ var testMessage = Message{
 	Severity: clusterspec.SeverityCritical, Subject: "pool vg/thin on node0 is full", Text: "95 % of its data is used.",
 }
 
-// secrets opens every secret as its own name with a prefix.
-func secrets(name clusterspec.SecretRef) (string, error) { return "opened-" + string(name), nil }
+// secrets opens every value as its secret's name and key with a prefix.
+func secrets(ref names.SecretKeyRef) (string, error) {
+	return "opened-" + ref.Name + "-" + ref.Key, nil
+}
 
 func TestTheWebhookPostsTheMessageAsJSON(t *testing.T) {
 	var got Message
@@ -58,8 +61,14 @@ func TestDiscordGetsAnEmbedColoredBySeverity(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&got)
 	}))
 	defer server.Close()
-	notifier, err := New(clusterspec.AlertChannel{Type: "discord", Webhook: "alerts.channels[0].webhook"},
-		func(clusterspec.SecretRef) (string, error) { return server.URL, nil }, nil)
+	webhookRef := names.SecretKeyRef{Name: "discord", Key: "webhook"}
+	notifier, err := New(clusterspec.AlertChannel{Type: "discord", WebhookSecretRef: &webhookRef},
+		func(ref names.SecretKeyRef) (string, error) {
+			if ref != webhookRef {
+				t.Errorf("opened %+v", ref)
+			}
+			return server.URL, nil
+		})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,22 +226,21 @@ func startSMTP(t *testing.T, server *fakeSMTP) int {
 	return listener.Addr().(*net.TCPAddr).Port
 }
 
-func emailChannel(port int) clusterspec.AlertChannel {
+func emailChannel(port int, caPEM []byte) clusterspec.AlertChannel {
 	return clusterspec.AlertChannel{
 		Type: "email", From: "clowder@example.com", To: []string{"ops@example.com"},
 		SMTP: &clusterspec.SMTP{
-			Host: "127.0.0.1", Port: port, User: "clowder", Password: "alerts.channels[0].smtp.password",
-			CA: "certs/ca.pem",
+			Host: "127.0.0.1", Port: port, User: "clowder",
+			PasswordSecretRef: &names.SecretKeyRef{Name: "smtp", Key: "password"}, CA: string(caPEM),
 		},
 	}
 }
 
 func TestEmailGoesOnlyThroughTLS(t *testing.T) {
 	certificate, caPEM := testCertificate(t)
-	files := map[string][]byte{"certs/ca.pem": caPEM}
 
 	server := &fakeSMTP{certificate: certificate}
-	notifier, err := New(emailChannel(startSMTP(t, server)), secrets, files)
+	notifier, err := New(emailChannel(startSMTP(t, server), caPEM), secrets)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +263,7 @@ func TestEmailGoesOnlyThroughTLS(t *testing.T) {
 	}
 
 	plain := &fakeSMTP{certificate: certificate, plain: true}
-	notifier, err = New(emailChannel(startSMTP(t, plain)), secrets, files)
+	notifier, err = New(emailChannel(startSMTP(t, plain), caPEM), secrets)
 	if err != nil {
 		t.Fatal(err)
 	}

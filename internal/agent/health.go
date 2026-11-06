@@ -13,19 +13,20 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// beatTimeout bounds one beat: a voter that does not take it in time holds
-// up no other, and the next beat follows anyway.
+// beatTimeout bounds one beat. A voter that does not take its beat in time
+// holds up no other voter, and the next beat follows anyway.
 const beatTimeout = 2 * time.Second
 
 // Beater sends this host's beat to a voter (api.Server.Beat).
 type Beater func(ctx context.Context, voter state.HostID) error
 
 // sendBeats tells every voter that this host is alive, every
-// controller.BeatInterval, until ctx ends: the leader takes a host that a
-// majority of the voters has not heard for controller.FailAfter for
-// failed. It beats from the start, before the state caught up: the beat
-// says the agent runs, not what it runs. A voter that does not answer is
-// only logged on debug: while it is down, every beat would log.
+// controller.BeatInterval, until ctx ends. The leader considers a host
+// failed when a majority of the voters has not heard from it for
+// controller.FailAfter. It beats from the start, before the state has
+// caught up, because the beat says that the agent runs, not what it runs.
+// A voter that does not answer is logged only at debug level; while the
+// voter is down, every beat would log.
 func sendBeats(ctx context.Context, node *raftnode.Node, self state.HostID, beat Beater, logger *slog.Logger) {
 	for {
 		var voters []state.HostID

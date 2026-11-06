@@ -1,7 +1,8 @@
-// Package metrics writes Prometheus' text format by hand: clowderd exports
-// a few dozen values, too few for Prometheus' client library and what it
-// brings along. Families and samples come out sorted, so the output is the
-// same from scrape to scrape and can be tested against a golden file.
+// Package metrics writes Prometheus' text format by hand. clowderd exports
+// only a few dozen values, too few to justify Prometheus' client library
+// and what it brings along. Families and samples come out sorted, so the
+// output is the same from scrape to scrape and can be tested against a
+// golden file.
 package metrics
 
 import (
@@ -41,14 +42,14 @@ type Set struct {
 	families map[string]*family
 }
 
-// NewSet is an empty set.
+// NewSet returns an empty set.
 func NewSet() *Set {
 	return &Set{families: map[string]*family{}}
 }
 
-// Add adds a sample to a family, which the first sample defines; labels are
-// names and values in turn. An odd list is a bug of the caller, so it
-// panics: the tests catch it.
+// Add adds a sample to a family, which the first sample defines. labels
+// alternates names and values. A list of odd length is a bug of the
+// caller, so Add panics, and the tests catch it.
 func (s *Set) Add(name, help string, kind Kind, value float64, labels ...string) {
 	if len(labels)%2 != 0 {
 		panic(fmt.Sprintf("metric %s: labels %q are not pairs of name and value", name, labels))
@@ -85,7 +86,8 @@ func (s *Set) Write(out io.Writer) error {
 	return err
 }
 
-// labels writes {name="value",...} sorted by name; nothing for none.
+// labels writes {name="value",...} sorted by name, or nothing if there are
+// no labels.
 func labels(set map[string]string) string {
 	if len(set) == 0 {
 		return ""

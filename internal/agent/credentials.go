@@ -16,16 +16,17 @@ import (
 	"github.com/webcodingcat/clowder/internal/pki"
 )
 
-// credentialsTimeout bounds clowderd credentials' call to its own agent: a
-// cutoff waits for the leader to commit it.
+// credentialsTimeout bounds the call of clowderd credentials to its own
+// agent. With a cutoff (--revoke-older), the call waits until the leader
+// commits it.
 const credentialsTimeout = time.Minute
 
 // CredentialsOptions are the flags of clowderd credentials.
 type CredentialsOptions struct {
 	// Name goes into the CLI's certificate, for the audit.
 	Name string
-	// Endpoints take the place of the hosts' public addresses, such as one
-	// address in front of them.
+	// Endpoints replace the hosts' public addresses, for example with one
+	// address in front of the hosts.
 	Endpoints   []string
 	RevokeOlder bool
 }
@@ -55,8 +56,8 @@ func newCredentials() *cobra.Command {
 			return printCredentials(ctx, cmd.OutOrStdout(), Files{Dir: DefaultDir}, options)
 		},
 	}
-	// no default here: the agent names a certificate without one
-	// (pki.DefaultCLIName), so the rule has one place
+	// no default here: the agent names a certificate that has no name
+	// (pki.DefaultCLIName), so the rule lives in one place
 	command.Flags().StringVar(&options.Name, "name", "",
 		"the name in the certificate, which the agents' logs and the audit show as cli/<name>; it grants nothing "+
 			"(default "+pki.DefaultCLIName+")")
@@ -67,10 +68,10 @@ func newCredentials() *cobra.Command {
 	return command
 }
 
-// printCredentials makes the CLI's key here and has the host's own agent
-// issue its certificate. Root on a host holds every key of the cluster
-// anyway, as with kubeadm's admin.conf; the agent only spares it the CA's
-// key, which is sealed in the state.
+// printCredentials makes the CLI's key on this host and has the host's own
+// agent issue its certificate. Root on a host can read every key of the
+// cluster anyway, as with kubeadm's admin.conf. The agent only saves root
+// from handling the CA's key, which is sealed in the state.
 func printCredentials(ctx context.Context, out io.Writer, files Files, options CredentialsOptions) error {
 	host, err := files.readHost()
 	if err != nil {

@@ -5,6 +5,7 @@ package live
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/clientconfig"
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
@@ -35,11 +37,11 @@ const commandTimeout = 5 * time.Minute
 
 // outputs are the outputs of examples/hetzner (tofu output -json).
 type outputs struct {
-	PublicAddress  struct{ Value string }                `json:"public_address"`
-	PrivateAddress struct{ Value string }                `json:"private_address"`
-	FloatingIP     struct{ Value string }                `json:"floating_ip"`
-	ClusterYAML    struct{ Value map[string]any }        `json:"cluster_yaml"`
-	Hosts          struct{ Value map[string]moduleHost } `json:"hosts"`
+	PublicAddress        struct{ Value string }                `json:"public_address"`
+	PrivateAddress       struct{ Value string }                `json:"private_address"`
+	FloatingIP           struct{ Value string }                `json:"floating_ip"`
+	ClusterConfiguration struct{ Value json.RawMessage }       `json:"cluster_configuration"` // moduleConfig reads it
+	Hosts                struct{ Value map[string]moduleHost } `json:"hosts"`
 }
 
 // moduleHost is a host as the module's output hosts has it.
@@ -60,6 +62,18 @@ func readOutputs(t *testing.T) outputs {
 		t.Fatalf("read OpenTofu's outputs: %v", err)
 	}
 	return result
+}
+
+// moduleConfig is the module's part of the ClusterConfiguration's spec,
+// read strictly into the real type, so a renamed field fails here and not
+// only in the cluster.
+func (o outputs) moduleConfig(t *testing.T) clusterspec.Config {
+	t.Helper()
+	config, err := resource.DecodeClusterConfiguration(o.ClusterConfiguration.Value)
+	if err != nil {
+		t.Fatalf("the module's cluster_configuration: %v", err)
+	}
+	return config
 }
 
 // host is the test's server, reached over SSH as root with the key OpenTofu
@@ -163,7 +177,7 @@ func (h host) service(t *testing.T, service string) string {
 		" --filter label=com.docker.compose.service="+service)
 }
 
-// clowder runs the CLI against the test's cluster directory.
+// clowder runs the CLI against the test's cluster.
 func clowder(args ...string) (string, error) {
 	return clowderWithInput(nil, args...)
 }
@@ -194,21 +208,30 @@ func mustClowder(t *testing.T, args ...string) string {
 	return output
 }
 
-func clusterDir() string { return filepath.Join(workDir, "cluster") }
+// exitCode is the exit code of a CLI call that ended with err: 0 for
+// none, -1 for a call that did not run to its end.
+func exitCode(err error) int {
+	var exitError *exec.ExitError
+	switch {
+	case err == nil:
+		return 0
+	case errors.As(err, &exitError):
+		return exitError.ExitCode()
+	}
+	return -1
+}
 
-// cliEnvironment is the CLI's environment: the test's cluster directory,
-// and a credentials file of the test's own, so a run neither finds nor
-// overwrites those of the developer.
+// cliEnvironment is the CLI's environment: a credentials file of the
+// test's own, so a run neither finds nor overwrites those of the developer.
 func cliEnvironment() []string {
-	return append(os.Environ(), "CLOWDER_CLUSTER="+clusterDir(), clientconfig.EnvVar+"="+credentialsFile())
+	return append(os.Environ(), clientconfig.EnvVar+"="+credentialsFile())
 }
 
 // credentialsFile is the test's credentials file, as ~/.clowder/config is
 // the user's.
 func credentialsFile() string { return filepath.Join(workDir, "clowder-config") }
 
-// stackDir is the directory of a stack's resources: outside the cluster
-// directory, which apply refuses.
+// stackDir is the directory of a stack's resources.
 func stackDir(name string) string { return filepath.Join(workDir, "stacks", name) }
 
 // stackFile is the file of a stack's resources: the stack and its volumes.
@@ -243,11 +266,16 @@ func volumeDocument(name, class, size string, replicas int) string {
 	return document(resource.KindVolume, name, fmt.Sprintf("class: %s\nsize: %s\nreplicas: %d", class, size, replicas))
 }
 
+// stackSecretKey is the one key of each Secret of the test's stacks.
+const stackSecretKey = "value"
+
 // encryptSecret is a Secret of the namespace default with its value
-// encrypted for it, as clowder secret encrypt writes it.
+// under stackSecretKey, encrypted for it from stdin, as clowder secret
+// encrypt writes it.
 func encryptSecret(t *testing.T, name, value string) string {
 	t.Helper()
-	secret, err := clowderWithInput(strings.NewReader(value), "secret", "encrypt", name)
+	secret, err := clowderWithInput(strings.NewReader(value), "secret", "encrypt", name,
+		"--from-file", stackSecretKey+"=-")
 	if err != nil {
 		t.Fatal(err)
 	}

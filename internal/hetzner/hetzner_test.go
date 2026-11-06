@@ -32,6 +32,8 @@ type fakeAPI struct {
 	actionFails bool
 	// missingServers makes GET /v1/servers/404 the API's not found
 	missingServers bool
+	// manyServers makes the list of servers longer than one page
+	manyServers bool
 	// labels are server 42's, which a PUT replaces
 	labels map[string]string
 	// failures are answered first, one per request, before the real ones:
@@ -88,6 +90,11 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.writeServer(w)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/servers/42":
 		f.writeServer(w)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/servers" && f.manyServers:
+		_, _ = io.WriteString(w, `{"servers": [{"id": 42}], "meta": {"pagination": {"page": 1, "next_page": 2}}}`)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/servers":
+		_, _ = io.WriteString(w, `{"servers": [{"id": 42, "name": "node0"}, {"id": 43, "name": "node1"}],
+			"meta": {"pagination": {"page": 1, "per_page": 50, "next_page": null}}}`)
 	case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/actions/"):
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{"action": {"id": 13, "command": "assign_floating_ip", "status": "running", "error": null}}`)
@@ -189,8 +196,38 @@ func TestTheFloatingIPIsFoundOnAnyPage(t *testing.T) {
 		t.Errorf("an unassigned Floating IP: target %d, %v", target, err)
 	}
 	if _, err := client.FloatingIPTarget(context.Background(), netip.MustParseAddr("192.0.2.1")); err == nil ||
-		!strings.Contains(err.Error(), "no Floating IP 192.0.2.1") {
+		!strings.Contains(err.Error(), "192.0.2.1") || !errors.Is(err, ErrNoSuchFloatingIP) {
 		t.Errorf("an unknown address: %v", err)
+	}
+}
+
+func TestTheServersAreListedInOneRequest(t *testing.T) {
+	api := &fakeAPI{t: t}
+	client := newClient(t, api)
+	ids, err := client.ServerIDs(context.Background())
+	if err != nil || !slices.Equal(ids, []int64{42, 43}) || len(api.requests) != 1 {
+		t.Errorf("ids %v, %v, requests %v", ids, err, api.requests)
+	}
+	api.manyServers = true
+	if _, err := client.ServerIDs(context.Background()); err == nil || !strings.Contains(err.Error(), "more than 50") {
+		t.Errorf("a second page: %v", err)
+	}
+}
+
+func TestATokenIsRefusedWhenUnknownOrOfAnotherProject(t *testing.T) {
+	api := &fakeAPI{t: t, missingServers: true}
+	wrong := New(newClient(t, api).api, "another-token")
+	_, err := wrong.ServerIDs(context.Background())
+	if !TokenRefused(err) {
+		t.Errorf("an unknown token: %v", err)
+	}
+	client := newClient(t, api)
+	_, err = client.RetiredSerial(context.Background(), 404)
+	if !TokenRefused(err) {
+		t.Errorf("a server of another project: %v", err)
+	}
+	if TokenRefused(errors.New("connection refused")) || TokenRefused(nil) {
+		t.Error("a network error refuses no token")
 	}
 }
 

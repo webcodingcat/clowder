@@ -29,21 +29,21 @@ import (
 )
 
 // MetricsPort is where every agent serves /metrics, on its node address
-// only: the cluster's hosts reach it through WireGuard, containers do not
-// (the nft table), and it needs no authentication. Unlike the Raft and API
-// ports it is no field of the host: a Prometheus scrapes every host on one
-// port.
+// only. The cluster's hosts reach it through WireGuard, containers cannot
+// reach it (the nft table), and it needs no authentication. Unlike the Raft
+// and API ports, it is not a field of the host, because a Prometheus
+// scrapes every host on the same port.
 const MetricsPort = 7444
 
-// metricsTimeout bounds what a scrape asks Docker: well below Prometheus'
-// default scrape timeout of 10 s, so a slow Docker costs the containers'
-// values, not the whole scrape.
+// metricsTimeout bounds the scrape's calls to Docker. It is well below
+// Prometheus' default scrape timeout of 10 s, so a slow Docker loses only
+// the containers' values, not the whole scrape.
 const metricsTimeout = 5 * time.Second
 
-// metricsSource gathers what /metrics shows. Each agent exports what is
-// about its own host; what the cluster has once (open alerts, failed
-// deliveries, certificates, the scheduler's room per host) only the leader
-// exports, so a Prometheus that scrapes every host counts it once.
+// metricsSource gathers what /metrics shows. Each agent exports the values
+// of its own host. Only the leader exports the values that the cluster has
+// once (open alerts, failed deliveries, certificates, the scheduler's room
+// per host), so a Prometheus that scrapes every host counts them once.
 type metricsSource struct {
 	host    Host
 	cluster interface {
@@ -53,17 +53,17 @@ type metricsSource struct {
 	docker   Docker
 	restarts func() map[supervisor.Service]int
 	failures func() []controller.Failure
-	// seen is what the volume reconciler last found of the copies here
-	// (volumes.Reconciler.Seen)
+	// seen is what the volume reconciler last found out about the copies
+	// on this host (volumes.Reconciler.Seen)
 	seen func() map[string]storage.Observed
 	// memory reads the agent's resident memory (readRSS); tests replace it
 	memory func() (int64, error)
 	logger *slog.Logger
 }
 
-// collect gathers one scrape. An error means none at all: the handler then
-// answers 500, so Prometheus sees the target down instead of every series
-// gone.
+// collect gathers one scrape. An error means no values at all: the handler
+// then answers 500, so Prometheus sees the target as down instead of seeing
+// every series disappear.
 func (m *metricsSource) collect(ctx context.Context) (*metrics.Set, error) {
 	set := metrics.NewSet()
 	// a copy, not the state under its lock: the scrape asks Docker, and
@@ -81,7 +81,7 @@ func (m *metricsSource) collect(ctx context.Context) (*metrics.Set, error) {
 	return set, nil
 }
 
-// addHost adds what is about this host: its phase and role, the Raft
+// addHost adds the values of this host: its phase and role, the Raft
 // index, its pools, Docker, the root file system and the agent's memory.
 func (m *metricsSource) addHost(set *metrics.Set, copied *state.State, leads bool) {
 	name := m.host.Name
@@ -112,10 +112,10 @@ func (m *metricsSource) addHost(set *metrics.Set, copied *state.State, leads boo
 	m.addCopies(set)
 }
 
-// addCopies adds what this host's copies of the volumes are: how far each
-// is from its peers and, for one whose DRBD resource is up, its role,
-// whether its data is current, whether it has its quorum and whether a peer
-// stands alone from it (split brain).
+// addCopies adds the values of this host's copies of the volumes: how far
+// each copy is behind its peers and, if its DRBD resource is up, its role,
+// whether its data is current, whether it has its quorum, and whether a
+// peer stands alone from it (split brain).
 func (m *metricsSource) addCopies(set *metrics.Set) {
 	name := m.host.Name
 	seen := m.seen()
@@ -148,8 +148,8 @@ func (m *metricsSource) addContainers(ctx context.Context, set *metrics.Set) {
 	if err != nil {
 		m.logger.Warn("collect the metrics: list the containers", "error", err)
 	}
-	// clowder's own Traefik counts too: like a stack's, its containers and
-	// restarts show how the host does
+	// clowder's own Traefik counts too: like a stack's containers and
+	// restarts, its own show how the host is doing
 	counts := map[[3]string]int{}
 	for _, container := range containers {
 		counts[[3]string{container.Labels[docker.ProjectLabel], container.Labels[docker.ServiceLabel], container.State}]++
@@ -177,7 +177,7 @@ func stackLabels(project string) (namespace, stack string) {
 	return "", project
 }
 
-// addCluster adds what the cluster has once: the room of each host, the
+// addCluster adds the values the cluster has once: the room of each host, the
 // certificates, the open alerts and the deliveries that failed.
 func (m *metricsSource) addCluster(set *metrics.Set, copied *state.State) {
 	rooms := scheduler.Rooms(copied)

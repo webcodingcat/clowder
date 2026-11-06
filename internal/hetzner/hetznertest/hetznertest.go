@@ -1,7 +1,8 @@
 // Package hetznertest is a fake of Hetzner Cloud's API for the tests of the
 // packages that use internal/hetzner: servers with their addresses and
-// labels, Floating IPs, and power actions that finish at once. A test names
-// it in cluster.yaml's hetzner.api, so the real client talks to it.
+// labels, Floating IPs, and power actions that finish at once. A test puts
+// its URL into the configuration's hetzner.api, so the real client talks to
+// the fake.
 package hetznertest
 
 import (
@@ -33,7 +34,8 @@ type API struct {
 	// changes are what the requests changed, in order: "poweroff 41",
 	// "poweron 41", "assign 203.0.113.10 41", "label 41 clowder-retired=s1"
 	changes []string
-	// failing counts the actions on a server that still end in an error
+	// failing counts, per server, the actions that will still end in an
+	// error
 	failing map[int64]int
 }
 
@@ -52,7 +54,7 @@ func New(t testing.TB, token string) *API {
 }
 
 // AddServer adds a server with its address in the private network and its
-// public one.
+// public address.
 func (a *API) AddServer(id int64, private, public netip.Addr) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -67,7 +69,8 @@ func (a *API) RouteFloatingIP(ip netip.Addr, serverID int64) {
 	a.floatingIPs[ip] = serverID
 }
 
-// FloatingIPTarget is the server the Floating IP is routed to, 0 for none.
+// FloatingIPTarget returns the server that the Floating IP is routed to, or
+// 0 for none.
 func (a *API) FloatingIPTarget(ip netip.Addr) int64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -75,8 +78,8 @@ func (a *API) FloatingIPTarget(ip netip.Addr) int64 {
 }
 
 // FailActions makes the next count actions on the server end in an error,
-// as an action Hetzner could not carry out does: the client does not send
-// it again.
+// like an action that Hetzner could not carry out. The client does not send
+// such an action again.
 func (a *API) FailActions(serverID int64, count int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -90,16 +93,16 @@ func (a *API) SetLabel(serverID int64, key, value string) {
 	a.servers[serverID].labels[key] = value
 }
 
-// Labels are the server's labels.
+// Labels returns the server's labels.
 func (a *API) Labels(serverID int64) map[string]string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return maps.Clone(a.servers[serverID].labels)
 }
 
-// Changes are what the requests changed so far, in order: "poweroff 41",
-// "poweron 41", "assign 203.0.113.10 41", "label 41 clowder-retired=s1".
-// Failed actions count too.
+// Changes returns what the requests changed so far, in order: "poweroff
+// 41", "poweron 41", "assign 203.0.113.10 41", "label 41
+// clowder-retired=s1". Failed actions are included.
 func (a *API) Changes() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -118,6 +121,8 @@ func (a *API) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/floating_ips":
 		a.writeFloatingIPs(w)
+	case r.Method == http.MethodGet && r.URL.Path == "/servers":
+		a.writeServers(w)
 	case r.Method == http.MethodPost && len(parts) == 4 && parts[0] == "floating_ips" && parts[3] == "assign":
 		a.assign(w, r, parts[1])
 	case len(parts) >= 2 && parts[0] == "servers":
@@ -127,8 +132,8 @@ func (a *API) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// writeFloatingIPs lists the Floating IPs, sorted by address, on one page;
-// a Floating IP's ID is its place in the list.
+// writeFloatingIPs lists the Floating IPs, sorted by address, on one page.
+// A Floating IP's ID is its position in the list.
 func (a *API) writeFloatingIPs(w http.ResponseWriter) {
 	type floatingIP struct {
 		ID     int64  `json:"id"`
@@ -144,6 +149,15 @@ func (a *API) writeFloatingIPs(w http.ResponseWriter) {
 		list = append(list, entry)
 	}
 	writeJSON(w, map[string]any{"floating_ips": list, "meta": map[string]any{"pagination": map[string]any{"next_page": nil}}})
+}
+
+// writeServers lists the servers, sorted by ID, on one page.
+func (a *API) writeServers(w http.ResponseWriter) {
+	list := []map[string]int64{}
+	for _, id := range slices.Sorted(maps.Keys(a.servers)) {
+		list = append(list, map[string]int64{"id": id})
+	}
+	writeJSON(w, map[string]any{"servers": list, "meta": map[string]any{"pagination": map[string]any{"next_page": nil}}})
 }
 
 func (a *API) sortedFloatingIPs() []netip.Addr {
@@ -211,7 +225,7 @@ func (a *API) serveServer(w http.ResponseWriter, r *http.Request, parts []string
 }
 
 // actionFails tells whether the next action on the server fails, and
-// counts it.
+// counts the failure.
 func (a *API) actionFails(serverID int64) bool {
 	if a.failing[serverID] <= 0 {
 		return false

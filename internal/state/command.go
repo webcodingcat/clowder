@@ -13,8 +13,8 @@ import (
 )
 
 // CommandVersion is the format of the commands this build writes. Apply also
-// reads the version before it: from v1.0.0, agents of two neighboring
-// releases run side by side during an upgrade.
+// reads the version before it, because from v1.0.0 on, agents of two
+// neighboring releases run side by side during an upgrade.
 const CommandVersion = 1
 
 // Command is one entry of the Raft log.
@@ -32,7 +32,6 @@ type Command struct {
 // The kinds of commands. Each has a payload type of the same name.
 const (
 	KindBootstrap            = "bootstrap"
-	KindApplyConfig          = "apply-config"
 	KindSetHostPhase         = "set-host-phase"
 	KindReportHost           = "report-host"
 	KindSetIngress           = "set-ingress"
@@ -43,8 +42,7 @@ const (
 	KindDeleteCertificate    = "delete-certificate"
 	KindSetCLICutoff         = "set-cli-cutoff"
 	KindSetRecoveryRecipient = "set-recovery-recipient"
-	KindPutResource          = "put-resource"
-	KindDeleteResource       = "delete-resource"
+	KindChangeResources      = "change-resources"
 	KindRestartStack         = "restart-stack"
 	KindSetStackStatus       = "set-stack-status"
 	KindSetStackWaitReason   = "set-stack-wait-reason"
@@ -95,15 +93,17 @@ func NewCommand(kind string, at time.Time, actor string, payload any) (Command, 
 	return Command{Version: CommandVersion, Kind: kind, At: at.UTC(), Actor: actor, Payload: encoded}, nil
 }
 
-// handler checks one kind of command against the state and returns the
-// change it makes, which Apply runs only for a valid command. The change
-// cannot fail: everything that can refuse the command runs before it, in
-// the handler, which only reads the state. So a refused command leaves no
-// trace, without the cost of working on a copy of the state.
+// handler checks one kind of command against the state and returns a
+// function that makes the change; Apply runs it only for a valid command.
+// The change cannot fail: everything that can refuse the command runs
+// before it, in the handler, which only reads the state. So a refused
+// command leaves no trace, without the cost of working on a copy of the
+// state. One handler, applyChangeResources, works on a copy all the same,
+// because what each of its changes may do depends on the changes before it.
 type handler func(s *State, cmd Command) (change func(), err error)
 
-// commandKind is how Apply runs one kind of command, and the release that
-// brought the kind: the leader writes a kind only once every agent reads it
+// commandKind says how Apply runs one kind of command, and which release
+// brought the kind. The leader writes a kind only once every agent reads it
 // (State.CheckKnown).
 type commandKind struct {
 	since string
@@ -112,7 +112,6 @@ type commandKind struct {
 
 var commandKinds = map[string]commandKind{
 	KindBootstrap:            {"0.1.0", decoded(applyBootstrap)},
-	KindApplyConfig:          {"0.1.0", decoded(applyConfig)},
 	KindSetHostPhase:         {"0.1.0", decoded(applySetHostPhase)},
 	KindReportHost:           {"0.1.0", decoded(applyReportHost)},
 	KindSetIngress:           {"0.1.0", decoded(applySetIngress)},
@@ -123,8 +122,7 @@ var commandKinds = map[string]commandKind{
 	KindDeleteCertificate:    {"0.1.0", decoded(applyDeleteCertificate)},
 	KindSetCLICutoff:         {"0.2.0", decoded(applySetCLICutoff)},
 	KindSetRecoveryRecipient: {"0.1.0", decoded(applySetRecoveryRecipient)},
-	KindPutResource:          {"0.1.0", decoded(applyPutResource)},
-	KindDeleteResource:       {"0.1.0", decoded(applyDeleteResource)},
+	KindChangeResources:      {"0.2.0", decoded(applyChangeResources)},
 	KindRestartStack:         {"0.1.0", decoded(applyRestartStack)},
 	KindSetStackStatus:       {"0.1.0", decoded(applySetStackStatus)},
 	KindSetStackWaitReason:   {"0.1.0", decoded(applySetStackWaitReason)},
@@ -162,15 +160,16 @@ func decoded[Payload any](apply func(s *State, cmd Command, payload Payload) (fu
 	}
 }
 
-// ErrNotBootstrapped is returned for every command but the bootstrap before
-// the cluster has one.
+// ErrNotBootstrapped is returned for every command except the bootstrap
+// while the cluster has not been bootstrapped.
 var ErrNotBootstrapped = errors.New("the cluster is not bootstrapped yet")
 
 // ErrUnreadable marks a log entry or a snapshot this agent cannot read: not
-// JSON, a version it does not read, a kind it does not know. That is no
-// refusal: the agents that read it apply it, and one that went on without
-// it would differ from them for good. So the state stays as it is, its
-// index too, and the agent stops (raftnode.Node.Halted).
+// JSON, a version it does not read, or a kind it does not know. This is
+// not a refusal: the agents that can read the entry apply it, and an agent
+// that went on without it would differ from them for good. So the state
+// stays as it is, including its index, and the agent stops
+// (raftnode.Node.Halted).
 var ErrUnreadable = errors.New("not readable by this agent")
 
 // ApplyEntry applies a Raft log entry: a command as JSON.
@@ -218,7 +217,7 @@ func (s *State) Apply(index uint64, cmd Command) ([]Change, error) {
 }
 
 // readable returns how to apply a command whose version and kind this agent
-// reads, else an ErrUnreadable.
+// reads, or else an ErrUnreadable.
 func readable(cmd Command) (commandKind, error) {
 	if cmd.Version < max(1, CommandVersion-1) || cmd.Version > CommandVersion {
 		return commandKind{}, fmt.Errorf("%s: command version %d is %w (it reads %d)",
@@ -232,7 +231,7 @@ func readable(cmd Command) (commandKind, error) {
 }
 
 // ErrNotReadByAll is CheckKnown's answer for a kind an agent of the cluster
-// may not read yet. It is no refusal: the command may commit later, once
+// may not read yet. It is not a refusal: the command may commit later, once
 // every agent runs the release that brought the kind.
 var ErrNotReadByAll = errors.New("not every agent reads it yet")
 
@@ -252,11 +251,12 @@ func (s *State) CheckKnown(kind string) error {
 	return nil
 }
 
-// MinVersion is the oldest release an agent of the cluster runs, empty if
-// none runs one. Removed hosts, hosts that have not reported a version yet
-// and development builds do not count: a development build reads every kind
-// of its code. A host that joined counts from its first report on; until
-// then, should the leader write a kind it cannot read, it stops at it.
+// MinVersion is the oldest release that an agent of the cluster runs, or
+// empty if no agent counts. Removed hosts, hosts that have not reported a
+// version yet, and development builds do not count: a development build
+// reads every kind in its code. A host that joined counts from its first
+// report on. If the leader writes a kind the host cannot read before then,
+// the host stops at it.
 func (s *State) MinVersion() string {
 	var oldest string
 	for _, host := range s.Hosts {
@@ -270,9 +270,10 @@ func (s *State) MinVersion() string {
 	return oldest
 }
 
-// CommandError is a command that its handler refused: the command's kind,
-// and why. The kind comes first in the message, for the logs; the API
-// shows users the reason alone, as they named a resource, not a command.
+// CommandError is a command that its handler refused: the command's kind
+// and the reason. The kind comes first in the message, for the logs. The
+// API shows users only the reason, because they named a resource, not a
+// command.
 type CommandError struct {
 	Kind string
 	Err  error
@@ -283,16 +284,13 @@ func (e *CommandError) Error() string { return e.Kind + ": " + e.Err.Error() }
 func (e *CommandError) Unwrap() error { return e.Err }
 
 // errUnchanged is a handler's answer to a command that would write what is
-// there already: Apply takes it as applied, and the command leaves no trace,
-// not even in the audit.
+// already there. Apply treats the command as applied, and it leaves no
+// trace, not even in the audit.
 var errUnchanged = errors.New("unchanged")
 
 // makeMaps creates the maps that are still nil (a fresh state, or one read
 // from a snapshot that left empty maps out), so handlers can write to them.
 func (s *State) makeMaps() {
-	if s.ClusterSecrets == nil {
-		s.ClusterSecrets = map[string]SealedSecret{}
-	}
 	if s.Secrets == nil {
 		s.Secrets = map[string]*Secret{}
 	}
@@ -337,10 +335,10 @@ func (s *State) makeMaps() {
 	}
 }
 
-// Refused carries why Apply refused a command, so the one who proposed it can
-// tell a refusal (the command is wrong) from a command that did not commit
-// (no leader, no quorum). The Raft member wraps Apply's error in it, which
-// is usually a CommandError: the same refusal, seen by the proposer.
+// Refused carries why Apply refused a command, so the proposer can tell a
+// refusal (the command is wrong) from a command that did not commit (no
+// leader, no quorum). The Raft member wraps Apply's error in it. That error
+// is usually a CommandError, so the proposer sees the same refusal.
 type Refused struct {
 	Err error
 }

@@ -12,24 +12,23 @@ import (
 	"github.com/webcodingcat/clowder/internal/storage"
 )
 
-// wantedCopy is a copy the state places on this host, and what it should
-// be.
+// wantedCopy is a copy that the state places on this host, and its target.
 type wantedCopy struct {
 	volume         storage.Volume
 	dataGeneration int64
 	target         target
 	initialized    bool
-	// synced is the state's word on the copy (VolumeCopy.Synced)
+	// synced is what the state says about the copy (VolumeCopy.Synced)
 	synced bool
 	// err says why the copy cannot be described (its class has no pool)
 	err error
 }
 
-// desired are the copies the state places on this host, sorted by volume
-// ID: a copy that a stack placed here names is mounted, unless the stack
-// stops for a move (State.StopsForMove); one that a stack
-// here may still hold (held, or any while holdAll) is kept as it is; any
-// other is secondary.
+// desired returns the copies that the state places on this host, sorted by
+// volume ID. A copy that a stack placed on this host names is mounted,
+// unless the stack stops for a move (State.StopsForMove). A copy that a
+// local stack may still hold (held, or any copy while holdAll) is kept as
+// it is. Any other copy is secondary.
 func (r *Reconciler) desired(copied *state.State, held map[string]bool, holdAll bool) []wantedCopy {
 	named := map[string]bool{}
 	for _, stack := range copied.Stacks {
@@ -64,20 +63,20 @@ func (r *Reconciler) desired(copied *state.State, held map[string]bool, holdAll 
 	return wanted
 }
 
-// describe turns a volume of the state into this host's copy of it, as the
-// storage driver takes it. The LV's name carries the generation, so a
-// restored volume is a new LV next to the old one; the DRBD resource has the
-// LV's name. Even a copy that cannot be described has its ID and LV, so the
-// error reaches the stack that waits for it. The volume has a copy on this
-// host (desired).
+// describe turns a volume of the state into this host's copy of it, in the
+// form the storage driver takes. The LV's name contains the generation, so
+// a restored volume is a new LV next to the old one. The DRBD resource has
+// the LV's name. Even a copy that cannot be described has its ID and LV, so
+// that the error reaches the stack that waits for it. The caller (desired)
+// makes sure that the volume has a copy on this host.
 func (r *Reconciler) describe(copied *state.State, volume *state.Volume) (storage.Volume, error) {
 	id := volume.ID()
 	lv := names.VolumeName(id, volume.DataGeneration)
 	described := storage.Volume{ID: id, LV: lv, SizeBytes: int64(volume.Spec.Size)}
 	config := copied.Config.Spec
 	index := slices.IndexFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host })
-	// a tiebreaker has no pool, but for the one of a copy that had a disk:
-	// its class names the pool of the LV to remove
+	// a tiebreaker has no pool, except a former copy with a disk: its
+	// class names the pool of the LV that must be removed
 	described.Diskless = volume.Copies[index].Tiebreaker
 	if class := volume.Copies[index].Class; !described.Diskless || class != "" {
 		pool, err := poolOf(config, id, class)
@@ -111,13 +110,14 @@ func (r *Reconciler) describe(copied *state.State, volume *state.Volume) (storag
 	return described, nil
 }
 
-// poolOf is the thin pool of a copy's storage class. cluster apply refuses
-// a cluster.yaml without a class a volume uses, so a missing one is a bug
-// to say clearly, not an empty pool for lvcreate.
+// poolOf returns the thin pool of a copy's storage class. The state refuses
+// a configuration that lacks a class which a volume uses, so a missing
+// class is a bug. poolOf reports it clearly instead of passing an empty
+// pool to lvcreate.
 func poolOf(config clusterspec.Config, volumeID, class string) (string, error) {
 	storageClass, ok := config.StorageClasses[class]
 	if !ok || storageClass.Pool == "" {
-		return "", fmt.Errorf("volume %s: cluster.yaml has no storage class %s with a pool", volumeID, class)
+		return "", fmt.Errorf("volume %s: the configuration has no storage class %s with a pool", volumeID, class)
 	}
 	return storageClass.Pool, nil
 }

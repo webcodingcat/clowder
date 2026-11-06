@@ -8,13 +8,13 @@ import (
 	"time"
 )
 
-// ClientTLSToHosts is the TLS of a caller (a CLI, or an agent calling another)
-// that talks to a host. It trusts any host of the CA that is not revoked,
-// whatever name or address it was reached by: an endpoint may be a name, and a
-// host certificate lists only the host's addresses. revoked may be nil (the
-// CLI does not know the list; the agent it reaches checks the CLI). Without a
-// certificate (an empty one) the caller shows none: a joining host's first
-// contact.
+// ClientTLSToHosts returns the TLS configuration of a caller (a CLI, or an
+// agent calling another) that talks to a host. It trusts any host of the
+// CA that is not revoked, whatever name or address it was reached by,
+// because an endpoint may be a name and a host certificate lists only the
+// host's addresses. revoked may be nil (the CLI does not know the list;
+// the agent it reaches checks the CLI). With an empty certificate, the
+// caller presents none, as on a joining host's first contact.
 func ClientTLSToHosts(certificate tls.Certificate, ca *x509.Certificate, revoked func(serial string) bool) *tls.Config {
 	var certificates []tls.Certificate
 	if len(certificate.Certificate) > 0 {
@@ -28,7 +28,8 @@ func ClientTLSToHosts(certificate tls.Certificate, ca *x509.Certificate, revoked
 	}
 }
 
-// ServerTLSForHosts is the TLS of a server only hosts may reach (Raft).
+// ServerTLSForHosts returns the TLS configuration of a server that only
+// hosts may reach (Raft).
 func ServerTLSForHosts(certificate tls.Certificate, ca *x509.Certificate, revoked func(serial string) bool) *tls.Config {
 	return &tls.Config{
 		Certificates:     []tls.Certificate{certificate},
@@ -38,8 +39,8 @@ func ServerTLSForHosts(certificate tls.Certificate, ca *x509.Certificate, revoke
 	}
 }
 
-// verifyHost checks that the other side shows a host certificate of the CA
-// that is not revoked.
+// verifyHost checks that the other side presents a host certificate of the
+// CA that is not revoked.
 func verifyHost(ca *x509.Certificate, revoked func(serial string) bool) func(tls.ConnectionState) error {
 	if revoked == nil {
 		revoked = func(string) bool { return false }

@@ -10,17 +10,18 @@ import (
 )
 
 // Alert is an open alert: a condition the leader saw that someone should
-// look at. Only open alerts are in the state; whether and when the leader
-// told the channels is in its memory.
+// look at. The state holds only open alerts. Whether and when the leader
+// told the channels, it keeps in its memory.
 type Alert struct {
-	// Key is the alert's kind and subject ("pool-use/node0/vg/thin/data"):
-	// a condition has one key, so it never has two open alerts.
+	// Key is the alert's kind and subject ("pool-use/node0/vg/thin/data").
+	// A condition has one key, so it never has two open alerts.
 	Key      string `json:"key"`
 	Kind     string `json:"kind"`
 	Severity string `json:"severity"` // info, warning or critical
 	Subject  string `json:"subject"`
 	Message  string `json:"message"`
-	// Since is when it was raised; a change of severity keeps it.
+	// Since is when the alert was raised. A change of severity does not
+	// reset it.
 	Since time.Time `json:"since"`
 }
 

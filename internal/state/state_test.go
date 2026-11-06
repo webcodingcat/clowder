@@ -3,16 +3,10 @@ package state
 import (
 	"bytes"
 	"compress/gzip"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -152,6 +146,48 @@ func (c *cluster) refuse(kind, actor string, payload any, wantError string) {
 	if err == nil || !strings.Contains(err.Error(), wantError) {
 		c.t.Errorf("%s: want an error with %q, got %v", kind, wantError, err)
 	}
+}
+
+// putChange is how clowder apply sends one resource.
+func putChange(kind, namespace, name string, spec any) ResourceChange {
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		panic(err)
+	}
+	return ResourceChange{Put: &PutResource{Kind: kind, Namespace: namespace, Name: name, Owner: OwnerCLI, Spec: encoded}}
+}
+
+// deleteChange is how clowder delete sends one resource.
+func deleteChange(kind, namespace, name string) ResourceChange {
+	return ResourceChange{Delete: &DeleteResource{Kind: kind, Namespace: namespace, Name: name, Owner: OwnerCLI}}
+}
+
+// batch is one change-resources of the changes, in their order.
+func batch(changes ...ResourceChange) ChangeResources {
+	return ChangeResources{Changes: changes}
+}
+
+// put applies one resource as the CLI does.
+func (c *cluster) put(kind, namespace, name string, spec any) {
+	c.t.Helper()
+	c.mustApply(KindChangeResources, cliActor, batch(putChange(kind, namespace, name, spec)))
+}
+
+// del deletes one resource as the CLI does.
+func (c *cluster) del(kind, namespace, name string) {
+	c.t.Helper()
+	c.mustApply(KindChangeResources, cliActor, batch(deleteChange(kind, namespace, name)))
+}
+
+// refuseChange applies one change of the CLI that must be refused.
+func (c *cluster) refuseChange(change ResourceChange, wantError string) {
+	c.t.Helper()
+	c.refuse(KindChangeResources, cliActor, batch(change), wantError)
+}
+
+// sealedValue is a secret of one key, "value".
+func sealedValue(sealed Sealed, digest string) SealedSecret {
+	return SealedSecret{Data: map[string]Sealed{"value": sealed}, Digest: digest}
 }
 
 func TestBootstrapMakesHostZeroTheActiveVoter(t *testing.T) {
@@ -450,9 +486,12 @@ func TestANewRecoveryKeyReplacesTheOld(t *testing.T) {
 	}
 }
 
+// hetznerToken is where testConfig finds the Hetzner token.
+var hetznerToken = names.SecretKeyRef{Name: "hetzner", Key: "token"}
+
 func testConfig() clusterspec.Config {
 	return clusterspec.Config{
-		Hetzner:        clusterspec.Hetzner{Token: "hetzner.token"},
+		Hetzner:        clusterspec.Hetzner{TokenSecretRef: hetznerToken},
 		PrivateNetwork: "10.0.0.0/16",
 		Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.11"},
 		StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
@@ -464,73 +503,22 @@ func testVolumeSpec() resource.VolumeSpec {
 	return resource.VolumeSpec{Class: "fast", Size: 1 << 30, Replicas: 1}
 }
 
-// testSecrets are the values testConfig names.
-func testSecrets() map[string]SealedSecret {
-	return map[string]SealedSecret{"hetzner.token": {Value: Sealed("sealed"), Digest: "d-token"}}
+// hetznerSecret puts the Secret of names.System that testConfig names.
+func hetznerSecret() ResourceChange {
+	return putChange(resource.KindSecret, names.System, hetznerToken.Name,
+		SealedSecret{Data: map[string]Sealed{hetznerToken.Key: sealedOf(10)}, Digest: "d-token"})
 }
 
-func TestApplyConfigCountsRevisionsAndReplacesTheSecrets(t *testing.T) {
-	c := newCluster(t)
-	if c.state.Config.Revision != 0 || len(c.state.ClusterSecrets) != 0 {
-		t.Errorf("after init: config %+v, values %v", c.state.Config, c.state.ClusterSecrets)
-	}
-	config := testConfig()
-	config.Registries = map[string]clusterspec.Registry{
-		"ghcr.io":   {Username: "robot", Password: `registries["ghcr.io"].password`},
-		"localhost": {Username: "ci", Password: "registries.localhost.password"},
-	}
-	secrets := testSecrets()
-	secrets[`registries["ghcr.io"].password`] = SealedSecret{Value: Sealed("pw"), Digest: "d3"}
-	secrets["registries.localhost.password"] = SealedSecret{Value: Sealed("pw2"), Digest: "d4"}
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: secrets})
-	if login := c.state.RegistryLogins()["ghcr.io"]; login.Username != "robot" || string(login.Password) != "pw" {
-		t.Errorf("login %+v", login)
-	}
-
-	delete(config.Registries, "localhost")
-	c.refuse(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: secrets},
-		"a value for registries.localhost.password, which cluster.yaml does not name")
-	delete(secrets, "registries.localhost.password")
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: secrets})
-	if c.state.Config.Revision != 2 || len(c.state.RegistryLogins()) != 1 {
-		t.Errorf("config %+v, logins %v", c.state.Config, c.state.RegistryLogins())
-	}
-	c.refuse(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig()}, "hetzner.token: the value is missing")
-	c.refuse(KindApplyConfig, cliActor, ApplyConfig{
-		Spec: testConfig(), Secrets: map[string]SealedSecret{"hetzner.token": {Value: Sealed("sealed")}},
-	}, "hetzner.token: the value has no digest")
-	c.refuse(KindApplyConfig, cliActor, ApplyConfig{Secrets: secrets}, "storage_classes: at least one class is required")
+// configChange puts the ClusterConfiguration.
+func configChange(config clusterspec.Config) ResourceChange {
+	return putChange(resource.KindClusterConfiguration, "", resource.ClusterConfigurationName, config)
 }
 
-func TestTheFilesNamedInClusterYAMLComeWithIt(t *testing.T) {
-	c := newCluster(t)
-	config := testConfig()
-	config.ACME.CA = "pebble.pem"
-	ca := testCertificatePEM(t)
-	c.refuse(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: testSecrets()},
-		"file pebble.pem is named in cluster.yaml but missing")
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{
-		Spec: config, Secrets: testSecrets(), Files: map[string][]byte{"pebble.pem": ca, "other.pem": ca},
-	})
-	files := c.state.Config.Files
-	if len(files) != 1 || !bytes.Equal(files["pebble.pem"], ca) {
-		t.Errorf("files %v: want only pebble.pem", files)
-	}
-}
-
-// testCertificatePEM is a self-signed certificate, as acme.ca holds one.
-func testCertificatePEM(t *testing.T) []byte {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	template := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: testTime, NotAfter: testTime.Add(time.Hour)}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+// configure applies a configuration with the Secret it names above it,
+// as one clowder apply -f of both.
+func (c *cluster) configure(config clusterspec.Config) {
+	c.t.Helper()
+	c.mustApply(KindChangeResources, cliActor, batch(hetznerSecret(), configChange(config)))
 }
 
 func TestTheLeaderKeepsTheACMEAccountChallengesAndCertificates(t *testing.T) {
@@ -654,9 +642,9 @@ func TestAWaitReasonChangesNothingElse(t *testing.T) {
 
 func TestAVolumeRecordKeepsItsInvariantsAndOwnMinor(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.configure(testConfig())
 	for _, name := range []string{"pgdata", "cache"} {
-		c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", name, testVolumeSpec()))
+		c.put(resource.KindVolume, "default", name, testVolumeSpec())
 	}
 	minor := 5
 	volume := *c.state.Volumes["default/pgdata"]
@@ -694,12 +682,12 @@ func TestAVolumeRecordKeepsItsInvariantsAndOwnMinor(t *testing.T) {
 
 func TestOnlyACopysHostMarksItsGenerationInitialized(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.configure(testConfig())
 	c.addHost(testHost(1))
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
 	spec := testVolumeSpec()
 	spec.Replicas = 2
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "pgdata", spec))
+	c.put(resource.KindVolume, "default", "pgdata", spec)
 	c.refuse(KindSetVolumeInitialized, HostActor(0), SetVolumeInitialized{Volume: "default/pgdata", DataGeneration: 1},
 		"host/0 has no copy")
 	minor := 5
@@ -737,12 +725,12 @@ func TestOnlyACopysHostMarksItsGenerationInitialized(t *testing.T) {
 
 func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.configure(testConfig())
 	c.addHost(testHost(1))
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
 	spec := testVolumeSpec()
 	spec.Replicas = 2
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "pgdata", spec))
+	c.put(resource.KindVolume, "default", "pgdata", spec)
 	minor := 5
 	volume := *c.state.Volumes["default/pgdata"]
 	volume.Minor, volume.Status = &minor, VolumeOK
@@ -774,14 +762,13 @@ func TestOnlyRetiredCopiesMayGo(t *testing.T) {
 	c.refuse(KindForgetCopy, HostActor(1), ForgetCopy{Copy: want[0]}, "no retired copy")
 
 	// a deleted volume retires its copies
-	c.mustApply(KindDeleteResource, cliActor,
-		DeleteResource{Kind: resource.KindVolume, Namespace: "default", Name: "pgdata", Owner: OwnerCLI})
+	c.del(resource.KindVolume, "default", "pgdata")
 	if !slices.Contains(c.state.Retired, RetiredCopy{Volume: "default/pgdata", DataGeneration: 2, Host: 0}) {
 		t.Errorf("retired %v after the delete", c.state.Retired)
 	}
 	// its minor stays taken while a host still has a retired copy: the
 	// copy's resource has it there
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "other", spec))
+	c.put(resource.KindVolume, "default", "other", spec)
 	other := *c.state.Volumes["default/other"]
 	other.Minor, other.Status = &minor, VolumeOK
 	other.Copies = []VolumeCopy{{Host: 0, Class: "fast"}}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,7 +19,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/hetzner/hetznertest"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/raftnode"
+	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -89,15 +92,32 @@ func lostCluster(t *testing.T) (Files, *hetznertest.API) {
 			t.Fatalf("%s: %v", kind, err)
 		}
 	}
-	commit(state.KindApplyConfig, state.CLIActor("admin"), state.ApplyConfig{
-		Spec: clusterspec.Config{
-			Hetzner:        clusterspec.Hetzner{Token: "hetzner.token", API: project.URL},
-			PrivateNetwork: "127.0.0.0/8",
-			Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.10"},
-			StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
+	encode := func(spec any) []byte {
+		t.Helper()
+		encoded, err := json.Marshal(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return encoded
+	}
+	secret := encode(state.SealedSecret{Data: map[string]state.Sealed{"token": token}, Digest: "d"})
+	config := encode(clusterspec.Config{
+		Hetzner: clusterspec.Hetzner{
+			TokenSecretRef: names.SecretKeyRef{Name: "hetzner", Key: "token"}, API: project.URL,
 		},
-		Secrets: map[string]state.SealedSecret{"hetzner.token": {Value: token, Digest: "d"}},
+		PrivateNetwork: "127.0.0.0/8",
+		Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.10"},
+		StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 	})
+	commit(state.KindChangeResources, state.CLIActor("admin"), state.ChangeResources{Changes: []state.ResourceChange{
+		{Put: &state.PutResource{
+			Kind: resource.KindSecret, Namespace: names.System, Name: "hetzner", Owner: state.OwnerCLI, Spec: secret,
+		}},
+		{Put: &state.PutResource{
+			Kind: resource.KindClusterConfiguration, Name: resource.ClusterConfigurationName, Owner: state.OwnerCLI,
+			Spec: config,
+		}},
+	}})
 	for id := state.HostID(1); id <= 2; id++ {
 		name := "node" + string(rune('0'+id))
 		underlay, public := netip.AddrFrom4([4]byte{127, 0, 0, byte(id + 2)}), netip.AddrFrom4([4]byte{198, 51, 100, byte(id + 2)})
@@ -227,7 +247,7 @@ func TestRecoverNamesTheHostsItDoesNotReach(t *testing.T) {
 	}
 }
 
-func TestRecoverHasNothingToDoForASingleHostOrBeforeTheFirstClusterApply(t *testing.T) {
+func TestRecoverHasNothingToDoForASingleHostOrBeforeTheConfiguration(t *testing.T) {
 	one := &state.State{Keys: &state.ClusterKeys{}, Hosts: map[state.HostID]*state.Host{0: {ID: 0, Phase: state.Active}}}
 	if _, err := hostsToRetire(one, Host{ID: 0, Name: "node0"}); err == nil || !strings.Contains(err.Error(), "nothing to recover") {
 		t.Errorf("a single host: %v", err)
@@ -237,8 +257,8 @@ func TestRecoverHasNothingToDoForASingleHostOrBeforeTheFirstClusterApply(t *test
 		t.Errorf("a single host after a recover: %v, %v", gone, err)
 	}
 	one.Hosts[1] = &state.Host{ID: 1, Phase: state.Active}
-	if _, err := hostsToRetire(one, Host{ID: 0, Name: "node0"}); err == nil || !strings.Contains(err.Error(), "no cluster.yaml brought the Hetzner token") {
-		t.Errorf("before the first cluster apply: %v", err)
+	if _, err := hostsToRetire(one, Host{ID: 0, Name: "node0"}); err == nil || !strings.Contains(err.Error(), "no ClusterConfiguration names the Hetzner token") {
+		t.Errorf("before the configuration: %v", err)
 	}
 }
 

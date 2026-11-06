@@ -14,45 +14,49 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// AskSilence asks a voter how long it has not heard a host (Heard.Silence,
-// over the agent's API).
+// AskSilence asks a voter how long it has not heard from a host
+// (Heard.Silence, over the agent's API).
 type AskSilence func(ctx context.Context, voter, host state.HostID) (time.Duration, error)
 
 const (
-	// askTimeout bounds the question to one voter: a voter that does not
-	// answer in time counts as one that heard the host.
+	// askTimeout bounds the question to one voter. A voter that does not
+	// answer in time counts as one that heard from the host.
 	askTimeout = 2 * time.Second
-	// powerOffTries is how often the leader tries to power a server off
-	// before it gives the fence up; each try retries the API's busy answers
-	// itself (hetzner.Client).
+	// powerOffTries is how often the leader tries to power off a server
+	// before it gives up the fence. Within each try, hetzner.Client itself
+	// retries when the API answers that it is busy.
 	powerOffTries = 3
-	// powerOffPause is the pause after the first failed try; it doubles.
+	// powerOffPause is the pause after the first failed try; it doubles
+	// after each further try.
 	powerOffPause = 5 * time.Second
-	// powerOffTimeout bounds one try, the client's own retries included: a
-	// power action takes seconds, and while a fence tries, the loop watches
-	// no beats.
+	// powerOffTimeout bounds one try, including the client's own retries.
+	// A power action takes seconds, and the loop watches no beats while a
+	// fence is trying.
 	powerOffTimeout = 45 * time.Second
-	// fenceAgain is how long the leader waits before it fences a host again
-	// that it could not power off; a user's fence-confirm need not wait.
+	// fenceAgain is how long the leader waits before it tries again to
+	// fence a host that it could not power off. A user's fence-confirm does
+	// not have to wait.
 	fenceAgain = 5 * time.Minute
 	// powerOnAgain is how long the leader waits before it asks Hetzner
-	// again to power on a server it could not.
+	// again to power on a server that it failed to power on.
 	powerOnAgain = 30 * time.Second
 )
 
 // fencer detects failed hosts, fences them and powers them on again while
-// this agent leads. What it keeps in memory a new leader starts afresh: it
-// may then power a fenced host on a second time, which changes nothing.
+// this agent leads. It keeps its records in memory, so a new leader starts
+// with an empty memory. The new leader may then power on a fenced host a
+// second time, which changes nothing.
 type fencer struct {
 	FenceParts
 
-	// fenceAfter and powerOnAfter are when the leader may try again to power
-	// a host off or on after it failed to, by its ID; apart, so a power-off
-	// that failed holds up no power-on after a user's fence-confirm
+	// fenceAfter and powerOnAfter say, by host ID, when the leader may try
+	// again to power a host off or on after a failed try. They are kept
+	// apart, so a failed power-off does not hold up a power-on after a
+	// user's fence-confirm.
 	fenceAfter, powerOnAfter map[state.HostID]time.Time
 	// pause is powerOffPause; tests shorten it
 	pause time.Duration
-	// poweredOn are the fenced hosts this leader powered on
+	// poweredOn are the fenced hosts that this leader powered on
 	poweredOn map[state.HostID]bool
 }
 
@@ -69,17 +73,19 @@ type FenceParts struct {
 }
 
 // RunFencing keeps the hosts' phases in line with their beats while this
-// agent leads, until ctx ends, every BeatInterval (docs/developing/loops.md,
-// Fencing):
-//   - a host a majority of the voters has not heard for FailAfter is
-//     failed; a failed host a majority heard again is active;
-//   - a failed host is fenced, one at a time, while a majority of the
-//     voters is active without it: a fence-host operation powers its server
-//     off, and only then is it fenced and its stacks start elsewhere
-//     (placement);
-//   - a fenced host is powered on again once its fence is over; it comes
-//     back as recovering, and active once its copies caught up. One fenced
-//     FlapLimit times within FlapWindow stays off (disabled).
+// agent leads, until ctx ends. It looks every BeatInterval
+// (docs/developing/loops.md, Fencing):
+//   - A host becomes failed when a majority of the voters has not heard
+//     from it for FailAfter. A failed host becomes active again when a
+//     majority hears from it again.
+//   - Failed hosts are fenced one at a time, and only while a majority of
+//     the voters is active without the host. A fence-host operation powers
+//     off the host's server. Only then is the host fenced, and its stacks
+//     start elsewhere (placement).
+//   - A fenced host is powered on again once its fence is over. It comes
+//     back as recovering, and becomes active once its copies have caught
+//     up. A host fenced FlapLimit times within FlapWindow stays off
+//     (disabled).
 func RunFencing(ctx context.Context, parts FenceParts) {
 	f := &fencer{
 		FenceParts: parts, pause: powerOffPause,
@@ -106,8 +112,8 @@ func RunFencing(ctx context.Context, parts FenceParts) {
 	}
 }
 
-// pass makes each of the changes once, on the same copy of the state; one
-// that depends on another's commit happens in the next pass.
+// pass makes each of the changes once, on the same copy of the state. A
+// change that depends on the commit of another one happens in the next pass.
 func (f *fencer) pass(ctx context.Context) error {
 	copied, err := f.Cluster.SharedCopy()
 	if err != nil {
@@ -117,10 +123,10 @@ func (f *fencer) pass(ctx context.Context) error {
 	return errors.Join(f.watch(ctx, copied), f.fence(ctx, copied, now), f.powerOn(ctx, copied, now))
 }
 
-// watch moves the hosts whose beats stopped to failed, and the failed hosts
-// that are heard again back to active. Both need a majority of the voters
-// (the leader included): a host only the leader cannot hear, as when the
-// network between them two is cut, is not failed.
+// watch moves the hosts whose beats stopped to failed, and moves the failed
+// hosts that are heard again back to active. Both need a majority of the
+// voters, the leader included. So a host that only the leader cannot hear,
+// for example because the network between the two is cut, is not failed.
 func (f *fencer) watch(ctx context.Context, copied *state.State) error {
 	var errs []error
 	for _, id := range slices.Sorted(maps.Keys(copied.Hosts)) {
@@ -130,7 +136,7 @@ func (f *fencer) watch(ctx context.Context, copied *state.State) error {
 		case id == f.Self:
 			continue
 		case state.Up(host.Phase):
-			// the voters are asked only once the leader itself misses it
+			// ask the voters only once the leader itself misses the host's beats
 			if f.Heard.Silence(id) < FailAfter || !f.voters(ctx, copied, id, func(silence time.Duration) bool {
 				return silence >= FailAfter
 			}) {
@@ -155,11 +161,12 @@ func (f *fencer) watch(ctx context.Context, copied *state.State) error {
 	return errors.Join(errs...)
 }
 
-// voters tells whether a majority of the voters says so of a host's
-// silence. The leader counts itself; the others are asked at once, and one
-// that does not answer does not count, nor does the host itself. So a
-// voter that cannot be asked holds a host back from failed, and from
-// active again too: either way the host stays as it is.
+// voters tells whether says is true of a host's silence for a majority of
+// the voters. The leader counts itself and asks the others at the same
+// time. A voter that does not answer does not count, and neither does the
+// host itself. So a voter that cannot be asked keeps a host from becoming
+// failed, and also from becoming active again: either way the host stays
+// as it is.
 func (f *fencer) voters(ctx context.Context, copied *state.State, host state.HostID, says func(time.Duration) bool) bool {
 	ctx, cancel := context.WithTimeout(ctx, askTimeout)
 	defer cancel()
@@ -201,8 +208,9 @@ func (f *fencer) voters(ctx context.Context, copied *state.State, host state.Hos
 	return majority(count, total)
 }
 
-// fence takes the fencing on: the running fence-host operation if there is
-// one, else it starts one for the first failed host that may be fenced.
+// fence moves the fencing forward. If a fence-host operation is running, it
+// takes that one on. Otherwise it starts one for the first failed host that
+// may be fenced.
 func (f *fencer) fence(ctx context.Context, copied *state.State, now time.Time) error {
 	// one fence at a time: while one runs, the other failed hosts wait, and
 	// their conditions stay as they were
@@ -242,12 +250,13 @@ func (f *fencer) fence(ctx context.Context, copied *state.State, now time.Time) 
 	return errors.Join(errs...)
 }
 
-// needsFence tells whether a failed host must be powered off: it has a stack
-// that another active host could take over, and that host must not start
-// it while the failed one may still run it. A host without stacks, such as
-// one drained and rebooting for maintenance, or one whose stacks no other
-// host could take, gains nothing from a power cycle: it stays failed, with
-// its alert, and is active again once a majority hears it.
+// needsFence tells whether a failed host must be powered off. That is the
+// case when it has a stack that another active host could take over: that
+// host must not start the stack while the failed one may still run it. A
+// power cycle gains nothing for a host without stacks (such as one that was
+// drained and is rebooting for maintenance) or for a host whose stacks no
+// other host could take. Such a host stays failed, with its alert, and
+// becomes active again once a majority hears from it.
 func needsFence(copied *state.State, id state.HostID) bool {
 	hasStack, other := false, false
 	for _, stack := range copied.Stacks {
@@ -259,14 +268,15 @@ func needsFence(copied *state.State, id state.HostID) bool {
 	return hasStack && other
 }
 
-// whyNotFence says why a failed host may not be fenced now, "" if it may:
-//   - Hetzner can power it off: cluster.yaml brought the token, and the
-//     leader checked the host's server (a wrong ID would power off
-//     another server);
-//   - a majority of the voters stays active without it: when more hosts
-//     fail at once, the network is the likelier cause, and powering off
-//     hosts would not help;
-//   - the leader did not fail to power it off a short while ago.
+// whyNotFence says why a failed host may not be fenced now, or "" if it
+// may. A host may be fenced when all of these hold:
+//   - Hetzner can power it off: the configuration names the token, and the
+//     leader has checked the host's server (a wrong ID would power off
+//     another server).
+//   - A majority of the voters stays active without it. When several hosts
+//     fail at once, the network is the more likely cause, and powering off
+//     hosts would not help.
+//   - The leader did not fail to power it off a short while ago.
 func (f *fencer) whyNotFence(copied *state.State, host *state.Host, now time.Time) string {
 	total, active := 0, 0
 	for _, voter := range copied.Hosts {
@@ -280,8 +290,8 @@ func (f *fencer) whyNotFence(copied *state.State, host *state.Host, now time.Tim
 		}
 	}
 	switch {
-	case copied.Config.Revision == 0:
-		return "no cluster.yaml brought the Hetzner token to power it off"
+	case !copied.Configured():
+		return "no ClusterConfiguration names the Hetzner token to power it off"
 	case !host.ServerChecked:
 		return "Hetzner has not confirmed its server"
 	case copied.HostLocked(host.ID):
@@ -294,12 +304,13 @@ func (f *fencer) whyNotFence(copied *state.State, host *state.Host, now time.Tim
 	return ""
 }
 
-// step takes a fence-host operation on. At FenceStart it powers the server
-// off, and once it is off fences the host; if it cannot, the host goes back
-// to failed and the operation fails. At FenceOff it finishes once the
-// host's stacks run elsewhere, or after the step's deadline.
+// step moves a fence-host operation forward. At FenceStart it powers off
+// the server and, once the server is off, fences the host. If it cannot,
+// the host goes back to failed and the operation fails. At FenceOff it
+// finishes once the host's stacks run elsewhere, or after the step's
+// deadline.
 func (f *fencer) step(ctx context.Context, copied *state.State, operation *state.Operation, now time.Time) error {
-	// the host is there: its lock keeps it from being removed
+	// the host exists: its lock keeps it from being removed
 	host := copied.Hosts[operation.Fence.Host]
 	switch {
 	case operation.Step == state.FenceStart && host.Phase == state.Fencing:
@@ -308,9 +319,9 @@ func (f *fencer) step(ctx context.Context, copied *state.State, operation *state
 		// fenced by a leader that stopped before it recorded the step
 		return f.advance(ctx, operation)
 	case operation.Step == state.FenceStart:
-		// back to failed by a leader that stopped before it finished
+		// moved back to failed by a leader that stopped before it finished
 		return f.finish(ctx, operation, true, "the server could not be powered off")
-	// FenceOff: the step got StepTime of its own as it was recorded
+	// FenceOff: the step got its own StepTime when it was recorded
 	case now.After(operation.Deadline) || stacksMovedOff(copied, operation.Fence):
 		f.Logger.Info("the fence of a host is over", "host", host.Name)
 		return f.finish(ctx, operation, false, "")
@@ -318,18 +329,19 @@ func (f *fencer) step(ctx context.Context, copied *state.State, operation *state
 	return nil
 }
 
-// powerOff powers the host's server off, trying powerOffTries times, and
-// then fences the host (to fenced, then the step) or, if it cannot, takes
-// it back to failed and ends the operation. The leader confirms its lead
-// before each try: a leader cut off from the others must not power off a
-// host the others still run.
+// powerOff powers off the host's server, with up to powerOffTries tries.
+// Then it fences the host (first the phase fenced, then the step). If it
+// cannot, it moves the host back to failed and ends the operation. The
+// leader confirms its lead before each try: a leader that is cut off from
+// the others must not power off a host that the others still run.
 func (f *fencer) powerOff(ctx context.Context, copied *state.State, operation *state.Operation, host *state.Host) error {
 	client, err := OpenHetzner(copied, f.Open)
 	if err == nil {
 		err = f.tryPowerOff(ctx, client, host)
+		f.Conditions.Observe(hetznerTokenRefused, hetzner.TokenRefused(err))
 	}
 	if err != nil {
-		// from now, not the pass's start: the tries took a while
+		// count from now, not from the pass's start: the tries took a while
 		f.fenceAfter[host.ID] = time.Now().Add(fenceAgain)
 		f.Logger.Error("a failed host's server could not be powered off; it stays failed", "host", host.Name,
 			"error", err)
@@ -347,11 +359,11 @@ func (f *fencer) powerOff(ctx context.Context, copied *state.State, operation *s
 	return f.advance(ctx, operation)
 }
 
-// tryPowerOff powers the server off, up to powerOffTries times. Each try
-// ends after powerOffTimeout, the client's own retries of a busy API
-// included, so a fence that cannot power off holds the loop at most
-// powerOffTries times powerOffTimeout and the pauses (about two and a half
-// minutes). Meanwhile no beats are watched; only one fence runs anyway.
+// tryPowerOff powers off the server, with up to powerOffTries tries. Each
+// try ends after powerOffTimeout, including the client's own retries of a
+// busy API. So a fence that cannot power off holds up the loop for at most
+// powerOffTries times powerOffTimeout plus the pauses (about two and a half
+// minutes). No beats are watched meanwhile, but only one fence runs anyway.
 func (f *fencer) tryPowerOff(ctx context.Context, client *hetzner.Client, host *state.Host) error {
 	pause := f.pause
 	var err error
@@ -376,9 +388,9 @@ func (f *fencer) tryPowerOff(ctx context.Context, client *hetzner.Client, host *
 	return err
 }
 
-// stacksMovedOff tells whether the stacks a fenced host had run elsewhere
-// by now: each is gone, runs on another host, or waits for this one (its
-// data has no other copy).
+// stacksMovedOff tells whether the stacks that a fenced host had now run
+// elsewhere. Each stack must be gone, run on another host, or wait for this
+// host because its data has no other copy.
 func stacksMovedOff(copied *state.State, fence *state.HostFence) bool {
 	for _, id := range fence.Stacks {
 		stack, ok := copied.Stacks[id]
@@ -417,10 +429,10 @@ func (f *fencer) finish(ctx context.Context, operation *state.Operation, failed 
 	return nil
 }
 
-// powerOn powers each fenced host on whose fence is over, once per leader:
-// a server that does not come up is not asked again until another leader
-// leads, as it is likely broken (it stays fenced, and its copies are made
-// anew elsewhere after scheduler.CopyWait). One the flapping brake keeps
+// powerOn powers on each fenced host whose fence is over, once per leader.
+// A server that does not come up is likely broken, so it is not asked again
+// until another agent leads. It stays fenced, and its copies are made anew
+// elsewhere after scheduler.CopyWait. A host that the flapping brake keeps
 // off is disabled instead, until a user enables it.
 func (f *fencer) powerOn(ctx context.Context, copied *state.State, now time.Time) error {
 	var errs []error
@@ -432,9 +444,10 @@ func (f *fencer) powerOn(ctx context.Context, copied *state.State, now time.Time
 			continue
 		case copied.HostLocked(id) || f.poweredOn[id] || now.Before(f.powerOnAfter[id]):
 			continue
-		case copied.Config.Revision == 0 || !host.ServerChecked:
-			// a user confirmed the fence; a server Hetzner did not confirm may
-			// name another server, so the user powers it on (host-fenced)
+		case !copied.Configured() || !host.ServerChecked:
+			// a user confirmed the fence. A server ID that Hetzner did not
+			// confirm may name another server, so the user powers it on
+			// (host-fenced).
 			continue
 		case host.Flapping(now):
 			f.Logger.Error("a host was fenced too often; it stays off until a user enables it", "host", host.Name,
@@ -449,6 +462,7 @@ func (f *fencer) powerOn(ctx context.Context, copied *state.State, now time.Time
 			powerCtx, cancel := context.WithTimeout(ctx, hetznerTimeout)
 			err = client.PowerOn(powerCtx, host.ServerID)
 			cancel()
+			f.Conditions.Observe(hetznerTokenRefused, hetzner.TokenRefused(err))
 		}
 		if err != nil {
 			f.powerOnAfter[id] = now.Add(powerOnAgain)

@@ -41,7 +41,7 @@ func TestTheStaticConfigurationMatchesTheGoldenFile(t *testing.T) {
 }
 
 func TestTheStaticConfigurationNeedsItsAddresses(t *testing.T) {
-	// before the first cluster apply there is no Floating IP
+	// before the first configuration there is no Floating IP
 	_, err := RenderStatic(Static{NodeAddress: netip.MustParseAddr("10.77.0.1"), Overlay: netip.MustParsePrefix("10.77.0.0/24")})
 	if err == nil || !strings.Contains(err.Error(), "Floating IP") {
 		t.Errorf("got %v", err)

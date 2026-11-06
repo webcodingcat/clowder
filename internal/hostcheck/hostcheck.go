@@ -1,7 +1,8 @@
 // Package hostcheck checks the operator base of a host: what the operator
-// sets up (cloud-init, Ansible, by hand) and clowderd relies on. It only
-// reads; it never changes the host. clowderd check runs it; init and join will
-// run it first, and the agent will report it with every health message.
+// sets up (with cloud-init, Ansible or by hand) and clowderd relies on. It
+// only reads and never changes the host. clowderd check runs it; later, init
+// and join will run it first, and the agent will report it with every
+// health message.
 package hostcheck
 
 import (

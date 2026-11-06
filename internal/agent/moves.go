@@ -11,25 +11,29 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// moveSteps are what the steps of a move that this host runs look at: the
-// stack runner, the volume reconciler and the prefetcher do the work, as
-// the state tells them (State.StopsForMove); the steps only record it done.
+// moveSteps holds what this host's steps of a move look at. The stack
+// runner, the volume reconciler and the prefetcher do the work, as the
+// state tells them (State.StopsForMove); the steps only record that the
+// work is done.
 type moveSteps struct {
 	cluster loop.Cluster
 	self    state.HostID
 	propose func(context.Context, state.Command) (uint64, error)
-	// imagesReady tells whether Docker has a stack's images, by its ID
+	// imagesReady tells whether Docker has the images of the stack with
+	// this ID
 	imagesReady func(stackID string) bool
-	// stopped tells whether a stack, by its project, has no containers here
+	// stopped tells whether the stack of this project has no containers on
+	// this host
 	stopped func(project string) (bool, error)
-	// released tells whether this host's copy, by its LV, is unmounted and
+	// released tells whether this host's copy with this LV is unmounted and
 	// secondary
 	released func(lv string) bool
 	logger   *slog.Logger
 }
 
-// run records the steps of moves this host owns as they are done, at every
-// change of the state and every interval, until ctx ends.
+// run records the steps of moves that this host owns once they are done.
+// It checks at every change of the state and every interval, until ctx
+// ends.
 func (m moveSteps) run(ctx context.Context) {
 	loop.Run(ctx, m.cluster, nil, func() { m.pass(ctx) })
 }
@@ -66,10 +70,10 @@ func (m moveSteps) pass(ctx context.Context) {
 	}
 }
 
-// synced is the step on the new host: each volume's copy here holds the
-// data (a volume that never held any has none to wait for), and Docker has
-// the images. The old host stops the stack next; a stack without one goes
-// on with the leader.
+// synced is the step on the new host: each volume's copy on this host holds
+// the data (a volume that never held data has nothing to wait for), and
+// Docker has the images. The old host stops the stack next. If the stack
+// had no old host, the leader takes the next step.
 func (m moveSteps) synced(copied *state.State, operation *state.Operation, stack *state.Stack) *state.AdvanceOperation {
 	for _, name := range stack.Spec.VolumeNames() {
 		volume, ok := copied.Volumes[names.ID(stack.Namespace, name)]
@@ -85,8 +89,8 @@ func (m moveSteps) synced(copied *state.State, operation *state.Operation, stack
 	if !m.imagesReady(stack.ID()) {
 		return nil
 	}
-	// the old host stops the stack next; a stack that had none has nothing
-	// to stop, so the leader gives it its host next
+	// the old host stops the stack next; a stack that had no old host has
+	// nothing to stop, so the leader gives it its new host next
 	advance := &state.AdvanceOperation{ID: operation.ID, FromStep: state.MoveCopies, Step: state.MoveSynced, Owner: operation.Move.From}
 	if operation.Move.From == nil {
 		advance.Step = state.MoveStopped
@@ -94,8 +98,9 @@ func (m moveSteps) synced(copied *state.State, operation *state.Operation, stack
 	return advance
 }
 
-// stoppedHere is the step on the old host: the stack has no containers
-// here any more, and each of its copies here is unmounted and secondary.
+// stoppedHere is the step on the old host: the stack has no containers on
+// this host any more, and each of its copies here is unmounted and
+// secondary.
 // The leader gives the stack its new host next.
 func (m moveSteps) stoppedHere(copied *state.State, operation *state.Operation, stack *state.Stack) *state.AdvanceOperation {
 	stopped, err := m.stopped(stack.Project())

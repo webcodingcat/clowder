@@ -4,6 +4,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/pki"
 )
 
 func TestPriorityDefaultsAreCheckedAndFilledIn(t *testing.T) {
@@ -69,6 +73,17 @@ func TestTheReservationsAndTheSystemReserveHaveDefaults(t *testing.T) {
 	}
 }
 
+// problemsWith are the problems of Check that start with prefix.
+func problemsWith(config Config, prefix string) []string {
+	var found []string
+	for _, problem := range Check(config) {
+		if strings.HasPrefix(problem, prefix) {
+			found = append(found, problem)
+		}
+	}
+	return found
+}
+
 func TestHetznersAPIIsAFullURL(t *testing.T) {
 	for api, valid := range map[string]bool{
 		"":                             true,
@@ -78,18 +93,18 @@ func TestHetznersAPIIsAFullURL(t *testing.T) {
 		"ftp://api.example.com":        false,
 		"https:///v1":                  false,
 	} {
-		hetzner := Hetzner{Token: "hetzner.token", API: api}
-		if problems := checkHetzner(hetzner); (len(problems) == 0) != valid {
+		problems := problemsWith(Config{Hetzner: Hetzner{API: api}}, "hetzner.api")
+		if (len(problems) == 0) != valid {
 			t.Errorf("api %q: valid %v, problems %v", api, valid, problems)
 		}
 	}
 }
 
-func TestOwnEndpointsAreWarnedAboutAndHTTPAboveAll(t *testing.T) {
-	if warnings := EndpointWarnings(Config{}); len(warnings) != 0 {
-		t.Errorf("the default endpoints warn: %v", warnings)
+func TestServiceURLsAreWarnedAboutAndHTTPAboveAll(t *testing.T) {
+	if warnings := ServiceURLWarnings(Config{}); len(warnings) != 0 {
+		t.Errorf("the default service URLs warn: %v", warnings)
 	}
-	warnings := EndpointWarnings(Config{
+	warnings := ServiceURLWarnings(Config{
 		Hetzner: Hetzner{API: "http://198.18.0.1/v1"},
 		ACME:    ACME{Directory: "https://ca.example.com/directory"},
 	})
@@ -108,16 +123,66 @@ func TestThePrivateNetworkIsAnIPv4NetworkOutsideClowders(t *testing.T) {
 		"fd00::/8":     "is not an IPv4 network",
 		"10.77.0.0/16": "overlaps clowder's 10.77.0.0/24",
 	} {
-		var reported []string
-		for _, reportedProblem := range Check(Config{PrivateNetwork: network}) {
-			if strings.HasPrefix(reportedProblem, "private_network") {
-				reported = append(reported, reportedProblem)
-			}
-		}
+		reported := problemsWith(Config{PrivateNetwork: network}, "privateNetwork")
 		if problem == "" && len(reported) != 0 ||
 			problem != "" && (len(reported) != 1 || !strings.Contains(reported[0], problem)) {
-			t.Errorf("private_network %q: %v, want %q", network, reported, problem)
+			t.Errorf("privateNetwork %q: %v, want %q", network, reported, problem)
 		}
+	}
+}
+
+// testCA is a CA certificate in PEM, as a test lab's.
+func testCA(t *testing.T) string {
+	t.Helper()
+	ca, err := pki.NewCA("test", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(ca.CertificatePEM())
+}
+
+func TestACAIsPEMWithACertificate(t *testing.T) {
+	for ca, problem := range map[string]string{
+		"":                               "",
+		testCA(t):                        "",
+		"not a certificate":              "holds no PEM certificate",
+		strings.Repeat("x", MaxCASize+1): "larger than 64 KiB",
+	} {
+		reported := problemsWith(Config{ACME: ACME{CA: ca}}, "acme.ca")
+		if problem == "" && len(reported) != 0 ||
+			problem != "" && (len(reported) != 1 || !strings.Contains(reported[0], problem)) {
+			t.Errorf("acme.ca of %d bytes: %v, want %q", len(ca), reported, problem)
+		}
+	}
+}
+
+func TestTheSecretPlacesAreEveryFieldThatNamesASecret(t *testing.T) {
+	ref := func(name string) *names.SecretKeyRef { return &names.SecretKeyRef{Name: name, Key: "value"} }
+	config := Config{
+		Hetzner: Hetzner{TokenSecretRef: names.SecretKeyRef{Name: "hetzner", Key: "token"}},
+		Alerts: &Alerts{
+			Channels: []AlertChannel{
+				{Type: "discord", WebhookSecretRef: ref("discord")},
+				{Type: "webhook", URLSecretRef: ref("hook")},
+				{Type: "email", SMTP: &SMTP{PasswordSecretRef: ref("smtp")}},
+				{Type: "email", SMTP: &SMTP{}},
+			},
+			Heartbeat: &Heartbeat{URLSecretRef: *ref("beat")},
+		},
+	}
+	var got []string
+	for _, place := range SecretPlaces(config) {
+		got = append(got, place.Path+"="+place.Ref.String())
+	}
+	want := []string{
+		"hetzner.tokenSecretRef=hetzner[token]",
+		"alerts.channels[0].webhookSecretRef=discord[value]",
+		"alerts.channels[1].urlSecretRef=hook[value]",
+		"alerts.channels[2].smtp.passwordSecretRef=smtp[value]",
+		"alerts.heartbeat.urlSecretRef=beat[value]",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("places:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 
@@ -139,25 +204,26 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 			Channels: []AlertChannel{
 				{Type: "discord"},
 				{Type: "pager"},
-				{Type: "webhook", MinSeverity: "loud"},
-				{Type: "email", SMTP: &SMTP{Password: "the-key"}, From: "clowder@example.com", To: []string{"ops@example.com"}},
+				{Type: "webhook", MinSeverity: "loud", WebhookSecretRef: &names.SecretKeyRef{Name: "hook", Key: "url"}},
+				{
+					Type: "email", SMTP: &SMTP{PasswordSecretRef: &names.SecretKeyRef{Name: "Mail", Key: "password"}, CA: "x"},
+					From: "clowder@example.com", To: []string{"ops@example.com"},
+				},
 			},
 			Heartbeat: &Heartbeat{Interval: "often"},
 		},
-		ACME:       ACME{Directory: "acme.example.com", Email: "ops", CA: "../ca.pem", RenewBefore: "soon"},
-		Registries: map[string]Registry{"ghcr.io": {}},
+		ACME: ACME{Directory: "acme.example.com", Email: "ops", CA: testCA(t), RenewBefore: "soon"},
 	}
 	want := []string{
-		`acme.directory "acme.example.com"`, `acme.email "ops"`, `"../ca.pem" is not a path`, `renew_before "soon"`,
-		"hetzner.token",
-		`hetzner.api "api.example.com/v1" is not a full URL`,
-		"private_network 10.77.0.0/16 overlaps clowder's 10.77.0.0/24", "not an IPv4 address", `pool "nopool"`, `reserve "95%"`,
-		`falls back to "slow"`, "storage class empty", "resync_rate", "top: 2000",
+		`acme.directory "acme.example.com"`, `acme.email "ops"`, `renewBefore "soon"`,
+		`hetzner.api "api.example.com/v1" is not a full URL`, `hetzner.tokenSecretRef: secret name ""`,
+		"privateNetwork 10.77.0.0/16 overlaps clowder's 10.77.0.0/24", "not an IPv4 address", `pool "nopool"`, `reserve "95%"`,
+		`falls back to "slow"`, "storage class empty", "resyncRate", "top: 2000",
 		`default "medium"`, `"Monitoring" is not <namespace>/<stack>`, "reservations.memory", "reservations.cpus",
-		"webhook: a value tagged !secret", "type is not discord", `min_severity "loud"`, "url: a value tagged !secret",
-		"heartbeat.url", `interval "often"`,
-		"smtp needs host and port", `registries["ghcr.io"].username`, `registries["ghcr.io"].password`,
-		`alerts.channels[3].smtp.password names the secret "the-key"`,
+		"webhookSecretRef is required", "type is not discord", `minSeverity "loud"`, "urlSecretRef is required",
+		"webhookSecretRef is a discord channel's", `interval "often"`, "smtp needs host and port",
+		"smtp.ca holds no PEM certificate", `heartbeat.urlSecretRef: secret name ""`,
+		`alerts.channels[3].smtp.passwordSecretRef: secret name "Mail"`,
 	}
 	problems := Check(config)
 	text := problems.Error()

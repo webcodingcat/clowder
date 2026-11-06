@@ -61,7 +61,7 @@ clowder_pool_data_percent{host="node0",pool="vg-fast/thin"} 42
 clowder_pool_metadata_percent{host="node0",pool="vg-fast/thin"} 7
 # HELP clowder_raft_applied_index Raft index of the last command this host applied.
 # TYPE clowder_raft_applied_index gauge
-clowder_raft_applied_index{host="node0"} 9
+clowder_raft_applied_index{host="node0"} 10
 # HELP clowder_root_used_percent How full the root file system is.
 # TYPE clowder_root_used_percent gauge
 clowder_root_used_percent{host="node0"} 31

@@ -7,15 +7,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
 // readResourceFiles reads the resources of a file, of the YAML files of a
-// directory, or of stdin ("-"). A file or stdin must hold resources; in a
+// directory, or of stdin ("-"). A file or stdin must hold resources. In a
 // directory, hidden files, other files and files of other documents are
-// skipped, and each is reported to report.
+// skipped, and each skipped file is reported to report.
 func readResourceFiles(from string, stdin io.Reader, report io.Writer) ([]resource.Object, error) {
 	if from == "-" {
 		data, err := io.ReadAll(stdin)
@@ -38,12 +37,9 @@ func readResourceFiles(from string, stdin io.Reader, report io.Writer) ([]resour
 	return readDirectory(from, report)
 }
 
-// readDirectory reads the YAML files of a directory, not those below it.
-// A cluster directory is refused: its files are cluster apply's.
+// readDirectory reads the YAML files of a directory, in the order of their
+// names. It does not read the files in subdirectories.
 func readDirectory(dir string, report io.Writer) ([]resource.Object, error) {
-	if _, err := os.Stat(filepath.Join(dir, clusterdir.ConfigFile)); err == nil {
-		return nil, fmt.Errorf("%s holds %s: it is a cluster directory, which cluster apply takes", dir, clusterdir.ConfigFile)
-	}
 	paths, err := yamlFiles(dir, report)
 	if err != nil {
 		return nil, fmt.Errorf("read the resources: %w", err)
@@ -66,8 +62,9 @@ func readDirectory(dir string, report io.Writer) ([]resource.Object, error) {
 	return objects, nil
 }
 
-// yamlFiles lists the YAML files of a directory, sorted by name, not those
-// below it; hidden files and other files are skipped and reported.
+// yamlFiles lists the YAML files of a directory, sorted by name, without
+// the files in subdirectories. Hidden files and other files are skipped and
+// reported.
 func yamlFiles(dir string, report io.Writer) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -95,10 +92,10 @@ func skipped(report io.Writer, path, why string) {
 	_, _ = fmt.Fprintf(report, "skipped %s: %s\n", path, why) // a report only
 }
 
-// readFile reads the resources of one file, a Secret's value encrypted in
-// it (resource.ParseDocuments): the CLI never sees a value in clear, on
-// stdin neither. Unless required, a file without resources holds none (a
-// directory skips it); else it is an error.
+// readFile reads the resources of one file, in which a Secret's values are
+// encrypted (resource.ParseDocuments). The CLI never sees a value in clear,
+// not even on stdin. A file without resources is allowed unless required
+// is set (a directory skips such a file); otherwise it is an error.
 func readFile(name string, data []byte, required bool) ([]resource.Object, error) {
 	objects, err := resource.ParseDocuments(data)
 	switch {

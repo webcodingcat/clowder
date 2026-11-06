@@ -79,8 +79,6 @@ linters:
           deny:
             - pkg: os
               desc: the state does no I/O
-            - pkg: github.com/webcodingcat/clowder/internal/clusterdir
-              desc: "the state reads cluster.yaml's types from clusterspec; clusterdir reads files"
             - pkg: github.com/webcodingcat/clowder/internal/agent
               desc: the state does no I/O
             - pkg: github.com/webcodingcat/clowder/internal/controller

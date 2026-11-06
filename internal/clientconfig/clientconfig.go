@@ -1,13 +1,13 @@
-// Package clientconfig is the CLI's credentials file, as kubectl's
-// kubeconfig: contexts, each the way into one cluster, and the current one.
-// clowderd credentials prints a file with one context; clowder config
-// import adds it to the user's file. It is portable (Linux, macOS,
-// Windows).
+// Package clientconfig is the CLI's credentials file, like kubectl's
+// kubeconfig: contexts, each the way into one cluster, and the current
+// context. clowderd credentials prints a file with one context, and
+// clowder config import adds it to the user's file. The package is
+// portable (Linux, macOS, Windows).
 //
 // Unlike a kubeconfig, a context holds everything in one place (no
 // clusters and users to join by name) and lists several endpoints, which
 // the CLI tries in turn, so a cluster needs nothing in front of it. Its
-// keys are snake_case, as every file of clowder's that is no resource.
+// keys are snake_case, like every clowder file that is not a resource.
 package clientconfig
 
 import (
@@ -31,8 +31,8 @@ import (
 // EnvVar names the file when --config is not given.
 const EnvVar = "CLOWDER_CONFIG"
 
-// The errors of picking and adding a context, for the CLI to say what to
-// do about them.
+// The errors of picking and adding a context, so that the CLI can say what
+// to do about them.
 var (
 	ErrNoCurrentContext = errors.New("no current context")
 	ErrNoContext        = errors.New("no such context")
@@ -47,24 +47,25 @@ type Config struct {
 }
 
 // Context is the way into one cluster: the agents to ask, the CA to trust
-// them by, and the CLI's key and certificate. Whoever holds it controls the
-// cluster, as with kubeadm's admin.conf.
+// them by, and the CLI's key and certificate. Whoever holds it controls
+// the cluster, as with kubeadm's admin.conf.
 type Context struct {
-	// Name is the user's own, as in a kubeconfig, any text but none: it
-	// names no file and goes nowhere. clowderd credentials names it after
-	// the cluster.
+	// Name is chosen by the user, as in a kubeconfig. It may be any text
+	// except empty, because it names no file and is sent nowhere. clowderd
+	// credentials names it after the cluster.
 	Name string `yaml:"name"`
-	// Endpoints are the agents the CLI asks, in turn: the hosts' public
-	// addresses, or one address in front of them, each with the API's port
-	// unless it names its own. The CLI learns no others.
+	// Endpoints are the agents that the CLI asks, in turn: the hosts'
+	// public addresses, or one address in front of them, each with the
+	// API's port unless it names its own. The CLI learns no other agents.
 	Endpoints   []string `yaml:"endpoints"`
 	CA          string   `yaml:"ca"`
 	Certificate string   `yaml:"certificate"`
 	Key         string   `yaml:"key"`
 }
 
-// Path is the file the CLI reads: the flag, else $CLOWDER_CONFIG, else
-// ~/.clowder/config, as kubectl's ~/.kube/config.
+// Path returns the file that the CLI reads: the flag, or else
+// $CLOWDER_CONFIG, or else ~/.clowder/config, like kubectl's
+// ~/.kube/config.
 func Path(flag string) (string, error) {
 	for _, candidate := range []string{flag, os.Getenv(EnvVar)} {
 		if candidate != "" {
@@ -78,8 +79,8 @@ func Path(flag string) (string, error) {
 	return filepath.Join(home, ".clowder", "config"), nil
 }
 
-// Read reads the file at path; a missing file is an empty config, so the
-// first import writes it.
+// Read reads the file at path. A missing file is an empty config, so the
+// first import creates it.
 func Read(path string) (Config, error) {
 	content, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -96,8 +97,8 @@ func Read(path string) (Config, error) {
 }
 
 // Parse reads a config strictly and checks it, so a misspelled key or a
-// context without its key shows at once. An empty file is an empty config,
-// as a missing one is.
+// context without its key shows up at once. An empty file is an empty
+// config, as a missing one is.
 func Parse(content []byte) (Config, error) {
 	var config Config
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
@@ -111,8 +112,8 @@ func Parse(content []byte) (Config, error) {
 	return config, nil
 }
 
-// check holds every context to what the CLI needs, and the current
-// context to one of them.
+// check checks that every context has what the CLI needs, and that the
+// current context is one of them.
 func (c Config) check() error {
 	var seen []string
 	for _, cliContext := range c.Contexts {
@@ -178,13 +179,13 @@ func (c Config) Context(name string) (Context, error) {
 	return c.Contexts[index], nil
 }
 
-// index is the place of the context of that name, or -1.
+// index returns the position of the context of that name, or -1.
 func (c Config) index(name string) int {
 	return slices.IndexFunc(c.Contexts, func(cliContext Context) bool { return cliContext.Name == name })
 }
 
-// Add adds a context under a name not taken yet; the first context becomes
-// the current one.
+// Add adds a context under a name that is not taken yet. The first context
+// becomes the current one.
 func (c *Config) Add(cliContext Context) error {
 	if c.index(cliContext.Name) >= 0 {
 		return fmt.Errorf("%w: %s", ErrContextTaken, cliContext.Name)
@@ -192,9 +193,9 @@ func (c *Config) Add(cliContext Context) error {
 	return c.Put(cliContext)
 }
 
-// Put adds a context, or replaces the one of the same name in its place,
-// as new credentials replace old ones; the first context becomes the
-// current one.
+// Put adds a context, or replaces the context of the same name in its
+// place, as new credentials replace old ones. The first context becomes
+// the current one.
 func (c *Config) Put(cliContext Context) error {
 	if err := cliContext.check(); err != nil {
 		return err
@@ -210,8 +211,8 @@ func (c *Config) Put(cliContext Context) error {
 	return nil
 }
 
-// Delete removes the context of that name; if it was the current one, none
-// is current afterwards.
+// Delete removes the context of that name. If it was the current one, no
+// context is current afterwards.
 func (c *Config) Delete(name string) error {
 	index := c.index(name)
 	if index < 0 {
@@ -233,9 +234,9 @@ func (c *Config) Use(name string) error {
 	return nil
 }
 
-// Write writes the config to path, readable by the user alone (0600 in a
-// directory of 0700, as SSH keeps its keys; on Windows the user's profile
-// protects it), whole or not at all.
+// Write writes the config to path, whole or not at all, readable only by
+// the user (0600 in a directory of 0700, as SSH keeps its keys; on Windows
+// the user's profile protects it).
 func Write(path string, config Config) error {
 	if err := config.check(); err != nil {
 		return err

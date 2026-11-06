@@ -25,8 +25,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// DefaultClusterName names a cluster that init is given no name for, as
-// kubeadm's clusterName is kubernetes without one.
+// DefaultClusterName is the cluster's name when init is given none, as
+// kubeadm's clusterName is "kubernetes" by default.
 const DefaultClusterName = "clowder-cluster"
 
 // InitOptions are what cloud-init gives clowderd init.
@@ -49,8 +49,9 @@ type InitOptions struct {
 	APIPort     int
 }
 
-// checkHostName refuses a name the state would refuse: the host's name in
-// the cluster is its hostname, and a hostname may be a FQDN or have capitals.
+// checkHostName refuses a name that the state would refuse. The host's name
+// in the cluster is its hostname, and a hostname may be a FQDN or contain
+// capitals.
 func checkHostName(name string) error {
 	if !names.Valid(name) {
 		return fmt.Errorf("the hostname %q cannot name a host of the cluster: %s", name, names.Rule)
@@ -73,18 +74,18 @@ func Init(ctx context.Context, files Files, options InitOptions, hostNetwork Hos
 	if options.Name == "" || options.ServerID <= 0 {
 		return errors.New("init needs the host's name and its server ID")
 	}
-	// the state takes only a DNS label (applyBootstrap); refused there,
-	// init would stop halfway
+	// the state accepts only a DNS label (applyBootstrap); if the state
+	// refused it, init would stop halfway
 	if !names.Valid(options.ClusterName) {
 		return fmt.Errorf("cluster name %q: %s", options.ClusterName, names.Rule)
 	}
-	// the state takes only a DNS label (checkNewHost); refused there, init
-	// would stop halfway
+	// the state accepts only a DNS label (checkNewHost); if the state
+	// refused it, init would stop halfway
 	if err := checkHostName(options.Name); err != nil {
 		return err
 	}
-	// the state takes only IPv4 (checkNewHost); refused there, init would
-	// stop halfway
+	// the state accepts only IPv4 (checkNewHost); if the state refused
+	// it, init would stop halfway
 	if !options.Underlay.Is4() || !options.PublicAddress.Is4() {
 		return errors.New("the underlay and the public address must be IPv4 addresses")
 	}

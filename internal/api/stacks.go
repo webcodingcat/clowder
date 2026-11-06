@@ -21,15 +21,15 @@ type ContainerInfo struct {
 }
 
 // Containers answers for the stacks that run on this host, by their Compose
-// project (names.Project); the agent is the real one.
+// project (names.Project). The agent implements it.
 type Containers interface {
 	Ps(ctx context.Context, project string) ([]ContainerInfo, error)
 	// Logs writes the stack's logs to out; with follow, until ctx ends.
 	Logs(ctx context.Context, project string, follow bool, out io.Writer) error
 }
 
-// stackHost finds the host a stack runs on and its Compose project there;
-// ok is false (and the answer written) when there is none.
+// stackHost finds the host that a stack runs on, and its Compose project
+// there. ok is false (and the answer is written) when there is none.
 func (s *Server) stackHost(w http.ResponseWriter, r *http.Request) (state.HostID, string, bool) {
 	namespace, name := r.PathValue("namespace"), r.PathValue("name")
 	id := names.ID(namespace, name)
@@ -78,8 +78,8 @@ func (s *Server) stackLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 // RestartRequest is the body of POST /v1/stacks/{namespace}/{name}/restart:
-// the services to restart, none for all of them. Those that depend on them
-// come along (state.RestartStack).
+// the services to restart, or none for all of them. The services that
+// depend on them are restarted too (state.RestartStack).
 type RestartRequest struct {
 	Services []string `json:"services,omitempty"`
 }
@@ -97,9 +97,9 @@ func (s *Server) restartStack(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// localProject is the Compose project of an internal route: only hosts call
-// these, but the project becomes a path on this host, so it must be a
-// stack's.
+// localProject returns the Compose project of an internal route. Only hosts
+// call these routes, but the project becomes a path on this host, so it
+// must belong to a stack.
 func localProject(w http.ResponseWriter, r *http.Request) (string, bool) {
 	project := r.PathValue("project")
 	if _, _, ok := names.SplitProject(project); !ok {
@@ -165,9 +165,9 @@ func (f flushingWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
-// relay asks another host's internal endpoint with client and passes its
-// answer on, as it streams: the forwarder for answers that must come
-// within its timeout, the streamer for logs that follow.
+// relay asks another host's internal endpoint with client and passes the
+// answer on as it streams. client is the forwarder for answers that must
+// come within its timeout, or the streamer for logs that follow.
 func (s *Server) relay(w http.ResponseWriter, r *http.Request, client *http.Client, host state.HostID, path string) {
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
 		"https://"+s.config.APIAddress(host)+path, nil)

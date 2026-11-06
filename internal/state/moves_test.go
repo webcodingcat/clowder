@@ -15,11 +15,11 @@ import (
 func moveCluster(t *testing.T) *cluster {
 	t.Helper()
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.configure(testConfig())
 	c.activeHosts(2)
 	spec := testVolumeSpec()
 	spec.Replicas = 2
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "data", spec))
+	c.put(resource.KindVolume, "default", "data", spec)
 	shop := shopSpec()
 	app := shop.Services["app"]
 	app.Volumes = []stackspec.Mount{{Volume: "data", Path: "/data"}}

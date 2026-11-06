@@ -38,9 +38,9 @@ type Node struct {
 //   - quorum majority with suspend-io: a copy without quorum stops writing
 //     instead of going its own way (split brain);
 //   - auto-promote off: only the agent makes a copy primary;
-//   - node-id is the host ID, the address the node address;
-//   - the after-split-brain rules: discard what has no changes, never guess
-//     on two primaries (a human decides).
+//   - node-id is the host ID, and the address is the node address;
+//   - the after-split-brain rules: discard the copy that has no changes,
+//     and never guess when there are two primaries (a human decides).
 func RenderResource(resource Resource) string {
 	resyncRate := resource.ResyncRate
 	if resyncRate == "" {

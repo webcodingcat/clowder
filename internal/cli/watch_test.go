@@ -41,10 +41,10 @@ func waitForText(t *testing.T, out *syncBuffer, text string) {
 }
 
 func TestGetWatchShowsTheListThenEachChange(t *testing.T) {
-	cluster := startCluster(t)
+	startCluster(t)
 	apply := func(document string) {
 		t.Helper()
-		if out, err := runWithInput(t, document, "--cluster", cluster, "apply", "-f", "-"); err != nil {
+		if out, err := runWithInput(t, document, "apply", "-f", "-"); err != nil {
 			t.Fatalf("apply: %v\n%s", err, out)
 		}
 	}
@@ -57,13 +57,13 @@ func TestGetWatchShowsTheListThenEachChange(t *testing.T) {
 		root := NewRoot()
 		root.SetOut(&out)
 		root.SetErr(&out)
-		root.SetArgs([]string{"--cluster", cluster, "get", "namespaces", "--watch"})
+		root.SetArgs([]string{"get", "namespaces", "--watch"})
 		ended <- root.ExecuteContext(ctx)
 	}()
 	waitForText(t, &out, "shop")
 	apply("apiVersion: clowder/v1\nkind: Namespace\nmetadata: {name: blog}\n")
 	waitForText(t, &out, "blog")
-	if _, err := run(t, "--cluster", cluster, "delete", "namespace", "blog"); err != nil {
+	if _, err := run(t, "delete", "namespace", "blog"); err != nil {
 		t.Fatal(err)
 	}
 	waitForText(t, &out, "Namespace blog: deleted")

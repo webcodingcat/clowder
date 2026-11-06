@@ -22,7 +22,6 @@ import (
 	"github.com/webcodingcat/clowder/internal/agent/agenttest"
 	"github.com/webcodingcat/clowder/internal/cli"
 	"github.com/webcodingcat/clowder/internal/clientconfig"
-	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/hetzner"
 	"github.com/webcodingcat/clowder/internal/hetzner/hetznertest"
 	"github.com/webcodingcat/clowder/internal/names"
@@ -349,7 +348,6 @@ func TestAFirstHostAndItsCLI(t *testing.T) {
 	}
 
 	// the CLI's side: a credentials file of its own, nothing in it yet
-	t.Setenv(clusterdir.EnvVar, "")
 	t.Setenv(clientconfig.EnvVar, filepath.Join(t.TempDir(), "config"))
 	dir := t.TempDir()
 	if _, err := clowder(t, "host", "list"); err == nil || !strings.Contains(err.Error(), "clowderd credentials") {
@@ -380,7 +378,7 @@ func TestAFirstHostAndItsCLI(t *testing.T) {
 		t.Errorf("the first credentials: %v", err)
 	}
 	// a new cluster has no recovery key: encrypting waits for the first
-	if _, err := clowderWithInput(t, "x\n", "secret", "encrypt", "--cluster-yaml"); err == nil ||
+	if _, err := clowder(t, "secret", "encrypt", "clowder-system/hetzner", "--from-literal", "token=x"); err == nil ||
 		!strings.Contains(err.Error(), "recovery rotate") {
 		t.Errorf("encrypt without a recovery key: %v", err)
 	}
@@ -418,39 +416,45 @@ func TestAFirstHostAndItsCLI(t *testing.T) {
 		t.Errorf("the host's new credentials: %q, %v", out, err)
 	}
 
-	// cluster.yaml from scratch, with the Hetzner token encrypted by the
-	// cluster's recipients; the hosts' private network is the loopback's
-	config := filepath.Join(dir, clusterdir.ConfigFile)
+	// the configuration from scratch, after the Secret with the Hetzner
+	// token, encrypted for the cluster; the hosts' private network is the
+	// loopback's
+	config := filepath.Join(dir, "configuration.yaml")
 	finish := func(token string, privateNetwork string) {
 		t.Helper()
-		block, err := clowderWithInput(t, token+"\n", "secret", "encrypt", "--cluster-yaml")
+		secret, err := clowder(t, "secret", "encrypt", "clowder-system/hetzner", "--from-literal", "token="+token)
 		if err != nil {
 			t.Fatal(err)
 		}
-		finished := "hetzner:\n  api: " + project.URL + "\n  token: " + block +
-			"private_network: " + privateNetwork + "\n" +
-			"ingress:\n  floating_ip: 203.0.113.10\nstorage_classes:\n  fast: {pool: vg-fast/thin}\n"
+		finished := secret + "---\napiVersion: clowder/v1\nkind: ClusterConfiguration\nmetadata: {name: cluster}\nspec:\n" +
+			"  hetzner: {api: " + project.URL + ", tokenSecretRef: {name: hetzner, key: token}}\n" +
+			"  privateNetwork: " + privateNetwork + "\n" +
+			"  ingress: {floatingIP: 203.0.113.10}\n  storageClasses: {fast: {pool: vg-fast/thin}}\n"
 		if err := os.WriteFile(config, []byte(finished), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	finish("CHANGE-ME", "127.0.0.0/8")
-	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "never applied") ||
-		!strings.Contains(out, "the secret hetzner.token differs") {
+	// differences end diff with exit code 1 and no message (cli.Silent)
+	if out, err := clowder(t, "diff", "-f", config); !cli.Silent(err) ||
+		!strings.Contains(out, "ClusterConfiguration cluster: new") || !strings.Contains(out, "Secret clowder-system/hetzner: new") {
 		t.Errorf("diff before the first apply: %q, %v", out, err)
 	}
-
-	out, err := clowder(t, "--cluster", dir, "cluster", "apply")
-	if err != nil || !strings.Contains(out, "revision 1") {
+	// a new Hetzner token: without a terminal, only with --yes
+	if _, err := clowder(t, "apply", "-f", config); err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("apply of a new token without --yes: %v", err)
+	}
+	out, err := clowder(t, "apply", "--yes", "-f", config)
+	if err != nil || !strings.Contains(out, "ClusterConfiguration cluster: applied") {
 		t.Fatalf("apply: %q, %v", out, err)
 	}
-	// the Floating IP of cluster.yaml reaches the nft rules (HTTP hairpin)
+	// the Floating IP of the configuration reaches the nft rules (HTTP hairpin)
 	hostNetwork.waitForRuleset(t, func(ruleset network.Ruleset) bool {
 		return ruleset.FloatingIP == netip.MustParseAddr("203.0.113.10")
 	})
 	// and the leader routes it to this host's server, with the token opened
 	waitForTarget(t, project, floatingIP, 1000001)
-	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "nothing to apply") {
+	if out, err := clowder(t, "diff", "-f", config); err != nil || !strings.Contains(out, "nothing would change") {
 		t.Errorf("diff after apply: %q, %v", out, err)
 	}
 
@@ -469,7 +473,7 @@ spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := clowder(t, "--cluster", dir, "apply", "-f", resources); err != nil {
+	if _, err := clowder(t, "apply", "-f", resources); err != nil {
 		t.Fatal(err)
 	}
 	lv := names.VolumeName("default/db", 1)
@@ -478,8 +482,8 @@ spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
 	if _, err := os.Stat(filepath.Join(files.Dir, "stacks", "default_shop", "compose.yaml")); err != nil {
 		t.Errorf("the rendered Compose file: %v", err)
 	}
-	waitForOutput(t, "running", "--cluster", dir, "get", "stacks")
-	listed, err := clowder(t, "--cluster", dir, "get", "stacks", "-o", "json")
+	waitForOutput(t, "running", "get", "stacks")
+	listed, err := clowder(t, "get", "stacks", "-o", "json")
 	var stacks []resource.Object
 	var status struct{ Status, Host string }
 	if err != nil || json.Unmarshal([]byte(listed), &stacks) != nil || len(stacks) != 1 ||
@@ -487,28 +491,28 @@ spec: {services: {app: {image: nginx, volumes: [{volume: db, path: /data}]}}}
 		status.Status != "running" || status.Host != "node0" {
 		t.Errorf("get stacks -o json: %q, %v", listed, err)
 	}
-	waitForOutput(t, "Up 2 seconds", "--cluster", dir, "stack", "ps", "shop")
-	waitForOutput(t, "hello", "--cluster", dir, "stack", "logs", "shop")
+	waitForOutput(t, "Up 2 seconds", "stack", "ps", "shop")
+	waitForOutput(t, "hello", "stack", "logs", "shop")
 	// deleted, the stack before its volume: compose down, the LV removed
-	if _, err := clowder(t, "--cluster", dir, "delete", "--with-data", "-f", resources); err != nil {
+	if _, err := clowder(t, "delete", "--with-data", "-f", resources); err != nil {
 		t.Fatal(err)
 	}
 	hostDocker.WaitFor(t, "down default_shop")
 	hostStorage.WaitFor(t, "remove "+lv)
 	// the same token encrypted anew is no change; the private network is
 	finish("CHANGE-ME", "127.0.0.0/16")
-	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "private_network") ||
-		strings.Contains(out, "secret") {
-		t.Errorf("diff after a change of cluster.yaml: %q, %v", out, err)
+	if out, err := clowder(t, "diff", "-f", config); !cli.Silent(err) || !strings.Contains(out, "spec.privateNetwork") ||
+		strings.Contains(out, "Secret") {
+		t.Errorf("diff after a change of the configuration: %q, %v", out, err)
 	}
 	// and now a new Hetzner token as well: diff names both
 	finish("new", "127.0.0.0/16")
-	if out, err := clowder(t, "--cluster", dir, "cluster", "diff"); err != nil || !strings.Contains(out, "private_network") ||
-		!strings.Contains(out, "the secret hetzner.token differs") {
+	if out, err := clowder(t, "diff", "-f", config); !cli.Silent(err) || !strings.Contains(out, "spec.privateNetwork") ||
+		!strings.Contains(out, "Secret clowder-system/hetzner: differs in data.token") {
 		t.Errorf("diff after both changed: %q, %v", out, err)
 	}
-	out, err = clowder(t, "--cluster", dir, "cluster", "status")
-	if err != nil || !strings.Contains(out, "leader node0") || !strings.Contains(out, "revision 1") {
+	out, err = clowder(t, "cluster", "status")
+	if err != nil || !strings.Contains(out, "leader node0") || !strings.Contains(out, "configuration generation 1") {
 		t.Errorf("status: %q, %v", out, err)
 	}
 

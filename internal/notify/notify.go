@@ -1,6 +1,7 @@
-// Package notify sends alerts to the channels cluster.yaml names: Discord,
-// email and webhooks. Only the leader's controller uses it; it knows
-// nothing of the state, and gets each channel's secrets opened.
+// Package notify sends alerts to the channels that the configuration names:
+// Discord, email and webhooks. Only the leader's controller uses it. It
+// knows nothing about the state, and it receives each channel's secrets
+// already opened.
 package notify
 
 import (
@@ -17,9 +18,10 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/names"
 )
 
-// The events a message tells of.
+// The events that a message reports.
 const (
 	Raised   = "raised"
 	Reminder = "reminder"
@@ -27,8 +29,8 @@ const (
 	Test     = "test"
 )
 
-// Message is one alert's event as a channel sends it; the webhook posts it
-// as it is.
+// Message is one event of an alert, as a channel sends it. The webhook
+// posts it unchanged.
 type Message struct {
 	Cluster  string    `json:"cluster"`
 	Event    string    `json:"event"`
@@ -40,7 +42,7 @@ type Message struct {
 	Since    time.Time `json:"since"`
 }
 
-// title is the one-line summary that heads the message everywhere.
+// title is the one-line summary at the top of the message in every channel.
 func (m Message) title() string {
 	switch m.Event {
 	case Resolved:
@@ -60,27 +62,27 @@ type Notifier interface {
 // sendTimeout bounds one message to one channel.
 const sendTimeout = 30 * time.Second
 
-// Secrets opens a secret of cluster.yaml by its name.
-type Secrets func(name clusterspec.SecretRef) (string, error)
+// Secrets opens a value that the configuration names, from a Secret in
+// clowder-system.
+type Secrets func(ref names.SecretKeyRef) (string, error)
 
-// New makes the notifier of a channel, with its secrets opened and the
-// files next to cluster.yaml (smtp.ca) at hand.
-func New(channel clusterspec.AlertChannel, secrets Secrets, files map[string][]byte) (Notifier, error) {
-	switch channel.Type {
-	case "discord":
-		url, err := secrets(channel.Webhook)
+// New creates the notifier of a channel and opens the channel's secrets.
+func New(channel clusterspec.AlertChannel, secrets Secrets) (Notifier, error) {
+	switch {
+	case channel.Type == "discord" && channel.WebhookSecretRef != nil:
+		url, err := secrets(*channel.WebhookSecretRef)
 		return discord{url: url}, err
-	case "webhook":
-		url, err := secrets(channel.URL)
+	case channel.Type == "webhook" && channel.URLSecretRef != nil:
+		url, err := secrets(*channel.URLSecretRef)
 		return webhook{url: url}, err
-	case "email":
-		return newEmail(channel, secrets, files)
+	case channel.Type == "email" && channel.SMTP != nil:
+		return newEmail(channel, secrets)
 	default:
 		return nil, fmt.Errorf("alert channel type %q is not supported", channel.Type)
 	}
 }
 
-// postJSON posts body as JSON to target and wants a 2xx answer.
+// postJSON posts body as JSON to target and expects a 2xx answer.
 func postJSON(ctx context.Context, target string, body any) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -90,7 +92,7 @@ func postJSON(ctx context.Context, target string, body any) error {
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(encoded))
 	if err != nil {
-		// the URL is a secret: no word of it in the error
+		// the URL is a secret, so the error must not contain any of it
 		return errors.New("the channel's URL does not read")
 	}
 	request.Header.Set("Content-Type", "application/json")
@@ -119,8 +121,8 @@ func (w webhook) Send(ctx context.Context, message Message) error {
 	return postJSON(ctx, w.url, message)
 }
 
-// discord posts the message to a Discord webhook as an embed, colored by
-// severity, green for the all-clear.
+// discord posts the message to a Discord webhook as an embed. The color
+// shows the severity, and green means the all-clear.
 type discord struct {
 	url string
 }
@@ -143,8 +145,8 @@ func (d discord) Send(ctx context.Context, message Message) error {
 	})
 }
 
-// Heartbeat calls the heartbeat's URL (a GET, as services such as
-// healthchecks.io take it); the service alarms when the calls stop.
+// Heartbeat calls the heartbeat's URL (with a GET, as services such as
+// healthchecks.io expect); the service raises an alarm when the calls stop.
 func Heartbeat(ctx context.Context, target string) error {
 	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
@@ -167,14 +169,14 @@ func Heartbeat(ctx context.Context, target string) error {
 	return nil
 }
 
-// trust is the system's CAs and the one of a file, if any.
+// trust returns the system's CAs plus the CA from caPEM, if one is given.
 func trust(caPEM []byte) (*x509.CertPool, error) {
 	pool, err := x509.SystemCertPool()
 	if err != nil {
-		pool = x509.NewCertPool() // no system pool: only the file, if any
+		pool = x509.NewCertPool() // no system pool: only the CA given, if any
 	}
 	if len(caPEM) > 0 && !pool.AppendCertsFromPEM(caPEM) {
-		return nil, errors.New("the CA file holds no PEM certificate")
+		return nil, errors.New("the CA holds no PEM certificate")
 	}
 	return pool, nil
 }

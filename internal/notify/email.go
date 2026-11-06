@@ -17,9 +17,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 )
 
-// implicitTLSPort is SMTP's port that speaks TLS from the start (RFC 8314);
-// any other port must offer STARTTLS, so no password and no alert travels
-// in clear.
+// implicitTLSPort is the SMTP port that uses TLS from the start (RFC 8314).
+// Any other port must offer STARTTLS, so that no password and no alert is
+// sent in clear text.
 const implicitTLSPort = 465
 
 // email sends the message as a plain-text mail.
@@ -33,21 +33,17 @@ type email struct {
 	to       []string
 }
 
-func newEmail(channel clusterspec.AlertChannel, secrets Secrets, files map[string][]byte) (email, error) {
+func newEmail(channel clusterspec.AlertChannel, secrets Secrets) (email, error) {
 	server := channel.SMTP
-	var caPEM []byte
-	if server.CA != "" {
-		caPEM = files[server.CA]
-	}
-	config, err := tlsConfig(server.Host, caPEM)
+	config, err := tlsConfig(server.Host, []byte(server.CA))
 	if err != nil {
 		return email{}, err
 	}
 	sender := email{
 		host: server.Host, port: server.Port, tls: config, user: server.User, from: channel.From, to: channel.To,
 	}
-	if server.Password != "" {
-		if sender.password, err = secrets(server.Password); err != nil {
+	if server.PasswordSecretRef != nil {
+		if sender.password, err = secrets(*server.PasswordSecretRef); err != nil {
 			return email{}, err
 		}
 	}
@@ -61,7 +57,7 @@ func (e email) Send(ctx context.Context, message Message) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = client.Close() }() // Quit below says goodbye; this only frees
+	defer func() { _ = client.Close() }() // Quit below ends the session; this only frees the connection
 	if e.user != "" {
 		if err := client.Auth(smtp.PlainAuth("", e.user, e.password, e.host)); err != nil {
 			return fmt.Errorf("log in to the mail server: %w", err)
@@ -92,8 +88,9 @@ func (e email) Send(ctx context.Context, message Message) error {
 	return client.Quit()
 }
 
-// connect reaches the server and makes sure the talk is encrypted: TLS from
-// the start on port 465, else STARTTLS, which the server must offer.
+// connect connects to the server and makes sure the connection is
+// encrypted: TLS from the start on port 465, otherwise STARTTLS, which the
+// server must offer.
 func (e email) connect(ctx context.Context) (*smtp.Client, error) {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(e.host, strconv.Itoa(e.port)))
@@ -124,10 +121,10 @@ func (e email) connect(ctx context.Context) (*smtp.Client, error) {
 	return client, nil
 }
 
-// mail is the message as a mail: headers, a blank line, the text, with
-// CRLF line ends. The headers are those strict providers want; the
-// subject is encoded (RFC 2047), as a stack's name may hold more than
-// ASCII.
+// mail formats the message as a mail: headers, a blank line and the text,
+// with CRLF line ends. The headers are the ones that strict providers
+// require. The subject is encoded (RFC 2047), because a stack's name may
+// contain more than ASCII.
 func (e email) mail(message Message) ([]byte, error) {
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {

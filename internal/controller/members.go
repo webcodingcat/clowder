@@ -43,22 +43,24 @@ const (
 type memberStep struct {
 	action memberAction
 	host   state.HostID
-	// voter is the role recordVoterRole records
+	// voter is the role that recordVoterRole records
 	voter bool
 }
 
 // RunMembers keeps Raft's members and the hosts' roles as the state wants
-// them while this agent leads, until ctx ends, one change at a time:
-//   - every host that is not removed is a member; a joining host becomes
-//     one as a non-voter;
-//   - a joining host that reported (its agent runs) becomes passive while
-//     it is the second host of a cluster that is not highly available yet,
-//     else active; a passive host becomes active once there are three;
-//   - of the active hosts, 1, 3 or 5 vote (voterCount): those that voted
-//     already, then the lowest IDs;
-//   - a removed host leaves Raft, once another took its vote; a removed
-//     leader hands its lead over first;
-//   - the state records each host's vote as Raft has it (set-host-voter).
+// them while this agent leads, until ctx ends. It makes one change at a
+// time:
+//   - Every host that is not removed is a member. A joining host becomes a
+//     member as a non-voter.
+//   - A joining host that has reported (its agent runs) becomes passive
+//     while it is the second host of a cluster that is not highly available
+//     yet; otherwise it becomes active. A passive host becomes active once
+//     there are three hosts.
+//   - Of the active hosts, 1, 3 or 5 vote (voterCount): first those that
+//     voted already, then those with the lowest IDs.
+//   - A removed host leaves Raft once another host has taken its vote. A
+//     removed leader hands over its lead first.
+//   - The state records each host's vote as Raft has it (set-host-voter).
 //
 // raftAddress is a host's Raft address.
 func RunMembers(ctx context.Context, cluster Cluster, members Members, propose Propose,
@@ -132,8 +134,9 @@ func movePhase(ctx context.Context, propose Propose, host *state.Host, phase sta
 	return err
 }
 
-// voterCount is how many of n active hosts vote: below three, one, as two
-// voters would stop at the loss of either; from six, five.
+// voterCount is how many of n active hosts vote. Below three hosts, one
+// votes, because two voters would stop when either is lost. From six
+// hosts on, five vote.
 func voterCount(n int) int {
 	switch {
 	case n >= 6:
@@ -145,22 +148,23 @@ func voterCount(n int) int {
 	}
 }
 
-// nextMemberStep decides the next change; configuration is Raft's, self the
-// leader. The order matters:
-//  1. a leader that is removed hands its lead over, before anything else.
-//     The API hands it over before it removes the host; this is the
-//     fallback for a removal it did not see coming. The removal revoked
-//     the leader's certificate, so the others take no new connection of
-//     it, but Raft's open connections go on, and so would its lead;
-//  2. hosts that are not members join Raft, and a joining or passive host
-//     that is a voter loses its vote;
-//  3. a host that leaves (Host.Leaving) and has nothing left on it is
-//     removed, by another leader if it leads;
-//     joining and passive hosts move on;
-//  4. votes go where they belong, before a removed voter leaves: so the
-//     cluster never has fewer voters on the way than at its end;
-//  5. removed hosts leave Raft;
-//  6. the state records Raft's votes.
+// nextMemberStep decides the next change. configuration is Raft's
+// configuration, and self is the leader. The order matters:
+//  1. A leader that is removed hands over its lead, before anything else.
+//     The API hands over the lead before it removes the host; this step is
+//     the fallback for a removal that the API did not see coming. The
+//     removal revoked the leader's certificate, so the others accept no new
+//     connection from it. But Raft's open connections stay up, and so
+//     would its lead.
+//  2. Hosts that are not members join Raft, and a joining or passive host
+//     that is a voter loses its vote.
+//  3. A leaving host (Host.Leaving) with nothing left on it is removed; if
+//     it leads, another leader removes it. Then joining and passive hosts
+//     move on to their next phase.
+//  4. Votes go where they belong before a removed voter leaves, so that
+//     the cluster never has fewer voters along the way than at the end.
+//  5. Removed hosts leave Raft.
+//  6. The state records Raft's votes.
 func nextMemberStep(current *state.State, configuration map[state.HostID]bool, self state.HostID) memberStep {
 	ids := slices.Sorted(maps.Keys(current.Hosts))
 	isMember := func(id state.HostID) bool {
@@ -175,15 +179,15 @@ func nextMemberStep(current *state.State, configuration map[state.HostID]bool, s
 		switch {
 		case phase != state.Removed && !isMember(id):
 			return memberStep{action: addNonvoter, host: id}
-		// a host that took the ID of a removed one before that left Raft
-		// finds its vote; it gets none until it runs stacks
+		// a host that took the ID of a removed host before that host left
+		// Raft inherits its vote; it gets none until it runs stacks
 		case (phase == state.Joining || phase == state.Passive) && configuration[id] && id != self:
 			return memberStep{action: demoteVoter, host: id}
 		}
 	}
 	for _, id := range ids {
-		// a host that leaves goes once nothing is on it; a leader hands
-		// its lead over first, and the next leader removes it
+		// a leaving host is removed once nothing is left on it. A leader
+		// hands over its lead first, and the next leader removes it.
 		if current.Hosts[id].Leaving && current.CheckRemoval(id) == nil {
 			if id == self {
 				return memberStep{action: handOverLead, host: id}
@@ -211,12 +215,14 @@ func nextMemberStep(current *state.State, configuration map[state.HostID]bool, s
 	return memberStep{}
 }
 
-// nextPhase moves a joining host that reported, or a passive host, on.
+// nextPhase moves a joining host that has reported, or a passive host, on
+// to its next phase.
 func nextPhase(current *state.State, ids []state.HostID) memberStep {
-	// settled are the hosts that run stacks or wait to (passive); joining
-	// hosts do not count. With one active host and two that join, the first
-	// to report becomes passive (settled is 1), the second active (settled
-	// is 2), and then the passive one active (settled is 3).
+	// settled are the hosts that run stacks or wait to run them (passive);
+	// joining hosts do not count. With one active host and two joining
+	// hosts, the first to report becomes passive (settled is 1), the second
+	// becomes active (settled is 2), and then the passive one becomes
+	// active (settled is 3).
 	settled := 0
 	for _, host := range current.Hosts {
 		if host.Phase == state.Active || host.Phase == state.Draining || host.Phase == state.Passive {
@@ -237,16 +243,17 @@ func nextPhase(current *state.State, ids []state.HostID) memberStep {
 	return memberStep{}
 }
 
-// nextVoter promotes or demotes one host, so voterCount of the hosts that
-// run stacks, or ran them and are to come back (votes), vote. A host that
-// voted keeps its vote while it may; the leader never gives up its own.
-// Only an active or draining host gets a vote: one that cannot answer
-// would count toward a quorum it does not help to reach.
+// nextVoter promotes or demotes one host, so that voterCount of the
+// eligible hosts vote. Eligible hosts run stacks, or ran them and are to
+// come back (votes). A host that voted keeps its vote while it may, and the
+// leader never gives up its own. Only an active or draining host gets a new
+// vote: a host that cannot answer would count toward a quorum that it does
+// not help to reach.
 //
-// A failed or fenced voter keeps its vote. Taking it would shrink the
-// cluster below what it was built for, and with three hosts it would take
-// the vote of a live host instead: the leader would be left as the only
-// voter that answers, and the cluster would stop at the next failure.
+// A failed or fenced voter keeps its vote. Taking it away would shrink the
+// cluster below what it was built for. With three hosts, the vote would go
+// to a live host instead, leaving the leader as the only voter that answers,
+// and the cluster would stop at the next failure.
 func nextVoter(current *state.State, configuration map[state.HostID]bool, ids []state.HostID,
 	self state.HostID,
 ) memberStep {
@@ -278,7 +285,7 @@ func nextVoter(current *state.State, configuration map[state.HostID]bool, ids []
 }
 
 // votes tells whether a host in this phase counts for the voters: it runs
-// stacks, or it ran them and is to come back after its failure.
+// stacks, or it ran them and is to come back after a failure.
 func votes(phase state.HostPhase) bool {
 	switch phase {
 	case state.Active, state.Draining, state.Failed, state.Fencing, state.Fenced, state.Recovering, state.Disabled:

@@ -12,7 +12,10 @@ services:
     working_dir: /app
     user: "1000"
     secrets:
-      - api-key
+      - source: api_key
+        target: /run/secrets/api/key
+      - source: api_tls.crt
+        target: /run/secrets/api/tls.crt
     volumes:
       - type: volume
         source: uploads
@@ -51,7 +54,7 @@ services:
       - 169.254.77.53
     labels:
       clowder.restarted: "2026-10-31T12:00:00Z"
-      clowder.secrets: digest-of-api-key
+      clowder.secrets: digest-of-api
       clowder.stack: shop_web
     read_only: true
     init: true
@@ -137,5 +140,7 @@ volumes:
       o: bind
       type: none
 secrets:
-  api-key:
-    file: /run/clowder-secrets/shop_web/files/api-key
+  api_key:
+    file: /run/clowder-secrets/shop_web/files/api/key
+  api_tls.crt:
+    file: /run/clowder-secrets/shop_web/files/api/tls.crt

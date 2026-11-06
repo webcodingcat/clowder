@@ -24,10 +24,10 @@ func newResolveSplitBrain(g *globals) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "resolve-splitbrain [<namespace>/]<volume> --keep <host>",
 		Short: "Connect a volume's copies again after a split brain, with the data of one",
-		Long: "After a split brain (the alert split-brain), the volume's copies changed apart and DRBD\n" +
-			"does not connect them again by itself. Look at the copies, then name the host whose copy\n" +
-			"keeps its data: the copies on the other hosts give up their changes since the split and\n" +
-			"resync from it. The volume's stack must run on that host, or not at all.",
+		Long: "After a split brain (the alert split-brain), the volume's copies have changed separately,\n" +
+			"and DRBD does not connect them again by itself. Look at the copies, then name the host\n" +
+			"whose copy keeps its data. The copies on the other hosts give up their changes since the\n" +
+			"split and resync from that copy. The volume's stack must run on that host, or not at all.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			volume, err := selected.resolve("volume", args[0])

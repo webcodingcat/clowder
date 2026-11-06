@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 
 	"filippo.io/age"
@@ -24,33 +26,32 @@ func newSecret(g *globals) *cobra.Command {
 	return secret
 }
 
-// blockIndent indents the armor of a printed block: deeper than any key of
-// cluster.yaml up to three levels down; a deeper key needs it indented more.
-const blockIndent = "    "
+// blockIndent indents the armor of a printed value one level deeper than
+// its key in spec.data.
+const blockIndent = "      "
 
 func newEncrypt(g *globals) *cobra.Command {
-	var forClusterYAML bool
+	var literals, fromFiles []string
 	command := &cobra.Command{
-		Use:   "encrypt [<namespace>/]<name> | --cluster-yaml",
-		Short: "Encrypt a value for a Secret or for cluster.yaml",
-		Long: "Encrypts a value for the cluster and the recovery key. Given a secret's name (without a\n" +
-			"namespace in default), it prints the whole Secret to apply; with --cluster-yaml the value\n" +
-			"tagged !secret, to put after a key of cluster.yaml (indent the armor deeper than the key).\n" +
-			"The value is bound to its place: only that Secret, or cluster.yaml, takes it. Only the\n" +
-			"cluster opens it. The value is asked for without echo on a terminal, else read from stdin,\n" +
-			"without one line end at its end. The recipients come from the cluster each time.",
-		Args: cobra.MaximumNArgs(1),
+		Use:   "encrypt [<namespace>/]<name> (--from-literal <key>=<value> | --from-file <key>=<path|->)...",
+		Short: "Encrypt values for a Secret and print the Secret",
+		Long: "Encrypts values for the cluster and the recovery key and prints the whole Secret to apply\n" +
+			"(in default if no namespace is given), with each value under its key in spec.data. The\n" +
+			"flags work like those of kubectl create secret generic. --from-file takes a file's\n" +
+			"content, or with - one value from stdin: on a terminal it asks without echo, otherwise it\n" +
+			"reads stdin without one line end at the end. --from-literal puts the value on the command\n" +
+			"line, where the shell's history keeps it. The values are bound to the Secret, and no\n" +
+			"other Secret accepts them. Only the cluster can decrypt them. The recipients come from the\n" +
+			"cluster each time.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if forClusterYAML == (len(args) == 1) {
-				return usage("name a secret ([<namespace>/]<name>) or give --cluster-yaml, one of the two")
+			namespace, name, err := secretName(args[0])
+			if err != nil {
+				return err
 			}
-			place, namespace, name := secretvalue.Cluster, "", ""
-			if !forClusterYAML {
-				var err error
-				if namespace, name, err = secretName(args[0]); err != nil {
-					return err
-				}
-				place = names.ID(namespace, name)
+			values, err := secretValues(literals, fromFiles, cmd.InOrStdin(), cmd.ErrOrStderr())
+			if err != nil {
+				return err
 			}
 			client, err := g.connect()
 			if err != nil {
@@ -60,37 +61,100 @@ func newEncrypt(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			value, err := readValue(cmd.InOrStdin(), cmd.ErrOrStderr())
-			if err != nil {
-				return err
-			}
-			armored, err := secretvalue.Encrypt(secretvalue.Value{For: place, Bytes: value}, recipients...)
-			if err != nil {
-				return err
-			}
-			out := secretvalue.Block(armored, blockIndent)
-			if !forClusterYAML {
-				out = fmt.Sprintf("apiVersion: %s\nkind: %s\nmetadata: {namespace: %s, name: %s}\nspec:\n  value: %s",
-					resource.APIVersion, resource.KindSecret, namespace, name, out)
+			out := fmt.Sprintf("apiVersion: %s\nkind: %s\nmetadata: {namespace: %s, name: %s}\nspec:\n  data:\n",
+				resource.APIVersion, resource.KindSecret, namespace, name)
+			for _, key := range slices.Sorted(maps.Keys(values)) {
+				armored, err := secretvalue.Encrypt(secretvalue.Value{For: names.ID(namespace, name), Bytes: values[key]},
+					recipients...)
+				if err != nil {
+					return err
+				}
+				out += "    " + key + ": " + secretvalue.Block(armored, blockIndent)
 			}
 			_, err = fmt.Fprint(cmd.OutOrStdout(), out)
 			return err
 		},
 	}
-	// not --cluster: that names the cluster directory, for every command
-	command.Flags().BoolVar(&forClusterYAML, "cluster-yaml", false, "a value for cluster.yaml")
+	command.Flags().StringArrayVar(&literals, "from-literal", nil, "a key and its value, <key>=<value>")
+	command.Flags().StringArrayVar(&fromFiles, "from-file", nil,
+		"a key and the file of its value, <key>=<path>, or <key>=- for stdin")
 	return command
 }
 
-// secretName reads [<namespace>/]<name>: without a namespace, default, as
-// get and delete take it.
+// secretValues reads the values of encrypt's flags by key. Each key may
+// appear once, and stdin may be used at most once.
+func secretValues(literals, fromFiles []string, stdin io.Reader, prompt io.Writer) (map[string][]byte, error) {
+	values := map[string][]byte{}
+	add := func(flag, pair string, read func(source string) ([]byte, error)) error {
+		key, source, ok := strings.Cut(pair, "=")
+		switch {
+		case !ok:
+			return usage("--%s %q: write <key>=...", flag, pair)
+		case !names.ValidSecretKey(key):
+			return usage("--%s: key %q: %s", flag, key, names.SecretKeyRule)
+		case values[key] != nil:
+			return usage("key %s is given twice", key)
+		}
+		value, err := read(source)
+		if err != nil {
+			return err
+		}
+		values[key] = value
+		return nil
+	}
+	for _, pair := range literals {
+		if err := add("from-literal", pair, func(value string) ([]byte, error) {
+			if value == "" {
+				return nil, errors.New("the value is empty")
+			}
+			return []byte(value), nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	readStdin := false
+	for _, pair := range fromFiles {
+		if err := add("from-file", pair, func(path string) ([]byte, error) {
+			if path != "-" {
+				return readFileValue(path)
+			}
+			if readStdin {
+				return nil, usage("--from-file: only one value comes from stdin")
+			}
+			readStdin = true
+			return readValue(stdin, prompt)
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if len(values) == 0 {
+		return nil, usage("give the values with --from-literal <key>=<value> or --from-file <key>=<path|->")
+	}
+	return values, nil
+}
+
+// readFileValue reads a value from a file, as it is.
+func readFileValue(path string) ([]byte, error) {
+	value, err := os.ReadFile(path)
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("read the value: %w", err)
+	case len(value) == 0:
+		return nil, fmt.Errorf("%s is empty", path)
+	}
+	return value, nil
+}
+
+// secretName reads [<namespace>/]<name>. Without a namespace, it uses
+// default, as get and delete do. names.System holds the cluster's own
+// Secrets.
 func secretName(text string) (namespace, name string, err error) {
 	namespace, name, ok := strings.Cut(text, "/")
 	if !ok {
 		namespace, name = names.Default, text
 	}
 	switch {
-	case !names.ValidNamespace(namespace):
+	case namespace != names.System && !names.ValidNamespace(namespace):
 		return "", "", usage("namespace %q: %s", namespace, names.NamespaceRule)
 	case !names.Valid(name):
 		return "", "", usage("secret %q: %s", name, names.Rule)
@@ -98,9 +162,9 @@ func secretName(text string) (namespace, name string, err error) {
 	return namespace, name, nil
 }
 
-// clusterRecipients asks the cluster whom every value is encrypted for: its
-// own key and the recovery key. A new cluster without a recovery key
-// answers 409 with what to do (api's errNoRecoveryKey).
+// clusterRecipients asks the cluster whom every value is encrypted for:
+// its own key and the recovery key. A new cluster without a recovery key
+// answers 409 and says what to do (api's errNoRecoveryKey).
 func clusterRecipients(ctx context.Context, client *api.Client) ([]age.Recipient, error) {
 	var encryption api.Encryption
 	if err := client.Get(ctx, "/v1/encryption", &encryption); err != nil {
@@ -117,9 +181,9 @@ func clusterRecipients(ctx context.Context, client *api.Client) ([]age.Recipient
 	return recipients, nil
 }
 
-// readValue reads the value to encrypt: asked for without echo on a
-// terminal, else all of in without one line end at its end, which echo and
-// most files add.
+// readValue reads the value to encrypt. On a terminal, it asks for the
+// value without echo. Otherwise it reads all of in, without one line end
+// at the end, which echo and most files add.
 func readValue(in io.Reader, prompt io.Writer) ([]byte, error) {
 	var value []byte
 	if file, ok := in.(*os.File); ok && term.IsTerminal(int(file.Fd())) {

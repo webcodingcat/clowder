@@ -17,19 +17,39 @@ func TestAVolumeNeedsAClassASizeAndReplicasFromZeroToThree(t *testing.T) {
 	}
 }
 
-func TestASecretTravelsEncrypted(t *testing.T) {
-	if err := (SecretSpec{Encrypted: testArmor}).Check(); err != nil {
+func TestASecretTravelsEncryptedByValidKeys(t *testing.T) {
+	if err := (SecretSpec{Encrypted: map[string]string{"password": testArmor, "tls.crt": testArmor}}).Check(); err != nil {
 		t.Error(err)
 	}
-	for _, refused := range []string{"", "s3cret"} {
+	for name, refused := range map[string]map[string]string{
+		"no keys":  {},
+		"in clear": {"password": "s3cret"},
+		"bad key":  {"a/b": testArmor},
+		"dot dot":  {"..": testArmor},
+	} {
 		if err := (SecretSpec{Encrypted: refused}).Check(); err == nil || strings.Contains(err.Error(), "s3cret") {
-			t.Errorf("%q: %v", refused, err)
+			t.Errorf("%s: %v", name, err)
 		}
 	}
 }
 
-func TestOnlyNamespacesLiveOutsideANamespace(t *testing.T) {
-	if Namespaced(KindNamespace) || !Namespaced(KindVolume) || !Namespaced(KindSecret) {
+func TestANamespaceNamesEachPullSecretOnce(t *testing.T) {
+	valid := NamespaceSpec{ImagePullSecrets: []LocalObjectReference{{Name: "ghcr"}, {Name: "docker-hub"}}}
+	if err := valid.Check(); err != nil {
+		t.Error(err)
+	}
+	twice := NamespaceSpec{ImagePullSecrets: []LocalObjectReference{{Name: "ghcr"}, {Name: "ghcr"}, {Name: "Bad"}}}
+	err := twice.Check()
+	for _, want := range []string{"ghcr is named twice", `"Bad" is not a secret name`} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("no %q in %v", want, err)
+		}
+	}
+}
+
+func TestOnlyNamespacesAndTheConfigurationLiveOutsideANamespace(t *testing.T) {
+	if Namespaced(KindNamespace) || Namespaced(KindClusterConfiguration) || !Namespaced(KindVolume) ||
+		!Namespaced(KindSecret) || !Namespaced(KindStack) {
 		t.Error("wrong kinds in namespaces")
 	}
 }

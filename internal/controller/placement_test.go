@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,11 +9,13 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -88,14 +91,12 @@ func newLeader(t *testing.T, poolSize int64) *leader {
 			CertificateSerial: "s0", CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
-	l.apply(state.KindApplyConfig, state.CLIActor("admin"), state.ApplyConfig{
-		Spec: clusterspec.Config{
-			Hetzner:        clusterspec.Hetzner{Token: "hetzner.token"},
-			PrivateNetwork: "10.0.0.0/16",
-			Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.10"},
-			StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
-		},
-		Secrets: map[string]state.SealedSecret{"hetzner.token": {Value: state.Sealed("t"), Digest: "d"}},
+	putSystemSecret(l, "hetzner", map[string]string{"token": "t"})
+	putConfig(l, clusterspec.Config{
+		Hetzner:        clusterspec.Hetzner{TokenSecretRef: names.SecretKeyRef{Name: "hetzner", Key: "token"}},
+		PrivateNetwork: "10.0.0.0/16",
+		Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.10"},
+		StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 	})
 	l.apply(state.KindReportHost, state.HostActor(0), state.ReportHost{
 		Host: 0, Version: "1.0.0", Capacity: state.Resources{MemoryBytes: 4 << 30, CPUs: 4},
@@ -112,21 +113,58 @@ func newLeader(t *testing.T, poolSize int64) *leader {
 // apply does.
 func putResource(l *leader, kind, name string, spec any) {
 	l.t.Helper()
+	putResourceIn(l, names.Default, kind, name, spec)
+}
+
+// putResourceIn applies a resource of a namespace ("" for a kind that
+// lives in none).
+func putResourceIn(l *leader, namespace, kind, name string, spec any) {
+	l.t.Helper()
 	encoded, err := json.Marshal(spec)
 	if err != nil {
 		l.t.Fatal(err)
 	}
-	l.apply(state.KindPutResource, state.CLIActor("admin"), state.PutResource{
-		Kind: kind, Namespace: "default", Name: name, Owner: state.OwnerCLI, Spec: encoded,
-	})
+	l.apply(state.KindChangeResources, state.CLIActor("admin"), state.ChangeResources{Changes: []state.ResourceChange{{
+		Put: &state.PutResource{Kind: kind, Namespace: namespace, Name: name, Owner: state.OwnerCLI, Spec: encoded},
+	}}})
+}
+
+// sealedPadding makes a test's value as long as the state takes a sealed
+// one to be (state.ClearSize), so it may stand in for one.
+var sealedPadding = strings.Repeat("~", 200)
+
+// openPadded opens a value putSystemSecret "sealed": it drops the padding.
+func openPadded(sealed state.Sealed) ([]byte, error) {
+	opened, ok := bytes.CutPrefix(sealed, []byte(sealedPadding))
+	if !ok {
+		return nil, errors.New("not sealed")
+	}
+	return opened, nil
+}
+
+// putSystemSecret applies a Secret of clowder-system; each value is
+// "sealed" by padding it, which openPadded drops again.
+func putSystemSecret(l *leader, name string, values map[string]string) {
+	l.t.Helper()
+	secret := state.SealedSecret{Data: map[string]state.Sealed{}, Digest: "d"}
+	for key, value := range values {
+		secret.Data[key] = state.Sealed(sealedPadding + value)
+	}
+	putResourceIn(l, names.System, resource.KindSecret, name, secret)
+}
+
+// putConfig applies the cluster's configuration.
+func putConfig(l *leader, config clusterspec.Config) {
+	l.t.Helper()
+	putResourceIn(l, "", resource.KindClusterConfiguration, resource.ClusterConfigurationName, config)
 }
 
 // deleteResource deletes a resource of the namespace default.
 func deleteResource(l *leader, kind, name string) {
 	l.t.Helper()
-	l.apply(state.KindDeleteResource, state.CLIActor("admin"), state.DeleteResource{
-		Kind: kind, Namespace: "default", Name: name, Owner: state.OwnerCLI,
-	})
+	l.apply(state.KindChangeResources, state.CLIActor("admin"), state.ChangeResources{Changes: []state.ResourceChange{{
+		Delete: &state.DeleteResource{Kind: kind, Namespace: names.Default, Name: name, Owner: state.OwnerCLI},
+	}}})
 }
 
 // reserving is a stack of one service that reserves memory at a priority.

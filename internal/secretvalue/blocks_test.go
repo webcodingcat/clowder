@@ -180,7 +180,8 @@ func TestRewriteRefusesArmorWithAnEmptyLine(t *testing.T) {
 
 func TestEncryptedValuesComeBackThroughAFile(t *testing.T) {
 	cluster, recovery := identities(t)
-	token, err := Encrypt(Value{For: Cluster, Bytes: []byte("hcloud token")}, cluster.Recipient(), recovery.Recipient())
+	token, err := Encrypt(Value{For: "clowder-system/hetzner", Bytes: []byte("hcloud token")},
+		cluster.Recipient(), recovery.Recipient())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +194,7 @@ func TestEncryptedValuesComeBackThroughAFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opened.For != Cluster || string(opened.Bytes) != "hcloud token" {
+	if opened.For != "clowder-system/hetzner" || string(opened.Bytes) != "hcloud token" {
 		t.Errorf("got %q for %s", opened.Bytes, opened.For)
 	}
 	var config map[string]map[string]string

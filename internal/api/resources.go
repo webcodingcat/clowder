@@ -15,19 +15,20 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// The resources as users read them: lists, one resource, and the statuses
-// they show. What changes them is in changes.go.
+// The resources as users read them: lists, single resources, and the
+// statuses they show. changes.go has the code that changes them.
 
-// ResourceList is the answer to GET /v1/resources/{kind}: the resources
-// sorted by namespace and name, and the state's index they were read at.
+// ResourceList is the answer to GET /v1/resources/{kind}: the resources,
+// sorted by namespace and name, and the state's index at which they were
+// read.
 type ResourceList struct {
 	Index uint64            `json:"index"`
 	Items []resource.Object `json:"items"`
 }
 
 // VolumeStatus is a volume's status as the API shows it. Status is the
-// state's (pending, ok) for a volume that has all its copies synced,
-// else resyncing while a copy catches up, or degraded while copies are
+// state's status (pending, ok) for a volume whose copies are all synced. It
+// is resyncing while a copy catches up, and degraded while copies are
 // missing.
 type VolumeStatus struct {
 	Status         string       `json:"status"`
@@ -43,17 +44,20 @@ type VolumeCopy struct {
 	Synced     bool   `json:"synced,omitempty"`
 }
 
-// SecretStatus is a secret's status: its digest, never its value.
+// SecretStatus is a secret's status: its keys and its digest, never its
+// values.
 type SecretStatus struct {
-	Digest string `json:"digest"`
+	Keys   []string `json:"keys"`
+	Digest string   `json:"digest"`
 }
 
 // StackStatus is a stack's status as the API shows it.
 type StackStatus struct {
 	Status string `json:"status"`
 	Host   string `json:"host,omitempty"` // empty: not placed yet
-	// Priority is the stack's as the cluster resolves it now; Default tells
-	// that the spec names none and cluster.yaml's default applies.
+	// Priority is the stack's priority as the cluster resolves it now.
+	// Default says that the spec names none and the configuration's
+	// default applies.
 	Priority int  `json:"priority"`
 	Default  bool `json:"default,omitempty"`
 	// PushedOut are the services stopped for others of higher priority.
@@ -63,15 +67,16 @@ type StackStatus struct {
 	// UpError is why its host could not bring a failing stack up.
 	UpError string `json:"upError,omitempty"`
 	// AppliedSecrets are the digests of the secrets its containers came up
-	// with: one that differs from the secret's own has not reached them yet.
+	// with. A digest that differs from the secret's own means that the
+	// change has not reached the containers yet.
 	AppliedSecrets map[string]string `json:"appliedSecrets,omitempty"`
 	// Restarted is when each service was last restarted (stack restart).
 	Restarted map[string]time.Time `json:"restarted,omitempty"`
 }
 
-// listResources lists the resources of a kind: of one namespace
-// (?namespace=) or of all (?allNamespaces=true); there is no default, so a
-// controller never reads the wrong one by accident.
+// listResources lists the resources of a kind, of one namespace
+// (?namespace=) or of all namespaces (?allNamespaces=true). There is no
+// default, so a controller never reads the wrong namespace by accident.
 func (s *Server) listResources(w http.ResponseWriter, r *http.Request) {
 	kind, ok := resource.KindOf(r.PathValue("kind"))
 	if !ok {
@@ -95,7 +100,7 @@ func (s *Server) listResources(w http.ResponseWriter, r *http.Request) {
 }
 
 // namespaceSelection is what a list or a watch reads: one namespace, every
-// namespace, or none for the kinds that live in none.
+// namespace, or none for the kinds that live in no namespace.
 type namespaceSelection struct {
 	namespace string
 	all       bool
@@ -108,7 +113,7 @@ func (n namespaceSelection) holds(namespace string) bool {
 // selectNamespace reads ?namespace= or ?allNamespaces=true for a kind and
 // asks Authorize whether the caller may read it. There is no default, so no
 // reader gets the wrong namespace by accident. ok is false (and the answer
-// written) when the request does not fit.
+// is written) when the request does not fit.
 func selectNamespace(w http.ResponseWriter, r *http.Request, kind string) (namespaceSelection, bool) {
 	selected := namespaceSelection{
 		namespace: r.URL.Query().Get("namespace"), all: r.URL.Query().Get("allNamespaces") == "true",
@@ -136,30 +141,40 @@ func (s *Server) getResource(w http.ResponseWriter, r *http.Request) {
 	s.answerResource(w, resource.Ref{Kind: kind, Namespace: r.PathValue("namespace"), Name: r.PathValue("name")})
 }
 
-// getNamespace answers one namespace, which lives in none:
-// /v1/resources/namespace/{name}.
-func (s *Server) getNamespace(w http.ResponseWriter, r *http.Request) {
-	s.answerResource(w, resource.Ref{Kind: resource.KindNamespace, Name: r.PathValue("name")})
+// getClusterResource answers one resource of a kind that lives in no
+// namespace (a namespace, the configuration): /v1/resources/{kind}/{name}.
+func (s *Server) getClusterResource(w http.ResponseWriter, r *http.Request) {
+	kind, ok := resource.KindOf(r.PathValue("kind"))
+	if !ok || resource.Namespaced(kind) {
+		writeError(w, http.StatusNotFound, fmt.Errorf("no resource at %s", r.URL.Path))
+		return
+	}
+	s.answerResource(w, resource.Ref{Kind: kind, Name: r.PathValue("name")})
 }
 
 func (s *Server) answerResource(w http.ResponseWriter, ref resource.Ref) {
-	var found *resource.Object
-	s.config.Cluster.Read(func(current *state.State) {
-		for _, object := range objects(current, ref.Kind) {
-			if object.Ref() == ref {
-				found = &object
-				return
-			}
-		}
-	})
-	if found == nil {
+	var found resource.Object
+	var ok bool
+	s.config.Cluster.Read(func(current *state.State) { found, ok = objectOf(current, ref) })
+	if !ok {
 		writeError(w, http.StatusNotFound, fmt.Errorf("no %s", ref))
 		return
 	}
 	writeJSON(w, http.StatusOK, found)
 }
 
-// objects are the resources of a kind as the API shows them, sorted by
+// objectOf returns one resource as the API shows it, or false if there is
+// none.
+func objectOf(current *state.State, ref resource.Ref) (resource.Object, bool) {
+	for _, object := range objects(current, ref.Kind) {
+		if object.Ref() == ref {
+			return object, true
+		}
+	}
+	return resource.Object{}, false
+}
+
+// objects returns the resources of a kind as the API shows them, sorted by
 // namespace and name. A secret shows its digest, never its value.
 func objects(current *state.State, kind string) []resource.Object {
 	var shown []resource.Object
@@ -181,9 +196,18 @@ func objects(current *state.State, kind string) []resource.Object {
 		shown = append(shown, object)
 	}
 	switch kind {
+	case resource.KindClusterConfiguration:
+		if current.Configured() {
+			add(current.Config.Meta, current.Config.Spec, nil)
+		}
 	case resource.KindNamespace:
 		for _, name := range slices.Sorted(maps.Keys(current.Namespaces)) {
-			add(current.Namespaces[name].Meta, nil, nil)
+			namespace := current.Namespaces[name]
+			var spec any
+			if len(namespace.Spec.ImagePullSecrets) > 0 {
+				spec = namespace.Spec
+			}
+			add(namespace.Meta, spec, nil)
 		}
 	case resource.KindVolume:
 		for _, id := range slices.Sorted(maps.Keys(current.Volumes)) {
@@ -193,7 +217,7 @@ func objects(current *state.State, kind string) []resource.Object {
 	case resource.KindSecret:
 		for _, id := range slices.Sorted(maps.Keys(current.Secrets)) {
 			secret := current.Secrets[id]
-			add(secret.Meta, nil, SecretStatus{Digest: secret.Spec.Digest})
+			add(secret.Meta, nil, SecretStatus{Keys: secret.Spec.Keys(), Digest: secret.Spec.Digest})
 		}
 	case resource.KindStack:
 		for _, id := range slices.Sorted(maps.Keys(current.Stacks)) {
@@ -215,7 +239,7 @@ func stackStatus(current *state.State, stack *state.Stack) StackStatus {
 		}
 	}
 	// the state checked that it resolves, at the apply and at every
-	// cluster apply since
+	// configuration since
 	written, _ := stackspec.ParsePriority(stack.Spec.Priority)
 	status.Priority, _ = current.Config.Spec.WithDefaults().Priorities.Resolve(written)
 	return status
@@ -232,22 +256,22 @@ func volumeStatus(current *state.State, volume *state.Volume) VolumeStatus {
 			Host: host, Class: volumeCopy.Class, Tiebreaker: volumeCopy.Tiebreaker, Synced: volumeCopy.Synced,
 		})
 	}
-	// pending and restore-pending say it all
+	// pending and restore-pending need no more detail
 	if volume.Status == state.VolumeOK {
 		status.Status = volumeHealth(volume)
 	}
 	return status
 }
 
-// The health of a placed volume beside ok.
+// The health values of a placed volume other than ok.
 const (
 	volumeDegraded  = "degraded"
 	volumeResyncing = "resyncing"
 )
 
-// volumeHealth tells how a placed volume's copies are: degraded with fewer
-// copies than replicas, resyncing while one is not synced yet, else ok.
-// Replicas 0 has one plain LV.
+// volumeHealth tells how healthy a placed volume's copies are: degraded
+// with fewer copies than replicas, resyncing while a copy is not synced
+// yet, and ok otherwise. A volume of replicas 0 has one plain LV.
 func volumeHealth(volume *state.Volume) string {
 	copies, synced := 0, 0
 	for _, volumeCopy := range volume.Copies {

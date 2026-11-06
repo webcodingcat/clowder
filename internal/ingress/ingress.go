@@ -4,8 +4,8 @@
 // tested against golden files.
 //
 // Traefik runs in the host network. Every host has the Floating IP on its
-// interface, held or not, so Traefik binds it on every host and at boot;
-// Hetzner routes the address to one host only.
+// interface, whether it holds the address or not, so Traefik can bind it on
+// every host and at boot. Hetzner routes the address to one host only.
 package ingress
 
 import (
@@ -20,15 +20,15 @@ import (
 )
 
 // Project is the Compose project of clowder's Traefik. names refuses stack
-// names that start with "clowder-", so no stack can take it.
+// names that start with "clowder-", so no stack can use this name.
 const Project = "clowder-traefik"
 
 // Image is Traefik's image, pinned per clowder release: a new pin recreates
 // the container at the agent's first pass.
 const Image = "traefik:v3.7.16"
 
-// The ports Traefik and the agent use besides 80 and 443; all lie in the
-// range stackspec.ReservedPort keeps for clowder.
+// The ports that Traefik and the agent use besides 80 and 443. All of them
+// lie in the range that stackspec.ReservedPort keeps for clowder.
 const (
 	// InternalPort is the entrypoint on the node address that other hosts
 	// send requests to (phase 2).
@@ -40,16 +40,16 @@ const (
 	ChallengePort = 7445
 )
 
-// ChallengePath is where ACME's HTTP-01 challenges are asked for, followed
-// by the token.
+// ChallengePath is the path at which ACME asks for its HTTP-01 challenges,
+// followed by the token.
 const ChallengePath = "/.well-known/acme-challenge/"
 
-// loopback is where only the host itself reaches: Traefik's health check,
-// the answers to ACME's challenges.
+// loopback is the address that only the host itself can reach. Traefik's
+// health check and the answers to ACME's challenges listen there.
 var loopback = netip.AddrFrom4([4]byte{127, 0, 0, 1})
 
 // ChallengeAddress is where the agent serves the answers to ACME's
-// challenges and Traefik sends them.
+// challenges and where Traefik sends the challenges.
 var ChallengeAddress = Target(loopback, ChallengePort)
 
 // Where Traefik finds its files inside the container.
@@ -59,7 +59,7 @@ const (
 	certificatesDir = "/etc/traefik-certificates"
 )
 
-// Static is what the static configuration depends on; a change of it
+// Static is what the static configuration depends on; a change to it
 // recreates the container.
 type Static struct {
 	FloatingIP  netip.Addr
@@ -110,9 +110,9 @@ type fileProvider struct {
 }
 
 // RenderStatic writes traefik.yml. The public entrypoints trust no
-// X-Forwarded-For (Traefik then sets the client's address itself); the
-// internal one trusts the node network, whose hosts pass the client's
-// address on.
+// X-Forwarded-For header, so Traefik sets the client's address itself. The
+// internal entrypoint trusts the node network, whose hosts pass on the
+// client's address.
 func RenderStatic(static Static) ([]byte, error) {
 	if !static.FloatingIP.IsValid() || !static.NodeAddress.IsValid() || !static.Overlay.IsValid() {
 		return nil, fmt.Errorf("render Traefik's configuration: the Floating IP, the node address and the node network are needed")
@@ -134,7 +134,7 @@ func RenderStatic(static Static) ([]byte, error) {
 	return marshal("Traefik's configuration", config)
 }
 
-// Mounts are the host's directories Traefik reads.
+// Mounts are the host's directories that Traefik reads.
 type Mounts struct {
 	// Static holds traefik.yml.
 	Static string
@@ -146,7 +146,7 @@ type Mounts struct {
 
 // CertificateFiles are the files of a domain's certificate in the
 // certificates' directory. Traefik watches only the routes, so a renewed
-// certificate must come under new names: then the routes change too, and
+// certificate must get new file names. Then the routes change too, and
 // Traefik reads the new certificate.
 type CertificateFiles struct {
 	Domain string
@@ -154,9 +154,9 @@ type CertificateFiles struct {
 	Chain, Key string
 }
 
-// RenderCompose writes Traefik's Compose file. Like every container of
-// clowder's, it has restart "no": the agent's supervisor restarts it, and
-// after a boot nothing starts before the agent.
+// RenderCompose writes Traefik's Compose file. Like every clowder
+// container, Traefik has restart "no": the agent's supervisor restarts it,
+// and after a boot nothing starts before the agent.
 func RenderCompose(mounts Mounts) ([]byte, error) {
 	healthcheck := []string{"CMD", "traefik", "healthcheck", "--ping", "--configFile=" + staticDir + "/traefik.yml"}
 	file := map[string]any{
@@ -189,13 +189,14 @@ func RenderCompose(mounts Mounts) ([]byte, error) {
 type Route struct {
 	Project, Service string
 	Host, Path       string
-	// Targets are "address:port" of the containers that may take requests:
-	// running, and healthy if they have a health check. For a route of a
-	// stack on another host, that host's internal entrypoint.
+	// Targets are the "address:port" of the containers that may take
+	// requests: those that run and, if they have a health check, are
+	// healthy. For a route of a stack on another host, the target is that
+	// host's internal entrypoint.
 	Targets []string
-	// Forwarded says the stack runs on another host: the route sends its
-	// requests to that host's Traefik, and only from the public
-	// entrypoints, so a request is forwarded once at most.
+	// Forwarded says that the stack runs on another host. The route sends
+	// its requests to that host's Traefik, and only from the public
+	// entrypoints, so a request is forwarded at most once.
 	Forwarded bool
 }
 
@@ -220,8 +221,8 @@ type router struct {
 	TLS         *routerTLS `yaml:"tls,omitempty"`
 }
 
-// routerTLS is empty: Traefik picks the certificate by the client's SNI
-// from those in tlsConfig.
+// routerTLS is empty: Traefik picks the certificate from those in tlsConfig
+// by the client's SNI.
 type routerTLS struct{}
 
 type middleware struct {
@@ -256,29 +257,30 @@ type server struct {
 	URL string `yaml:"url"`
 }
 
-// The names of what the routes of the stacks share; they have no dot, and
-// those of the stacks have one.
+// The names of the router, middleware and service that all stacks' routes
+// share. These names have no dot, and the stacks' names have one.
 const (
 	challengeName = "acme-challenge"
 	redirectName  = "redirect-to-https"
 )
 
-// challengePriority puts the ACME challenges' router before every stack's:
-// Traefik's default priority is the length of the rule.
+// challengePriority puts the router of the ACME challenges before every
+// stack's router, because Traefik's default priority is the rule's length.
 const challengePriority = 1_000_000
 
-// RenderDynamic writes the routes for the file provider. Per route a
+// RenderDynamic writes the routes for the file provider. Each route gets a
 // service with its targets, named "<project>.<service>", and routers named
-// "<entrypoint>.<project>.<service>": projects and services have no dot, so
-// names never clash. A route whose domain has one of the certificates gets a router on
-// websecure and one on web that redirects to it; without one, only a plain
-// router on web, so nobody sees Traefik's self-signed default certificate.
-// A route of a stack on this host also has a router on the internal
-// entrypoint, where other hosts' Traefiks forward its requests to; TLS
-// ended there.
+// "<entrypoint>.<project>.<service>". Projects and services have no dot, so
+// the names never clash. A route whose domain has one of the certificates
+// gets a router on websecure and a router on web that redirects to it.
+// Without a certificate, the route gets only a plain router on web, so
+// nobody sees Traefik's self-signed default certificate. A route of a stack
+// on this host also has a router on the internal entrypoint, to which other
+// hosts' Traefiks forward its requests; TLS has already ended there.
+//
 // The ACME challenges go to the agent on every host, whatever the domain,
-// also on the internal entrypoint: the leader checks a challenge there on
-// the ingress host before the CA asks for it (controller.checkAddress).
+// and also on the internal entrypoint: the leader checks a challenge there
+// on the ingress host before the CA asks for it (controller.checkAddress).
 func RenderDynamic(routes []Route, certificates []CertificateFiles) ([]byte, error) {
 	config := dynamicConfig{HTTP: httpConfig{
 		Routers: map[string]router{
@@ -332,8 +334,9 @@ func RenderDynamic(routes []Route, certificates []CertificateFiles) ([]byte, err
 	return marshal("Traefik's routes", config)
 }
 
-// rule matches the route's host and, unless it is "/" or empty, its path
-// and below. stackspec.Check made sure neither holds a backtick.
+// rule matches the route's host and, unless the path is "/" or empty, the
+// path and everything below it. stackspec.Check made sure that neither
+// contains a backtick.
 func rule(route Route) string {
 	matcher := "Host(`" + strings.ToLower(route.Host) + "`)"
 	if route.Path != "" && route.Path != "/" {
@@ -342,8 +345,8 @@ func rule(route Route) string {
 	return matcher
 }
 
-// marshal writes YAML with an indent of two, as the other files clowder
-// renders.
+// marshal writes YAML with an indent of two, like the other files that
+// clowder renders.
 func marshal(what string, value any) ([]byte, error) {
 	var out bytes.Buffer
 	encoder := yaml.NewEncoder(&out)
@@ -357,8 +360,8 @@ func marshal(what string, value any) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// Target is an address and port as Traefik takes them: a route's target,
-// an entrypoint's address.
+// Target is an address and port in the form Traefik takes them, for a
+// route's target or an entrypoint's address.
 func Target(address netip.Addr, port uint16) string {
 	return netip.AddrPortFrom(address, port).String()
 }

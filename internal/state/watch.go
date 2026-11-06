@@ -6,13 +6,14 @@ import (
 	"slices"
 )
 
-// ChangeRingSize is how many changes an agent keeps for the watch. Hosts'
-// reports about themselves are no change, so on a quiet cluster the ring
-// covers hours.
+// ChangeRingSize is how many changes an agent keeps for the watch. Reports
+// of hosts about themselves are not changes, so on a quiet cluster the
+// ring covers hours.
 const ChangeRingSize = 4096
 
-// ErrChangesGone answers a watch from an index the ring no longer covers:
-// the client lists afresh and watches from the list's index.
+// ErrChangesGone is the answer to a watch from an index that the ring no
+// longer covers. The client then lists again and watches from the list's
+// index.
 var ErrChangesGone = errors.New("the changes since that index are gone; list afresh")
 
 // ChangeRing keeps the last changes the log made, oldest first, for the
@@ -23,8 +24,9 @@ type ChangeRing struct {
 	from    uint64
 }
 
-// Reset empties the ring; it is complete from index on. An agent resets it
-// to the state's index when it starts from a snapshot or installs one.
+// Reset empties the ring, which is then complete from index on. An agent
+// resets it to the state's index when it starts from a snapshot or
+// installs one.
 func (r *ChangeRing) Reset(index uint64) {
 	r.changes, r.from = nil, index
 }

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
 )
@@ -18,7 +19,7 @@ func shopSpec() stackspec.Spec {
 // putShop applies the stack default/shop as the CLI does.
 func (c *cluster) putShop(spec stackspec.Spec) {
 	c.t.Helper()
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindStack, "default", "shop", spec))
+	c.put(resource.KindStack, "default", "shop", spec)
 }
 
 // runningShop puts default/shop, places it on host 0 and has the host
@@ -46,13 +47,13 @@ func TestAStackIsPutOnceAndOnlyByItsChannel(t *testing.T) {
 	app := same.Services["app"]
 	app.Restart = "always"
 	same.Services["app"] = app
-	if changes, err := c.changes(KindPutResource, cliActor, putResource(resource.KindStack, "default", "shop", same)); err != nil ||
-		len(changes) != 0 {
+	if changes, err := c.changes(KindChangeResources, cliActor,
+		batch(putChange(resource.KindStack, "default", "shop", same))); err != nil || len(changes) != 0 {
 		t.Errorf("the same stack written out: changes %v, %v", changes, err)
 	}
-	gitops := putResource(resource.KindStack, "default", "shop", shopSpec())
-	gitops.Owner = "gitops:main" // another channel
-	c.refuse(KindPutResource, LeaderActor, gitops, "belongs to cli")
+	gitops := putChange(resource.KindStack, "default", "shop", shopSpec())
+	gitops.Put.Owner = "gitops:main" // another channel
+	c.refuse(KindChangeResources, LeaderActor, batch(gitops), "belongs to cli")
 }
 
 func TestOnlyItsHostReportsAStackWhereItIs(t *testing.T) {
@@ -80,6 +81,7 @@ func TestANewGenerationStartsUntilItsHostReportsIt(t *testing.T) {
 	changed := shopSpec()
 	changed.Services["app"] = stackspec.Service{Image: "y"}
 	c.putShop(changed)
+	stack = c.state.Stacks["default/shop"] // a change of resources replaces the state
 	if stack.Status != StackStarting || stack.Generation != 2 || *stack.Host != host {
 		t.Errorf("after a new apply of a running stack: %+v", stack)
 	}
@@ -98,12 +100,10 @@ func TestTheStateReadsTheStackSpecItself(t *testing.T) {
 	c := newCluster(t)
 	broken := shopSpec()
 	broken.Services["app"] = stackspec.Service{Image: "x", DependsOn: []string{"db"}}
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindStack, "default", "shop", broken),
-		`dependsOn: "db" is no other service`)
+	c.refuseChange(putChange(resource.KindStack, "default", "shop", broken), `dependsOn: "db" is no other service`)
 	unknown := shopSpec()
 	unknown.Priority = "urgent"
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindStack, "default", "shop", unknown),
-		`no priority category "urgent"`)
+	c.refuseChange(putChange(resource.KindStack, "default", "shop", unknown), `no priority category "urgent"`)
 	reserved := shopSpec()
 	reserved.Priority = "high"
 	reserved.Services["app"] = stackspec.Service{
@@ -116,31 +116,53 @@ func TestTheStateReadsTheStackSpecItself(t *testing.T) {
 	}
 }
 
-func TestOnlyStacksNamedInClusterYAMLMayHavePrivileges(t *testing.T) {
+func TestOnlyStacksNamedInTheConfigurationMayHavePrivileges(t *testing.T) {
 	c := newCluster(t)
 	config := testConfig()
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: testSecrets()})
+	c.configure(config)
 	privileged := shopSpec()
 	privileged.Services["app"] = stackspec.Service{Image: "x", Privileged: true}
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindStack, "default", "shop", privileged),
-		"only stacks named in stacks.privileged")
+	c.refuseChange(putChange(resource.KindStack, "default", "shop", privileged), "only stacks named in stacks.privileged")
 	config.Stacks.Privileged = []string{"default/shop"}
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: testSecrets()})
+	c.configure(config)
 	c.putShop(privileged)
 	config.Stacks.Privileged = nil
-	c.refuse(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: testSecrets()},
-		"stack default/shop asks for privileges, so it must stay in stacks.privileged")
+	c.refuseChange(configChange(config), "stack default/shop asks for privileges, so it must stay in stacks.privileged")
 }
 
-func TestClusterYAMLKeepsTheCategoriesStacksName(t *testing.T) {
+func TestTheConfigurationKeepsTheCategoriesStacksName(t *testing.T) {
 	c := newCluster(t)
+	c.mustApply(KindChangeResources, cliActor, batch(hetznerSecret()))
 	spec := shopSpec()
 	spec.Priority = "low"
 	c.putShop(spec)
 	config := testConfig()
 	config.Priorities = clusterspec.Priorities{Default: "normal", Categories: map[string]int{"normal": 500}}
-	c.refuse(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: testSecrets()},
-		`cluster.yaml would break stack default/shop: service app: the cluster has no priority category "low"`)
+	c.refuseChange(configChange(config),
+		`the configuration would break stack default/shop: service app: the cluster has no priority category "low"`)
+}
+
+func TestAStackNamesOnlyKeysItsSecretsHave(t *testing.T) {
+	c := newCluster(t)
+	db := func(digest string, keys ...string) ResourceChange {
+		data := map[string]Sealed{}
+		for _, key := range keys {
+			data[key] = sealedOf(5)
+		}
+		return putChange(resource.KindSecret, "default", "db", SealedSecret{Data: data, Digest: digest})
+	}
+	uses := shopSpec()
+	uses.Services["app"] = stackspec.Service{
+		Image: "x", SecretEnv: map[string]names.SecretKeyRef{"DB_PASSWORD": {Name: "db", Key: "password"}},
+	}
+	c.mustApply(KindChangeResources, cliActor, batch(db("d1", "user")))
+	c.refuseChange(putChange(resource.KindStack, "default", "shop", uses), "stack default/shop: secret db has no key password")
+	c.mustApply(KindChangeResources, cliActor, batch(db("d2", "user", "password"), putChange(resource.KindStack, "default", "shop", uses)))
+
+	// the key the stack names stays; another may go
+	c.refuseChange(db("d3", "user"), "secret default/db must keep the key password, which stack default/shop names")
+	c.mustApply(KindChangeResources, cliActor, batch(db("d4", "password")))
+	c.refuseChange(deleteChange(resource.KindSecret, "default", "db"), "is stack default/shop's")
 }
 
 func TestAPortOrRouteBelongsToOneStack(t *testing.T) {
@@ -152,60 +174,54 @@ func TestAPortOrRouteBelongsToOneStack(t *testing.T) {
 		}}}
 	}
 	c.putShop(published(9987, "udp", "shop.example.com", ""))
-	blog := func(spec stackspec.Spec) PutResource { return putResource(resource.KindStack, "default", "blog", spec) }
-	c.refuse(KindPutResource, cliActor, blog(published(9987, "udp", "blog.example.com", "")),
+	blog := func(spec stackspec.Spec) ResourceChange {
+		return putChange(resource.KindStack, "default", "blog", spec)
+	}
+	c.refuseChange(blog(published(9987, "udp", "blog.example.com", "")),
 		"port udp/9987 is published by stack default/shop already")
-	c.refuse(KindPutResource, cliActor, blog(published(9988, "udp", "Shop.example.com", "/")),
+	c.refuseChange(blog(published(9988, "udp", "Shop.example.com", "/")),
 		"route shop.example.com/ belongs to stack default/shop already")
 	// another protocol or path is another address
-	c.mustApply(KindPutResource, cliActor, blog(published(9987, "tcp", "shop.example.com", "/blog")))
+	c.mustApply(KindChangeResources, cliActor, batch(blog(published(9987, "tcp", "shop.example.com", "/blog"))))
 	// a deleted stack frees what it had
-	c.mustApply(KindDeleteResource, cliActor,
-		DeleteResource{Kind: resource.KindStack, Namespace: "default", Name: "shop", Owner: OwnerCLI})
-	c.mustApply(KindPutResource, cliActor, blog(published(9987, "udp", "shop.example.com", "")))
+	c.del(resource.KindStack, "default", "shop")
+	c.mustApply(KindChangeResources, cliActor, batch(blog(published(9987, "udp", "shop.example.com", ""))))
 }
 
 func TestAStackNamesVolumesAndSecretsOfItsNamespace(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.configure(testConfig())
 	uses := shopSpec()
 	uses.Services["app"] = stackspec.Service{
 		Image: "x", Volumes: []stackspec.Mount{{Volume: "data", Path: "/data"}}, Secrets: []string{"token"},
 	}
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindStack, "default", "shop", uses),
-		"namespace default has no volume data")
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "data", testVolumeSpec()))
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindStack, "default", "shop", uses),
-		"namespace default has no secret token")
-	c.mustApply(KindPutResource, cliActor,
-		putResource(resource.KindSecret, "default", "token", SealedSecret{Value: sealedOf(5), Digest: "d"}))
+	c.refuseChange(putChange(resource.KindStack, "default", "shop", uses), "namespace default has no volume data")
+	c.put(resource.KindVolume, "default", "data", testVolumeSpec())
+	c.refuseChange(putChange(resource.KindStack, "default", "shop", uses), "namespace default has no secret token")
+	c.put(resource.KindSecret, "default", "token", sealedValue(sealedOf(5), "d"))
 	c.putShop(uses)
 
 	// one stack per volume; a secret may serve several
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindStack, "default", "blog", uses),
-		"volume data is stack default/shop's already")
+	c.refuseChange(putChange(resource.KindStack, "default", "blog", uses), "volume data is stack default/shop's already")
 	// what a stack names stays
-	c.refuse(KindDeleteResource, cliActor,
-		DeleteResource{Kind: resource.KindVolume, Namespace: "default", Name: "data", Owner: OwnerCLI}, "is stack default/shop's")
-	c.refuse(KindDeleteResource, cliActor,
-		DeleteResource{Kind: resource.KindSecret, Namespace: "default", Name: "token", Owner: OwnerCLI}, "is stack default/shop's")
+	c.refuseChange(deleteChange(resource.KindVolume, "default", "data"), "is stack default/shop's")
+	c.refuseChange(deleteChange(resource.KindSecret, "default", "token"), "is stack default/shop's")
 	// a deleted stack leaves its volume for the next
-	c.mustApply(KindDeleteResource, cliActor,
-		DeleteResource{Kind: resource.KindStack, Namespace: "default", Name: "shop", Owner: OwnerCLI})
+	c.del(resource.KindStack, "default", "shop")
 	if _, ok := c.state.Volumes["default/data"]; !ok {
 		t.Error("the stack's delete took its volume along")
 	}
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindStack, "default", "blog", uses))
+	c.put(resource.KindStack, "default", "blog", uses)
 }
 
 func TestAPlacedStackNamesNoVolumeWhoseDataIsOnAnotherHost(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.configure(testConfig())
 	c.addHost(testHost(1))
 	c.putShop(shopSpec())
 	host := HostID(0)
 	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{PlannedAt: c.index, ID: "default/shop", Status: StackStarting, Host: &host})
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "data", testVolumeSpec()))
+	c.put(resource.KindVolume, "default", "data", testVolumeSpec())
 	elsewhere := *c.state.Volumes["default/data"]
 	minor := 0
 	elsewhere.Status, elsewhere.Minor, elsewhere.Copies = VolumeOK, &minor, []VolumeCopy{{Host: 1, Class: "fast"}}
@@ -213,19 +229,18 @@ func TestAPlacedStackNamesNoVolumeWhoseDataIsOnAnotherHost(t *testing.T) {
 
 	uses := shopSpec()
 	uses.Services["app"] = stackspec.Service{Image: "x", Volumes: []stackspec.Mount{{Volume: "data", Path: "/data"}}}
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindStack, "default", "shop", uses),
+	c.refuseChange(putChange(resource.KindStack, "default", "shop", uses),
 		"stack default/shop runs on host 0, but volume data has its data on another host")
 	// a stack not placed yet goes where the data is
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindStack, "default", "blog", uses))
+	c.put(resource.KindStack, "default", "blog", uses)
 }
 
 func TestTwoNamespacesHaveAStackOfTheSameName(t *testing.T) {
 	c := newCluster(t)
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindStack, "other", "shop", shopSpec()),
-		`no namespace "other"`)
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindNamespace, "", "other", nil))
+	c.refuseChange(putChange(resource.KindStack, "other", "shop", shopSpec()), `no namespace "other"`)
+	c.put(resource.KindNamespace, "", "other", nil)
 	c.putShop(shopSpec())
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindStack, "other", "shop", shopSpec()))
+	c.put(resource.KindStack, "other", "shop", shopSpec())
 	if stack := c.state.Stacks["other/shop"]; stack.Project() == c.state.Stacks["default/shop"].Project() {
 		t.Error("the two stacks share their project on the host")
 	}
@@ -274,6 +289,7 @@ func TestARestartTakesAlongWhatDependsOnItAndKeepsTheGeneration(t *testing.T) {
 	// a new generation forgets the services it no longer has
 	delete(spec.Services, "cache")
 	c.putShop(spec)
+	stack = c.state.Stacks["default/shop"] // a change of resources replaces the state
 	if _, ok := stack.Restarted["cache"]; ok || len(stack.Restarted) != 3 {
 		t.Errorf("restarted after cache went %v", stack.Restarted)
 	}

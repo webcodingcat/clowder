@@ -17,31 +17,33 @@ import (
 var ErrRetired = errors.New("clowderd recover took this host out of the cluster (Hetzner label " +
 	"clowder-retired); set its server up anew or delete it")
 
-// retiredCheckTimeout bounds the start's question to Hetzner, well within
-// systemd's start timeout.
+// retiredCheckTimeout bounds the question to Hetzner at the agent's start.
+// It is well within systemd's start timeout.
 const retiredCheckTimeout = 20 * time.Second
 
-// checkRetired asks Hetzner, before the agent starts Raft, the network or a
-// stack, whether clowderd recover retired this host (ErrRetired): its
-// server's label clowder-retired names this host's certificate. Two retired
-// hosts would still have the old cluster's majority between them: they
-// would elect a leader, their copies would have DRBD's quorum, and they
-// would fence the host that recovered. A server set up anew has a
-// certificate of its own, so the label stops nothing there.
+// checkRetired asks Hetzner whether clowderd recover retired this host
+// (ErrRetired). It asks before the agent starts Raft, the network or a
+// stack. A host is retired when its server's label clowder-retired names
+// this host's certificate. Two retired hosts would still have the old
+// cluster's majority between them: they would elect a leader, their copies
+// would have DRBD's quorum, and they would fence the host that recovered.
+// A server that is set up again has a new certificate, so the label does
+// not stop it.
 //
-// The token comes from the state the Raft log on disk holds, as Raft does
-// not run yet; reading it costs the start a second replay of the log, which
-// the member does again when it opens. Before the first cluster apply
-// there is no token to ask with, and recover retires no host then. An API
-// that does not answer lets the agent start as before: a host must not stay
-// down for Hetzner's outage, and a retired host only does harm if it is
-// switched on while the API is down, and another one with it.
+// Raft does not run yet, so the token comes from the state in the Raft log
+// on disk. Reading it costs the start a second replay of the log, because
+// the Raft member replays it again when it opens. Before the first
+// ClusterConfiguration there is no token to ask with, and recover retires
+// no host then. If the API does not answer, the agent starts as before: a
+// host must not stay down because of an outage at Hetzner, and a retired
+// host only does harm if it is switched on while the API is down, together
+// with another retired host.
 func checkRetired(ctx context.Context, files Files, host Host, credentials credentials, logger *slog.Logger) error {
 	current, err := raftnode.ReadState(files.raftDir())
 	if err != nil {
 		return fmt.Errorf("read the state before the start: %w", err)
 	}
-	if current.Config.Revision == 0 {
+	if !current.Configured() {
 		return nil
 	}
 	client, err := controller.OpenHetzner(current, credentials.dataKey.Open)

@@ -138,7 +138,7 @@ type testCluster struct {
 	servers  []*httptest.Server
 	apis     []*Server
 	// recipients are the cluster's age key and a recovery key: what
-	// cluster.yaml's values are encrypted for
+	// the Secrets' values are encrypted for
 	recipients []age.Recipient
 	// recovery is the recovery key, which opens every value
 	recovery *age.X25519Identity

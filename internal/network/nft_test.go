@@ -51,7 +51,7 @@ func TestTheRulesetMatchesTheGoldenFile(t *testing.T) {
 	}))
 }
 
-// Before the first cluster apply: no Floating IP, no private network.
+// Before the first configuration: no Floating IP, no private network.
 func TestABareRulesetKeepsItsBoundaries(t *testing.T) {
 	rendered := Render(Ruleset{ClusterHosts: []netip.Addr{netip.MustParseAddr("198.51.100.2")}})
 	if hairpin := "tcp dport { 80, 443 }"; strings.Contains(rendered, hairpin) {

@@ -12,9 +12,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
-// WatchEvent is one change GET /v1/watch streams, one JSON object per line:
-// which resource changed, spec or status, or that it is gone. The client
-// reads the resource itself if it needs it.
+// WatchEvent is one change that GET /v1/watch streams, as one JSON object
+// per line. It says which resource changed (spec or status) or is gone.
+// The client reads the resource itself if it needs it.
 type WatchEvent struct {
 	Kind            string `json:"kind"`
 	Namespace       string `json:"namespace,omitempty"`
@@ -23,9 +23,10 @@ type WatchEvent struct {
 	Deleted         bool   `json:"deleted,omitempty"`
 }
 
-// watchWaitTimeout bounds how long a watch from an index this agent has
-// not applied yet waits for it: a follower cut off from the leader would
-// wait forever. A variable, so the tests need not wait as long.
+// watchWaitTimeout bounds how long a watch from an index that this agent
+// has not applied yet waits for it; otherwise a follower cut off from the
+// leader would wait forever. It is a variable so that the tests need not
+// wait as long.
 var watchWaitTimeout = 30 * time.Second
 
 // watch streams the changes of one kind in a namespace (or all of them)
@@ -33,10 +34,13 @@ var watchWaitTimeout = 30 * time.Second
 // GET /v1/watch?kind=&namespace=|allNamespaces=true&since=. Any agent
 // answers from its own ring of changes (state.ChangeRing), so a client
 // that listed on one agent can watch on another.
-//   - since before what the ring holds: 410, the client lists afresh
-//   - since ahead of this agent: it waits at most watchWaitTimeout, then 504
-//   - the stream ends when ctx ends, or when the ring dropped changes the
-//     client has not read yet (the client lists afresh, as after 410)
+//   - since is older than what the ring holds: 410, and the client lists
+//     again
+//   - since is ahead of this agent: it waits at most watchWaitTimeout,
+//     then 504
+//   - the stream ends when ctx ends, or when the ring has dropped changes
+//     that the client has not read yet (the client lists again, as after
+//     410)
 func (s *Server) watch(w http.ResponseWriter, r *http.Request) {
 	kind, ok := resource.KindOf(r.URL.Query().Get("kind"))
 	if !ok {
@@ -59,8 +63,8 @@ func (s *Server) watch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusGatewayTimeout, fmt.Errorf("this agent has not reached index %d yet; try again", since))
 		return
 	}
-	// the channel before the changes, so none between the read and the
-	// wait goes unseen
+	// get the channel before the changes, so that no change between the
+	// read and the wait goes unseen
 	changed := s.config.Cluster.Changed()
 	changes, index, err := s.config.Cluster.Changes(since)
 	if err != nil {
@@ -92,7 +96,7 @@ func (s *Server) watch(w http.ResponseWriter, r *http.Request) {
 		}
 		changed = s.config.Cluster.Changed()
 		if changes, index, err = s.config.Cluster.Changes(since); err != nil {
-			return // the ring went on without the client: it lists afresh
+			return // the ring went on without the client: it lists again
 		}
 	}
 }

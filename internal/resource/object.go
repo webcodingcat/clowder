@@ -7,18 +7,19 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// APIVersion is the version of the resources' format; a resource of
-// another is refused.
+// APIVersion is the version of the resources' format. A resource of
+// another version is refused.
 const APIVersion = "clowder/v1"
 
 // Kinds are the kinds of resources.
-var Kinds = []string{KindNamespace, KindSecret, KindStack, KindVolume}
+var Kinds = []string{KindClusterConfiguration, KindNamespace, KindSecret, KindStack, KindVolume}
 
-// KindOf is the kind a word names: the kind in lower case ("volume"), as
-// the API's paths write it.
+// KindOf returns the kind that a word names: the kind in lower case
+// ("volume"), as the API's paths write it.
 func KindOf(word string) (string, bool) {
 	for _, kind := range Kinds {
 		if strings.ToLower(kind) == word {
@@ -33,17 +34,18 @@ type Object struct {
 	APIVersion string   `json:"apiVersion"`
 	Kind       string   `json:"kind"`
 	Metadata   Metadata `json:"metadata"`
-	// Spec is the kind's (VolumeSpec, SecretSpec, stackspec.Spec; a
+	// Spec is the kind's spec (VolumeSpec, SecretSpec, stackspec.Spec; a
 	// namespace has none).
 	Spec json.RawMessage `json:"spec,omitempty"`
-	// Status is what the cluster tells about the resource; an apply
+	// Status is what the cluster reports about the resource. An apply
 	// ignores it.
 	Status json.RawMessage `json:"status,omitempty"`
 }
 
 // Metadata names a resource. The cluster sets Owner, Generation and
-// ResourceVersion; an apply ignores them, so what the API answered applies
-// again as it is, but for a secret, whose value never leaves the cluster.
+// ResourceVersion, and an apply ignores them. So what the API answered can
+// be applied again as it is, except for a secret, whose value never leaves
+// the cluster.
 type Metadata struct {
 	Namespace       string `json:"namespace,omitempty"`
 	Name            string `json:"name"`
@@ -64,7 +66,8 @@ func (o Object) Ref() Ref {
 	return Ref{Kind: o.Kind, Namespace: o.Metadata.Namespace, Name: o.Metadata.Name}
 }
 
-// String is how messages name a resource: "Volume shop/data".
+// String returns the name of a resource as messages use it:
+// "Volume shop/data".
 func (r Ref) String() string {
 	if r.Namespace == "" {
 		return r.Kind + " " + r.Name
@@ -72,8 +75,8 @@ func (r Ref) String() string {
 	return r.Kind + " " + r.Namespace + "/" + r.Name
 }
 
-// decodeStrict reads a spec as users write it: a field the kind does not
-// have is an error, not ignored.
+// decodeStrict reads a spec as users write it. A field that the kind does
+// not have is an error, not ignored.
 func decodeStrict(raw json.RawMessage, spec any) error {
 	if len(raw) == 0 {
 		raw = json.RawMessage("{}")
@@ -86,22 +89,31 @@ func decodeStrict(raw json.RawMessage, spec any) error {
 	return nil
 }
 
-// CheckNamespaceSpec refuses a spec for a namespace, which has none.
-func CheckNamespaceSpec(raw json.RawMessage) error {
-	var spec map[string]json.RawMessage
+// DecodeNamespaceSpec reads and checks a namespace's spec as users write
+// it; a namespace may have none.
+func DecodeNamespaceSpec(raw json.RawMessage) (NamespaceSpec, error) {
+	var spec NamespaceSpec
 	if err := decodeStrict(raw, &spec); err != nil {
-		return err
+		return NamespaceSpec{}, err
 	}
-	if len(spec) > 0 {
-		return errors.New("a namespace has no spec")
+	return spec, spec.Check()
+}
+
+// DecodeClusterConfiguration reads the configuration's spec as users write
+// it. clusterspec.Check runs in the state, which also checks the spec
+// against the cluster.
+func DecodeClusterConfiguration(raw json.RawMessage) (clusterspec.Config, error) {
+	var spec clusterspec.Config
+	if err := decodeStrict(raw, &spec); err != nil {
+		return clusterspec.Config{}, err
 	}
-	return nil
+	return spec, nil
 }
 
 // DecodeVolumeSpec reads and checks a volume's spec as users write it.
 func DecodeVolumeSpec(raw json.RawMessage) (VolumeSpec, error) {
 	// replicas has no default: 0 and 1 are both common and mean very
-	// different things, so a missing one must be told from 0
+	// different things, so a missing value must be told apart from 0
 	var written struct {
 		Class    string     `json:"class"`
 		Size     units.Size `json:"size"`

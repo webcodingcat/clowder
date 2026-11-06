@@ -19,6 +19,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/hetzner/hetznertest"
 	"github.com/webcodingcat/clowder/internal/jointoken"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -66,16 +67,11 @@ func newJoinTest(t *testing.T) *joinTest {
 	}
 }
 
-// setHetznerToken seals the token as cluster.yaml's hetzner.token.
+// setHetznerToken applies the token to the Secret the configuration names
+// for it (clowder-system/hetzner, key token).
 func setHetznerToken(t *testing.T, cluster *agenttest.Cluster, token string) {
 	t.Helper()
-	sealed, err := cluster.Keys.Seal([]byte(token))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cluster.Lock()
-	defer cluster.Unlock()
-	cluster.State.ClusterSecrets["hetzner.token"] = state.SealedSecret{Value: sealed, Digest: "d"}
+	cluster.PutSecretIn(names.System, "hetzner", map[string]string{"token": token})
 }
 
 // token opens a join token.

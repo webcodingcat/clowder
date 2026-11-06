@@ -24,10 +24,11 @@ const (
 )
 
 // serve starts the API on the host's addresses, the answers to ACME's
-// challenges and the metrics. If one cannot listen, it closes those it
-// started and returns that error, which ends the agent at its start. Once
-// they serve, only the API's errors reach serveErrors: without the other
-// two the host still runs its stacks, so they log theirs.
+// challenges, and the metrics. If one of them cannot listen, serve closes
+// the servers it started and returns that error, which ends the agent at
+// its start. Once they serve, only the API's errors reach serveErrors.
+// Without the other two servers the host still runs its stacks, so those
+// servers only log their errors.
 func (d *daemon) serve() ([]*http.Server, <-chan error, error) {
 	servers, serveErrors, err := serveAPI(d.server, d.host.apiAddresses(), d.logger)
 	if err != nil {
@@ -53,9 +54,9 @@ func (d *daemon) serve() ([]*http.Server, <-chan error, error) {
 	return servers, serveErrors, nil
 }
 
-// freeBind lets a socket bind an address the host does not have yet: at
-// boot the public address can come up after the agent (DHCP, netplan), and
-// the agent must neither fail nor leave users locked out then.
+// freeBind lets a socket bind an address that the host does not have yet.
+// At boot, the public address can come up after the agent starts (DHCP,
+// netplan), and the agent must then neither fail nor lock users out.
 var freeBind = net.ListenConfig{
 	Control: func(_, _ string, raw syscall.RawConn) error {
 		var optErr error

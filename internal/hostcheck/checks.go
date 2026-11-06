@@ -251,8 +251,8 @@ func checkCompose(ctx context.Context, host Host, _ Options) (Status, string) {
 // checkUnattendedUpgrades: the kernel, Docker, DRBD and clowder are only
 // updated by hand, in a maintenance window.
 func checkUnattendedUpgrades(ctx context.Context, host Host, _ Options) (Status, string) {
-	// a removed package whose configuration is left is listed too, so look at
-	// its status, not only whether dpkg knows it
+	// dpkg also lists a removed package whose configuration is left, so
+	// check its status, not only whether dpkg knows it
 	status, err := host.Run(ctx, "dpkg-query", "--show", "--showformat=${db:Status-Status}", "unattended-upgrades")
 	if err != nil || strings.TrimSpace(status) != "installed" {
 		return OK, "not installed"
@@ -262,8 +262,9 @@ func checkUnattendedUpgrades(ctx context.Context, host Host, _ Options) (Status,
 		return Fail, fmt.Sprintf("apt-config: %v", err)
 	}
 	// unattended-upgrades matches each entry against the start of a package
-	// name, so these four keep every kernel, Docker, DRBD and clowder package;
-	// a longer entry such as linux-firmware would keep only that one
+	// name, so these four entries hold back every kernel, Docker, DRBD and
+	// clowder package; a longer entry such as linux-firmware would hold back
+	// only that one
 	entries := map[string]bool{}
 	for _, match := range quoted.FindAllStringSubmatch(dump, -1) {
 		entries[match[1]] = true

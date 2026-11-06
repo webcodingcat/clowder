@@ -15,13 +15,25 @@ const (
 	readTimeout = 30 * time.Second
 )
 
+// withConfig puts docker's --config before args. It names the directory of
+// the config.json whose registry logins a pull uses. There is one directory
+// per namespace, so a stack pulls only with its own namespace's logins.
+// Without --config, docker uses root's own logins.
+func withConfig(config string, args ...string) []string {
+	if config == "" {
+		return args
+	}
+	return append([]string{"--config", config}, args...)
+}
+
 // ComposeUp starts or updates a stack from its rendered Compose files (the
-// stack, and its secret variables if it has any): Docker recreates only the
-// containers whose configuration changed. The services left out are scaled
-// to 0, which also removes their running containers; nothing that runs may
-// depend on them.
-func (c *Client) ComposeUp(ctx context.Context, stack string, files, leftOut []string) error {
-	args := []string{"compose", "--project-name", stack}
+// stack, and its secret variables if it has any). Docker recreates only the
+// containers whose configuration changed. The services in leftOut are scaled
+// to 0, which also removes their running containers, so no running service
+// may depend on them. Missing images are pulled with the logins of config
+// (withConfig).
+func (c *Client) ComposeUp(ctx context.Context, config, stack string, files, leftOut []string) error {
+	args := withConfig(config, "compose", "--project-name", stack)
 	for _, file := range files {
 		args = append(args, "--file", file)
 	}
@@ -33,11 +45,12 @@ func (c *Client) ComposeUp(ctx context.Context, stack string, files, leftOut []s
 	return err
 }
 
-// ComposePull pulls the images of some services of a stack again, also
-// those Docker has: an image may have changed under the same tag. compose
-// up pulls only images that are missing.
-func (c *Client) ComposePull(ctx context.Context, stack string, files, services []string) error {
-	args := []string{"compose", "--project-name", stack}
+// ComposePull pulls the images of some services of a stack again, even the
+// ones that Docker already has, because an image may have changed under the
+// same tag; compose up pulls only missing images. ComposePull logs in with
+// the registry logins of config (withConfig).
+func (c *Client) ComposePull(ctx context.Context, config, stack string, files, services []string) error {
+	args := withConfig(config, "compose", "--project-name", stack)
 	for _, file := range files {
 		args = append(args, "--file", file)
 	}
@@ -69,12 +82,4 @@ func (c *Client) ComposeLogs(ctx context.Context, stack, file string, follow boo
 		args = append(args, "--follow")
 	}
 	return command.Stream(ctx, out, "docker", args...)
-}
-
-// Login signs in to a private registry; the password goes on standard
-// input, never on the command line.
-func (c *Client) Login(ctx context.Context, registry, username, password string) error {
-	_, err := command.RunWithInput(ctx, readTimeout, password, "docker", "login", "--username", username,
-		"--password-stdin", registry)
-	return err
 }

@@ -53,7 +53,7 @@ func newTestFencer(t *testing.T) *testFencer {
 		FenceParts: FenceParts{
 			Cluster: l, Propose: l.propose, Heard: heard, Ask: ask, Self: 0, Conditions: NewConditions(),
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-			Open:   func(sealed state.Sealed) ([]byte, error) { return sealed, nil },
+			Open:   openPadded,
 		},
 		fenceAfter: map[state.HostID]time.Time{}, powerOnAfter: map[state.HostID]time.Time{},
 		poweredOn: map[state.HostID]bool{}, pause: time.Millisecond,

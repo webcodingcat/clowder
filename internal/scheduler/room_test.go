@@ -12,7 +12,7 @@ import (
 const mib = int64(1) << 20
 
 // roomCluster is cluster's host offering its services memory (MiB) and 4
-// CPUs after the default system_reserve (512M, 0.25).
+// CPUs after the default systemReserve (512M, 0.25).
 func roomCluster(memory int64) *state.State {
 	current := cluster()
 	current.Hosts[0].Capacity = state.Resources{MemoryBytes: (512 + memory) * mib, CPUs: 4.25}

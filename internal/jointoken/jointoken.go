@@ -1,13 +1,13 @@
-// Package jointoken makes and reads the one-time tokens a host joins the
-// cluster with (clowder host join-token, clowderd join). A token is an ID
-// and a secret. The state keeps only the secret's Hash, under the ID, until
-// a join uses the token or it expires; whoever reads the state therefore
+// Package jointoken makes and reads the one-time tokens that a host joins
+// the cluster with (clowder host join-token, clowderd join). A token is an
+// ID and a secret. The state keeps only the secret's Hash, under the ID,
+// until a join uses the token or it expires. So whoever reads the state
 // cannot join with it.
 //
-// The joining host trusts the cluster's CA by a proof made with the hash
-// (pki.TrustProof): only someone with the token or the state can make it.
-// It then sends the token itself, over TLS checked against that CA, and
-// the leader compares its hash.
+// The joining host trusts the cluster's CA because of a proof made with
+// the hash (pki.TrustProof), which only someone with the token or the
+// state can make. The host then sends the token itself, over TLS checked
+// against that CA, and the leader compares its hash.
 package jointoken
 
 import (
@@ -20,9 +20,9 @@ import (
 	"strings"
 )
 
-// idSize and secretSize are in bytes. The ID only names the token, so the
-// agent sends the proof of one token, not of every open one; the secret's
-// 256 bits are what nobody guesses.
+// idSize and secretSize are in bytes. The ID only names the token, so that
+// the agent sends the proof of one token, not of every open one. The
+// secret's 256 bits are what nobody can guess.
 const (
 	idSize     = 8
 	secretSize = 32
@@ -48,7 +48,8 @@ func New() (Token, error) {
 	return Token{ID: hex.EncodeToString(id), secret: secret}, nil
 }
 
-// String is the token as the user copies it: the ID, a dot, the secret.
+// String returns the token in the form the user copies: the ID, a dot,
+// and the secret.
 func (t Token) String() string {
 	return t.ID + "." + base64.RawURLEncoding.EncodeToString(t.secret)
 }
@@ -69,17 +70,18 @@ func Parse(text string) (Token, error) {
 	return Token{ID: id, secret: secret}, nil
 }
 
-// Hash is what the state keeps of the token: SHA-256 of its secret, in hex.
-// The secret is random, so no salt is needed.
+// Hash returns what the state keeps of the token: the SHA-256 of its
+// secret, in hex. The secret is random, so no salt is needed.
 func (t Token) Hash() string {
 	sum := sha256.Sum256(t.secret)
 	return hex.EncodeToString(sum[:])
 }
 
-// ProofKey is the key of the trust proof for a token with this hash: the
-// agent has the hash, the joining host makes it from the token. It is a
-// key, not a list of fields to MAC, and the hash always has 64 hexadecimal
-// digits, so the line end needs no length before it (digest.WriteParts).
+// ProofKey returns the key of the trust proof for a token with this hash.
+// The agent has the hash, and the joining host computes it from the token.
+// It is a key, not a list of fields to MAC, and the hash always has 64
+// hexadecimal digits, so the line end needs no length before it
+// (digest.WriteParts).
 func ProofKey(hash string) []byte {
 	return []byte("clowder join\n" + hash)
 }

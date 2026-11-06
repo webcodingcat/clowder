@@ -13,9 +13,9 @@ import (
 )
 
 func TestTheCLIRotatesTheRecoveryKey(t *testing.T) {
-	dir := startCluster(t)
+	startCluster(t)
 	keys := t.TempDir()
-	out, err := run(t, "--cluster", dir, "recovery", "rotate", "--recovery-out", filepath.Join(keys, "new"))
+	out, err := run(t, "recovery", "rotate", "--recovery-out", filepath.Join(keys, "new"))
 	if err != nil {
 		t.Fatal(err)
 	}

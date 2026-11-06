@@ -1,6 +1,7 @@
-// Package cli holds the commands of the clowder CLI. It must build on Linux,
-// macOS and Windows: no package that only works on Linux may be imported here
-// (.golangci.yml checks the direct imports, the cross build in CI the rest).
+// Package cli holds the commands of the clowder CLI. It must build on
+// Linux, macOS and Windows, so no package that only works on Linux may be
+// imported here. .golangci.yml checks the direct imports, and the cross
+// build in CI checks the rest.
 package cli
 
 import (
@@ -24,7 +25,7 @@ func NewRoot() *cobra.Command {
 	shared.register(root)
 	root.AddCommand(newVersion(), newConfig(&shared), newCluster(&shared), newSecret(&shared),
 		newHost(&shared), newStack(&shared), newVolume(&shared), newAlert(&shared), newRecovery(&shared),
-		newApplyResources(&shared), newGet(&shared), newDelete(&shared))
+		newApplyResources(&shared), newDiff(&shared), newGet(&shared), newDelete(&shared))
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError{err} })
 	checkArgs(root)
 	return root
@@ -38,15 +39,15 @@ func (e usageError) Error() string { return e.err.Error() }
 
 func (e usageError) Unwrap() error { return e.err }
 
-// usage makes a wrong call of an error.
+// usage turns an error into a wrong call.
 func usage(format string, args ...any) error {
 	return usageError{fmt.Errorf(format, args...)}
 }
 
-// checkArgs makes the argument errors of every command usage errors. A
-// command of commands (clowder, clowder stack) shows its help, and takes
-// an unknown command as a wrong call: without this, cobra would show the
-// help and end as if done.
+// checkArgs turns the argument errors of every command into usage errors.
+// A command that only groups other commands (clowder, clowder stack) shows
+// its help and treats an unknown command as a wrong call. Without this,
+// cobra would show the help and exit as if it had succeeded.
 func checkArgs(command *cobra.Command) {
 	if command.HasSubCommands() && !command.Runnable() {
 		command.Args = cobra.ArbitraryArgs
@@ -70,20 +71,37 @@ func checkArgs(command *cobra.Command) {
 	}
 }
 
-// ExitCode is the exit code for the error a command returned: 0 when it
-// did what was asked, 2 for a wrong call, 1 for anything else (refused,
-// missing, not reachable).
+// ExitCode returns the exit code for the error that a command returned: 0
+// when it did what was asked, 2 for a wrong call, and 1 for anything else
+// (refused, missing, not reachable). Like kubectl diff, diff ends with 1
+// when the resources differ (errDiffers) and with 2 when it could not tell
+// (diffFailed).
 func ExitCode(err error) int {
 	var wrongCall usageError
+	var failed diffFailed
 	switch {
 	case err == nil:
 		return 0
-	case errors.As(err, &wrongCall):
+	case errors.As(err, &wrongCall), errors.As(err, &failed):
 		return 2
 	default:
 		return 1
 	}
 }
+
+// Silent tells whether the error is an answer rather than a fault, so that
+// clowder prints nothing for it. diff's errDiffers is such an error.
+func Silent(err error) bool {
+	return errors.Is(err, errDiffers)
+}
+
+// diffFailed is an error of diff when it could not tell whether the
+// resources differ.
+type diffFailed struct{ err error }
+
+func (e diffFailed) Error() string { return e.err.Error() }
+
+func (e diffFailed) Unwrap() error { return e.err }
 
 func newVersion() *cobra.Command {
 	return &cobra.Command{

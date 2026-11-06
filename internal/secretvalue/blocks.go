@@ -13,9 +13,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/yamlpath"
 )
 
-// header is the line a value starts on, from the tag on: a literal block
-// scalar with no indentation indicator, as secret encrypt writes it. Only
-// such a block has lines of its own, which Rewrite can replace.
+// header is the line that a value starts on, from the tag on: a literal
+// block scalar with no indentation indicator, as secret encrypt writes it.
+// Only such a block has lines of its own, which Rewrite can replace.
 var header = regexp.MustCompile(`^!secret[ \t]+\|[-+]?[ \t]*(#.*)?$`)
 
 // Document is one YAML document of a file, with its values taken out.
@@ -27,9 +27,9 @@ type Document struct {
 	Secrets map[string]string
 }
 
-// Extract reads every document of content and takes the values out. A
-// tag on anything but a block scalar is an error; whether a path may hold a
-// value is the caller's to check.
+// Extract reads every document of content and takes the values out. A tag
+// on anything other than a block scalar is an error. The caller checks
+// whether a path may hold a value.
 func Extract(content []byte) ([]Document, error) {
 	file, err := parse(content)
 	if err != nil {
@@ -51,8 +51,8 @@ func Extract(content []byte) ([]Document, error) {
 }
 
 // Rewrite replaces the armor of every value in content with what change
-// returns for it (document counts from 0), and leaves the rest as it is:
-// the tag's line, indentation, comments, line endings, other documents.
+// returns for it (document counts from 0). It leaves the rest as it is:
+// the tag's line, indentation, comments, line endings and other documents.
 func Rewrite(content []byte, change func(document int, path, armored string) (string, error)) ([]byte, error) {
 	file, err := parse(content)
 	if err != nil {
@@ -93,9 +93,9 @@ func Rewrite(content []byte, change func(document int, path, armored string) (st
 	return rewritten.Bytes(), nil
 }
 
-// Block writes a value as it stands in a file, after its key: the tag on
+// Block writes a value as it appears in a file, after its key: the tag on
 // this line and the armor below it, each line after indent, which must be
-// deeper than the key's.
+// deeper than the key's indentation.
 func Block(armored, indent string) string {
 	var block strings.Builder
 	block.WriteString(Tag + " |\n")
@@ -105,8 +105,8 @@ func Block(armored, indent string) string {
 	return block.String()
 }
 
-// parsed is a file read for Extract and Rewrite: its lines with their
-// endings, its documents and, per document, its values in the order of
+// parsed is a file as read for Extract and Rewrite: its lines with their
+// endings, its documents, and per document its values in the order of
 // their lines.
 type parsed struct {
 	lines     [][]byte
@@ -114,8 +114,8 @@ type parsed struct {
 	blocks    [][]block
 }
 
-// block is a value in its file: the lines of its armor (from 0, both
-// included) and their indentation.
+// block is a value in its file: the first and last lines of its armor
+// (counted from 0, both included) and their indentation.
 type block struct {
 	path        string
 	node        *yaml.Node
@@ -149,9 +149,9 @@ func parse(content []byte) (parsed, error) {
 	}
 }
 
-// walk calls visit for every node below node tagged !secret, in document
-// order, with its path. A key that is not a scalar has no path; a value
-// below one is an error.
+// walk calls visit for every node below node that is tagged !secret, in
+// document order, with its path. A key that is not a scalar has no path,
+// so a value below such a key is an error.
 func walk(node *yaml.Node, path string, named bool, visit func(tagged *yaml.Node, path string) error) error {
 	if node.Tag == Tag {
 		if !named {
@@ -192,7 +192,7 @@ func walk(node *yaml.Node, path string, named bool, visit func(tagged *yaml.Node
 
 // locate finds a value's lines in the file and checks that they are laid
 // out as secret encrypt writes them: the tag and the block's indicator on
-// one line, the armor below, indented further.
+// one line, and the armor below, indented further.
 func (file parsed) locate(node *yaml.Node, path string) (block, error) {
 	writeAs := fmt.Errorf("%s: write %s | and the armor below it, as clowder secret encrypt does", path, Tag)
 	if node.Style&^yaml.TaggedStyle != yaml.LiteralStyle || node.Anchor != "" || node.Line < 1 || node.Line > len(file.lines) {
@@ -243,7 +243,7 @@ func (file parsed) locate(node *yaml.Node, path string) (block, error) {
 	return found, nil
 }
 
-// indentation counts the spaces a line starts with; YAML indents with
+// indentation counts the spaces that a line starts with. YAML indents with
 // spaces only.
 func indentation(line []byte) int {
 	return len(line) - len(bytes.TrimLeft(line, " "))
@@ -253,7 +253,8 @@ func blank(line []byte) bool {
 	return len(bytes.TrimSpace(line)) == 0
 }
 
-// lineEnding is the end of line: "\r\n", "\n", or none on a file's last line.
+// lineEnding returns the end of a line: "\r\n", "\n", or none on a file's
+// last line.
 func lineEnding(line []byte) string {
 	switch {
 	case bytes.HasSuffix(line, []byte("\r\n")):

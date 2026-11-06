@@ -66,7 +66,7 @@ func prioritizedStack(name string, services map[string]string) string {
 // it must fit for a minute, one service after the other.
 const pushOutDeadline = 5 * time.Minute
 
-// pushOut runs store on a host made just big enough for it (system_reserve
+// pushOut runs store on a host made just big enough for it (systemReserve
 // from what /metrics shows), then stacks of higher priority that push its
 // services out, lowest first, db never; deleted, they let them come back.
 // A stack whose second service finds nothing below its priority starts
@@ -74,7 +74,7 @@ const pushOutDeadline = 5 * time.Minute
 func pushOut(t *testing.T, server host) {
 	createAndApply(t, "store", storeStack)
 	waitRunning(t, "store", 1)
-	// system_reserve takes what is free now but 100M: the host then has
+	// systemReserve takes what is free now but 100M: the host then has
 	// 100M free, in MiB rounded down, so a little more. The cases below
 	// count on it: 300M is cache's 200M and the free 100M, 500M adds app's
 	// 200M, and mixed's api takes the free 100M.

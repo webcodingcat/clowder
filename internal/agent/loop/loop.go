@@ -16,7 +16,7 @@ import (
 const Interval = 30 * time.Second
 
 // Cluster is what the agent's loops need from the Raft member. A loop
-// reads the state through SharedCopy and changes nothing of it.
+// reads the state through SharedCopy and never changes it.
 type Cluster interface {
 	Read(use func(current *state.State))
 	SharedCopy() (*state.State, error)
@@ -26,11 +26,11 @@ type Cluster interface {
 // Run runs pass at once. After that, it runs pass again whenever the state
 // changes, wake fires, or Interval passes, until ctx ends. wake may be nil.
 //
-// The host's report has a loop of its own: it reacts only to a new
-// cluster.yaml, not to every change of the state.
+// The host's report has its own loop, because it reacts only to a new
+// configuration, not to every change of the state.
 func Run(ctx context.Context, cluster Cluster, wake <-chan struct{}, pass func()) {
 	for {
-		// take the channel before reading, so no change between goes unseen
+		// take the channel before reading, so no change in between is missed
 		changed := cluster.Changed()
 		pass()
 		select {
@@ -43,20 +43,21 @@ func Run(ctx context.Context, cluster Cluster, wake <-chan struct{}, pass func()
 	}
 }
 
-// Signal is how the supervisor reaches a runner (the stack runner,
-// Traefik's): it starts the runner's next pass at once and counts Docker's
-// restarts. With live-restore the containers outlive a restart, but what
-// died meanwhile went unseen and nothing starts it again (restart: "no"),
-// so the runner brings up anew what it brought up before.
+// Signal is how the supervisor reaches a runner (the stack runner or
+// Traefik's runner). It starts the runner's next pass at once and counts
+// Docker's restarts. With live-restore the containers outlive a restart,
+// but nobody saw the containers that died in the meantime, and nothing
+// starts them again (restart: "no"). So after a restart the runner brings
+// up again everything it brought up before.
 type Signal struct {
-	// wake is buffered (1): one pass due is enough
+	// wake is buffered (1): one pending pass is enough
 	wake chan struct{}
 
 	mu             sync.Mutex
 	dockerRestarts int
 }
 
-// NewSignal has no pass due and counts no restart.
+// NewSignal returns a signal with no pending pass and no counted restart.
 func NewSignal() *Signal {
 	return &Signal{wake: make(chan struct{}, 1)}
 }
@@ -89,22 +90,22 @@ func (s *Signal) Restarts() int {
 
 // BroughtUp is what a runner last brought up: the hash of everything
 // compose up read, and how often Docker had restarted before compose up
-// began. If Docker restarts again, the containers are gone, so it no
+// began. If Docker restarts again, the containers are gone, so the value no
 // longer matches.
 type BroughtUp struct {
 	Hash           [32]byte
 	DockerRestarts int
 }
 
-// Pauser is what the runners need from the supervisor;
-// supervisor.Supervisor is the real one.
+// Pauser is what the runners need from the supervisor.
+// supervisor.Supervisor is the real implementation.
 type Pauser interface {
 	Pause(project string) (resume func())
 }
 
 // WhilePaused runs change, which stops or recreates a project's containers,
-// with the supervisor paused for the project: those containers did not
-// crash.
+// while the supervisor is paused for the project. Those containers did not
+// crash, so the supervisor must not restart them.
 func WhilePaused(watcher Pauser, project string, change func() error) error {
 	resume := watcher.Pause(project)
 	defer resume()
@@ -114,8 +115,8 @@ func WhilePaused(watcher Pauser, project string, change func() error) error {
 // CommitAsHost commits a command in which this host reports about itself
 // (its report, a stack's status, a forgotten copy), with the host as actor.
 // The leader's loops commit with the leader as actor (controller's commit).
-// propose is a controller.Propose; spelled out, so the host's loops need
-// nothing of the leader's package.
+// propose is a controller.Propose. Its type is spelled out, so the host's
+// loops need nothing from the leader's package.
 func CommitAsHost(ctx context.Context, propose func(context.Context, state.Command) (uint64, error),
 	host state.HostID, kind string, payload any,
 ) error {

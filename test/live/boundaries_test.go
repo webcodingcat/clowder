@@ -161,9 +161,9 @@ func checkDroppedBeyondTheHost(t *testing.T, server host, tofu outputs, proberPI
 		}
 	})
 
-	privateNetwork, err := netip.ParsePrefix(fmt.Sprint(tofu.ClusterYAML.Value["private_network"]))
+	privateNetwork, err := netip.ParsePrefix(tofu.moduleConfig(t).PrivateNetwork)
 	if err != nil {
-		t.Fatalf("the module's private_network: %v", err)
+		t.Fatalf("the module's privateNetwork: %v", err)
 	}
 	// the address before the network's last (its broadcast): no host has it
 	first := privateNetwork.Addr().As4()

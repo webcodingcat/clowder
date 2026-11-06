@@ -15,8 +15,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/pki"
 )
 
-// fromAHost is how a user gets credentials, for the messages that need
-// them.
+// fromAHost says how a user gets credentials, for the messages that need
+// to say it.
 const fromAHost = "ssh root@<host> clowderd credentials | clowder config import -"
 
 func newConfig(g *globals) *cobra.Command {
@@ -57,7 +57,7 @@ func newGetContexts(g *globals) *cobra.Command {
 	}
 }
 
-// printContexts lists the contexts with when their certificates end.
+// printContexts lists the contexts and when their certificates end.
 func printContexts(out io.Writer, config clientconfig.Config) error {
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(table, "CURRENT\tNAME\tENDPOINTS\tCERTIFICATE-ENDS") // tabwriter reports errors on Flush
@@ -116,9 +116,9 @@ func newImport(g *globals) *cobra.Command {
 		Long: "Adds the context of a file that clowderd credentials printed (- for stdin) to your\n" +
 			"credentials file, for example\n" +
 			"  " + fromAHost + "\n" +
-			"The context keeps the cluster's name unless --as names it otherwise. A name that is\n" +
-			"taken needs another, or --replace, which puts new credentials in place of old ones\n" +
-			"(a renewed certificate). The first context becomes the current one.",
+			"The context is named after the cluster unless --as gives another name. If the name is\n" +
+			"already taken, choose another one, or use --replace to put the new credentials in place\n" +
+			"of the old ones (for a renewed certificate). The first context becomes the current one.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			imported, err := readImport(cmd.InOrStdin(), args[0])
@@ -146,8 +146,8 @@ func newImport(g *globals) *cobra.Command {
 	return command
 }
 
-// changeConfig reads the credentials file, changes it and writes it back,
-// then says what it did and which context is current.
+// changeConfig reads the credentials file, changes it and writes it back.
+// Then it says what it did and which context is current.
 func (g *globals) changeConfig(out io.Writer, done string, change func(config *clientconfig.Config) error) error {
 	config, path, err := g.readConfig()
 	if err != nil {

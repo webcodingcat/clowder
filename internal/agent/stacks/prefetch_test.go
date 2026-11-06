@@ -2,8 +2,10 @@ package stacks
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"slices"
 	"testing"
 
@@ -13,6 +15,14 @@ import (
 	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
 )
+
+// newTestPrefetcher is the prefetcher of host 1, with the Docker configs
+// in a directory of the test.
+func newTestPrefetcher(t *testing.T, cluster *agenttest.Cluster, docker *agenttest.Docker) *Prefetcher {
+	t.Helper()
+	registries := NewRegistryConfigs(Files{SecretsDir: t.TempDir()}, cluster.Keys.Open)
+	return NewPrefetcher(1, cluster, docker, registries, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
 
 // blogWithCopyOn is the cluster of agenttest with host 1, and the stack
 // blog (image ghost) on host 0 whose volume data (replicas 1) has its copy
@@ -38,9 +48,10 @@ func TestAHostPullsTheImagesOfTheStacksItMayTake(t *testing.T) {
 	// (nginx) has a throw-away volume and runs on host 0, so any host may
 	cluster := blogWithCopyOn(t, 1)
 	docker := &agenttest.Docker{}
-	prefetcher := NewPrefetcher(1, cluster, docker, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	prefetcher := newTestPrefetcher(t, cluster, docker)
 	prefetcher.pass(context.Background())
-	if want := []string{"pull missing ghost", "pull missing nginx"}; !slices.Equal(docker.Lines(), want) {
+	// with the Docker config of the stacks' namespace
+	if want := []string{"pull missing ghost with default", "pull missing nginx with default"}; !slices.Equal(docker.Lines(), want) {
 		t.Errorf("pulled %q, want %q", docker.Lines(), want)
 	}
 	if !prefetcher.Ready("default/blog") {
@@ -54,12 +65,47 @@ func TestAHostPullsTheImagesOfTheStacksItMayTake(t *testing.T) {
 	}
 }
 
+func TestAHostPullsWithoutAPullSecretThatIsMissing(t *testing.T) {
+	cluster := blogWithCopyOn(t, 1)
+	cluster.PutIn("", resource.KindNamespace, names.Default, resource.NamespaceSpec{
+		ImagePullSecrets: []resource.LocalObjectReference{{Name: "ghcr"}},
+	})
+	docker := &agenttest.Docker{}
+	prefetcher := newTestPrefetcher(t, cluster, docker)
+	prefetcher.pass(context.Background())
+	if !prefetcher.Ready("default/blog") {
+		t.Errorf("as the kubelet, public images pull without the login: %q", docker.Lines())
+	}
+}
+
+func TestTheLoginsOfANamespaceWithoutStacksHereGo(t *testing.T) {
+	cluster := blogWithCopyOn(t, 1)
+	files := Files{SecretsDir: t.TempDir()}
+	registries := NewRegistryConfigs(files, cluster.Keys.Open)
+	var current *state.State
+	cluster.Read(func(read *state.State) { current = read })
+	for _, namespace := range []string{names.Default, "gone"} {
+		if _, _, err := registries.Write(current, namespace); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := registries.RemoveOthers(map[string]bool{names.Default: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(files.registryConfigDir("gone")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the logins of a namespace without stacks here stay: %v", err)
+	}
+	if _, err := os.Stat(files.registryConfigDir(names.Default)); err != nil {
+		t.Errorf("the logins of a namespace with stacks here go: %v", err)
+	}
+}
+
 func TestAHostWithoutTheDataPullsNothingForTheStack(t *testing.T) {
 	cluster := blogWithCopyOn(t, 0)
 	docker := &agenttest.Docker{}
-	prefetcher := NewPrefetcher(1, cluster, docker, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	prefetcher := newTestPrefetcher(t, cluster, docker)
 	prefetcher.pass(context.Background())
-	if slices.Contains(docker.Lines(), "pull missing ghost") || prefetcher.Ready("default/blog") {
+	if slices.Contains(docker.Lines(), "pull missing ghost with default") || prefetcher.Ready("default/blog") {
 		t.Errorf("pulled %q for a stack host 1 cannot take", docker.Lines())
 	}
 }

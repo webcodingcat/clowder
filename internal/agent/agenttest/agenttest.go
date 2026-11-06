@@ -1,7 +1,8 @@
 // Package agenttest has the fakes that the tests of the agent, its stack
 // runner and its volume reconciler share: a cluster that applies what is
-// proposed, Docker, the storage driver and the volume reconciler. Each fake is a sync.Locker: a test changes its fields
-// under its lock while a loop runs.
+// proposed, Docker, the storage driver and the volume reconciler. Each fake
+// is a sync.Locker, so a test changes its fields under its lock while a
+// loop runs.
 package agenttest
 
 import (
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/netip"
 	"path/filepath"
 	"slices"
@@ -31,7 +33,7 @@ import (
 )
 
 // ShopProject is the Compose project of default/shop, the stack of
-// NewCluster, and the name of all the runner keeps of it.
+// NewCluster, and the name of everything the runner keeps for it.
 const ShopProject = "default_shop"
 
 // DBLV is the LV of the volume default/db in a data generation.
@@ -280,13 +282,15 @@ func (f *Volumes) Mounted(lv string) (string, bool, error) {
 type Docker struct {
 	Calls
 	// FailedUps and FailedDowns are how many compose ups and downs fail
-	// before one works
+	// before one succeeds
 	FailedUps, FailedDowns int
 	// Down makes Ping fail as if refused, Hangs as if it timed out
 	Down, Hangs bool
 	// UpFiles and LeftOut are the files and the services left out of the
 	// last compose up
 	UpFiles, LeftOut []string
+	// UpConfig is the Docker config directory of the last compose up
+	UpConfig string
 	// Listed and Details are what Docker lists and inspects
 	Listed  []docker.Container
 	Details map[string]docker.Details
@@ -328,14 +332,14 @@ func (f *Docker) Start(context.Context, string) error { return nil }
 func (f *Docker) Restart(context.Context, string) error { return nil }
 
 // ComposeUp records the call; it fails while FailedUps is above zero.
-func (f *Docker) ComposeUp(_ context.Context, stack string, files, leftOut []string) error {
+func (f *Docker) ComposeUp(_ context.Context, config, stack string, files, leftOut []string) error {
 	f.Add("up %s", stack)
 	if f.DuringUp != nil {
 		f.DuringUp()
 	}
 	f.Lock()
 	defer f.Unlock()
-	f.UpFiles, f.LeftOut = files, leftOut
+	f.UpFiles, f.LeftOut, f.UpConfig = files, leftOut, config
 	if f.FailedUps > 0 {
 		f.FailedUps--
 		return errors.New("pull access denied")
@@ -344,14 +348,15 @@ func (f *Docker) ComposeUp(_ context.Context, stack string, files, leftOut []str
 }
 
 // ComposePull records the call.
-func (f *Docker) ComposePull(_ context.Context, stack string, _, services []string) error {
+func (f *Docker) ComposePull(_ context.Context, _, stack string, _, services []string) error {
 	f.Add("pull %s %s", stack, strings.Join(services, " "))
 	return nil
 }
 
-// PullMissing records the call.
-func (f *Docker) PullMissing(_ context.Context, image string) error {
-	f.Add("pull missing %s", image)
+// PullMissing records the call, with the base name of the Docker config
+// directory: the namespace whose logins it pulls with.
+func (f *Docker) PullMissing(_ context.Context, config, image string) error {
+	f.Add("pull missing %s with %s", image, filepath.Base(config))
 	return nil
 }
 
@@ -378,13 +383,7 @@ func (f *Docker) ComposeLogs(_ context.Context, _, _ string, _ bool, out io.Writ
 	return err
 }
 
-// Login records the call.
-func (f *Docker) Login(_ context.Context, registry, username, password string) error {
-	f.Add("login %s %s %s", registry, username, password)
-	return nil
-}
-
-// Containers are Listed.
+// Containers returns Listed.
 func (f *Docker) Containers(context.Context, string) ([]docker.Container, error) {
 	f.Lock()
 	defer f.Unlock()
@@ -430,14 +429,12 @@ func NewCluster(t *testing.T) *Cluster {
 			ServerID: 40, WGPublicKey: "wg", CertificateSerial: "s0", CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
-	cluster.Apply(state.KindApplyConfig, state.CLIActor("admin"), state.ApplyConfig{
-		Spec: clusterspec.Config{
-			Hetzner:        clusterspec.Hetzner{Token: "hetzner.token"},
-			PrivateNetwork: "10.0.0.0/16",
-			Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.10"},
-			StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
-		},
-		Secrets: map[string]state.SealedSecret{"hetzner.token": {Value: state.Sealed("t"), Digest: "d"}},
+	cluster.PutSecretIn(names.System, "hetzner", map[string]string{"token": "t"})
+	cluster.PutIn("", resource.KindClusterConfiguration, resource.ClusterConfigurationName, clusterspec.Config{
+		Hetzner:        clusterspec.Hetzner{TokenSecretRef: names.SecretKeyRef{Name: "hetzner", Key: "token"}},
+		PrivateNetwork: "10.0.0.0/16",
+		Ingress:        clusterspec.Ingress{FloatingIP: "203.0.113.10"},
+		StorageClasses: map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}},
 	})
 	cluster.Put(resource.KindVolume, "db", resource.VolumeSpec{Class: "fast", Size: 1 << 30, Replicas: 0})
 	cluster.Put(resource.KindStack, "shop", UsingDB(stackspec.Service{}))
@@ -505,32 +502,58 @@ func (c *Cluster) Apply(kind, actor string, payload any) {
 // Put applies a resource of the namespace default, as clowder apply does.
 func (c *Cluster) Put(kind, name string, spec any) {
 	c.t.Helper()
+	c.PutIn(names.Default, kind, name, spec)
+}
+
+// PutIn applies a resource of a namespace ("" for a kind that lives in
+// none).
+func (c *Cluster) PutIn(namespace, kind, name string, spec any) {
+	c.t.Helper()
 	encoded, err := json.Marshal(spec)
 	if err != nil {
 		c.t.Fatal(err)
 	}
-	c.Apply(state.KindPutResource, state.CLIActor("admin"), state.PutResource{
-		Kind: kind, Namespace: names.Default, Name: name, Owner: state.OwnerCLI, Spec: encoded,
-	})
+	c.Apply(state.KindChangeResources, state.CLIActor("admin"), state.ChangeResources{Changes: []state.ResourceChange{{
+		Put: &state.PutResource{Kind: kind, Namespace: namespace, Name: name, Owner: state.OwnerCLI, Spec: encoded},
+	}}})
 }
 
 // Remove deletes a resource of the namespace default.
 func (c *Cluster) Remove(kind, name string) {
 	c.t.Helper()
-	c.Apply(state.KindDeleteResource, state.CLIActor("admin"), state.DeleteResource{
-		Kind: kind, Namespace: names.Default, Name: name, Owner: state.OwnerCLI,
-	})
+	c.Apply(state.KindChangeResources, state.CLIActor("admin"), state.ChangeResources{Changes: []state.ResourceChange{{
+		Delete: &state.DeleteResource{Kind: kind, Namespace: names.Default, Name: name, Owner: state.OwnerCLI},
+	}}})
 }
 
-// PutSecret applies a secret of the namespace default, sealed with the
-// cluster's data key; its digest stands for one the API computes.
+// PutSecret applies a secret of the namespace default with the one key
+// value, sealed with the cluster's data key.
 func (c *Cluster) PutSecret(name, value string) {
 	c.t.Helper()
-	sealed, err := c.Keys.Seal([]byte(value))
-	if err != nil {
-		c.t.Fatal(err)
+	c.PutSecretIn(names.Default, name, map[string]string{"value": value})
+}
+
+// PutSecretIn applies a secret of a namespace with its keys and values,
+// sealed with the cluster's data key.
+func (c *Cluster) PutSecretIn(namespace, name string, values map[string]string) {
+	c.t.Helper()
+	c.PutIn(namespace, resource.KindSecret, name, c.sealed(values))
+}
+
+// sealed seals a secret's values with the cluster's data key; its digest
+// stands for one the API computes.
+func (c *Cluster) sealed(values map[string]string) state.SealedSecret {
+	c.t.Helper()
+	secret := state.SealedSecret{Data: map[string]state.Sealed{}, Digest: "digest of"}
+	for _, key := range slices.Sorted(maps.Keys(values)) {
+		sealed, err := c.Keys.Seal([]byte(values[key]))
+		if err != nil {
+			c.t.Fatal(err)
+		}
+		secret.Data[key] = sealed
+		secret.Digest += " " + key + "=" + values[key]
 	}
-	c.Put(resource.KindSecret, name, state.SealedSecret{Value: sealed, Digest: "digest of " + value})
+	return secret
 }
 
 // Place puts a stack of the namespace default on host 0, as the placement
@@ -543,8 +566,8 @@ func (c *Cluster) Place(name string) {
 	})
 }
 
-// Index is the state's index: the leader's commands of a test plan on the
-// state as it is (state.SetStackStatus.PlannedAt).
+// Index returns the state's index. A test's leader commands use it to plan
+// on the current state (state.SetStackStatus.PlannedAt).
 func (c *Cluster) Index() uint64 {
 	c.Lock()
 	defer c.Unlock()
@@ -552,7 +575,8 @@ func (c *Cluster) Index() uint64 {
 }
 
 // PlaceVolume places a volume of the namespace default on host 0 in a data
-// generation, as the placement (the first) or a restore (the next) does.
+// generation, as the placement does (for the first generation) or a
+// restore does (for the next ones).
 func (c *Cluster) PlaceVolume(name string, generation int64) {
 	c.t.Helper()
 	var volume state.Volume

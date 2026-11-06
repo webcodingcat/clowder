@@ -121,16 +121,15 @@ func TestAServerBelongsToOneHost(t *testing.T) {
 
 func TestAnUnderlayIsInThePrivateNetwork(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.configure(testConfig())
 	c.mustApply(KindAddJoinToken, cliActor, AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
 	add := joiningHost()
 	add.Host.Underlay = netip.MustParseAddr("192.168.0.3")
-	c.refuse(KindAddHost, LeaderActor, add, "host node1 has the underlay 192.168.0.3, outside private_network 10.0.0.0/16")
+	c.refuse(KindAddHost, LeaderActor, add, "host node1 has the underlay 192.168.0.3, outside privateNetwork 10.0.0.0/16")
 
 	config := testConfig()
 	config.PrivateNetwork = "10.1.0.0/16"
-	c.refuse(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: testSecrets()},
-		"host node0 has the underlay 10.0.0.2, outside private_network 10.1.0.0/16")
+	c.refuseChange(configChange(config), "host node0 has the underlay 10.0.0.2, outside privateNetwork 10.1.0.0/16")
 }
 
 // activeHosts joins hosts 1 to last and makes them active.
@@ -183,7 +182,7 @@ func TestAHostWithAStackOrACopyStays(t *testing.T) {
 	host := HostID(1)
 	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{PlannedAt: c.index, ID: "default/shop", Status: StackStarting, Host: &host})
 	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed}, "host node1 still has stack default/shop")
-	c.mustApply(KindDeleteResource, cliActor, DeleteResource{Kind: resource.KindStack, Namespace: "default", Name: "shop", Owner: OwnerCLI})
+	c.del(resource.KindStack, "default", "shop")
 	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed})
 }
 

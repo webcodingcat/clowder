@@ -17,14 +17,14 @@ import (
 )
 
 // storeLockTimeout is how long ReadState and Recover wait for the Raft
-// store: a running agent holds it.
+// store, which a running agent holds.
 const storeLockTimeout = 5 * time.Second
 
-// ReadState reads the state as this member's log on disk has it, without
-// Raft: the last snapshot, then every command after it. That includes
-// commands the cluster may never have committed, as Recover takes them
-// too. The agent must not run (it holds the store). A member that never
-// started has an empty state.
+// ReadState reads the state from this member's log on disk, without Raft:
+// the last snapshot, then every command after it. This includes commands
+// that the cluster may never have committed, because Recover takes them
+// too. The agent must not run, because it holds the store. A member that
+// never started has an empty state.
 func ReadState(dir string) (*state.State, error) {
 	if _, err := os.Stat(filepath.Join(dir, storeFile)); errors.Is(err, os.ErrNotExist) {
 		return &state.State{}, nil
@@ -63,7 +63,7 @@ func ReadState(dir string) (*state.State, error) {
 }
 
 // restoreLatest restores the newest snapshot into the fsm and returns its
-// index; 0 without one.
+// index, or 0 if there is no snapshot.
 func restoreLatest(machine *fsm, snapshots raft.SnapshotStore) (uint64, error) {
 	listed, err := snapshots.List()
 	if err != nil {
@@ -83,9 +83,10 @@ func restoreLatest(machine *fsm, snapshots raft.SnapshotStore) (uint64, error) {
 }
 
 // Recover makes this member the only voter of its cluster, with the state
-// its log holds (raft.RecoverCluster): clowderd recover, after the other
-// hosts were powered off for good. Raft writes a snapshot of that state
-// with the new configuration and drops the log. The agent must not run.
+// that its log holds (raft.RecoverCluster). clowderd recover calls it after
+// the other hosts were powered off for good. Raft writes a snapshot of that
+// state with the new configuration and drops the log. The agent must not
+// run.
 func Recover(cfg Config) error {
 	store, err := openStore(cfg.Dir, false)
 	if err != nil {
@@ -111,8 +112,8 @@ func Recover(cfg Config) error {
 	return nil
 }
 
-// openStore opens the Raft store, read only or not, and gives up after
-// storeLockTimeout while another process holds it.
+// openStore opens the Raft store, read-only or not. It gives up after
+// storeLockTimeout if another process holds the store.
 func openStore(dir string, readOnly bool) (*raftboltdb.BoltStore, error) {
 	store, err := raftboltdb.New(raftboltdb.Options{
 		Path:        filepath.Join(dir, storeFile),

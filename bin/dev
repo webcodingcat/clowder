@@ -13,28 +13,28 @@
 #             into dist/
 #   package   build, then the Debian packages of clowder and clowderd into dist/
 #   all       lint, test, test-tools, package (what CI runs)
-#   live      the live tests in HLab labs of their own, up to three at once
-#             (LIVE_LABS=<n>, else as many as the free memory holds), each
-#             with a group of the scenarios of test/live/scenarios: live up,
-#             live run, and live down once they pass (needs
+#   live      the live tests in separate HLab labs, up to three at once
+#             (LIVE_LABS=<n>, otherwise as many as the free memory allows).
+#             Each lab runs a group of the scenarios of test/live/scenarios:
+#             live up, live run, and live down once they pass (needs
 #             HLAB=<path to HLab's bin/hlab> and /dev/kvm). A failed lab keeps
-#             its hosts for a look.
+#             its hosts for inspection.
 #   live up [--lab <n>] [<tag>]  package, make the hosts' image unless it is
 #             current (live image), start lab n (default 1) unless it runs,
 #             make the first host with examples/hetzner from the image,
-#             set up its cluster and have two more hosts join (test/live:
+#             set up its cluster and let two more hosts join (test/live:
 #             TestSetup).
-#             With a tag, on a checkout of it, the release without the test
-#             hook: the image is made anew from the release, the host
-#             installs clowderd from the APT repository, the CLI comes from
-#             the GitHub release
+#             With a tag, on a checkout of that tag: the release without the
+#             test hook. The image is made again from the release, the host
+#             installs clowderd from the APT repository, and the CLI comes
+#             from the GitHub release
 #   live run [--lab <n>] [<go test flags>]  the scenarios of test/live on the
 #             hosts of lab n (default 1), e.g. bin/dev live run -run TestIngress
 #   live down [--lab <n>]  destroy what the live tests left and stop their
-#             labs, or lab n
-#   live image [--rebuild]  make the hosts' image in a lab of its own unless
-#             its inputs are unchanged and it is younger than a week
-#             (test/live: TestImage); it stays in the Docker volume
+#             labs, or only lab n
+#   live image [--rebuild]  make the hosts' image in a separate lab, unless
+#             its inputs are unchanged and it is less than a week old
+#             (test/live: TestImage); the image stays in the Docker volume
 #             clowder-live-image
 #   live release <tag>  live up <tag>, live run, live down
 set -euo pipefail
@@ -63,34 +63,37 @@ readonly DEBIAN_IMAGE=debian:trixie-slim
 readonly CACHE_VOLUME=clowder-gocache
 readonly BUSYBOX_IMAGE=busybox:1.37.0
 # The live tests' labs, clowder-live-1 to clowder-live-<MAX_LABS>
-# (test/live/<lab>.yaml), and the lab that makes their hosts' image. Each
-# keeps its files in a Docker volume of its name, so bin/dev live run and
-# down find them: the OpenTofu state, the SSH key, the CLI, the cluster
-# directory, and the lock that keeps two runs apart (live_lock). The image's
-# volume also holds the image (host.qcow2) and the hash of its inputs.
+# (test/live/<lab>.yaml), and the lab that makes their hosts' image. Each lab
+# keeps its files in a Docker volume with its own name, so bin/dev live run
+# and down find them: the OpenTofu state, the SSH key, the CLI, the
+# cluster's resources, and the lock that keeps two runs apart (live_lock).
+# The image's volume also holds the image (host.qcow2) and the hash of its
+# inputs.
 readonly MAX_LABS=3
-# What a lab takes of the Docker host's memory: at most five servers of 4 GB
-# at once (three hosts and those that TestReplace and TestRecover add) and
-# the lab itself.
+# How much of the Docker host's memory a lab uses: at most five servers of
+# 4 GB at once (three hosts plus those that TestReplace and TestRecover add)
+# and the lab itself.
 readonly LAB_MEMORY_GB=22
 readonly IMAGE_LAB=clowder-live-image
 readonly IMAGE_VOLUME="${IMAGE_LAB}"
-# An image older than this is made anew: the mirrors' kernel and DRBD move on.
+# An image older than this is made again, because the mirrors' kernel and
+# DRBD get updates.
 readonly IMAGE_MAX_AGE_DAYS=7
-# Debian's image that HLab starts debian-13 from, and the checksums that say
-# when it changed.
+# Debian's image that HLab starts debian-13 from, and the checksums that
+# show when it changed.
 readonly DEBIAN_SUMS_URL=https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS
 readonly DEBIAN_IMAGE_FILE=debian-13-generic-amd64.qcow2
 readonly REGISTRY_IMAGE=registry:3.0.0
 readonly MAILPIT_IMAGE=axllent/mailpit:v1.27.4
-# HLab gives tools in the lab's network this address, and the hosts reach it.
+# HLab gives this address to tools in the lab's network, and the hosts can
+# reach it.
 readonly LAB_ADDRESS=192.0.2.2
 readonly PACKAGE_PORT=8099
 readonly PACKAGE_URL="http://${LAB_ADDRESS}:${PACKAGE_PORT}/clowderd.deb"
 readonly REGISTRY_PORT=5000
 readonly SMTP_PORT=1025
 readonly MAIL_API_PORT=8025
-# Where the releases' CLI archives are (bin/dev live release).
+# Where the CLI archives of the releases are (bin/dev live release).
 readonly RELEASES_URL=https://github.com/webcodingcat/clowder/releases/download
 
 # The lab that the live commands work on (use_lab), and its number for the
@@ -98,9 +101,9 @@ readonly RELEASES_URL=https://github.com/webcodingcat/clowder/releases/download
 lab_config=""
 work_volume=""
 lab_number=""
-# its containers: the clowderd package for the hosts, the private registry
-# the test stack pulls from (test/live: registry), and the mail server of the
-# alerts' email channel (test/live: mailServer)
+# the lab's containers: the clowderd package for the hosts, the private
+# registry that the test stack pulls from (test/live: registry), and the
+# mail server of the alerts' email channel (test/live: mailServer)
 packages_container=""
 registry_container=""
 mail_container=""
@@ -116,9 +119,9 @@ in_image() {
     -e GOFLAGS=-buildvcs=false "${image}" "$@"
 }
 
-# release_tag: Print the tag the build is for: the one the release workflow
-# runs on (a final tag may share its commit with the release candidate),
-# else the checked-out commit's; fail without one.
+# release_tag: Print the tag that the build is for: the tag that the release
+# workflow runs on (a final tag may share its commit with the release
+# candidate), otherwise the tag of the checked-out commit; fail without one.
 # Globals:
 #   GITHUB_REF_TYPE, GITHUB_REF_NAME (read; set by GitHub Actions)
 release_tag() {
@@ -199,8 +202,8 @@ cmd_test() {
 }
 
 # cmd_test_tools: Check the renderers' golden files with Debian's nft, wg,
-# drbdadm and docker-compose (the hostname node0 is a host of the resource
-# files).
+# drbdadm and docker-compose (the hostname node0 is one of the hosts in the
+# resource files).
 cmd_test_tools() {
   docker run --rm --cap-add NET_ADMIN --hostname node0 -v "${DOCKER_ROOT}:/src" -w /src \
     "${DEBIAN_IMAGE}" sh test/tools/check-golden-files.sh
@@ -224,9 +227,9 @@ cmd_build() {
   give_back dist
 }
 
-# give_back <path>: The containers run as root, so on Linux (CI as well) what
-# they write belongs to root; hand it to the caller (dist/ after a build, the
-# golden files after test -update).
+# give_back <path>: The containers run as root, so on Linux (CI as well) the
+# files they write belong to root. Hand them over to the caller (dist/ after
+# a build, the golden files after test -update).
 give_back() {
   in_image "${GO_IMAGE}" chown -R "$(id -u):$(id -g)" "$1"
 }
@@ -247,8 +250,8 @@ cmd_package() {
 }
 
 # use_lab <name>: Point the live commands at a lab: its HLab configuration
-# in test/live, the Docker volume of its files and its containers, each
-# named after it.
+# in test/live, the Docker volume with its files, and its containers, all
+# named after the lab.
 # Globals:
 #   lab_config, work_volume, packages_container, registry_container,
 #   mail_container (set)
@@ -288,12 +291,13 @@ in_lab() {
     -e HLAB_CONTROL -e HLAB_ACME_DIRECTORY -e HLAB_ACME_CA -e GOFLAGS=-buildvcs=false "${image}" "$@"
 }
 
-# live_lock: Take the lock of the lab's volume, held until bin/dev ends or
-# live_unlock, or fail if another bin/dev holds it: two runs would share the
-# lab and the volume. flock in a container holds it while the container's
-# stdin is open; that is a pipe from this shell, which closes however
-# bin/dev ends. The lock file is a dot file, which rm -rf /work/* keeps.
-# Bash runs one coproc at a time, so bin/dev holds one lock at a time.
+# live_lock: Take the lock of the lab's volume until bin/dev ends or calls
+# live_unlock, or fail if another bin/dev holds it, because two runs would
+# share the lab and the volume. flock in a container holds the lock while
+# the container's stdin is open. stdin is a pipe from this shell, which
+# closes however bin/dev ends. The lock file is a dot file, so
+# rm -rf /work/* keeps it. Bash runs one coproc at a time, so bin/dev holds
+# one lock at a time.
 # Globals:
 #   work_volume (read)
 #   LIVE_LOCK, LIVE_LOCK_PID (set by coproc), locked_volume (set)
@@ -317,7 +321,7 @@ live_lock() {
   locked_volume="${work_volume}"
 }
 
-# live_unlock: Give the lock of live_lock back: the container's stdin closes.
+# live_unlock: Release the lock of live_lock by closing the container's stdin.
 # Globals:
 #   LIVE_LOCK, LIVE_LOCK_PID (read)
 #   locked_volume (set)
@@ -328,14 +332,14 @@ live_unlock() {
   locked_volume=""
 }
 
-# lab_runs: Tell whether the lab runs: hlab status asks the lab's control
-# and fails without a running lab.
+# lab_runs: Tell whether the lab runs. hlab status asks the lab's control,
+# and fails if the lab is not running.
 lab_runs() {
   lab status >/dev/null 2>&1
 }
 
-# live_lab: Start the lab unless it runs (hlab up would start a running lab
-# afresh and shut its servers down), and set its variables.
+# live_lab: Start the lab unless it runs (hlab up would restart a running
+# lab and shut down its servers), and set its variables.
 live_lab() {
   if ! lab_runs; then
     lab up
@@ -343,8 +347,8 @@ live_lab() {
   eval "$(lab env)"
 }
 
-# live_tofu <command>: A shell command with OpenTofu on examples/hetzner in
-# the lab's network; the state and OpenTofu's data stay in /work.
+# live_tofu <command>: Run a shell command with OpenTofu on examples/hetzner
+# in the lab's network; the state and OpenTofu's data stay in /work.
 # Globals:
 #   HLAB_NETWORK, HCLOUD_ENDPOINT, HCLOUD_TOKEN, work_volume (read)
 live_tofu() {
@@ -355,14 +359,14 @@ live_tofu() {
       && tofu init -input=false -lockfile=readonly >/dev/null && $1"
 }
 
-# live_host_left: Tell whether an earlier run left OpenTofu state, that is a
-# host. A failure to look is an error, not a "no": the state is the only way
-# to destroy the host.
+# live_host_left: Tell whether an earlier run left OpenTofu state, and so a
+# host. If the check fails, that is an error, not a "no", because the state
+# is the only way to destroy the host.
 # Globals:
 #   work_volume (read)
 live_host_left() {
   local answer
-  # outside the lab's network: bin/dev live up asks before the lab runs
+  # outside the lab's network: bin/dev live up asks before the lab is running
   answer="$(docker run --rm -v "${work_volume}:/work" "${BUSYBOX_IMAGE}" \
     sh -c 'if test -e /work/terraform.tfstate; then echo yes; else echo no; fi')"
   case "${answer}" in
@@ -375,15 +379,15 @@ live_host_left() {
   esac
 }
 
-# start_registry: A private registry in the lab's network, with TLS from a
-# throw-away CA and a password, as test/live expects them in
+# start_registry: Start a private registry in the lab's network, with TLS
+# from a throw-away CA and a password, which test/live expects in
 # /work/registry (ca.crt, password; the user is tester).
 # Globals:
 #   HLAB_NETWORK, work_volume, registry_container (read)
 start_registry() {
-  # Debian's openssl and htpasswd (bcrypt, which the registry wants), in the
-  # Debian image the tools already use, rather than one more image; outside
-  # the lab's network, where apt reaches Debian's mirror
+  # Debian's openssl and htpasswd (bcrypt, which the registry requires), in
+  # the Debian image that the tools already use, rather than one more image;
+  # outside the lab's network, where apt can reach Debian's mirror
   docker run --rm -v "${work_volume}:/work" -e "ADDRESS=${LAB_ADDRESS}" "${DEBIAN_IMAGE}" sh -c '
     set -e
     apt-get -qq update && apt-get -qq install -y --no-install-recommends openssl apache2-utils >/dev/null
@@ -406,9 +410,10 @@ start_registry() {
     -e REGISTRY_AUTH_HTPASSWD_PATH=/work/registry/htpasswd "${REGISTRY_IMAGE}" >/dev/null
 }
 
-# start_mail: The mail server of the alerts' email channel in the lab's
-# network: STARTTLS required, with the registry's certificate (its CA is in
-# /work/registry/ca.crt), any login; its API lets the test read the mail.
+# start_mail: Start the mail server of the alerts' email channel in the
+# lab's network. It requires STARTTLS with the registry's certificate (its
+# CA is in /work/registry/ca.crt) and accepts any login; its API lets the
+# test read the mail.
 # Globals:
 #   HLAB_NETWORK, work_volume, mail_container (read)
 start_mail() {
@@ -446,8 +451,8 @@ fetch_release_cli() {
     sh "${RELEASES_URL}/${tag}/clowder_${tag}_linux-amd64.tar.gz"
 }
 
-# at_release_checkout <tag>: Fail unless the checkout is the tag's commit,
-# without changes: the tests of a release come from the checkout.
+# at_release_checkout <tag>: Fail unless the checkout is at the tag's commit
+# and has no changes, because the tests of a release come from the checkout.
 at_release_checkout() {
   local tag="$1"
   if [[ "$(cd "${ROOT}" && git rev-parse "${tag}^{commit}" 2>/dev/null)" != "$(cd "${ROOT}" && git rev-parse HEAD)" ]]; then
@@ -464,7 +469,7 @@ at_release_checkout() {
 # image, the setup and its unit, clowderd's dependencies (its package's
 # configuration) and how TestImage prepares and cleans the server.
 image_inputs() {
-  # $1 and $2 are the shell's in the container
+  # $1 and $2 belong to the shell in the container
   # shellcheck disable=SC2016
   in_image "${GO_IMAGE}" sh -c 'set -e
     { curl -fsSL "$1" | grep " $2\$"
@@ -473,8 +478,8 @@ image_inputs() {
     } | sha256sum | cut -c 1-16' sh "${DEBIAN_SUMS_URL}" "${DEBIAN_IMAGE_FILE}"
 }
 
-# image_current <inputs>: Tell whether the image's volume holds an image of
-# these inputs, younger than IMAGE_MAX_AGE_DAYS.
+# image_current <inputs>: Tell whether the image's volume holds an image made
+# from these inputs that is younger than IMAGE_MAX_AGE_DAYS.
 image_current() {
   docker run --rm -v "${IMAGE_VOLUME}:/image:ro" "${BUSYBOX_IMAGE}" sh -c \
     'test -s /image/host.qcow2 && test "$(cat /image/inputs 2>/dev/null)" = "$1" \
@@ -482,12 +487,13 @@ image_current() {
 }
 
 # ensure_image [--rebuild] [<tag>]: Make the hosts' image unless the
-# image's volume holds a current one (image_current) or --rebuild says to.
-# For a release (with its tag) always anew, from the release's packages: the
-# release's setup runs from scratch once per run. Its inputs name the
-# release, so the next run of a checkout makes its own image again.
-# make_image runs in a subshell: it points the live commands at the image's
-# lab, which the caller's lab must not become, and its lock ends with it.
+# image's volume holds a current one (image_current) and --rebuild is not
+# given. For a release (with its tag), always make it again from the
+# release's packages, so the release's setup runs from scratch once per run.
+# The image's inputs name the release, so the next run of a checkout makes
+# its own image again. make_image runs in a subshell: it points the live
+# commands at the image's lab, which must not become the caller's lab, and
+# its lock ends with the subshell.
 ensure_image() {
   local rebuild="" tag inputs
   if [[ "${1:-}" == --rebuild ]]; then
@@ -507,19 +513,21 @@ ensure_image() {
   (make_image "${inputs}" "")
 }
 
-# make_image <inputs> <tag>: Make the hosts' image in a lab of its own:
-# TestImage prepares a server with setup.sh and snapshots it; the snapshot
-# goes into the image's volume as host.qcow2, with its inputs. Without a
-# tag, the setup reads clowderd's dependencies from the package of dist/
-# (cmd_package made it); with one, from the release in the APT repository.
-# The lab stops once the image is in the volume and keeps its own volume,
-# with Debian's image loaded; a failure leaves it running for a look.
+# make_image <inputs> <tag>: Make the hosts' image in a separate lab.
+# TestImage prepares a server with setup.sh and takes a snapshot of it; the
+# snapshot goes into the image's volume as host.qcow2, together with its
+# inputs. Without a tag, the setup reads clowderd's dependencies from the
+# package in dist/ (made by cmd_package); with a tag, from the release in
+# the APT repository. The lab stops once the image is in the volume, and it
+# keeps its own volume with Debian's image loaded. After a failure the lab
+# keeps running for inspection.
 make_image() {
   local inputs="$1" tag="$2" settings image_id
   use_lab "${IMAGE_LAB}"
   live_lock
   live_lab
-  # a failed image leaves its server; the snapshots of the image before go too
+  # a failed image leaves its server behind; the reset also removes the
+  # snapshots of the previous image
   lab reset
   in_lab "${GO_IMAGE}" sh -c 'rm -rf /work/www /work/id_ed25519* /work/known_hosts /work/image.env \
     /work/image-id && ssh-keygen -q -t ed25519 -N "" -C clowder-live -f /work/id_ed25519' </dev/null
@@ -536,8 +544,9 @@ make_image() {
     return 1
   fi
   image_id="$(in_lab "${GO_IMAGE}" cat /work/image-id </dev/null)"
-  # the inputs only beside a whole image: image_current reads them. The
-  # export names the file only once it is whole, and copies inside Docker.
+  # write the inputs only next to a complete image, because image_current
+  # reads them. The export gives the file its name only once it is complete,
+  # and it copies inside Docker.
   docker run --rm -v "${IMAGE_VOLUME}:/image" "${BUSYBOX_IMAGE}" rm -f /image/inputs
   lab image export "${image_id}" --volume "${IMAGE_VOLUME}:host.qcow2"
   docker run --rm -v "${IMAGE_VOLUME}:/image" "${BUSYBOX_IMAGE}" sh -c \
@@ -547,8 +556,8 @@ make_image() {
   echo "bin/dev live: made the hosts' image (${inputs})"
 }
 
-# prepare_live [<tag>]: What every lab's up needs first: the packages (or,
-# with a tag, a checkout at it) and the hosts' image.
+# prepare_live [<tag>]: Prepare what every lab's up needs first: the
+# packages (or, with a tag, a checkout at that tag) and the hosts' image.
 prepare_live() {
   local tag="${1:-}"
   if [[ -n "${tag}" ]]; then
@@ -557,8 +566,8 @@ prepare_live() {
     cmd_package
   fi
   ensure_image "${tag}"
-  # the labs run tofu init at once; with the providers in the cache before,
-  # none of them writes to it
+  # the labs run tofu init at the same time; if the providers are already
+  # in the cache, none of them writes to it
   tofu_validate examples/hetzner
 }
 
@@ -572,11 +581,12 @@ import_image() {
     --label "clowder-live-image=${inputs}"
 }
 
-# up_lab [<tag>]: Make the first host in the lab of use_test_lab, started
-# unless it runs, from the hosts' image (prepare_live made it); TestSetup
-# sets up its cluster and has two more hosts join, with OpenTofu copied
-# to /work/bin. The registry and the mail server run on until bin/dev live
-# down. With a tag, on that release instead of dist/.
+# up_lab [<tag>]: Make the first host from the hosts' image (made by
+# prepare_live) in the lab of use_test_lab, and start the lab unless it
+# runs. TestSetup sets up the cluster and lets two more hosts join, with
+# OpenTofu copied to /work/bin. The registry and the mail server keep
+# running until bin/dev live down. With a tag, use that release instead of
+# dist/.
 # Globals:
 #   lab_number (read)
 up_lab() {
@@ -597,8 +607,9 @@ up_lab() {
   fi
   image_id="$(import_image)"
   public_key="$(in_lab "${GO_IMAGE}" cat /work/id_ed25519.pub </dev/null)"
-  # bulk holds the 20 GB volume of TestNoFalseFailover (resyncVolumeSize): its
-  # pool is 90 % of the disk, and the placement keeps 20 % of that free
+  # bulk holds the 20 GB volume of TestNoFalseFailover (resyncVolumeSize):
+  # its pool takes 90 % of the disk, and the placement keeps 20 % of the
+  # pool free
   in_lab "${GO_IMAGE}" sh -c 'cat >/work/live.tfvars' <<EOF
 ssh_public_key  = "${public_key}"
 admin_cidrs     = ["${LAB_ADDRESS}/32"]
@@ -619,13 +630,13 @@ EOF
 }
 
 # run_lab [<go test flags>]: Run the scenarios on the hosts of the lab of
-# use_test_lab; they stay, whatever the outcome.
+# use_test_lab; the hosts stay, whatever the outcome.
 # Globals:
 #   lab_number, registry_container, mail_container (read)
 run_lab() {
   local tag
   live_lock
-  # not live_lab: a lab started now would have no host
+  # not live_lab: a lab started at this point would have no host
   if ! lab_runs; then
     echo "bin/dev live run: lab ${lab_number} is not up; bin/dev live up --lab ${lab_number} starts it" >&2
     return 1
@@ -651,8 +662,8 @@ run_lab() {
       "bin/dev live down --lab ${lab_number} removes it all"
 }
 
-# down_lab: Destroy what the live tests left in the lab of use_lab and stop
-# it. A lab that never ran has no volume and is left alone.
+# down_lab: Destroy what the live tests left in the lab of use_lab, and stop
+# the lab. A lab that never ran has no volume and is left alone.
 # Globals:
 #   work_volume, packages_container, registry_container, mail_container (read)
 down_lab() {
@@ -667,7 +678,8 @@ down_lab() {
     live_tofu 'touch /work/hosts.tfvars && tofu destroy -input=false -auto-approve \
       -state=/work/terraform.tfstate -var-file=/work/live.tfvars -var-file=/work/hosts.tfvars'
   fi
-  # only after a destroy that worked (set -e): the state goes with the rest
+  # only after a successful destroy (set -e): the state is removed with the
+  # rest
   docker run --rm -v "${work_volume}:/work" "${BUSYBOX_IMAGE}" sh -c 'rm -rf /work/*'
   if lab_runs; then
     lab down
@@ -692,8 +704,8 @@ container_runs() {
 }
 
 # live_go_test <go test flags>: Run test/live in the lab's network with the
-# CLI that bin/dev live up put in /work/cli; the first failure ends it. The
-# timeout leaves room for every scenario on one lab.
+# CLI that bin/dev live up put in /work/cli; the first failure ends the run.
+# The timeout leaves room for all scenarios on one lab.
 # Globals:
 #   IMAGE_LABEL (read; TestImage's)
 live_go_test() {
@@ -701,8 +713,8 @@ live_go_test() {
     go test -tags live -count=1 -failfast -timeout 150m -v "$@" ./test/live </dev/null
 }
 
-# live_failed <next...>: Say that the hosts stay after a failure, and how to
-# go on; fail.
+# live_failed <next...>: Report that the hosts stay after a failure and what
+# to do next; fail.
 # Globals:
 #   work_volume (read)
 live_failed() {
@@ -711,9 +723,9 @@ live_failed() {
   return 1
 }
 
-# lab_count: Print how many labs bin/dev live runs: LIVE_LABS, else as many
-# as the Docker host's free memory holds (LAB_MEMORY_GB each), from 1 to
-# MAX_LABS.
+# lab_count: Print how many labs bin/dev live runs: LIVE_LABS, otherwise as
+# many as the Docker host's free memory allows (LAB_MEMORY_GB each), from 1
+# to MAX_LABS.
 lab_count() {
   local count available_kb
   if [[ -n "${LIVE_LABS:-}" ]]; then
@@ -730,9 +742,9 @@ lab_count() {
   echo $((count < 1 ? 1 : count > MAX_LABS ? MAX_LABS : count))
 }
 
-# scenario_groups <count>: Print a -run pattern per lab, one per line: the
-# scenarios of test/live/scenarios split by their run time, the longest
-# first to the lab with the least so far.
+# scenario_groups <count>: Print one -run pattern per lab, one per line. The
+# scenarios of test/live/scenarios are split by their run time: the longest
+# scenario goes first, each to the lab with the least run time so far.
 scenario_groups() {
   grep -v -e '^#' -e '^[[:space:]]*$' "${ROOT}/test/live/scenarios" | sort -k 2,2 -g -r \
     | awk -v labs="$1" '
@@ -749,26 +761,27 @@ scenario_groups() {
       }'
 }
 
-# cycle_lab <tag> <pattern>: up, run with the -run pattern, and down, in the
-# lab of use_test_lab; a failure ends it before down (set -e), and the hosts
-# stay.
+# cycle_lab <tag> <pattern>: Run up, run with the -run pattern, and down in
+# the lab of use_test_lab. A failure stops before down (set -e), and the
+# hosts stay.
 cycle_lab() {
   up_lab "$1"
   run_lab -run "$2"
   down_lab
 }
 
-# cmd_live [<tag>]: Run every scenario in as many labs at once as
-# lab_count says, each lab a group of scenario_groups, and tear each lab
-# down once it passed. Each lab's lines start with its number; a failed lab
-# keeps its hosts.
+# cmd_live [<tag>]: Run every scenario in as many labs at once as lab_count
+# says, each lab with one group from scenario_groups, and tear down each lab
+# once it has passed. Each lab's output lines start with its number; a
+# failed lab keeps its hosts.
 cmd_live() {
   local tag="${1:-}" count lab pattern minutes failed=()
   local -a patterns=() pids=()
   count="$(lab_count)"
   for ((lab = 1; lab <= count; lab++)); do
     use_test_lab "${lab}"
-    # asked again under each lab's lock; this spares the build and the image
+    # checked again under each lab's lock; checking here first avoids a
+    # useless build and image
     refuse_left_host
   done
   prepare_live "${tag}"
@@ -782,8 +795,9 @@ cmd_live() {
     return 1
   fi
   for ((lab = 1; lab <= count; lab++)); do
-    # sed -u: each lab's lines as they come. set -e ends the subshell at the
-    # first failure, and with pipefail wait gets its status, not sed's
+    # sed -u prints each lab's lines as they come. set -e ends the subshell
+    # at the first failure, and with pipefail wait gets the subshell's
+    # status, not sed's
     (
       use_test_lab "${lab}"
       cycle_lab "${tag}" "${patterns[lab - 1]}"
@@ -804,8 +818,8 @@ cmd_live() {
 }
 
 # cmd_live_up [--lab <n>] [<tag>]: prepare_live, then up_lab in lab n
-# (default 1). With a tag, on that release; the tests come from the
-# checkout, so it must be at the tag.
+# (default 1). With a tag, use that release; the tests come from the
+# checkout, so the checkout must be at the tag.
 cmd_live_up() {
   local lab=1
   if [[ "${1:-}" == --lab ]]; then
@@ -813,14 +827,15 @@ cmd_live_up() {
     shift 2
   fi
   use_test_lab "${lab}"
-  # asked again under the lock in up_lab; this spares the build and the image
+  # checked again under the lock in up_lab; checking here first avoids a
+  # useless build and image
   refuse_left_host
   prepare_live "${1:-}"
   up_lab "${1:-}"
 }
 
 # cmd_live_run [--lab <n>] [<go test flags>]: run_lab in lab n (default 1),
-# every scenario unless the flags choose.
+# with every scenario unless the flags select some.
 cmd_live_run() {
   local lab=1
   if [[ "${1:-}" == --lab ]]; then
@@ -831,8 +846,8 @@ cmd_live_run() {
   run_lab "$@"
 }
 
-# cmd_live_down [--lab <n>]: down_lab in lab n, or in every lab, and
-# stop the image's lab that a failed image left running.
+# cmd_live_down [--lab <n>]: down_lab in lab n, or in every lab; without
+# --lab, also stop the image's lab if a failed image left it running.
 cmd_live_down() {
   local lab
   if [[ "${1:-}" == --lab ]]; then
@@ -853,8 +868,8 @@ cmd_live_down() {
   done
 }
 
-# cmd_live_image [--rebuild]: Make the hosts' image unless a current one is
-# there, as bin/dev live up does.
+# cmd_live_image [--rebuild]: Make the hosts' image unless a current one
+# exists, as bin/dev live up does.
 cmd_live_image() {
   if (($# > 1)) || [[ $# == 1 && "$1" != --rebuild ]]; then
     echo "bin/dev live image: takes only --rebuild" >&2

@@ -12,27 +12,24 @@ import (
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/clientconfig"
-	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/pki"
 )
 
-// renewWarning is how long before its end a CLI certificate makes every
-// command warn: time to fetch a new one from a host, as nothing renews it.
+// renewWarning is how long before a CLI certificate ends every command
+// warns about it. This leaves time to fetch a new one from a host, because
+// nothing renews it.
 const renewWarning = 30 * 24 * time.Hour
 
 // globals are the flags every command shares.
 type globals struct {
-	cluster        string
 	config         string
 	context        string
 	connectTimeout time.Duration
-	// warnings is where connect warns, the command's stderr
+	// warnings is where connect writes its warnings: the command's stderr
 	warnings io.Writer
 }
 
 func (g *globals) register(root *cobra.Command) {
-	root.PersistentFlags().StringVar(&g.cluster, "cluster", "",
-		"cluster directory with cluster.yaml (default: $"+clusterdir.EnvVar+" or the working directory)")
 	root.PersistentFlags().StringVar(&g.config, "config", "",
 		"the CLI's credentials file (default: $"+clientconfig.EnvVar+" or ~/.clowder/config)")
 	root.PersistentFlags().StringVar(&g.context, "context", "",
@@ -59,9 +56,9 @@ func (g *globals) readConfig() (clientconfig.Config, string, error) {
 	return config, path, err
 }
 
-// connect reads the context the flags pick and returns a client for the
-// cluster's agents at its endpoints. A certificate near its end makes it
-// warn.
+// connect reads the context that the flags pick and returns a client for
+// the cluster's agents at its endpoints. It warns about a certificate that
+// is close to its end.
 func (g *globals) connect() (*api.Client, error) {
 	config, _, err := g.readConfig()
 	if err != nil {
@@ -88,9 +85,9 @@ func (g *globals) connect() (*api.Client, error) {
 	return api.NewClient(cliContext.Endpoints, g.connectTimeout, certificate, ca, buildinfo.Version), nil
 }
 
-// warnBeforeTheEnd warns from renewWarning before the certificate of a
-// context ends; an agent refuses it once it has. A warning that cannot be
-// written stops no command.
+// warnBeforeTheEnd warns, from renewWarning before the end on, that the
+// certificate of a context is about to end; an agent refuses it once it
+// has ended. A warning that cannot be written stops no command.
 func warnBeforeTheEnd(out io.Writer, contextName string, notAfter, now time.Time) {
 	left := notAfter.Sub(now)
 	if left > renewWarning {
@@ -107,14 +104,4 @@ func warnBeforeTheEnd(out io.Writer, contextName string, notAfter, now time.Time
 	}
 	_, _ = fmt.Fprintf(out, "warning: the CLI certificate of context %s %s; get a new one from a host: "+
 		"%s --as %s --replace\n", contextName, when, fromAHost, contextName)
-}
-
-// loadDirectory reads the cluster directory: cluster.yaml for cluster
-// apply and diff.
-func (g *globals) loadDirectory() (*clusterdir.Directory, error) {
-	path, err := clusterdir.Find(g.cluster)
-	if err != nil {
-		return nil, err
-	}
-	return clusterdir.Load(path)
 }

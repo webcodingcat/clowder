@@ -1,8 +1,8 @@
-// Package datakey is the cluster's data key: an age identity every host
-// keeps (only root may read it). Secrets are sealed with it before they go
-// into the cluster state, so a Raft snapshot or backup that ends up in the
-// wrong hands holds no secret in clear. Joining hosts get the key with the
-// answer to their join; the Raft backup carries it as well.
+// Package datakey is the cluster's data key: an age identity that every
+// host keeps (only root may read it). Secrets are sealed with it before
+// they go into the cluster state, so a Raft snapshot or backup that ends up
+// in the wrong hands holds no secret in plain text. A joining host gets the
+// key in the answer to its join; the Raft backup carries it as well.
 package datakey
 
 import (
@@ -44,7 +44,7 @@ func Parse(text string) (*Key, error) {
 	return &Key{identity: identity}, nil
 }
 
-// Text is the key in age's text form, for the join answer and the backup.
+// Text returns the key in age's text form, for the join answer and the backup.
 func (k *Key) Text() string {
 	return k.identity.String()
 }
@@ -58,8 +58,8 @@ func Load(path string) (*Key, error) {
 	return Parse(string(content))
 }
 
-// Save writes the key to path, readable by root only; a crash leaves the old
-// key or the new one, never half of one.
+// Save writes the key to path, readable only by root. A crash leaves the
+// old key or the new one, never a partial key.
 func (k *Key) Save(path string) error {
 	if err := atomicfile.Write(path, []byte(k.Text()+"\n"), 0o600); err != nil {
 		return fmt.Errorf("save the data key: %w", err)
@@ -99,11 +99,12 @@ func (k *Key) Open(sealed state.Sealed) ([]byte, error) {
 	return plaintext, nil
 }
 
-// Derive gives a key of 32 bytes for one purpose (HKDF-SHA256), the same on
-// every host and after every restart; it tells nothing about the data key.
+// Derive returns a 32-byte key for one purpose (HKDF-SHA256). The derived
+// key is the same on every host and after every restart, and it reveals
+// nothing about the data key.
 func (k *Key) Derive(purpose string) ([]byte, error) {
-	// the key's text form is its secret scalar in a fixed encoding (the
-	// key file holds exactly it), so it stays the same wherever it is read
+	// the key's text form is its secret scalar in a fixed encoding (the key
+	// file holds exactly this text), so it is the same wherever it is read
 	derived, err := hkdf.Key(sha256.New, []byte(k.identity.String()), nil, purpose, 32)
 	if err != nil {
 		return nil, fmt.Errorf("derive a key for %s: %w", purpose, err)

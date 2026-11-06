@@ -30,7 +30,7 @@ func lostMajority(t *testing.T) *cluster {
 	zero, one := HostID(0), HostID(1)
 	c.state.Stacks["default/shop"].Host = &zero
 	c.state.Stacks["default/shop"].Status = StackRunning
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindStack, "default", "web", shopSpec()))
+	c.put(resource.KindStack, "default", "web", shopSpec())
 	c.state.Stacks["default/web"].Host = &one
 	c.state.Stacks["default/web"].Status = StackRunning
 	minor := func(n int) *int { return &n }
@@ -155,8 +155,7 @@ func TestAVolumeThatWaitsForARestoreIsDeletedWithItsCopy(t *testing.T) {
 	c := lostMajority(t)
 	c.mustApply(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 0})
 	// until a restore, a user may delete the volume, its copy here with it
-	c.mustApply(KindDeleteResource, cliActor,
-		DeleteResource{Kind: resource.KindVolume, Namespace: "default", Name: "cache", Owner: OwnerCLI})
+	c.del(resource.KindVolume, "default", "cache")
 	if _, ok := c.state.Volumes["default/cache"]; ok {
 		t.Fatal("the volume is still there")
 	}

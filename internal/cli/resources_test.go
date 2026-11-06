@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
@@ -28,6 +27,7 @@ func TestKindsAndNamespacesAreNamedAsWithKubectl(t *testing.T) {
 		{"secrets", "", selectFlags{all: true}, selection{kind: resource.KindSecret, all: true}, ""},
 		{"namespaces", "", selectFlags{}, selection{kind: resource.KindNamespace}, ""},
 		{"namespace", "shop", selectFlags{}, selection{kind: resource.KindNamespace, name: "shop"}, ""},
+		{"clusterconfiguration", "cluster", selectFlags{}, selection{kind: resource.KindClusterConfiguration, name: "cluster"}, ""},
 		{"volume", "shop/data", selectFlags{namespace: "other"}, selection{}, "names namespace shop, but -n other"},
 		{"volume", "data", selectFlags{all: true}, selection{}, "takes no name"},
 		{"volume", "", selectFlags{namespace: "shop", all: true}, selection{}, "not both"},
@@ -49,7 +49,7 @@ func TestKindsAndNamespacesAreNamedAsWithKubectl(t *testing.T) {
 }
 
 func TestAWrongCallEndsWithTwoAndARefusalWithOne(t *testing.T) {
-	dir := startCluster(t)
+	startCluster(t)
 	for _, args := range [][]string{
 		{"nonsense"},
 		{"stack", "bogus"},
@@ -60,17 +60,19 @@ func TestAWrongCallEndsWithTwoAndARefusalWithOne(t *testing.T) {
 		{"get", "volumes", "--bogus"},
 		{"get", "volumes", "-o", "xml"},
 		{"apply"},
+		{"diff"},
 		{"delete", "volume"},
 		{"get", "pods"},
+		{"apply", "-f", "x.yaml", "--cluster", "prod"}, // the cluster directory is gone
 	} {
-		if _, err := run(t, append([]string{"--cluster", dir}, args...)...); ExitCode(err) != 2 {
+		if _, err := run(t, args...); ExitCode(err) != 2 {
 			t.Errorf("%v: exit code %d (%v), want 2", args, ExitCode(err), err)
 		}
 	}
-	if _, err := run(t, "--cluster", dir, "get", "namespace", "nowhere"); ExitCode(err) != 1 {
+	if _, err := run(t, "get", "namespace", "nowhere"); ExitCode(err) != 1 {
 		t.Errorf("get of a missing namespace: exit code %d (%v), want 1", ExitCode(err), err)
 	}
-	if out, err := run(t, "--cluster", dir, "stack"); err != nil || !strings.Contains(out, "Available Commands") {
+	if out, err := run(t, "stack"); err != nil || !strings.Contains(out, "Available Commands") {
 		t.Errorf("a command of commands shows its help: %v\n%s", err, out)
 	}
 }
@@ -78,7 +80,7 @@ func TestAWrongCallEndsWithTwoAndARefusalWithOne(t *testing.T) {
 // writeFiles writes the files of a directory of resources: plain YAML, a
 // Secret as secret encrypt writes it for the cluster, and files apply
 // skips.
-func writeFiles(t *testing.T, cluster string) string {
+func writeFiles(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	write := func(name, content string) {
@@ -86,21 +88,20 @@ func writeFiles(t *testing.T, cluster string) string {
 			t.Fatal(err)
 		}
 	}
-	// the volume before its namespace: apply sorts
 	write("shop.yaml", `
+apiVersion: clowder/v1
+kind: Namespace
+metadata: {name: shop}
+---
 apiVersion: clowder/v1
 kind: Volume
 metadata: {namespace: shop, name: data}
 spec: {class: fast, size: 1024M, replicas: 1}
----
-apiVersion: clowder/v1
-kind: Namespace
-metadata: {name: shop}
 `)
 	write("compose.yaml", "services: {web: {image: nginx}}\n")
 	write(".hidden.yaml", "apiVersion: clowder/v1\nkind: Namespace\nmetadata: {name: hidden}\n")
 	write("notes.txt", "not YAML\n")
-	token, err := runWithInput(t, "s3cret\n", "--cluster", cluster, "secret", "encrypt", "shop/token")
+	token, err := runWithInput(t, "s3cret\n", "secret", "encrypt", "shop/token", "--from-file", "value=-")
 	if err != nil {
 		t.Fatalf("secret encrypt: %v\n%s", err, token)
 	}
@@ -125,9 +126,9 @@ func runWithInput(t *testing.T, input string, args ...string) (string, error) {
 }
 
 func TestResourcesApplyFromADirectoryReadBackAndGo(t *testing.T) {
-	cluster := startCluster(t)
-	files := writeFiles(t, cluster)
-	out, err := runWithInput(t, "", "--cluster", cluster, "apply", "-f", files)
+	startCluster(t)
+	files := writeFiles(t)
+	out, err := runWithInput(t, "", "apply", "-f", files)
 	if err != nil {
 		t.Fatalf("apply: %v\n%s", err, out)
 	}
@@ -141,56 +142,56 @@ func TestResourcesApplyFromADirectoryReadBackAndGo(t *testing.T) {
 			t.Errorf("no %q in:\n%s", want, out)
 		}
 	}
-	if strings.Index(out, "Namespace shop") > strings.Index(out, "Volume shop/data") {
-		t.Errorf("the volume went before its namespace:\n%s", out)
-	}
 
-	out, err = run(t, "--cluster", cluster, "get", "volumes", "-n", "shop")
+	out, err = run(t, "get", "volumes", "-n", "shop")
 	if err != nil || !strings.Contains(out, "data") || !strings.Contains(out, "fast") || !strings.Contains(out, "1G") ||
 		!strings.Contains(out, "pending") {
 		t.Errorf("get volumes: %v\n%s", err, out)
 	}
-	out, err = run(t, "--cluster", cluster, "get", "secrets", "-A")
-	if err != nil || !strings.Contains(out, "token") || strings.Contains(out, "s3cret") {
+	out, err = run(t, "get", "secrets", "-A")
+	if err != nil || !strings.Contains(out, "token") || !strings.Contains(out, "value") || strings.Contains(out, "s3cret") {
 		t.Errorf("get secrets: %v\n%s", err, out)
 	}
 
 	// what get -o yaml shows applies again as it is, from stdin
-	shown, err := run(t, "--cluster", cluster, "get", "volume", "shop/data", "-o", "yaml")
+	shown, err := run(t, "get", "volume", "shop/data", "-o", "yaml")
 	if err != nil || !strings.Contains(shown, "size: 1G") {
 		t.Fatalf("get -o yaml: %v\n%s", err, shown)
 	}
-	out, err = runWithInput(t, shown, "--cluster", cluster, "apply", "-f", "-")
+	out, err = runWithInput(t, shown, "apply", "-f", "-")
 	if err != nil || !strings.Contains(out, "Volume shop/data: unchanged") {
 		t.Errorf("the shown volume applied again: %v\n%s", err, out)
 	}
 
 	out, err = runWithInput(t, "apiVersion: clowder/v1\nkind: Namespace\nmetadata: {name: blog}\n",
-		"--cluster", cluster, "apply", "--dry-run", "-f", "-")
+		"apply", "--dry-run", "-f", "-")
 	if err != nil || !strings.Contains(out, "Namespace blog: applied (dry run)") {
 		t.Errorf("dry run: %v\n%s", err, out)
 	}
-	if _, err := run(t, "--cluster", cluster, "get", "namespace", "blog"); err == nil {
+	if _, err := run(t, "get", "namespace", "blog"); err == nil {
 		t.Error("the dry run made the namespace")
 	}
 
 	// a volume goes only with --with-data, and without it nothing goes
-	if _, err := runWithInput(t, "", "--cluster", cluster, "delete", "-f", files); err == nil ||
+	if _, err := runWithInput(t, "", "delete", "-f", files); err == nil ||
 		!strings.Contains(err.Error(), "deleting volume shop/data deletes its data; confirm with --with-data") {
 		t.Errorf("delete -f without --with-data: %v", err)
 	}
-	if _, err := run(t, "--cluster", cluster, "get", "secret", "shop/token"); err != nil {
+	if _, err := run(t, "get", "secret", "shop/token"); err != nil {
 		t.Errorf("a refused delete took the secret: %v", err)
 	}
-	out, err = runWithInput(t, "", "--cluster", cluster, "delete", "--with-data", "-f", files)
-	if err != nil || !strings.Contains(out, "Namespace shop: deleted") ||
-		strings.Index(out, "Volume shop/data: deleted") > strings.Index(out, "Namespace shop: deleted") {
-		t.Errorf("delete -f: %v\n%s", err, out)
+	// from the bottom up: the Secret of the last file first, the namespace last
+	out, err = runWithInput(t, "", "delete", "--with-data", "-f", files)
+	want := "Secret shop/token: deleted\nVolume shop/data: deleted\nNamespace shop: deleted\n"
+	if err != nil || !strings.HasSuffix(out, want) {
+		t.Errorf("delete -f: %v\n%s\nwant it to end with\n%s", err, out, want)
 	}
 }
 
-func TestAStackIsListedAndAskedForInItsNamespace(t *testing.T) {
-	cluster := startCluster(t)
+func TestApplyKeepsTheOrderOfTheFiles(t *testing.T) {
+	startCluster(t)
+	// the stack above its namespace: apply does not sort, so the stack has
+	// no namespace yet, and nothing goes
 	out, err := runWithInput(t, `
 apiVersion: clowder/v1
 kind: Stack
@@ -200,38 +201,59 @@ spec: {services: {app: {image: example/app}}}
 apiVersion: clowder/v1
 kind: Namespace
 metadata: {name: shop}
-`, "--cluster", cluster, "apply", "-f", "-")
-	if err != nil || strings.Index(out, "Namespace shop") > strings.Index(out, "Stack shop/web: applied") {
+`, "apply", "-f", "-")
+	if ExitCode(err) != 1 || !strings.HasPrefix(out, "Stack shop/web: refused") ||
+		!strings.Contains(out, "Namespace shop: not-applied") {
+		t.Errorf("exit code %d (%v)\n%s", ExitCode(err), err, out)
+	}
+	if _, err := run(t, "get", "namespace", "shop"); err == nil {
+		t.Error("the namespace went in without the stack")
+	}
+}
+
+func TestAStackIsListedAndAskedForInItsNamespace(t *testing.T) {
+	startCluster(t)
+	out, err := runWithInput(t, `
+apiVersion: clowder/v1
+kind: Namespace
+metadata: {name: shop}
+---
+apiVersion: clowder/v1
+kind: Stack
+metadata: {namespace: shop, name: web}
+spec: {services: {app: {image: example/app}}}
+`, "apply", "-f", "-")
+	if err != nil || out != "Namespace shop: applied\nStack shop/web: applied\n" {
 		t.Fatalf("apply: %v\n%s", err, out)
 	}
-	out, err = run(t, "--cluster", cluster, "get", "stacks", "-n", "shop")
+	out, err = run(t, "get", "stacks", "-n", "shop")
 	if err != nil || !strings.Contains(out, "web") || !strings.Contains(out, "pending") ||
 		!strings.Contains(out, "500 (default)") {
 		t.Errorf("get stacks: %v\n%s", err, out)
 	}
 	for _, args := range [][]string{{"stack", "ps", "-n", "shop", "web"}, {"stack", "logs", "shop/web"}} {
-		_, err := run(t, append([]string{"--cluster", cluster}, args...)...)
+		_, err := run(t, args...)
 		if err == nil || !strings.Contains(err.Error(), "stack shop/web is not placed on a host yet") {
 			t.Errorf("%v: %v", args, err)
 		}
 	}
-	if _, err := run(t, "--cluster", cluster, "stack", "ps", "web"); err == nil || !strings.Contains(err.Error(), "no stack default/web") {
+	if _, err := run(t, "stack", "ps", "web"); err == nil || !strings.Contains(err.Error(), "no stack default/web") {
 		t.Errorf("stack ps in default: %v", err)
 	}
 
-	out, err = run(t, "--cluster", cluster, "stack", "restart", "-n", "shop", "web", "app")
+	out, err = run(t, "stack", "restart", "-n", "shop", "web", "app")
 	if err != nil || out != "Stack shop/web: restarting\n" {
 		t.Errorf("stack restart: %v\n%s", err, out)
 	}
-	if shown, err := run(t, "--cluster", cluster, "get", "stack", "shop/web", "-o", "yaml"); err != nil ||
+	if shown, err := run(t, "get", "stack", "shop/web", "-o", "yaml"); err != nil ||
 		!strings.Contains(shown, "restarted:") || !strings.Contains(shown, "generation: 1") {
 		t.Errorf("a restarted stack: %v\n%s", err, shown)
 	}
-	if _, err := run(t, "--cluster", cluster, "stack", "restart", "shop/web", "mail"); err == nil ||
+	if _, err := run(t, "stack", "restart", "shop/web", "mail"); err == nil ||
 		!strings.Contains(err.Error(), "stack shop/web has no service mail") {
 		t.Errorf("restart of no service: %v", err)
 	}
-	if _, err := run(t, "--cluster", cluster, "stack", "restart"); ExitCode(err) != 2 {
+	if _, err := run(t, "stack", "restart"); ExitCode(err) != 2 {
 		t.Errorf("restart without a stack: %v", err)
 	}
 }
@@ -239,13 +261,13 @@ metadata: {name: shop}
 func TestASecretInClearIsRefusedFromFilesAndStdin(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "token.yaml")
-	secret := "apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: token}\nspec: {value: s3cret}\n"
+	secret := "apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: token}\nspec: {data: {password: s3cret}}\n"
 	if err := os.WriteFile(path, []byte(secret), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, from := range []string{dir, path, "-"} {
 		_, err := readResourceFiles(from, strings.NewReader(secret), io.Discard)
-		if err == nil || !strings.Contains(err.Error(), "secret token: write its value encrypted") ||
+		if err == nil || !strings.Contains(err.Error(), "secret token: write the value of password encrypted") ||
 			strings.Contains(err.Error(), "s3cret") {
 			t.Errorf("%s: %v", from, err)
 		}
@@ -253,56 +275,46 @@ func TestASecretInClearIsRefusedFromFilesAndStdin(t *testing.T) {
 }
 
 func TestAValueEncryptedForAnotherSecretIsRefused(t *testing.T) {
-	cluster := startCluster(t)
-	token, err := runWithInput(t, "s3cret", "--cluster", cluster, "secret", "encrypt", "shop/token")
+	startCluster(t)
+	token, err := run(t, "secret", "encrypt", "shop/token", "--from-literal", "value=s3cret")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// the same value, renamed: it stays bound to shop/token
 	renamed := strings.Replace(token, "name: token", "name: copied", 1)
 	out, err := runWithInput(t, "apiVersion: clowder/v1\nkind: Namespace\nmetadata: {name: shop}\n---\n"+renamed,
-		"--cluster", cluster, "apply", "-f", "-")
+		"apply", "-f", "-")
 	if ExitCode(err) != 1 || !strings.Contains(out, "the value is for shop/token, not for shop/copied") {
 		t.Errorf("exit code %d (%v)\n%s", ExitCode(err), err, out)
 	}
-	if _, err := run(t, "--cluster", cluster, "secret", "encrypt"); ExitCode(err) != 2 {
-		t.Errorf("secret encrypt of nothing: %v", err)
-	}
-	if _, err := run(t, "--cluster", cluster, "secret", "encrypt", "a/b", "--cluster-yaml"); ExitCode(err) != 2 {
-		t.Errorf("secret encrypt of both: %v", err)
-	}
 }
 
-func TestARefusalNamesItsResourceAndStopsTheRest(t *testing.T) {
-	cluster := startCluster(t)
+func TestARefusalNamesItsResourceAndNoneGoes(t *testing.T) {
+	startCluster(t)
 	out, err := runWithInput(t, `
-apiVersion: clowder/v1
-kind: Volume
-metadata: {name: data}
-spec: {class: slow, size: 1G, replicas: 1}
----
 apiVersion: clowder/v1
 kind: Volume
 metadata: {name: logs}
 spec: {class: fast, size: 1G, replicas: 1}
-`, "--cluster", cluster, "apply", "-f", "-")
-	if ExitCode(err) != 1 || !strings.Contains(out, `Volume default/data: refused`) ||
-		!strings.Contains(out, "Volume default/logs: not-tried") {
+---
+apiVersion: clowder/v1
+kind: Volume
+metadata: {name: data}
+spec: {class: slow, size: 1G, replicas: 1}
+`, "apply", "-f", "-")
+	if ExitCode(err) != 1 || !strings.Contains(out, "Volume default/logs: not-applied") ||
+		!strings.Contains(out, `Volume default/data: refused`) {
 		t.Errorf("exit code %d (%v)\n%s", ExitCode(err), err, out)
+	}
+	if _, err := run(t, "get", "volume", "logs"); err == nil {
+		t.Error("the volume above the refused one went in")
 	}
 }
 
-func TestFilesOfTheWrongSortAreRefused(t *testing.T) {
-	cluster := startCluster(t)
-	if _, err := run(t, "--cluster", cluster, "apply", "-f", cluster); err == nil ||
-		!strings.Contains(err.Error(), "it is a cluster directory") {
-		t.Errorf("a cluster directory: %v", err)
-	}
-	if _, err := runWithInput(t, "services: {}\n", "--cluster", cluster, "apply", "-f", "-"); err == nil ||
+func TestFilesWithoutResourcesAreRefused(t *testing.T) {
+	startCluster(t)
+	if _, err := runWithInput(t, "services: {}\n", "apply", "-f", "-"); err == nil ||
 		!strings.Contains(err.Error(), "holds no resource of clowder's") {
 		t.Errorf("stdin of other documents: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(cluster, clusterdir.ConfigFile)); err != nil {
-		t.Fatal(err)
 	}
 }

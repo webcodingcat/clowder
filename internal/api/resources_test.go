@@ -7,11 +7,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
+
+	"filippo.io/age"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
-	"github.com/webcodingcat/clowder/internal/secretvalue"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -27,16 +28,26 @@ func object(kind, namespace, name, spec string) resource.Object {
 	return written
 }
 
-// secretObject is a Secret as the CLI sends it: its value encrypted for the
-// cluster, for the place forID (its own ID, but for the tests that copy a
-// value from elsewhere).
-func (c *testCluster) secretObject(namespace, name, value, forID string) resource.Object {
+// secretObject is a Secret as the CLI sends it: each value by its key,
+// encrypted for the cluster and for this Secret.
+func (c *testCluster) secretObject(namespace, name string, data map[string]string) resource.Object {
 	c.t.Helper()
-	spec, err := json.Marshal(resource.SecretSpec{Encrypted: encrypt(c.t, c.recipients, forID, value)})
-	if err != nil {
-		c.t.Fatal(err)
+	spec := resource.SecretSpec{Encrypted: map[string]string{}}
+	for key, value := range data {
+		spec.Encrypted[key] = encrypt(c.t, c.recipients, names.ID(namespace, name), value)
 	}
-	return object(resource.KindSecret, namespace, name, string(spec))
+	return secretWithSpec(c.t, namespace, name, spec)
+}
+
+// secretWithSpec is a Secret of a spec made by hand, for the tests of
+// values encrypted for another place.
+func secretWithSpec(t *testing.T, namespace, name string, spec resource.SecretSpec) resource.Object {
+	t.Helper()
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return object(resource.KindSecret, namespace, name, string(encoded))
 }
 
 // withStorageClass gives every agent's state the storage class fast.
@@ -56,7 +67,7 @@ func outcomes(result ChangeResult) []string {
 	return each
 }
 
-func TestAnApplyGoesInOrderAndStopsAtTheFirstRefusal(t *testing.T) {
+func TestAnApplyGoesInWholeOrNotAtAll(t *testing.T) {
 	cluster := newTestCluster(t)
 	withStorageClass(cluster)
 	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
@@ -64,20 +75,31 @@ func TestAnApplyGoesInOrderAndStopsAtTheFirstRefusal(t *testing.T) {
 	shop := ApplyRequest{Resources: []resource.Object{
 		object(resource.KindNamespace, "", "shop", ""),
 		object(resource.KindVolume, "shop", "data", `{"class": "fast", "size": "1024M", "replicas": 1}`),
-		cluster.secretObject("shop", "token", "s3cret", "shop/token"),
+		cluster.secretObject("shop", "token", map[string]string{"value": "s3cret"}),
 	}}
 	refused := shop
 	refused.Resources = append(slices.Clone(shop.Resources),
 		object(resource.KindVolume, "shop", "logs", `{"class": "slow", "size": "1G", "replicas": 1}`),
-		cluster.secretObject("shop", "later", "x", "shop/later"))
+		cluster.secretObject("shop", "later", map[string]string{"value": "x"}))
+	var before uint64
+	cluster.clusters[0].Read(func(current *state.State) { before = current.Index })
 	result, err := client.ApplyResources(ctx, refused, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{Applied, Applied, Applied, Refused, NotTried}
-	if !slices.Equal(outcomes(result), want) || result.Index == 0 ||
+	want := []string{NotApplied, NotApplied, NotApplied, Refused, NotApplied}
+	if !slices.Equal(outcomes(result), want) || result.Index != 0 ||
 		!strings.Contains(result.Results[3].Message, `no storage class "slow"`) {
 		t.Fatalf("results %+v, want %v", result, want)
+	}
+	cluster.clusters[0].Read(func(current *state.State) {
+		if _, ok := current.Namespaces["shop"]; ok || current.Index != before {
+			t.Error("a refused apply committed")
+		}
+	})
+	applied, err := client.ApplyResources(ctx, shop, false)
+	if err != nil || !slices.Equal(outcomes(applied), []string{Applied, Applied, Applied}) || applied.Index == 0 {
+		t.Fatalf("apply: %+v, %v", applied, err)
 	}
 	// the same files again change nothing and commit nothing
 	again, err := client.ApplyResources(ctx, shop, false)
@@ -139,16 +161,32 @@ func TestASpecIsReadStrictly(t *testing.T) {
 func TestASecretTakesOnlyAValueEncryptedForIt(t *testing.T) {
 	cluster := newTestCluster(t)
 	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
-	for forID, want := range map[string]string{
-		secretvalue.Cluster: "the value is for cluster, not for default/token", // the Hetzner token, copied
-		"shop/token":        "the value is for shop/token, not for default/token",
+	stranger, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, value, want string
+	}{
+		// the Hetzner token, copied
+		{
+			"the Hetzner token", encrypt(t, cluster.recipients, "clowder-system/hetzner", "s3cret"),
+			"the value is for clowder-system/hetzner, not for default/token",
+		},
+		{
+			"another Secret", encrypt(t, cluster.recipients, "shop/token", "s3cret"),
+			"the value is for shop/token, not for default/token",
+		},
+		{
+			"another cluster", encrypt(t, []age.Recipient{stranger.Recipient()}, "default/token", "s3cret"),
+			"another cluster",
+		},
 	} {
-		result, err := client.ApplyResources(context.Background(), ApplyRequest{Resources: []resource.Object{
-			cluster.secretObject("default", "token", "s3cret", forID),
-		}}, false)
-		if err != nil || result.Results[0].Outcome != Refused || !strings.Contains(result.Results[0].Message, want) ||
+		secret := secretWithSpec(t, "default", "token", resource.SecretSpec{Encrypted: map[string]string{"value": test.value}})
+		result, err := client.ApplyResources(context.Background(), ApplyRequest{Resources: []resource.Object{secret}}, false)
+		if err != nil || result.Results[0].Outcome != Refused || !strings.Contains(result.Results[0].Message, test.want) ||
 			strings.Contains(result.Results[0].Message, "s3cret") {
-			t.Errorf("a value for %s: %+v, %v", forID, result, err)
+			t.Errorf("a value of %s: %+v, %v", test.name, result, err)
 		}
 	}
 }
@@ -158,13 +196,14 @@ func TestResourcesReadBackAsTheyApplyAndSecretsWithoutTheirValue(t *testing.T) {
 	withStorageClass(cluster)
 	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	ctx := context.Background()
-	if _, err := client.ApplyResources(ctx, ApplyRequest{Resources: []resource.Object{
-		object(resource.KindNamespace, "", "shop", ""),
+	result, err := client.ApplyResources(ctx, ApplyRequest{Resources: []resource.Object{
+		object(resource.KindNamespace, "", "shop", `{"imagePullSecrets": [{"name": "ghcr"}]}`),
+		cluster.secretObject("shop", "ghcr", map[string]string{"server": "ghcr.io", "username": "robot", "password": "s3cret"}),
 		object(resource.KindVolume, "shop", "data", `{"class": "fast", "size": "1024M", "replicas": 1}`),
-		cluster.secretObject("shop", "token", "s3cret", "shop/token"),
-		cluster.secretObject("default", "token", "s3cret", "default/token"),
-	}}, false); err != nil {
-		t.Fatal(err)
+		cluster.secretObject("default", "ghcr", map[string]string{"server": "ghcr.io", "username": "robot", "password": "s3cret"}),
+	}}, false)
+	if err != nil || !slices.Equal(outcomes(result), []string{Applied, Applied, Applied, Applied}) {
+		t.Fatalf("apply: %+v, %v", result, err)
 	}
 	var volumes ResourceList
 	if err := client.Get(ctx, "/v1/resources/volume?namespace=shop", &volumes); err != nil {
@@ -175,7 +214,7 @@ func TestResourcesReadBackAsTheyApplyAndSecretsWithoutTheirValue(t *testing.T) {
 	}
 	// what a read answers applies again as it is (a secret's value never
 	// leaves the cluster, so a secret is the exception)
-	result, err := client.ApplyResources(ctx, ApplyRequest{Resources: volumes.Items}, false)
+	result, err = client.ApplyResources(ctx, ApplyRequest{Resources: volumes.Items}, false)
 	if err != nil || result.Results[0].Outcome != Unchanged {
 		t.Errorf("the answer applied again: %+v, %v", result, err)
 	}
@@ -186,22 +225,36 @@ func TestResourcesReadBackAsTheyApplyAndSecretsWithoutTheirValue(t *testing.T) {
 	if len(secrets.Items) != 2 || secrets.Items[0].Spec != nil || strings.Contains(string(secrets.Items[0].Status), "s3cret") {
 		t.Fatalf("secrets %+v", secrets)
 	}
-	// the same value in another secret has another digest
+	var status SecretStatus
+	if err := json.Unmarshal(secrets.Items[0].Status, &status); err != nil ||
+		!slices.Equal(status.Keys, []string{"password", "server", "username"}) || status.Digest == "" {
+		t.Errorf("secret status %s, %v", secrets.Items[0].Status, err)
+	}
+	// the same values in another secret have another digest
 	if string(secrets.Items[0].Status) == string(secrets.Items[1].Status) {
-		t.Error("two secrets of the same value share their digest")
+		t.Error("two secrets of the same values share their digest")
 	}
 	var namespace resource.Object
-	if err := client.Get(ctx, "/v1/resources/namespace/shop", &namespace); err != nil || namespace.Metadata.Owner != state.OwnerCLI {
-		t.Errorf("namespace %+v, %v", namespace, err)
+	if err := client.Get(ctx, "/v1/resources/namespace/shop", &namespace); err != nil || namespace.Metadata.Owner != state.OwnerCLI ||
+		string(namespace.Spec) != `{"imagePullSecrets":[{"name":"ghcr"}]}` {
+		t.Errorf("namespace %+v (%s), %v", namespace, namespace.Spec, err)
+	}
+	var system resource.Object
+	if err := client.Get(ctx, "/v1/resources/namespace/clowder-system", &system); err != nil || system.Spec != nil {
+		t.Errorf("namespace clowder-system %+v, %v", system, err)
 	}
 	for path, status := range map[string]int{
-		"/v1/resources/volume":                 http.StatusBadRequest, // no namespace named
-		"/v1/resources/namespace?namespace=x":  http.StatusBadRequest,
-		"/v1/resources/pod?namespace=shop":     http.StatusNotFound,
-		"/v1/resources/volume/shop/nothing":    http.StatusNotFound,
-		"/v1/resources/namespace/shop/nothing": http.StatusNotFound,
+		"/v1/resources/volume":                       http.StatusBadRequest, // no namespace named
+		"/v1/resources/namespace?namespace=x":        http.StatusBadRequest,
+		"/v1/resources/pod?namespace=shop":           http.StatusNotFound,
+		"/v1/resources/volume/shop/nothing":          http.StatusNotFound,
+		"/v1/resources/namespace/shop/nothing":       http.StatusNotFound,
+		"/v1/resources/namespace/nothing":            http.StatusNotFound,
+		"/v1/resources/volume/data":                  http.StatusNotFound, // a volume lives in a namespace
+		"/v1/resources/clusterconfiguration/cluster": http.StatusNotFound, // none applied yet
 	} {
-		if err := client.Get(ctx, path, &namespace); statusOf(err) != status {
+		var answer json.RawMessage
+		if err := client.Get(ctx, path, &answer); statusOf(err) != status {
 			t.Errorf("%s: want %d, got %v", path, status, err)
 		}
 	}
@@ -223,7 +276,7 @@ func TestAStackShowsItsStatusAndIsAskedForOnItsHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	var status StackStatus
-	// no priority written: cluster.yaml's default, normal
+	// no priority written: the configuration's default, normal
 	if err := json.Unmarshal(stack.Status, &status); err != nil || status.Status != string(state.StackPending) ||
 		status.Priority != 500 || !status.Default || status.Host != "" {
 		t.Errorf("status %s, %v", stack.Status, err)
@@ -321,34 +374,43 @@ func TestTheLeaderDecidesNotAFollowerThatIsBehind(t *testing.T) {
 	result, err = client.DeleteResources(ctx, DeleteRequest{Resources: []resource.Ref{
 		{Kind: resource.KindNamespace, Name: "shop"},
 		{Kind: resource.KindNamespace, Name: "default"},
-		{Kind: resource.KindNamespace, Name: "shop"},
+		{Kind: resource.KindNamespace, Name: "blog"},
 	}}, false)
-	if want := []string{Deleted, Refused, NotTried}; err != nil || !slices.Equal(outcomes(result), want) {
+	if want := []string{NotApplied, Refused, NotApplied}; err != nil || !slices.Equal(outcomes(result), want) ||
+		!strings.Contains(result.Results[1].Message, "namespace default belongs to the cluster") {
 		t.Errorf("delete: %+v, %v; want %v", result, err, want)
 	}
+	cluster.clusters[0].Read(func(current *state.State) {
+		if _, ok := current.Namespaces["shop"]; !ok {
+			t.Error("a refused delete took namespace shop")
+		}
+	})
 }
 
-func TestABatchCarriesOnlyTheCLIsResourceCommands(t *testing.T) {
+func TestABatchCarriesOnlyTheCLIsChanges(t *testing.T) {
 	cluster := newTestCluster(t)
 	host1 := cluster.client(cluster.hostCertificate(1), testVersion, 0)
-	cmd, err := state.NewCommand(state.KindSetRecoveryRecipient, time.Time{}, state.CLIActor("admin"),
-		state.SetRecoveryRecipient{Recipient: "age1mallory"})
-	if err != nil {
-		t.Fatal(err)
+	for _, actor := range []string{state.LeaderActor, "host/1", ""} {
+		var result ChangeResult
+		err := host1.Act(context.Background(), "/v1/internal/changes", changeBatch{Actor: actor, Changes: []batchChange{
+			{Ref: resource.Ref{Kind: resource.KindNamespace, Name: "shop"}, Change: namespaceChange("shop")},
+		}}, &result)
+		if statusOf(err) != http.StatusForbidden {
+			t.Errorf("a batch of actor %q: %v", actor, err)
+		}
 	}
-	var result ChangeResult
-	err = host1.Act(context.Background(), "/v1/internal/changes",
-		changeBatch{Changes: []batchChange{{Ref: resource.Ref{Kind: "Recovery", Name: "key"}, Command: &cmd}}}, &result)
-	if statusOf(err) != http.StatusForbidden {
-		t.Errorf("a set-recovery-recipient in a batch: %v", err)
-	}
+	cluster.clusters[0].Read(func(current *state.State) {
+		if _, ok := current.Namespaces["shop"]; ok {
+			t.Error("a forbidden batch went in")
+		}
+	})
 }
 
 func TestTheLeaderTakesABatchWithFieldsOfTheNextRelease(t *testing.T) {
 	cluster := newTestCluster(t)
 	host1 := cluster.client(cluster.hostCertificate(1), testVersion, 0)
-	encoded, err := json.Marshal(changeBatch{Changes: []batchChange{
-		{Ref: resource.Ref{Kind: resource.KindNamespace, Name: "shop"}, Command: mustCommand(t, "shop")},
+	encoded, err := json.Marshal(changeBatch{Actor: state.CLIActor("admin"), Changes: []batchChange{
+		{Ref: resource.Ref{Kind: resource.KindNamespace, Name: "shop"}, Change: namespaceChange("shop")},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -371,11 +433,11 @@ func TestAChangeThatDidNotCommitIsAFailureNotARefusal(t *testing.T) {
 	// commits, though the state would have taken the command
 	cluster.clusters[0].leader = false
 	server := &Server{config: ServerConfig{Cluster: alwaysLeader{cluster.clusters[0]}}}
-	result := server.runChanges(context.Background(), changeBatch{Changes: []batchChange{
-		{Ref: resource.Ref{Kind: resource.KindNamespace, Name: "shop"}, Command: mustCommand(t, "shop")},
-		{Ref: resource.Ref{Kind: resource.KindNamespace, Name: "blog"}, Command: mustCommand(t, "blog")},
+	result := server.runChanges(context.Background(), changeBatch{Actor: state.CLIActor("admin"), Changes: []batchChange{
+		{Ref: resource.Ref{Kind: resource.KindNamespace, Name: "shop"}, Change: namespaceChange("shop")},
+		{Ref: resource.Ref{Kind: resource.KindNamespace, Name: "blog"}, Change: namespaceChange("blog")},
 	}})
-	if want := []string{Failed, NotTried}; !slices.Equal(outcomes(result), want) {
+	if want := []string{Failed, Failed}; !slices.Equal(outcomes(result), want) {
 		t.Errorf("results %+v, want %v", result, want)
 	}
 }
@@ -385,12 +447,7 @@ type alwaysLeader struct{ *fakeCluster }
 
 func (alwaysLeader) IsLeader() bool { return true }
 
-func mustCommand(t *testing.T, namespace string) *state.Command {
-	t.Helper()
-	cmd, err := state.NewCommand(state.KindPutResource, time.Time{}, state.CLIActor("admin"),
-		state.PutResource{Kind: resource.KindNamespace, Name: namespace, Owner: state.OwnerCLI})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &cmd
+// namespaceChange puts a namespace of the CLI's.
+func namespaceChange(namespace string) *state.ResourceChange {
+	return &state.ResourceChange{Put: &state.PutResource{Kind: resource.KindNamespace, Name: namespace, Owner: state.OwnerCLI}}
 }

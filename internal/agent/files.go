@@ -24,10 +24,10 @@ import (
 // DefaultDir is where a host keeps its files.
 const DefaultDir = "/var/lib/clowder"
 
-// DefaultSecretsDir holds the stacks' secrets in clear. /run is a tmpfs:
-// they never reach a disk, and a boot clears them. It is not a systemd
-// RuntimeDirectory, which would go each time the agent stops while the
-// containers still use it.
+// DefaultSecretsDir holds the stacks' secrets in clear. /run is a tmpfs, so
+// the secrets never reach a disk, and a boot clears them. It is not a
+// systemd RuntimeDirectory: systemd removes that each time the agent stops,
+// while the containers still use it.
 const DefaultSecretsDir = "/run/clowder-secrets"
 
 // The ports of an agent; tests use others.
@@ -57,7 +57,8 @@ func (f Files) meshFile() string        { return filepath.Join(f.Dir, "net.json"
 func (f Files) joinFile() string        { return filepath.Join(f.Dir, "keys", "join.json") }
 
 // The storage driver's directories: the mount points of the volumes, and
-// its state, beside which the agent keeps the time of the last trim.
+// the driver's state. The agent keeps the time of the last trim beside the
+// state.
 func (f Files) volumesDir() string { return filepath.Join(f.Dir, "volumes") }
 func (f Files) storageDir() string { return filepath.Join(f.Dir, "storage") }
 func (f Files) lastTrim() string   { return filepath.Join(f.storageDir(), "last-trim") }
@@ -75,15 +76,16 @@ func (f Files) volumeFiles() volumes.Files {
 }
 
 // Traefik's files sit beside stacks/, so the search for stacks that left
-// this host never finds them: its Compose file, the directory of
-// traefik.yml and the one of the routes, which Traefik watches.
+// this host never finds them. They are Traefik's Compose file, the
+// directory of traefik.yml, and the directory of the routes, which Traefik
+// watches.
 func (f Files) traefikCompose() string    { return filepath.Join(f.Dir, "traefik", "compose.yaml") }
 func (f Files) traefikStaticDir() string  { return filepath.Join(f.Dir, "traefik", "static") }
 func (f Files) traefikDynamicDir() string { return filepath.Join(f.Dir, "traefik", "dynamic") }
 
 // traefikCertificatesDir holds the routes' certificates and keys in clear,
-// beside the stacks' secrets on the tmpfs: the "clowder-" prefix keeps a
-// stack from taking it.
+// beside the stacks' secrets on the tmpfs. The "clowder-" prefix keeps a
+// stack from using the same directory.
 func (f Files) traefikCertificatesDir() string { return filepath.Join(f.SecretsDir, ingress.Project) }
 
 // Host is host.json: who this host is in the cluster. init and join write it

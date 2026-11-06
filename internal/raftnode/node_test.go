@@ -215,8 +215,10 @@ func TestTheWatchSeesWhatTheLogChangedAfterItsSnapshot(t *testing.T) {
 	ctx := context.Background()
 	namespace := func(on *Node, name string) uint64 {
 		t.Helper()
-		index, err := on.Propose(ctx, command(t, state.KindPutResource, state.PutResource{
-			Kind: resource.KindNamespace, Name: name, Owner: state.OwnerCLI,
+		index, err := on.Propose(ctx, command(t, state.KindChangeResources, state.ChangeResources{
+			Changes: []state.ResourceChange{{Put: &state.PutResource{
+				Kind: resource.KindNamespace, Name: name, Owner: state.OwnerCLI,
+			}}},
 		}))
 		if err != nil {
 			t.Fatal(err)

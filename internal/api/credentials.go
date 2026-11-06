@@ -18,13 +18,13 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Credentials come from root on a host, as kubeadm's admin.conf does, the
-// first ones too: clowderd credentials makes a key and asks its own agent,
-// with the host's certificate, for a CLI certificate (POST
+// Credentials come from root on a host, like kubeadm's admin.conf, and so
+// do the first ones. clowderd credentials makes a key and asks its own
+// agent, with the host's certificate, for a CLI certificate (POST
 // /v1/internal/credentials). The CA is trusted through SSH. The cluster
-// lists no CLI certificates; with RevokeOlder, the agent also commits the
+// lists no CLI certificates. With RevokeOlder, the agent also commits the
 // new certificate's start as the cutoff (set-cli-cutoff), and every agent
-// refuses the CLI certificates issued before it.
+// then refuses the CLI certificates issued before it.
 
 // CredentialsRequest asks for a CLI certificate for a public key, with a
 // name for the audit (pki.DefaultCLIName without one).
@@ -35,7 +35,7 @@ type CredentialsRequest struct {
 }
 
 // CredentialsAnswer is the new CLI certificate and the CA to trust, with
-// what names the context: the cluster's name and the endpoints.
+// what the context needs: the cluster's name and the endpoints.
 type CredentialsAnswer struct {
 	CACertificate string `json:"ca_certificate"`
 	Certificate   string `json:"certificate"`
@@ -46,7 +46,7 @@ type CredentialsAnswer struct {
 }
 
 // internalCredentials issues a CLI certificate for root on a host, and
-// sets the cutoff to it if asked.
+// sets the cutoff to the certificate's start if asked.
 func (s *Server) internalCredentials(w http.ResponseWriter, r *http.Request) {
 	var request CredentialsRequest
 	if err := decodeStrict(r.Body, &request); err != nil {
@@ -105,10 +105,11 @@ func (s *Server) internalCredentials(w http.ResponseWriter, r *http.Request) {
 	answer := CredentialsAnswer{CACertificate: string(ca.CertificatePEM()), Certificate: string(certificatePEM)}
 	s.config.Cluster.Read(func(current *state.State) {
 		answer.ClusterName = current.ClusterName
-		// without a port: the client adds the API's (Address). A host that
-		// is down now may be back later, and costs the CLI its connect
-		// timeout once per command (the client starts with the endpoint
-		// that answered last), so every host that is not removed counts.
+		// without a port: the client adds the API's port (Address). A host
+		// that is down now may be back later, and costs the CLI only its
+		// connect timeout once per command (the client starts with the
+		// endpoint that answered last), so every host that is not removed
+		// counts.
 		for _, id := range slices.Sorted(maps.Keys(current.Hosts)) {
 			if host := current.Hosts[id]; host.Phase != state.Removed {
 				answer.Endpoints = append(answer.Endpoints, host.PublicAddress.String())
@@ -118,7 +119,7 @@ func (s *Server) internalCredentials(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, answer)
 }
 
-// authority opens the cluster CA from the state with the data key.
+// authority decrypts the cluster CA from the state with the data key.
 func (s *Server) authority() (*pki.CA, error) {
 	var keys *state.ClusterKeys
 	s.config.Cluster.Read(func(current *state.State) {
@@ -138,9 +139,9 @@ func (s *Server) authority() (*pki.CA, error) {
 }
 
 // cliCutoffPassed tells whether a CLI certificate that starts at notBefore
-// was issued after the cluster's cutoff, the one way a CLI certificate
-// ends before it expires. Certificates count in seconds, so one issued in
-// the same second as the new one stays valid too.
+// was issued after the cluster's cutoff. The cutoff is the one way that a
+// CLI certificate ends before it expires. Certificates count in seconds, so
+// a certificate issued in the same second as the new one also stays valid.
 func (s *Server) cliCutoffPassed(notBefore time.Time) bool {
 	var cutoff time.Time
 	s.config.Cluster.Read(func(current *state.State) { cutoff = current.CLICutoff })
@@ -153,7 +154,7 @@ type RotateRequest struct {
 }
 
 // rotateRecovery puts a new recovery key in place. The CLI's certificate is
-// enough: whoever holds it controls the cluster anyway.
+// enough, because whoever holds it controls the cluster anyway.
 func (s *Server) rotateRecovery(w http.ResponseWriter, r *http.Request) {
 	var request RotateRequest
 	if err := decodeStrict(r.Body, &request); err != nil {

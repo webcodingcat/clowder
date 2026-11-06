@@ -21,25 +21,26 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// A host joins with a one-time token a user made (clowder host join-token,
-// internal/jointoken):
+// A host joins with a one-time token that a user made (clowder host
+// join-token, internal/jointoken):
 //
-//  1. GET /v1/join?token=<id>: the agent sends its CA certificate and, while
-//     the token is open, pki.TrustProof over it made with the token's hash
-//     (jointoken.ProofKey). The joining host trusts the CA only if the
-//     proof matches its token.
+//  1. GET /v1/join?token=<id>: the agent sends its CA certificate and,
+//     while the token is open, a pki.TrustProof over it, made with the
+//     token's hash (jointoken.ProofKey). The joining host trusts the CA only
+//     if the proof matches its token.
 //  2. POST /v1/join over TLS checked against that CA: the token itself, the
 //     host's name, addresses, server ID and public keys, a nonce and the
-//     time. Any agent takes it and hands it to the leader, which checks the
-//     token and the server with Hetzner, chooses the host's ID, issues its
-//     certificate and commits add-host, which uses the token up. The answer
-//     carries the certificate, the data key and the other hosts.
+//     time. Any agent accepts the request and hands it to the leader. The
+//     leader checks the token and the server with Hetzner, chooses the
+//     host's ID, issues its certificate and commits add-host, which uses
+//     the token up. The answer carries the certificate, the data key and
+//     the other hosts.
 //
-// Neither request has a client certificate, so each agent takes only so
-// many tries of them per minute (limiter).
+// Neither request has a client certificate, so each agent accepts only a
+// limited number of tries per minute (limiter).
 
 // JoinOffer is the agent's answer to a joining host's first contact. It
-// comes unchecked; the proof makes the CA trustworthy.
+// arrives unchecked; the proof makes the CA trustworthy.
 type JoinOffer struct {
 	CACertificate string `json:"ca_certificate"`
 	Proof         []byte `json:"proof"`
@@ -47,8 +48,8 @@ type JoinOffer struct {
 
 // JoinRequest asks the leader to add a host.
 type JoinRequest struct {
-	// Token is the whole join token: it travels only over TLS checked
-	// against the CA the proof made trustworthy.
+	// Token is the whole join token. It travels only over TLS checked
+	// against the CA that the proof made trustworthy.
 	Token         string     `json:"token"`
 	Name          string     `json:"name"`
 	Underlay      netip.Addr `json:"underlay"`
@@ -56,15 +57,15 @@ type JoinRequest struct {
 	ServerID      int64      `json:"server_id"`
 	WGPublicKey   string     `json:"wg_public_key"`
 	// PublicKey is the host's own key (Ed25519), which its certificate is
-	// for; the private half never leaves the host.
+	// issued for. The private half never leaves the host.
 	PublicKey []byte `json:"public_key"`
-	// Nonce and Time make each request one of its own: the leader takes a
-	// request only once, and only for joinMaxAge.
+	// Nonce and Time make each request unique. The leader accepts a
+	// request only once, and only within joinMaxAge.
 	Nonce []byte    `json:"nonce"`
 	Time  time.Time `json:"time"`
-	// Source is the address the request came from, which the agent that
-	// took it sets: the leader takes a join only from the host's own
-	// addresses.
+	// Source is the address that the request came from. The agent that
+	// accepted the request sets it, and the leader accepts a join only from
+	// the host's own addresses.
 	Source netip.Addr `json:"source,omitzero"`
 }
 
@@ -77,7 +78,7 @@ type JoinAnswer struct {
 	Certificate string       `json:"certificate"`
 	// DataKey is the cluster's data key in age's text form.
 	DataKey string `json:"data_key"`
-	// Peers are the other hosts: the new host builds its WireGuard
+	// Peers are the other hosts. The new host builds its WireGuard
 	// interfaces to them before Raft can tell it anything.
 	Peers []JoinPeer `json:"peers"`
 }
@@ -89,21 +90,21 @@ type JoinPeer struct {
 	Underlay    netip.Addr   `json:"underlay"`
 }
 
-// Joins is the leader's side of a join, which the agent implements: it
+// Joins is the leader's side of a join, which the agent implements. It
 // checks the request against the state and Hetzner, and commits it.
 type Joins interface {
-	// Join adds the host. A refusal is a *StatusError the joining host is
-	// shown (JoinRefused); any other error is the cluster's.
+	// Join adds the host. A refusal is a *StatusError that the joining host
+	// is shown (JoinRefused); any other error is the cluster's fault.
 	Join(ctx context.Context, request JoinRequest) (JoinAnswer, error)
 }
 
-// JoinRefused is a refusal of a join, with why.
+// JoinRefused is a refusal of a join, with the reason.
 func JoinRefused(err error) error {
 	return &StatusError{Status: http.StatusForbidden, Message: err.Error()}
 }
 
-// DefaultJoinTokenTTL is how long a join token opens unless the user says
-// otherwise.
+// DefaultJoinTokenTTL is how long a join token stays open unless the user
+// says otherwise.
 const DefaultJoinTokenTTL = state.DefaultJoinTokenTTL
 
 // JoinTokenRequest asks for a join token that lives for TTL, a Go
@@ -112,14 +113,15 @@ type JoinTokenRequest struct {
 	TTL string `json:"ttl"`
 }
 
-// JoinTokenAnswer is a new join token, the only time it is shown.
+// JoinTokenAnswer is a new join token. This is the only time the token is
+// shown.
 type JoinTokenAnswer struct {
 	Token   string    `json:"token"`
 	Expires time.Time `json:"expires"`
 }
 
-// JoiningCluster is a cluster a joining host found and trusts: its CA
-// proved it knows the token.
+// JoiningCluster is a cluster that a joining host found and trusts,
+// because its CA proved that it knows the token.
 type JoiningCluster struct {
 	endpoint, version string
 	connectTimeout    time.Duration
@@ -174,8 +176,9 @@ func (c *JoiningCluster) Join(ctx context.Context, request JoinRequest) (JoinAns
 		return JoinAnswer{}, fmt.Errorf("join through %s: %w", c.endpoint, err)
 	}
 	httpRequest.Header.Set(VersionHeader, c.version)
-	// longer than the leader takes: an answer given up on would leave the
-	// host joined in the state, its token used, and nothing on the host
+	// longer than the leader takes: if the host gave up on the answer, the
+	// state would have the host joined and its token used, but the host
+	// itself would have nothing
 	client := checkedClient(c.CA, c.connectTimeout)
 	client.Timeout = joinClientTimeout
 	var answer JoinAnswer
@@ -185,7 +188,7 @@ func (c *JoiningCluster) Join(ctx context.Context, request JoinRequest) (JoinAns
 	return answer, nil
 }
 
-// uncheckedClient is for a joining host's first contact: there is nothing
+// uncheckedClient is for a joining host's first contact. There is nothing
 // to check the agent against yet, so the trust proof in its answer decides.
 func uncheckedClient(connectTimeout time.Duration) *http.Client {
 	tlsConfig := &tls.Config{
@@ -198,8 +201,8 @@ func uncheckedClient(connectTimeout time.Duration) *http.Client {
 	}
 }
 
-// checkedClient talks without a certificate to agents of a CA a trust
-// proof made trustworthy.
+// checkedClient talks, without a client certificate, to agents of a CA
+// that a trust proof made trustworthy.
 func checkedClient(ca *x509.Certificate, connectTimeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout:   answerTimeout,
@@ -207,9 +210,10 @@ func checkedClient(ca *x509.Certificate, connectTimeout time.Duration) *http.Cli
 	}
 }
 
-// CheckJoinRequest refuses a request that is too old or too new, or that
-// is not whole: the checks of its form, in one place. The leader checks
-// the rest against the state (state.CheckJoiningHost) and Hetzner.
+// CheckJoinRequest refuses a request that is too old, too new or
+// incomplete. It keeps the checks of the request's form in one place. The
+// leader checks the rest against the state (state.CheckJoiningHost) and
+// Hetzner.
 func CheckJoinRequest(request JoinRequest, now time.Time) error {
 	if age := now.Sub(request.Time); age > joinMaxAge || age < -joinMaxAge {
 		return errors.New("the request is too old (or a clock is off by minutes)")
@@ -227,7 +231,7 @@ func CheckJoinRequest(request JoinRequest, now time.Time) error {
 	return nil
 }
 
-// newJoinToken makes a join token and commits it; only its hash goes into
+// newJoinToken makes a join token and commits it. Only its hash goes into
 // the state.
 func (s *Server) newJoinToken(w http.ResponseWriter, r *http.Request) {
 	var request JoinTokenRequest
@@ -235,7 +239,7 @@ func (s *Server) newJoinToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	// the state checks the bounds too; here they come with a 400
+	// the state checks the bounds too; checking here gives a 400
 	ttl, err := time.ParseDuration(request.TTL)
 	if err != nil || ttl < state.MinJoinTokenTTL || ttl > state.MaxJoinTokenTTL {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("a join token lives %s to %s, not %q",
@@ -268,8 +272,8 @@ func (s *Server) newJoinToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, JoinTokenAnswer{Token: token.String(), Expires: expires})
 }
 
-// joinOffer answers a joining host's first contact: a proof only while
-// the token is open.
+// joinOffer answers a joining host's first contact. It includes a proof
+// only while the token is open.
 func (s *Server) joinOffer(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("token")
 	var caPEM []byte
@@ -293,7 +297,7 @@ func (s *Server) joinOffer(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// join takes a join request on any agent: the leader handles it, a
+// join accepts a join request on any agent. The leader handles it, and a
 // follower hands it on.
 func (s *Server) join(w http.ResponseWriter, r *http.Request) {
 	var request JoinRequest
@@ -322,7 +326,7 @@ func (s *Server) join(w http.ResponseWriter, r *http.Request) {
 	s.answerJoin(w, answer, err)
 }
 
-// joinTimeout bounds a join on the leader: it asks Hetzner and commits.
+// joinTimeout bounds a join on the leader, which asks Hetzner and commits.
 // The joining host waits joinClientTimeout, longer than the leader and the
 // agent that hands its request on.
 const (
@@ -348,8 +352,8 @@ func (s *Server) internalJoin(w http.ResponseWriter, r *http.Request) {
 	s.answerJoin(w, answer, err)
 }
 
-// answerJoin answers a join: a refusal as it is, any other error as the
-// cluster's.
+// answerJoin answers a join. It passes a refusal on as it is, and reports
+// any other error as the cluster's fault.
 func (s *Server) answerJoin(w http.ResponseWriter, answer JoinAnswer, err error) {
 	var statusError *StatusError
 	switch {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/notify"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -53,24 +54,24 @@ func newTestAlerts(t *testing.T) (*Alerts, *leader, *fakeChannel, *fakeChannel) 
 	var config clusterspec.Config
 	l.Read(func(current *state.State) { config = current.Config.Spec })
 	config.Alerts = &clusterspec.Alerts{Channels: []clusterspec.AlertChannel{
-		{Type: "webhook", URL: "alerts.channels[0].url"},
-		{Type: "discord", Webhook: "alerts.channels[1].webhook", MinSeverity: clusterspec.SeverityCritical},
-	}}
-	l.apply(state.KindApplyConfig, state.CLIActor("admin"), state.ApplyConfig{
-		Spec: config,
-		Secrets: map[string]state.SealedSecret{
-			"hetzner.token":              {Value: state.Sealed("t"), Digest: "d"},
-			"alerts.channels[0].url":     {Value: state.Sealed("h"), Digest: "d"},
-			"alerts.channels[1].webhook": {Value: state.Sealed("d"), Digest: "d"},
+		{Type: "webhook", URLSecretRef: &names.SecretKeyRef{Name: "alerts", Key: "webhook"}},
+		{
+			Type: "discord", WebhookSecretRef: &names.SecretKeyRef{Name: "alerts", Key: "discord"},
+			MinSeverity: clusterspec.SeverityCritical,
 		},
-	})
+	}}
+	putSystemSecret(l, "alerts", map[string]string{"webhook": "h", "discord": "d"})
+	putConfig(l, config)
 	webhook, discord := &fakeChannel{}, &fakeChannel{}
-	open := func(sealed state.Sealed) ([]byte, error) { return sealed, nil }
-	alerts := NewAlerts(l, l.propose, open, NewConditions(), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	alerts.connect = func(channel clusterspec.AlertChannel, secrets notify.Secrets, _ map[string][]byte) (notify.Notifier, error) {
+	alerts := NewAlerts(l, l.propose, openPadded, NewConditions(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	alerts.connect = func(channel clusterspec.AlertChannel, secrets notify.Secrets) (notify.Notifier, error) {
 		if channel.Type == "webhook" {
-			if url, err := secrets(channel.URL); err != nil || url != "h" {
+			// the URL comes from the Secret of clowder-system
+			if url, err := secrets(*channel.URLSecretRef); err != nil || url != "h" {
 				t.Errorf("the webhook's URL %q, %v", url, err)
+			}
+			if _, err := secrets(names.SecretKeyRef{Name: "alerts", Key: "missing"}); err == nil {
+				t.Error("a key the Secret lacks opened")
 			}
 			return webhook, nil
 		}

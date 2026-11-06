@@ -13,8 +13,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// challengeHandler answers ACME's HTTP-01 challenges from the state, where
-// the leader puts them while it orders: every agent serves them, so
+// challengeHandler answers ACME's HTTP-01 challenges. The leader puts them
+// in the state while it orders a certificate. Every agent serves them, so
 // whichever host holds the Floating IP can answer the CA.
 func challengeHandler(cluster loop.Cluster) http.Handler {
 	mux := http.NewServeMux()

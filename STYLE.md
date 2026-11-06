@@ -1,7 +1,7 @@
 # Style
 
-Official standards first, checked by `bin/dev lint`; `bin/dev format` applies what the
-formatters can fix.
+The official standards come first, and `bin/dev lint` checks them; `bin/dev format`
+applies what the formatters can fix.
 
 | Files | Standard | Tool |
 |---|---|---|
@@ -14,25 +14,27 @@ formatters can fix.
 ## Rules on top of the standards
 
 - English throughout.
-- Readable before short: descriptive names (`host`, `volume`, `stack`, not `h`, `v`, `s`);
-  single letters only for loop variables, receivers and one-line closures. Understandable
-  abbreviations (`cfg`, `ip`, `cmd`, IDs like `hostID`) are fine. One exception: a test's
-  fixture that the whole test works through, as a receiver would be (`c :=
-  newCluster(t)` in the state's tests, `l` for the controller's leader).
+- Readable before short: use descriptive names (`host`, `volume`, `stack`, not `h`, `v`,
+  `s`). Use single letters only for loop variables, receivers and one-line closures.
+  Understandable abbreviations (`cfg`, `ip`, `cmd`, IDs like `hostID`) are fine. One
+  exception: a test fixture that the whole test works through, the way it would work
+  through a receiver (`c := newCluster(t)` in the state's tests, `l` for the controller's
+  leader).
 - One job per function; no `Run()` that only calls `run()`.
-- Comments and doc comments say why (DRBD's or the kernel's behavior, a caveat); the code says
-  what. Doc comments are sentences; other comments may be short lowercase fragments.
-- Imports in three groups: standard library, others, this module (`goimports` with the local
-  prefix sorts them).
+- Comments and doc comments say why (DRBD's or the kernel's behavior, a caveat); the code
+  says what. Doc comments are sentences; other comments may be short lowercase fragments.
+- Imports in three groups: standard library, others, this module (`goimports` with the
+  local prefix sorts them).
 - JSON and YAML names: what users write and read as resources (`resource.Object`, the
-  specs, the statuses `get` shows) is camelCase, as in Kubernetes; everything else
-  (commands, the state, snapshots, the API's other bodies, `cluster.yaml`) is snake_case.
-- Errors: wrap with `fmt.Errorf("what was tried: %w", err)`; compare with `errors.Is` and
-  `errors.As`. Messages start lowercase and have no trailing period.
-- Logging: `log/slog` with key–value pairs (`"host", name`), never `fmt.Print` for logs.
-- Tests: next to the code (`foo_test.go`), names say what they check
-  (`TestVersionPrintsTheBuildVersion`); table tests where cases differ only in data; renderers
-  of configuration (nft, DRBD, Traefik, Compose) are tested against golden files in
-  `testdata/`.
+  specs, the statuses that `get` shows) is camelCase, as in Kubernetes. Everything else
+  (commands, the state, snapshots, the API's other bodies, the CLI's credentials file) is
+  snake_case.
+- Errors: wrap them with `fmt.Errorf("what was tried: %w", err)`, and compare them with
+  `errors.Is` and `errors.As`. Messages start lowercase and have no trailing period.
+- Logging: use `log/slog` with key–value pairs (`"host", name`), never `fmt.Print` for logs.
+- Tests: they live next to the code (`foo_test.go`), and their names say what they check
+  (`TestVersionPrintsTheBuildVersion`). Use table tests where cases differ only in data.
+  Renderers of configuration (nft, DRBD, Traefik, Compose) are tested against golden files
+  in `testdata/`.
 - Shell scripts start with a comment that says what they do and how to call them; every
   function has a header comment.

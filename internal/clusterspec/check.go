@@ -1,6 +1,7 @@
 package clusterspec
 
 import (
+	"crypto/x509"
 	"fmt"
 	"maps"
 	"net/mail"
@@ -14,49 +15,58 @@ import (
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// clowder's own address ranges. They live here, where cluster.yaml is
-// checked against them; network and hostcheck take them from here.
+// clowder's own address ranges. They are defined here, where the
+// configuration is checked against them; network and hostcheck use them
+// from here.
 var (
 	// Overlay holds the node addresses.
 	Overlay = netip.MustParsePrefix("10.77.0.0/24")
 	// ExportVIPs holds the addresses of exported services.
 	ExportVIPs = netip.MustParsePrefix("10.78.0.0/16")
-	// ClowderRanges are both: neither the private network nor Docker's
-	// address pools may overlap them.
+	// ClowderRanges are both ranges. Neither the private network nor
+	// Docker's address pools may overlap them.
 	ClowderRanges = []netip.Prefix{Overlay, ExportVIPs}
 )
 
-// Problems lists everything wrong in a cluster directory at once.
+// MaxCASize bounds a CA in the configuration (acme.ca, smtp.ca), because
+// the configuration travels in the state, which every agent keeps in
+// memory.
+const MaxCASize = 64 << 10
+
+// Problems lists everything wrong in a configuration at once.
 type Problems []string
 
 func (p Problems) Error() string {
-	return "the cluster directory has problems:\n  - " + strings.Join(p, "\n  - ")
+	return "the configuration has problems:\n  - " + strings.Join(p, "\n  - ")
 }
 
-// Check returns what is wrong in cluster.yaml, or nothing.
+// Check returns what is wrong in the configuration on its own, or nothing.
+// The state checks whether the Secrets it names exist.
 func Check(config Config) Problems {
 	var problems Problems
 	report := func(format string, args ...any) {
 		problems = append(problems, fmt.Sprintf(format, args...))
 	}
 
-	problems = append(problems, checkHetzner(config.Hetzner)...)
+	if config.Hetzner.API != "" && !fullURL(config.Hetzner.API) {
+		report("hetzner.api %q is not a full URL with http:// or https://", config.Hetzner.API)
+	}
 	network, err := netip.ParsePrefix(config.PrivateNetwork)
 	if err != nil || !network.Addr().Is4() || network != network.Masked() {
-		report("private_network %q is not an IPv4 network such as 10.0.0.0/16", config.PrivateNetwork)
+		report("privateNetwork %q is not an IPv4 network such as 10.0.0.0/16", config.PrivateNetwork)
 	}
 	for _, used := range ClowderRanges {
 		if err == nil && network.Overlaps(used) {
-			report("private_network %s overlaps clowder's %s", network, used)
+			report("privateNetwork %s overlaps clowder's %s", network, used)
 		}
 	}
 	if address, err := netip.ParseAddr(config.Ingress.FloatingIP); err != nil || !address.Is4() {
-		report("ingress.floating_ip %q is not an IPv4 address", config.Ingress.FloatingIP)
+		report("ingress.floatingIP %q is not an IPv4 address", config.Ingress.FloatingIP)
 	}
 	problems = append(problems, checkStorageClasses(config.StorageClasses)...)
 	if config.Replication.ResyncRate != "" {
 		if _, err := units.ParseSize(config.Replication.ResyncRate); err != nil {
-			report("replication.resync_rate: %v", err)
+			report("replication.resyncRate: %v", err)
 		}
 	}
 	problems = append(problems, checkPriorities(config.Priorities)...)
@@ -66,89 +76,69 @@ func Check(config Config) Problems {
 		}
 	}
 	problems = append(problems, checkResources("defaults.reservations", config.Defaults.Reservations)...)
-	problems = append(problems, checkResources("system_reserve", config.SystemReserve)...)
+	problems = append(problems, checkResources("systemReserve", config.SystemReserve)...)
 	if config.Alerts != nil {
 		for index, channel := range config.Alerts.Channels {
 			problems = append(problems, checkChannel(index, channel)...)
 		}
-		if heartbeat := config.Alerts.Heartbeat; heartbeat != nil {
-			if heartbeat.URL == "" {
-				report("alerts.heartbeat.url: a value tagged !secret is required")
-			}
-			if heartbeat.Interval != "" {
-				if interval, err := units.ParseDuration(heartbeat.Interval); err != nil || interval <= 0 {
-					report("alerts.heartbeat.interval %q is not a positive duration like 5m", heartbeat.Interval)
-				}
+		if heartbeat := config.Alerts.Heartbeat; heartbeat != nil && heartbeat.Interval != "" {
+			if interval, err := units.ParseDuration(heartbeat.Interval); err != nil || interval <= 0 {
+				report("alerts.heartbeat.interval %q is not a positive duration like 5m", heartbeat.Interval)
 			}
 		}
 	}
 	problems = append(problems, checkACME(config.ACME)...)
-	for _, host := range slices.Sorted(maps.Keys(config.Registries)) {
-		if config.Registries[host].Username == "" {
-			report("registries[%q].username is required", host)
-		}
-		if config.Registries[host].Password == "" {
-			report("registries[%q].password: a value tagged !secret is required", host)
-		}
-	}
 	for _, place := range SecretPlaces(config) {
-		if string(place.Name) != place.Path {
-			report("%s names the secret %q; a secret is named by its place", place.Path, place.Name)
+		if problem := place.Ref.Problem(); problem != "" {
+			report("%s: %s", place.Path, problem)
 		}
-	}
-	files := FileNames(config)
-	for _, name := range files {
-		if !validFileName(name) {
-			report("%q is not a path relative to %s, written with /", name, FileName)
-		}
-	}
-	if len(files) > maxFiles {
-		report("%s names %d files; at most %d are allowed", FileName, len(files), maxFiles)
-	}
-	return problems
-}
-
-// checkHetzner: a token, and an API that is a full http or https URL: the
-// token goes there.
-func checkHetzner(hetzner Hetzner) Problems {
-	var problems Problems
-	if hetzner.Token == "" {
-		problems = append(problems, "hetzner.token: a value tagged !secret is required")
-	}
-	if hetzner.API != "" && !fullURL(hetzner.API) {
-		problems = append(problems, fmt.Sprintf("hetzner.api %q is not a full URL with http:// or https://", hetzner.API))
 	}
 	return problems
 }
 
 // fullURL tells whether text is a URL with the scheme http or https and a
-// host: clowder sends tokens and keys there.
+// host, because clowder sends tokens and keys there.
 func fullURL(text string) bool {
 	parsed, err := url.Parse(text)
 	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
-// EndpointWarnings warns about hetzner.api and acme.directory. Unset, clowder
-// talks to Hetzner's API and Let's Encrypt over https; set, they point it
-// elsewhere, which is meant for test labs, and over http the Hetzner token
-// and the ACME requests cross the network unencrypted. The CLI prints them
-// as cluster.yaml goes out, the leader logs them.
-func EndpointWarnings(config Config) []string {
+// checkCA checks that a CA, if there is one, is PEM with a certificate and
+// within MaxCASize.
+func checkCA(path, ca string) Problems {
+	switch {
+	case ca == "":
+		return nil
+	case len(ca) > MaxCASize:
+		return Problems{fmt.Sprintf("%s is larger than %d KiB", path, MaxCASize>>10)}
+	case !x509.NewCertPool().AppendCertsFromPEM([]byte(ca)):
+		return Problems{path + " holds no PEM certificate"}
+	}
+	return nil
+}
+
+// ServiceURLWarnings warns about hetzner.api and acme.directory, the URLs
+// of the services that clowder talks to. When they are unset, clowder
+// talks to Hetzner's API and Let's Encrypt over https. When they are set,
+// they point clowder elsewhere, which is meant for test labs; over http,
+// the Hetzner token and the ACME requests cross the network unencrypted.
+// An apply returns the warnings, and the leader logs them.
+func ServiceURLWarnings(config Config) []string {
 	var warnings []string
 	if config.Hetzner.API != "" {
-		warnings = append(warnings, endpointWarning("hetzner.api", config.Hetzner.API,
+		warnings = append(warnings, serviceURLWarning("hetzner.api", config.Hetzner.API,
 			"instead of Hetzner's own API", "the Hetzner token"))
 	}
 	if config.ACME.Directory != "" {
-		warnings = append(warnings, endpointWarning("acme.directory", config.ACME.Directory,
+		warnings = append(warnings, serviceURLWarning("acme.directory", config.ACME.Directory,
 			"instead of Let's Encrypt", "the ACME account's requests"))
 	}
 	return warnings
 }
 
-// endpointWarning says that a field points clowder elsewhere, and what
+// serviceURLWarning says that a field points clowder elsewhere, and what
 // crosses the network in the clear when the URL is http.
-func endpointWarning(field, address, insteadOf, secret string) string {
+func serviceURLWarning(field, address, insteadOf, secret string) string {
 	warning := fmt.Sprintf("%s is set: clowder uses %s %s, which is meant for test labs", field, address, insteadOf)
 	if strings.HasPrefix(address, "http://") {
 		warning += "; over http " + secret + " crosses the network unencrypted"
@@ -156,13 +146,14 @@ func endpointWarning(field, address, insteadOf, secret string) string {
 	return warning
 }
 
-// checkACME: a full URL for the directory, an address for the email and a
-// positive duration for renew_before.
+// checkACME checks for a full URL for the directory, a valid CA, an
+// address for the email and a positive duration for renewBefore.
 func checkACME(acme ACME) Problems {
 	var problems Problems
 	if acme.Directory != "" && !fullURL(acme.Directory) {
 		problems = append(problems, fmt.Sprintf("acme.directory %q is not a full URL with http:// or https://", acme.Directory))
 	}
+	problems = append(problems, checkCA("acme.ca", acme.CA)...)
 	if acme.Email != "" {
 		if address, err := mail.ParseAddress(acme.Email); err != nil || address.Address != acme.Email {
 			problems = append(problems, fmt.Sprintf("acme.email %q is not an email address", acme.Email))
@@ -170,18 +161,18 @@ func checkACME(acme ACME) Problems {
 	}
 	if acme.RenewBefore != "" {
 		if renewBefore, err := units.ParseDuration(acme.RenewBefore); err != nil || renewBefore <= 0 {
-			problems = append(problems, fmt.Sprintf("acme.renew_before %q is not a positive duration like 30d", acme.RenewBefore))
+			problems = append(problems, fmt.Sprintf("acme.renewBefore %q is not a positive duration like 30d", acme.RenewBefore))
 		}
 	}
 	return problems
 }
 
-// checkStorageClasses: a class has a pool or falls back to other classes,
-// which must have pools themselves.
+// checkStorageClasses checks that a class has a pool or falls back to
+// other classes, which must have pools themselves.
 func checkStorageClasses(classes map[string]StorageClass) Problems {
 	var problems Problems
 	if len(classes) == 0 {
-		problems = append(problems, "storage_classes: at least one class is required")
+		problems = append(problems, "storageClasses: at least one class is required")
 	}
 	for _, name := range slices.Sorted(maps.Keys(classes)) {
 		class := classes[name]
@@ -218,9 +209,10 @@ func validPercent(text string) bool {
 	return strings.HasSuffix(text, "%") && err == nil && number >= 0 && number <= 90
 }
 
-// checkPriorities: numbers from 0 to 1000, and the default is one of the
-// categories. Without categories the default ones apply (withDefaults), so
-// the default must be one of those; with own categories it must be named.
+// checkPriorities checks for numbers from 0 to 1000, and that the default
+// is one of the categories. Without categories, the default categories
+// apply (withDefaults), so the default must be one of those. With its own
+// categories, the configuration must name the default.
 func checkPriorities(priorities Priorities) Problems {
 	var problems Problems
 	for _, name := range slices.Sorted(maps.Keys(priorities.Categories)) {
@@ -239,7 +231,7 @@ func checkPriorities(priorities Priorities) Problems {
 	return problems
 }
 
-// checkResources: a memory size and a positive number of CPUs.
+// checkResources checks for a memory size and a positive number of CPUs.
 func checkResources(where string, resources Resources) Problems {
 	var problems Problems
 	if resources.Memory != "" {
@@ -255,23 +247,24 @@ func checkResources(where string, resources Resources) Problems {
 	return problems
 }
 
-// checkChannel: each type needs its own fields.
+// checkChannel checks that each type has its own fields and no other
+// type's secret.
 func checkChannel(index int, channel AlertChannel) Problems {
 	var problems Problems
 	report := func(problem string) {
 		problems = append(problems, fmt.Sprintf("alerts.channels[%d] (%s): %s", index, channel.Type, problem))
 	}
 	if channel.MinSeverity != "" && !slices.Contains(Severities, channel.MinSeverity) {
-		report(fmt.Sprintf("min_severity %q is not info, warning or critical", channel.MinSeverity))
+		report(fmt.Sprintf("minSeverity %q is not info, warning or critical", channel.MinSeverity))
 	}
 	switch channel.Type {
 	case "discord":
-		if channel.Webhook == "" {
-			report("webhook: a value tagged !secret is required")
+		if channel.WebhookSecretRef == nil {
+			report("webhookSecretRef is required")
 		}
 	case "webhook":
-		if channel.URL == "" {
-			report("url: a value tagged !secret is required")
+		if channel.URLSecretRef == nil {
+			report("urlSecretRef is required")
 		}
 	case "email":
 		if channel.SMTP == nil || channel.From == "" || len(channel.To) == 0 {
@@ -281,6 +274,17 @@ func checkChannel(index int, channel AlertChannel) Problems {
 		}
 	default:
 		report("type is not discord, email or webhook")
+	}
+	if channel.Type != "discord" && channel.WebhookSecretRef != nil {
+		report("webhookSecretRef is a discord channel's")
+	}
+	if channel.Type != "webhook" && channel.URLSecretRef != nil {
+		report("urlSecretRef is a webhook channel's")
+	}
+	if channel.SMTP != nil {
+		for _, problem := range checkCA("smtp.ca", channel.SMTP.CA) {
+			report(problem)
+		}
 	}
 	return problems
 }

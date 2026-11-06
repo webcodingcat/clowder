@@ -12,9 +12,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/pki"
 )
 
-// tlsStream is Raft's network layer over mutual TLS: both sides present a
-// host certificate of the cluster CA that is not revoked. Users' and
-// strangers' certificates fail the handshake.
+// tlsStream is Raft's network layer over mutual TLS. Both sides present a
+// host certificate from the cluster CA that is not revoked. Certificates of
+// users and of strangers fail the handshake.
 type tlsStream struct {
 	net.Listener
 	advertise net.Addr
@@ -33,8 +33,8 @@ func newTLSStream(bind string, advertise net.Addr, certificate tls.Certificate, 
 	return &tlsStream{Listener: listener, advertise: advertise, client: client}, nil
 }
 
-// Addr is the address peers dial, not the one bound (which may be 0.0.0.0
-// in a test).
+// Addr is the address that peers dial, not the bound address (which may be
+// 0.0.0.0 in a test).
 func (s *tlsStream) Addr() net.Addr {
 	return s.advertise
 }

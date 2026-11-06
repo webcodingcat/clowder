@@ -20,7 +20,8 @@ func newStack(g *globals) *cobra.Command {
 	return stack
 }
 
-// stackPath is the API's path of one stack's containers, logs or restart.
+// stackPath returns the API's path of one stack's containers, logs or
+// restart.
 func stackPath(stack selection, what string) string {
 	return "/v1/stacks/" + url.PathEscape(stack.namespace) + "/" + url.PathEscape(stack.name) + "/" + what
 }
@@ -93,9 +94,9 @@ func newStackRestart(g *globals) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "restart [<namespace>/]<stack> [<service>...]",
 		Short: "Recreate a stack's containers with their images pulled again",
-		Long: "Recreates the containers of the services named, or of all of them, and of every service\n" +
-			"that depends on one of them, after pulling their images again: for a new image under the\n" +
-			"same tag, or a retry. The stack's spec stays as it is.",
+		Long: "Recreates the containers of the named services, or of all services, and of every service\n" +
+			"that depends on one of them, after pulling their images again. Use it for a new image\n" +
+			"under the same tag, or for a retry. The stack's spec stays as it is.",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			stack, err := selected.resolve("stack", args[0])
@@ -123,11 +124,11 @@ func newStackMove(g *globals) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "move [<namespace>/]<stack> <host>",
 		Short: "Move a stack to another host",
-		Long: "Moves a stack to another host: its volumes get a copy there first, and once the copies\n" +
-			"are synced and the images pulled, the stack stops on its host and starts on the new one.\n" +
-			"A volume of replicas 0 holds throw-away data: it starts empty on the new host. The move\n" +
-			"starts once the stack fits there; get stacks says why it waits. A move to the host the\n" +
-			"stack runs on takes a request back.",
+		Long: "Moves a stack to another host. Its volumes first get a copy there. Once the copies are\n" +
+			"synced and the images are pulled, the stack stops on its old host and starts on the new\n" +
+			"one. A volume of replicas 0 holds throw-away data, so it starts empty on the new host.\n" +
+			"The move starts once the stack fits on the new host; get stacks says why it waits. A\n" +
+			"move to the host that the stack runs on takes back an earlier request.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			stack, err := selected.resolve("stack", args[0])

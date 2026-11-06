@@ -1,6 +1,6 @@
-// Package clusterspec is cluster.yaml as clowder reads it: its types, their
-// defaults and Check. It does no I/O, so the state reads and checks the
-// config itself; reading the cluster directory is clusterdir's.
+// Package clusterspec is the spec of the ClusterConfiguration resource: its
+// types, their defaults and Check. It does no I/O, so the state reads and
+// checks the configuration itself.
 package clusterspec
 
 import (
@@ -10,55 +10,53 @@ import (
 	"strings"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// FileName is the name of the file in the cluster directory.
-const FileName = "cluster.yaml"
-
-// Config is cluster.yaml: everything cluster-wide. Changes take effect with
-// `clowder cluster apply`; the file is the source, the cluster keeps a copy.
-// No secret is in it: where cluster.yaml has a value tagged !secret, Config
-// has its name (SecretRef), and the value travels apart. The json names are
-// how the cluster state stores the file: a Go field may be renamed, its tags
-// never.
+// Config is the spec of the cluster's one ClusterConfiguration: everything
+// cluster-wide, like kubeadm's ClusterConfiguration. It holds no secret.
+// Instead, it names Secrets of the namespace names.System (SecretKeyRef),
+// which the state keeps separately. Its json names are what users write
+// and what the state stores, so a Go field may be renamed, but its tags
+// never change.
 type Config struct {
-	Hetzner Hetzner `yaml:"hetzner" json:"hetzner" jsonschema:"required"`
-	// Registries are the logins for private image registries, by host.
-	Registries map[string]Registry `yaml:"registries,omitempty" json:"registries,omitempty"`
-	// PrivateNetwork is the Hetzner private network the hosts share, as a
-	// CIDR: each host's underlay is in it. Containers may not reach it.
-	PrivateNetwork string                  `yaml:"private_network" json:"private_network" jsonschema:"required"`
-	Ingress        Ingress                 `yaml:"ingress" json:"ingress" jsonschema:"required"`
-	StorageClasses map[string]StorageClass `yaml:"storage_classes" json:"storage_classes" jsonschema:"required"`
-	Replication    Replication             `yaml:"replication,omitempty" json:"replication,omitempty"`
-	Priorities     Priorities              `yaml:"priorities,omitempty" json:"priorities,omitempty"`
-	Stacks         Stacks                  `yaml:"stacks,omitempty" json:"stacks,omitempty"`
-	Defaults       Defaults                `yaml:"defaults,omitempty" json:"defaults,omitempty"`
-	SystemReserve  Resources               `yaml:"system_reserve,omitempty" json:"system_reserve,omitempty"`
-	Alerts         *Alerts                 `yaml:"alerts,omitempty" json:"alerts,omitempty"`
-	ACME           ACME                    `yaml:"acme,omitempty" json:"acme,omitempty"`
+	Hetzner Hetzner `json:"hetzner"`
+	// PrivateNetwork is the Hetzner private network that the hosts share,
+	// as a CIDR. Each host's underlay is in it. Containers may not reach
+	// it.
+	PrivateNetwork string                  `json:"privateNetwork"`
+	Ingress        Ingress                 `json:"ingress"`
+	StorageClasses map[string]StorageClass `json:"storageClasses"`
+	Replication    Replication             `json:"replication,omitzero"`
+	Priorities     Priorities              `json:"priorities,omitzero"`
+	Stacks         Stacks                  `json:"stacks,omitzero"`
+	Defaults       Defaults                `json:"defaults,omitzero"`
+	SystemReserve  Resources               `json:"systemReserve,omitzero"`
+	Alerts         *Alerts                 `json:"alerts,omitempty"`
+	ACME           ACME                    `json:"acme,omitzero"`
 }
 
-// Priorities are the categories a stack or service may name instead of a
-// number. Without the block, DefaultPriorities applies.
+// Priorities are the categories that a stack or service may name instead
+// of a number. Without the block, DefaultPriorities applies.
 type Priorities struct {
 	// Default is the category of stacks that name none.
-	Default string `yaml:"default,omitempty" json:"default,omitempty"`
+	Default string `json:"default,omitempty"`
 	// Categories map names to numbers from 0 to 1000.
-	Categories map[string]int `yaml:"categories,omitempty" json:"categories,omitempty"`
+	Categories map[string]int `json:"categories,omitempty"`
 }
 
 // Priority is a priority as a stack or service writes it: a number from 0
-// to 1000 or the name of a category; the zero value means "the cluster's
+// to 1000 or the name of a category. The zero value means "the cluster's
 // default". The cluster's categories turn it into a number (Resolve).
 type Priority struct {
 	Value    *int   `json:"value,omitempty"`
 	Category string `json:"category,omitempty"`
 }
 
-// Resolve turns a priority into a number with the categories: a number
-// stays, a category is looked up, none is the default.
+// Resolve turns a priority into a number with the categories. A number
+// stays as it is, a category is looked up, and an empty priority becomes
+// the default.
 func (p Priorities) Resolve(priority Priority) (int, error) {
 	category := priority.Category
 	switch {
@@ -74,7 +72,7 @@ func (p Priorities) Resolve(priority Priority) (int, error) {
 	return value, nil
 }
 
-// DefaultPriorities are the categories when cluster.yaml names none.
+// DefaultPriorities are the categories when the configuration names none.
 func DefaultPriorities() Priorities {
 	return Priorities{
 		Default:    "normal",
@@ -82,8 +80,8 @@ func DefaultPriorities() Priorities {
 	}
 }
 
-// WithDefaults returns the config with what cluster.yaml may leave out filled
-// in. Load does it, and so does the cluster when it applies a config.
+// WithDefaults returns the config with the defaults filled in for what
+// users may leave out. The state calls it when it applies a configuration.
 func (c Config) WithDefaults() Config {
 	c.Priorities = c.Priorities.withDefaults()
 	c.Defaults.Reservations = c.Defaults.Reservations.withDefaults(DefaultReservations)
@@ -94,16 +92,16 @@ func (c Config) WithDefaults() Config {
 	return c
 }
 
-// The resources cluster.yaml may leave out: what a service reserves without
-// deploy.resources.reservations, and what a host keeps for itself (the
-// system, Docker, clowderd, Traefik).
+// The resources the configuration may leave out: what a service reserves
+// without deploy.resources.reservations, and what a host keeps for itself
+// (the system, Docker, clowderd, Traefik).
 var (
 	DefaultReservations  = Resources{Memory: "128M", CPUs: "0.1"}
 	DefaultSystemReserve = Resources{Memory: "512M", CPUs: "0.25"}
 )
 
-// DefaultResyncRate is how fast a copy resyncs without replication.resync_rate
-// (bytes per second, per resync).
+// DefaultResyncRate is how fast a copy resyncs without
+// replication.resyncRate (bytes per second, per resync).
 const DefaultResyncRate = "50M"
 
 // withDefaults fills in each field left out.
@@ -117,8 +115,9 @@ func (r Resources) withDefaults(defaults Resources) Resources {
 	return r
 }
 
-// withDefaults fills in what cluster.yaml leaves out: without categories the
-// default ones, and their default unless another one is named.
+// withDefaults fills in what the configuration leaves out: the default
+// categories if there are none, and their default unless another one is
+// named.
 func (p Priorities) withDefaults() Priorities {
 	if len(p.Categories) > 0 {
 		return p
@@ -132,45 +131,35 @@ func (p Priorities) withDefaults() Priorities {
 
 // Hetzner is the Hetzner Cloud project the hosts run in.
 type Hetzner struct {
-	// Token is the project's API token.
-	Token SecretRef `yaml:"token" json:"token" jsonschema:"required"`
+	// TokenSecretRef names the project's API token, like the hcloud
+	// controller, which reads it from kube-system/hcloud.
+	TokenSecretRef names.SecretKeyRef `json:"tokenSecretRef"`
 	// API is the full URL of Hetzner Cloud's API when it is not Hetzner's
 	// own (a test lab).
-	API string `yaml:"api,omitempty" json:"api,omitempty"`
-}
-
-// SecretRef is the name of a secret: where cluster.yaml has a value tagged
-// !secret, the CLI puts the value's place there (SecretPlaces), so the name
-// is the path, such as hetzner.token. "" is no secret.
-type SecretRef string
-
-// Registry is the login for a private image registry; only the password is
-// a secret.
-type Registry struct {
-	Username string    `yaml:"username" json:"username" jsonschema:"required"`
-	Password SecretRef `yaml:"password" json:"password" jsonschema:"required"`
+	API string `json:"api,omitempty"`
 }
 
 // Ingress is the Floating IP and the hosts that should hold it.
 type Ingress struct {
-	FloatingIP     string   `yaml:"floating_ip" json:"floating_ip" jsonschema:"required"`
-	PreferredHosts []string `yaml:"preferred_hosts,omitempty" json:"preferred_hosts,omitempty"`
+	FloatingIP     string   `json:"floatingIP"`
+	PreferredHosts []string `json:"preferredHosts,omitempty"`
 }
 
 // StorageClass is either a thin pool on each host ("vg/thinpool") or a
 // fallback list of other classes.
 type StorageClass struct {
-	Pool string `yaml:"pool,omitempty" json:"pool,omitempty"`
-	// Reserve kept free in the pool for snapshots and metadata, e.g. "20%".
-	Reserve  string   `yaml:"reserve,omitempty" json:"reserve,omitempty"`
-	Fallback []string `yaml:"fallback,omitempty" json:"fallback,omitempty"`
+	Pool string `json:"pool,omitempty"`
+	// Reserve is kept free in the pool for snapshots and metadata, e.g.
+	// "20%".
+	Reserve  string   `json:"reserve,omitempty"`
+	Fallback []string `json:"fallback,omitempty"`
 }
 
 // DefaultReservePercent is a pool's reserve when its class names none.
 const DefaultReservePercent = 20
 
-// ReservePercent is the class's reserve in percent of its pool; Check has
-// made sure Reserve reads.
+// ReservePercent returns the class's reserve in percent of its pool. Check
+// has made sure that Reserve parses.
 func (c StorageClass) ReservePercent() int {
 	if number, err := strconv.Atoi(strings.TrimSuffix(c.Reserve, "%")); err == nil {
 		return number
@@ -182,47 +171,50 @@ func (c StorageClass) ReservePercent() int {
 // traffic.
 type Replication struct {
 	// ResyncRate per host, e.g. "50M" (bytes per second).
-	ResyncRate string `yaml:"resync_rate,omitempty" json:"resync_rate,omitempty"`
+	ResyncRate string `json:"resyncRate,omitempty"`
 }
 
-// Stacks holds what the cluster allows single stacks beyond the rules for
-// all of them.
+// Stacks holds what the cluster allows individual stacks beyond the rules
+// for all stacks.
 type Stacks struct {
-	// Privileged stacks may use privileged, capabilities beyond the harmless
-	// ones and security_opt: they reach everything on their host, the data
-	// and secrets of other stacks included.
-	Privileged []string `yaml:"privileged,omitempty" json:"privileged,omitempty"`
+	// Privileged stacks may use privileged, capabilities beyond the
+	// harmless ones, and securityOpt. They reach everything on their host,
+	// including the data and secrets of other stacks.
+	Privileged []string `json:"privileged,omitempty"`
 }
 
 // Defaults apply to services without their own values.
 type Defaults struct {
-	Reservations Resources `yaml:"reservations,omitempty" json:"reservations,omitempty"`
+	Reservations Resources `json:"reservations,omitzero"`
 }
 
 // Resources are memory (e.g. "128M") and CPUs (e.g. "0.1").
 type Resources struct {
-	Memory string `yaml:"memory,omitempty" json:"memory,omitempty"`
-	CPUs   string `yaml:"cpus,omitempty" json:"cpus,omitempty"`
+	Memory string `json:"memory,omitempty"`
+	CPUs   string `json:"cpus,omitempty"`
 }
 
 // Alerts are the channels and the optional heartbeat.
 type Alerts struct {
-	Channels  []AlertChannel `yaml:"channels,omitempty" json:"channels,omitempty"`
-	Heartbeat *Heartbeat     `yaml:"heartbeat,omitempty" json:"heartbeat,omitempty"`
+	Channels  []AlertChannel `json:"channels,omitempty"`
+	Heartbeat *Heartbeat     `json:"heartbeat,omitempty"`
 }
 
-// AlertChannel is one notifier: discord, email or webhook.
+// AlertChannel is one notifier: discord, email or webhook. Its URL is a
+// secret, because whoever has a Discord webhook's URL can post to it.
 type AlertChannel struct {
-	Type        string    `yaml:"type" json:"type" jsonschema:"required,enum=discord,enum=email,enum=webhook"`
-	MinSeverity string    `yaml:"min_severity,omitempty" json:"min_severity,omitempty" jsonschema:"enum=info,enum=warning,enum=critical"`
-	Webhook     SecretRef `yaml:"webhook,omitempty" json:"webhook,omitempty"`
-	URL         SecretRef `yaml:"url,omitempty" json:"url,omitempty"`
-	SMTP        *SMTP     `yaml:"smtp,omitempty" json:"smtp,omitempty"`
-	From        string    `yaml:"from,omitempty" json:"from,omitempty"`
-	To          []string  `yaml:"to,omitempty" json:"to,omitempty"`
+	Type        string `json:"type"`
+	MinSeverity string `json:"minSeverity,omitempty"`
+	// WebhookSecretRef names a discord channel's webhook URL.
+	WebhookSecretRef *names.SecretKeyRef `json:"webhookSecretRef,omitempty"`
+	// URLSecretRef names a webhook channel's URL.
+	URLSecretRef *names.SecretKeyRef `json:"urlSecretRef,omitempty"`
+	SMTP         *SMTP               `json:"smtp,omitempty"`
+	From         string              `json:"from,omitempty"`
+	To           []string            `json:"to,omitempty"`
 }
 
-// The severities of an alert, which a channel's min_severity names.
+// The severities of an alert, which a channel's minSeverity names.
 const (
 	SeverityInfo     = "info"
 	SeverityWarning  = "warning"
@@ -232,7 +224,7 @@ const (
 // Severities are the severities, lowest first.
 var Severities = []string{SeverityInfo, SeverityWarning, SeverityCritical}
 
-// AtLeast tells whether severity is min or above; an empty min is info.
+// AtLeast tells whether severity is min or above. An empty min means info.
 func AtLeast(severity, min string) bool {
 	if min == "" {
 		min = SeverityInfo
@@ -240,32 +232,34 @@ func AtLeast(severity, min string) bool {
 	return slices.Index(Severities, severity) >= slices.Index(Severities, min)
 }
 
-// SMTP is the mail server of an email channel. Port 465 speaks TLS from the
+// SMTP is the mail server of an email channel. Port 465 uses TLS from the
 // start; any other port must offer STARTTLS.
 type SMTP struct {
-	Host     string    `yaml:"host" json:"host" jsonschema:"required"`
-	Port     int       `yaml:"port" json:"port" jsonschema:"required"`
-	User     string    `yaml:"user,omitempty" json:"user,omitempty"`
-	Password SecretRef `yaml:"password,omitempty" json:"password,omitempty"`
-	// CA is a PEM file next to cluster.yaml, written with "/", that the
-	// leader trusts for the server besides the system's (a test CA).
-	CA string `yaml:"ca,omitempty" json:"ca,omitempty"`
+	Host              string              `json:"host"`
+	Port              int                 `json:"port"`
+	User              string              `json:"user,omitempty"`
+	PasswordSecretRef *names.SecretKeyRef `json:"passwordSecretRef,omitempty"`
+	// CA is a PEM certificate that the leader trusts for the server in
+	// addition to the system's (a test CA), like Kubernetes' caBundle.
+	CA string `json:"ca,omitempty"`
 }
 
-// Heartbeat is called by the leader at an interval; an external service
-// alarms when the calls stop.
+// Heartbeat is called by the leader at an interval. An external service
+// raises an alarm when the calls stop.
 type Heartbeat struct {
-	URL SecretRef `yaml:"url" json:"url" jsonschema:"required"`
+	// URLSecretRef names the URL, which is secret because whoever has it
+	// can fake the heartbeat.
+	URLSecretRef names.SecretKeyRef `json:"urlSecretRef"`
 	// Interval is a duration like "1m" (the default).
-	Interval string `yaml:"interval,omitempty" json:"interval,omitempty"`
+	Interval string `json:"interval,omitempty"`
 }
 
-// DefaultHeartbeatInterval is how often the heartbeat is called when
-// cluster.yaml names no interval.
+// DefaultHeartbeatInterval is how often the heartbeat is called when the
+// configuration names no interval.
 const DefaultHeartbeatInterval = time.Minute
 
-// Every is how often the heartbeat is called; Check made sure Interval
-// reads.
+// Every returns how often the heartbeat is called. Check has made sure
+// that Interval parses.
 func (h Heartbeat) Every() time.Duration {
 	if interval, err := units.ParseDuration(h.Interval); err == nil && interval > 0 {
 		return interval
@@ -276,18 +270,19 @@ func (h Heartbeat) Every() time.Duration {
 // ACME is where certificates come from; empty means Let's Encrypt.
 type ACME struct {
 	// Directory is the full URL of the ACME directory.
-	Directory string `yaml:"directory,omitempty" json:"directory,omitempty"`
-	// CA is a PEM file next to cluster.yaml, written with "/", that the
-	// leader trusts for the directory besides the system's (a test CA).
-	CA string `yaml:"ca,omitempty" json:"ca,omitempty"`
+	Directory string `json:"directory,omitempty"`
+	// CA is a PEM certificate that the leader trusts for the directory in
+	// addition to the system's (a test CA), like Kubernetes' caBundle.
+	CA string `json:"ca,omitempty"`
 	// Email is the account's contact for the CA's notices.
-	Email string `yaml:"email,omitempty" json:"email,omitempty"`
+	Email string `json:"email,omitempty"`
 	// RenewBefore is how long before its end a certificate is renewed, e.g.
-	// "30d"; by default when a third of its lifetime is left.
-	RenewBefore string `yaml:"renew_before,omitempty" json:"renew_before,omitempty"`
+	// "30d". By default, it is renewed when a third of its lifetime is
+	// left.
+	RenewBefore string `json:"renewBefore,omitempty"`
 }
 
-// DefaultACMEDirectory is Let's Encrypt's.
+// DefaultACMEDirectory is Let's Encrypt's directory.
 const DefaultACMEDirectory = "https://acme-v02.api.letsencrypt.org/directory"
 
 // DirectoryURL is the ACME directory to use.
@@ -296,4 +291,40 @@ func (a ACME) DirectoryURL() string {
 		return DefaultACMEDirectory
 	}
 	return a.Directory
+}
+
+// SecretPlace is a field of the configuration that names a value of a
+// Secret in names.System: its path, for messages, and the reference.
+type SecretPlace struct {
+	Path string
+	Ref  names.SecretKeyRef
+}
+
+// SecretPlaces lists the fields of config that name a value of a Secret,
+// in the order of the configuration; a field that is left out is not
+// listed. It is the only list of these fields: Check checks each against
+// the rules of a reference, and the state checks each against the Secrets
+// it has.
+func SecretPlaces(config Config) []SecretPlace {
+	places := []SecretPlace{{Path: "hetzner.tokenSecretRef", Ref: config.Hetzner.TokenSecretRef}}
+	if config.Alerts == nil {
+		return places
+	}
+	add := func(path string, ref *names.SecretKeyRef) {
+		if ref != nil {
+			places = append(places, SecretPlace{Path: path, Ref: *ref})
+		}
+	}
+	for index, channel := range config.Alerts.Channels {
+		path := fmt.Sprintf("alerts.channels[%d]", index)
+		add(path+".webhookSecretRef", channel.WebhookSecretRef)
+		add(path+".urlSecretRef", channel.URLSecretRef)
+		if channel.SMTP != nil {
+			add(path+".smtp.passwordSecretRef", channel.SMTP.PasswordSecretRef)
+		}
+	}
+	if heartbeat := config.Alerts.Heartbeat; heartbeat != nil {
+		add("alerts.heartbeat.urlSecretRef", &heartbeat.URLSecretRef)
+	}
+	return places
 }

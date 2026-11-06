@@ -4,12 +4,12 @@
 // timeout and is left behind if it hangs (internal/command): without quorum,
 // DRBD suspends I/O.
 //
-// Each step of a copy's life is a method of its own, and each does only
-// what is missing: Ensure makes the copy (LV, resource), Promote and Mount
-// make it usable here, Unmount and Demote give it up, Remove takes it away.
-// Which steps a copy needs, the agent decides from Observe; this file has
-// the copy's making and removal, role.go the DRBD role, mount.go the file
-// system and the mount, observe.go what the host has.
+// Each step in a copy's life is a separate method, and each method does only
+// what is missing. Ensure creates the copy (LV, resource), Promote and Mount
+// make it usable on this host, Unmount and Demote give it up, and Remove
+// deletes it. The agent decides from Observe which steps a copy needs. This
+// file creates and removes copies; role.go handles the DRBD role, mount.go
+// the file system and the mount, and observe.go reads what the host has.
 package storage
 
 import (
@@ -36,7 +36,7 @@ const (
 	statusTimeout = 10 * time.Second // reading the pools, the roles, the mounts
 )
 
-// Runner runs a command with a timeout (command.Run; tests record).
+// Runner runs a command with a timeout (command.Run, or a recorder in tests).
 type Runner func(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error)
 
 // Driver keeps this host's copies of volumes.
@@ -54,31 +54,32 @@ type Driver struct {
 type Volume struct {
 	// ID is "<namespace>/<volume>" (names.ID).
 	ID string
-	// LV is the logical volume's name, Pool the thin pool ("vg/thin"). The
-	// name holds the generation, and so does the mount point VolumesDir/<LV>.
+	// LV is the logical volume's name, and Pool is the thin pool
+	// ("vg/thin"). The LV's name contains the generation, and so does the
+	// mount point VolumesDir/<LV>.
 	LV        string
 	Pool      string
 	SizeBytes int64
-	// Resource is the DRBD resource; nil for a volume with replicas 0, which
-	// is a plain LV.
+	// Resource is the DRBD resource. It is nil for a volume with replicas 0,
+	// which is a plain LV.
 	Resource *Resource
-	// Diskless is a tiebreaker: the resource without an LV. It gives a volume
-	// with two copies its third vote and holds no data. Its Pool is empty,
-	// but for a copy that had a disk: Ensure removes that LV once DRBD let it
-	// go.
+	// Diskless marks a tiebreaker: the resource without an LV. It gives a
+	// volume with two copies its third vote and holds no data. Its Pool is
+	// empty, except for a copy that used to have a disk: Ensure removes that
+	// LV once DRBD has let go of it.
 	Diskless bool
 }
 
 // MountPoint is where the volume's file system is mounted; containers get
-// its data/ directory. Each generation has a mount point of its own: one
-// shared by two generations would let the new one find the old one mounted
-// there, and the removal of the old one unmount the new one.
+// its data/ directory. Each generation has its own mount point. If two
+// generations shared one, the new generation could find the old one mounted
+// there, and removing the old one could unmount the new one.
 func (d Driver) MountPoint(volume Volume) string {
 	return filepath.Join(d.VolumesDir, volume.LV)
 }
 
 // device is the block device that holds the volume's file system: the DRBD
-// device with replicas, the LV without.
+// device for a replicated volume, otherwise the LV.
 func (d Driver) device(volume Volume) string {
 	if volume.Resource != nil {
 		return "/dev/drbd" + strconv.Itoa(volume.Resource.Minor)
@@ -95,11 +96,11 @@ func (d Driver) resourceFile(resource *Resource) string {
 	return filepath.Join(d.ResourceDir, resource.Name+".res")
 }
 
-// Ensure makes the copy: the thin LV and, with replicas, the DRBD resource
-// up with its metadata (new metadata only for a new one); a tiebreaker is
-// the resource alone. A new resource
-// comes up secondary; Ensure changes no role and mounts nothing, so a host
-// can hold a copy that a stack elsewhere uses.
+// Ensure creates the copy: the thin LV and, for a replicated volume, the
+// DRBD resource, brought up with its metadata (new metadata only for a new
+// resource). A tiebreaker is the resource alone. A new resource comes up
+// secondary. Ensure changes no role and mounts nothing, so a host can hold a
+// copy that a stack on another host uses.
 func (d Driver) Ensure(ctx context.Context, volume Volume) error {
 	if volume.Diskless {
 		if err := d.ensureResource(ctx, volume); err != nil {
@@ -117,9 +118,9 @@ func (d Driver) Ensure(ctx context.Context, volume Volume) error {
 }
 
 // removeDetachedLV removes the LV of a copy that became the tiebreaker on
-// its host, once adjust detached DRBD from it, and the markers of its
-// metadata: should the host get a disk again, that is a new LV that needs
-// new metadata.
+// its host, once adjust has detached DRBD from it. It also removes the
+// markers of the LV's metadata: if the host gets a disk again, that disk is
+// a new LV that needs new metadata.
 func (d Driver) removeDetachedLV(ctx context.Context, volume Volume) error {
 	if volume.Pool == "" {
 		return nil
@@ -138,19 +139,20 @@ func (d Driver) removeDetachedLV(ctx context.Context, volume Volume) error {
 }
 
 // The exit codes the driver reads. Any other failure of these tools (a
-// timeout, a missing binary, a device not ready) stops the step: guessing
-// "missing" there could create over or format real data.
+// timeout, a missing binary, a device not ready) stops the step. Guessing
+// "missing" in these cases could overwrite or format real data.
 const (
 	blkidNotFound   = 2 // blkid: no file system on the device
 	findmntNotFound = 1 // findmnt: nothing mounted that matches
 )
 
-// Markers in StateDir. They let Ensure pick up after a crash at any point:
-//   - <LV>.created: clowder made this LV, so it is empty or clowder's own;
-//   - <resource>.metadata: the DRBD metadata is written.
+// Markers in StateDir. They let Ensure continue after a crash at any point:
+//   - <LV>.created: clowder created this LV, so it is empty or holds
+//     clowder's own data;
+//   - <resource>.metadata: the DRBD metadata has been written.
 //
-// Whether a volume holds data is not a marker: the state knows
-// (Volume.Initialized), for every host.
+// Whether a volume holds data is not a marker: the state records it
+// (Volume.Initialized) for every host.
 func (d Driver) marker(name, kind string) string {
 	return filepath.Join(d.StateDir, name+"."+kind)
 }
@@ -171,7 +173,7 @@ func (d Driver) setMarker(name, kind, volumeID string) error {
 	return atomicfile.Write(d.marker(name, kind), []byte(volumeID+"\n"), 0o600)
 }
 
-// ensureLV creates the thin LV unless it is there, and marks it as clowder's.
+// ensureLV creates the thin LV unless it exists, and marks it as clowder's.
 func (d Driver) ensureLV(ctx context.Context, volume Volume) error {
 	exists, err := d.lvExists(ctx, volume)
 	if err != nil || exists {
@@ -182,7 +184,7 @@ func (d Driver) ensureLV(ctx context.Context, volume Volume) error {
 		return fmt.Errorf("create the LV of %s: %w", volume.ID, err)
 	}
 	// a crash right here leaves an LV without the marker; Ensure then
-	// refuses it and a human looks (it is empty)
+	// refuses the LV and a human must check it (it is empty)
 	return d.setMarker(volume.LV, "created", volume.ID)
 }
 
@@ -196,9 +198,9 @@ func (d Driver) lvExists(ctx context.Context, volume Volume) (bool, error) {
 	return slices.Contains(lvs, volume.LV), nil
 }
 
-// listLVs lists the names of a volume group's LVs. lvs has no exit code of
-// its own for a missing LV (5 is any failure, a missing volume group or a
-// lock too), so any failure is an error, never "missing".
+// listLVs lists the names of a volume group's LVs. lvs has no separate exit
+// code for a missing LV (5 means any failure, including a missing volume
+// group or a lock), so every failure is an error, never "missing".
 func (d Driver) listLVs(ctx context.Context, group string) ([]string, error) {
 	output, err := d.Run(ctx, shortTimeout, "lvs", "--noheadings", "--options", "lv_name", group)
 	if err != nil {
@@ -208,15 +210,16 @@ func (d Driver) listLVs(ctx context.Context, group string) ([]string, error) {
 }
 
 // ensureResource writes the resource file and brings the resource up.
-// New metadata goes only on an LV clowder made itself, and only once; a
-// tiebreaker has none. The peers the new file no longer has are forgotten
-// once adjust took them out (forgetDropped).
+// It writes new metadata only on an LV that clowder created itself, and
+// only once; a tiebreaker has no metadata. Peers that the new file no longer
+// lists are forgotten once adjust has removed them (forgetDropped).
 func (d Driver) ensureResource(ctx context.Context, volume Volume) error {
 	resource := volume.Resource
 	if err := d.noteDropped(resource); err != nil {
 		return err
 	}
-	// the file is applied only once adjust worked (resourceFileCurrent)
+	// the file counts as applied only after adjust succeeded
+	// (resourceFileCurrent)
 	if err := os.Remove(d.marker(resource.Name, "adjusted")); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("volume %s: %w", volume.ID, err)
 	}
@@ -244,9 +247,9 @@ func (d Driver) ensureResource(ctx context.Context, volume Volume) error {
 			return err
 		}
 	}
-	// adjust brings a resource that is down up, and one that is up to what
-	// the file says (new peers, a disk for a tiebreaker that gets one); it
-	// keeps its role
+	// adjust brings up a resource that is down, and changes a resource that
+	// is up to match the file (new peers, a disk for a tiebreaker that gets
+	// one); the role stays the same
 	if _, err := d.Run(ctx, shortTimeout, "drbdadm", "adjust", resource.Name); err != nil {
 		return fmt.Errorf("bring up the DRBD resource of %s: %w", volume.ID, err)
 	}
@@ -256,9 +259,9 @@ func (d Driver) ensureResource(ctx context.Context, volume Volume) error {
 	return d.forgetDropped(ctx, resource)
 }
 
-// noteDropped records the peers that the resource's file has and the new
-// one does not, in the marker <resource>.forget, before the new file is
-// written: so they are forgotten after a crash too.
+// noteDropped records the peers that the resource's current file lists and
+// the new file does not. It writes them to the marker <resource>.forget
+// before the new file is written, so they are forgotten even after a crash.
 func (d Driver) noteDropped(resource *Resource) error {
 	old, err := os.ReadFile(d.resourceFile(resource))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -291,7 +294,7 @@ func (d Driver) noteDropped(resource *Resource) error {
 // nodeIDPattern finds the node-ids in a resource file (RenderResource).
 var nodeIDPattern = regexp.MustCompile(`node-id (\d+);`)
 
-// droppedPeers reads the peers the marker <resource>.forget names.
+// droppedPeers reads the peers that the marker <resource>.forget names.
 func (d Driver) droppedPeers(name string) ([]int, error) {
 	content, err := os.ReadFile(d.marker(name, "forget"))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -311,8 +314,8 @@ func (d Driver) droppedPeers(name string) ([]int, error) {
 	return peers, nil
 }
 
-// forgetDropped forgets the peers a resource dropped (noteDropped), so the
-// next copy that comes finds a free slot in the metadata (maxPeers).
+// forgetDropped forgets the peers that a resource dropped (noteDropped), so
+// the next new copy finds a free slot in the metadata (maxPeers).
 func (d Driver) forgetDropped(ctx context.Context, resource *Resource) error {
 	dropped, err := d.droppedPeers(resource.Name)
 	if err != nil || len(dropped) == 0 {
@@ -329,9 +332,9 @@ func (d Driver) forgetDropped(ctx context.Context, resource *Resource) error {
 	return nil
 }
 
-// Remove unmounts the copy, takes the DRBD resource down and removes it and
-// the LV with the data. It picks up after a crash at any point: what is gone
-// already is skipped.
+// Remove unmounts the copy, takes the DRBD resource down, and removes the
+// resource and the LV with the data. It can continue after a crash at any
+// point, because it skips whatever is already gone.
 func (d Driver) Remove(ctx context.Context, volume Volume) error {
 	if err := d.Unmount(ctx, volume); err != nil {
 		return err
@@ -340,9 +343,10 @@ func (d Driver) Remove(ctx context.Context, volume Volume) error {
 	if volume.Resource != nil {
 		name := volume.Resource.Name
 		resourceFile := d.resourceFile(volume.Resource)
-		// without its file drbdadm knows the resource no more: it was down
-		// before the file went. Any other error leaves it unknown whether the
-		// resource is up, and the LV below it must not go then.
+		// without its file, drbdadm no longer knows the resource, so it was
+		// taken down before the file was removed. Any other error leaves it
+		// unknown whether the resource is up, and then the LV below it must
+		// stay.
 		_, err := os.Stat(resourceFile)
 		switch {
 		case err == nil:
@@ -366,7 +370,7 @@ func (d Driver) Remove(ctx context.Context, volume Volume) error {
 	return removeFiles(append(leftovers, d.MountPoint(volume)), volume.ID)
 }
 
-// removeLV removes the copy's LV, unless it is gone.
+// removeLV removes the copy's LV, unless it is already gone.
 func (d Driver) removeLV(ctx context.Context, volume Volume) error {
 	exists, err := d.lvExists(ctx, volume)
 	if err != nil || !exists {
@@ -379,8 +383,8 @@ func (d Driver) removeLV(ctx context.Context, volume Volume) error {
 	return nil
 }
 
-// removeFiles removes what is left of a copy; what is gone already is
-// skipped.
+// removeFiles removes the files left over from a copy and skips those that
+// are already gone.
 func removeFiles(files []string, volumeID string) error {
 	for _, file := range files {
 		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -429,11 +433,11 @@ func (d Driver) PoolUsage(ctx context.Context, pool string) (sizeBytes int64, da
 }
 
 // checkNoPrimaryPeer refuses to take a copy down while a peer that is
-// primary is still connected to it (ErrNotYet): with quorum majority, the
+// primary is still connected to it (ErrNotYet). With quorum majority, the
 // primary of a resource with two copies would lose its quorum and suspend
-// the stack's writes. The primary goes first (a deleted volume), or drops
-// this copy from its resource (adjust, a copy given up); either ends the
-// connection.
+// the stack's writes. Either the primary goes first (a deleted volume), or
+// it drops this copy from its resource (adjust, for a copy given up); both
+// end the connection.
 func (d Driver) checkNoPrimaryPeer(ctx context.Context, volume Volume) error {
 	resources, err := d.resources(ctx)
 	if err != nil {

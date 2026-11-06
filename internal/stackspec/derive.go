@@ -6,15 +6,18 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/webcodingcat/clowder/internal/names"
 )
 
-// Normalize fills in the schema's own defaults and writes what may be
-// written in several ways in one, so two specs written differently but
-// meaning the same are equal: lists whose order means nothing are sorted,
-// a route's host is in lower case, a capability has no CAP_. Defaults of
-// cluster.yaml (reservations, priority) stay out: the scheduler takes them
-// when it places. Normalize shares nothing with the spec it gets and leaves
-// it as it was; a normalized spec normalizes to itself.
+// Normalize fills in the schema's own defaults and writes everything that
+// can be written in several ways in one way. So two specs that are written
+// differently but mean the same are equal: lists whose order means nothing
+// are sorted, a route's host is in lower case, and a capability has no
+// CAP_. Defaults of the configuration (reservations, priority) are left
+// out, because the scheduler applies them when it places. Normalize shares
+// nothing with the spec it gets and leaves that spec unchanged. A
+// normalized spec normalizes to itself.
 func Normalize(spec Spec) Spec {
 	normalized := Spec{Priority: spec.Priority, Services: map[string]Service{}}
 	for name, service := range spec.Services {
@@ -87,7 +90,7 @@ func capabilities(names []string) []string {
 	return sortedSet(written)
 }
 
-// sortedSet is a set's members sorted, each once; nil for none.
+// sortedSet returns a set's members sorted, each once, or nil for none.
 func sortedSet(members []string) []string {
 	return nilIfEmpty(slices.Compact(slices.Sorted(slices.Values(members))))
 }
@@ -99,7 +102,7 @@ func nilIfEmpty[T any](list []T) []T {
 	return list
 }
 
-func mapOrNil(values map[string]string) map[string]string {
+func mapOrNil[Value any](values map[string]Value) map[string]Value {
 	if len(values) == 0 {
 		return nil
 	}
@@ -107,13 +110,13 @@ func mapOrNil(values map[string]string) map[string]string {
 }
 
 // RestartsUnhealthy tells whether the supervisor restarts the service's
-// container when it turns unhealthy: unless the spec says no.
+// container when it turns unhealthy. It does unless the spec says no.
 func (s Service) RestartsUnhealthy() bool {
 	return s.RestartUnhealthy == nil || *s.RestartUnhealthy
 }
 
-// withDefaults is the port with the schema's defaults filled in: published
-// as the container's port, over tcp.
+// withDefaults returns the port with the schema's defaults filled in:
+// published as the container's port, over tcp.
 func (p Port) withDefaults() Port {
 	if p.Published == 0 {
 		p.Published = p.Port
@@ -124,14 +127,15 @@ func (p Port) withDefaults() Port {
 	return p
 }
 
-// key is how the cluster names a published port: "udp/9987".
+// key returns the name that the cluster uses for a published port:
+// "udp/9987".
 func (p Port) key() string {
 	port := p.withDefaults()
 	return port.Protocol + "/" + strconv.Itoa(int(port.Published))
 }
 
-// key is how the cluster names an HTTP route: the host in lower case and
-// the path ("shop.example.com/api").
+// key returns the name that the cluster uses for an HTTP route: the host
+// in lower case and the path ("shop.example.com/api").
 func (h HTTP) key() string {
 	routePath := h.Path
 	if routePath == "" {
@@ -140,8 +144,8 @@ func (h HTTP) key() string {
 	return strings.ToLower(h.Host) + routePath
 }
 
-// PublishedPorts are the ports the stack publishes, sorted: no other stack
-// may have the same.
+// PublishedPorts returns the ports that the stack publishes, sorted. No
+// other stack may publish the same ports.
 func (s Spec) PublishedPorts() []string {
 	var ports []string
 	for _, service := range s.Services {
@@ -152,8 +156,8 @@ func (s Spec) PublishedPorts() []string {
 	return sortedSet(ports)
 }
 
-// Routes are the stack's HTTP routes, sorted: no other stack may have the
-// same.
+// Routes returns the stack's HTTP routes, sorted. No other stack may have
+// the same routes.
 func (s Spec) Routes() []string {
 	var routes []string
 	for _, service := range s.Services {
@@ -164,7 +168,8 @@ func (s Spec) Routes() []string {
 	return sortedSet(routes)
 }
 
-// VolumeNames are the volumes of the namespace the stack mounts, sorted.
+// VolumeNames returns the volumes of the namespace that the stack mounts,
+// sorted.
 func (s Spec) VolumeNames() []string {
 	var volumes []string
 	for _, service := range s.Services {
@@ -175,10 +180,10 @@ func (s Spec) VolumeNames() []string {
 	return sortedSet(volumes)
 }
 
-// WithDependents are the services named and every service that depends on
-// one of them, directly or through others, sorted: a dependency holds only
-// when a container starts, so whoever restarts a service restarts what
-// depends on it too.
+// WithDependents returns the named services and every service that depends
+// on one of them, directly or through others, sorted. A dependency only
+// applies when a container starts, so whoever restarts a service must also
+// restart the services that depend on it.
 func (s Spec) WithDependents(services []string) []string {
 	with := map[string]bool{}
 	for _, service := range services {
@@ -195,13 +200,28 @@ func (s Spec) WithDependents(services []string) []string {
 	return slices.Sorted(maps.Keys(with))
 }
 
-// SecretNames are the secrets of the namespace the stack uses, as files
-// or variables, sorted.
+// SecretNames returns the secrets of the namespace that the stack uses, as
+// files or variables, sorted.
 func (s Spec) SecretNames() []string {
 	var secrets []string
 	for _, service := range s.Services {
 		secrets = append(secrets, service.Secrets...)
-		secrets = append(secrets, slices.Collect(maps.Values(service.SecretEnv))...)
+		for _, ref := range service.SecretEnv {
+			secrets = append(secrets, ref.Name)
+		}
 	}
 	return sortedSet(secrets)
+}
+
+// SecretKeyRefs returns the values of secrets that the stack names one by
+// one, as variables, sorted and each once. A secret must keep these keys.
+func (s Spec) SecretKeyRefs() []names.SecretKeyRef {
+	var refs []names.SecretKeyRef
+	for _, service := range s.Services {
+		refs = append(refs, slices.Collect(maps.Values(service.SecretEnv))...)
+	}
+	slices.SortFunc(refs, func(a, b names.SecretKeyRef) int {
+		return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.Key, b.Key))
+	})
+	return slices.Compact(refs)
 }

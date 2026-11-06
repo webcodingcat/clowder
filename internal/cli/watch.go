@@ -19,8 +19,8 @@ import (
 
 // watchObjects lists the selection, then shows each of its resources that
 // changes (GET /v1/watch from the list's index) until ctx ends. When the
-// agent cannot follow from that index any more (410, or the stream ends),
-// it lists afresh and goes on, and says so on report.
+// agent can no longer follow from that index (410, or the stream ends), it
+// lists again, goes on, and says so on report.
 func watchObjects(ctx context.Context, client *api.Client, out, report io.Writer, selected selection,
 	output string,
 ) error {
@@ -55,8 +55,8 @@ func watchObjects(ctx context.Context, client *api.Client, out, report io.Writer
 	}
 }
 
-// showEvent prints the resource of one event as it is now; a deleted one
-// as "<Kind> <name>: deleted".
+// showEvent prints the resource of one event as it is now, and a deleted
+// resource as "<Kind> <name>: deleted".
 func showEvent(ctx context.Context, client *api.Client, out io.Writer, selected selection, output string,
 	event api.WatchEvent,
 ) error {
@@ -86,8 +86,8 @@ func showEvent(ctx context.Context, client *api.Client, out io.Writer, selected 
 }
 
 // printWatched prints what a watch shows: the table's rows (with the header
-// only before the first list), one JSON object each, or YAML documents
-// after "---" (but the very first).
+// only before the first list), one JSON object per resource, or YAML
+// documents after "---" (except the very first).
 func printWatched(out io.Writer, selected selection, objects []resource.Object, output string, first bool) error {
 	switch output {
 	case "json":
@@ -110,7 +110,7 @@ func printWatched(out io.Writer, selected selection, objects []resource.Object, 
 	return printTable(out, selected.kind, objects, first)
 }
 
-// watchPath is the API's path of the selection's watch from an index.
+// watchPath returns the API's path of the selection's watch from an index.
 func (s selection) watchPath(since uint64) string {
 	query := url.Values{"kind": {strings.ToLower(s.kind)}, "since": {strconv.FormatUint(since, 10)}}
 	switch {

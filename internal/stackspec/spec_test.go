@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/webcodingcat/clowder/internal/names"
 )
 
 // shop is the example of the README: a database and an app in front.
@@ -17,14 +19,14 @@ services:
   db:
     image: postgres:17
     env: {POSTGRES_USER: shop, PORT: 5432, RATIO: 1.0, DEBUG: yes}
-    secretEnv: {POSTGRES_PASSWORD: db-password}
+    secretEnv: {POSTGRES_PASSWORD: {name: db, key: password}}
     volumes: [{volume: data, path: /var/lib/postgresql/data}]
     resources: {reserve: {memory: 512M, cpus: 0.5}}
     healthcheck: {command: [pg_isready], interval: 10s}
   app:
     image: registry.example.com/shop:1.4
     dependsOn: [db]
-    secrets: [db-password]
+    secrets: [db]
     http: {host: shop.example.com, port: 8080}
     ports: [{port: 9987, protocol: udp}]
 `
@@ -52,7 +54,10 @@ func TestTheExampleIsAStackClowderRuns(t *testing.T) {
 	if got := spec.VolumeNames(); !slices.Equal(got, []string{"data"}) {
 		t.Errorf("volumes %v", got)
 	}
-	if got := spec.SecretNames(); !slices.Equal(got, []string{"db-password"}) {
+	if got := spec.SecretKeyRefs(); !slices.Equal(got, []names.SecretKeyRef{{Name: "db", Key: "password"}}) {
+		t.Errorf("secret key refs %v", got)
+	}
+	if got := spec.SecretNames(); !slices.Equal(got, []string{"db"}) {
 		t.Errorf("secrets %v", got)
 	}
 }
@@ -99,7 +104,7 @@ services:
     stopSignal: TERM
     shmSize: big
     env: {1A: x}
-    secretEnv: {TOKEN: Bad, 1B: ok}
+    secretEnv: {TOKEN: {name: Bad, key: k}, KEY: {name: ok, key: ..}, 1B: {name: ok, key: k}}
     secrets: [a, a, B]
     capAdd: [""]
 `))
@@ -131,7 +136,8 @@ services:
 		`stopSignal "TERM"`,
 		`shmSize: size "big"`,
 		`env: "1A" is not a variable name`,
-		`secretEnv: "Bad" is not a secret name`,
+		`secretEnv.TOKEN: secret name "Bad"`,
+		`secretEnv.KEY: key ".." of secret ok`,
 		`secretEnv: "1B" is not a variable name`,
 		"secrets: a secret is named twice",
 		`secrets: "B" is not a secret name`,

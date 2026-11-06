@@ -8,14 +8,14 @@ import (
 )
 
 // DiskUpToDate is DRBD's disk state of a copy that holds the volume's
-// current data; DiskDiskless that of a tiebreaker.
+// current data; DiskDiskless is the disk state of a tiebreaker.
 const (
 	DiskUpToDate = "UpToDate"
 	DiskDiskless = "Diskless"
 )
 
-// drbdResource is one resource that is up here, as drbdsetup status --json
-// shows it: a resource has one volume (device), and a connection per
+// drbdResource is one resource that is up on this host, as drbdsetup status
+// --json shows it. A resource has one volume (device) and one connection per
 // configured peer.
 type drbdResource struct {
 	Name string `json:"name"`
@@ -25,8 +25,8 @@ type drbdResource struct {
 	Suspended bool `json:"suspended"`
 	Devices   []struct {
 		DiskState string `json:"disk-state"`
-		// Quorum is false while the copy here lacks DRBD's quorum: a
-		// primary then suspends its writes (on-no-quorum suspend-io)
+		// Quorum is false while the copy on this host lacks DRBD's quorum;
+		// a primary then suspends its writes (on-no-quorum suspend-io)
 		Quorum bool `json:"quorum"`
 	} `json:"devices"`
 	Connections []struct {
@@ -37,13 +37,14 @@ type drbdResource struct {
 			// ReplicationState is SyncTarget while this copy resyncs from
 			// the peer
 			ReplicationState string `json:"replication-state"`
-			// OutOfSync is what this copy and the peer's differ by, in KiB
+			// OutOfSync is how much this copy differs from the peer's, in
+			// KiB
 			OutOfSync int64 `json:"out-of-sync"`
 		} `json:"peer_devices"`
 	} `json:"connections"`
 }
 
-// disk is the resource's disk state here; empty without a device.
+// disk is the resource's disk state on this host; empty without a device.
 func (r drbdResource) disk() string {
 	if len(r.Devices) == 0 {
 		return ""
@@ -51,10 +52,10 @@ func (r drbdResource) disk() string {
 	return r.Devices[0].DiskState
 }
 
-// outOfSyncBytes is what is left of this copy's resync: what it differs
-// by from the peers it resyncs from (SyncTarget, or paused). The other
-// peers do not count: one cut off, or the tiebreaker, would make a
-// healthy resync look stuck.
+// outOfSyncBytes is the part of this copy's resync that is left: how much
+// it differs from the peers that it resyncs from (SyncTarget, or paused).
+// The other peers do not count: a peer that is cut off, or the tiebreaker,
+// would make a healthy resync look stuck.
 func (r drbdResource) outOfSyncBytes() int64 {
 	most := int64(0)
 	for _, connection := range r.Connections {
@@ -68,8 +69,8 @@ func (r drbdResource) outOfSyncBytes() int64 {
 	return most
 }
 
-// resources reads the DRBD resources that are up here, by name; one that
-// is down is not among them.
+// resources reads the DRBD resources that are up on this host, keyed by
+// name; a resource that is down is missing from the map.
 func (d Driver) resources(ctx context.Context) (map[string]drbdResource, error) {
 	output, err := d.Run(ctx, statusTimeout, "drbdsetup", "status", "--json")
 	if err != nil {
@@ -88,15 +89,16 @@ func (d Driver) resources(ctx context.Context) (map[string]drbdResource, error) 
 	return resources, nil
 }
 
-// quorum tells whether the copy here has DRBD's quorum; false without a
-// device.
+// quorum tells whether the copy on this host has DRBD's quorum; false
+// without a device.
 func (r drbdResource) quorum() bool {
 	return len(r.Devices) > 0 && r.Devices[0].Quorum
 }
 
-// standAlonePeers are the peers, by node-id, that the resource here no
-// longer tries to connect to (StandAlone): after a split brain DRBD could
-// not resolve by its rules, or another refusal that needs a human.
+// standAlonePeers are the node-ids of the peers that the resource on this
+// host no longer tries to connect to (StandAlone). This happens after a
+// split brain that DRBD could not resolve by its rules, or after another
+// refusal that needs a human.
 func (r drbdResource) standAlonePeers() []int {
 	var peers []int
 	for _, connection := range r.Connections {
@@ -117,8 +119,8 @@ func (r drbdResource) hasPeer(peer int) bool {
 	return false
 }
 
-// primaryPeer is a connected peer that is primary, by its node-id; false
-// if there is none.
+// primaryPeer returns the node-id of a connected peer that is primary;
+// false if there is none.
 func (r drbdResource) primaryPeer() (int, bool) {
 	for _, connection := range r.Connections {
 		if connection.ConnectionState == "Connected" && connection.PeerRole == RolePrimary {

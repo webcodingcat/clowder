@@ -52,32 +52,41 @@ func TestAFileOfOtherDocumentsHoldsNoResource(t *testing.T) {
 
 const testArmor = "-----BEGIN AGE ENCRYPTED FILE-----\nYWJj\n-----END AGE ENCRYPTED FILE-----\n"
 
-func TestASecretsValueComesEncryptedFromSpecValue(t *testing.T) {
+func TestASecretsValuesComeEncryptedFromSpecData(t *testing.T) {
 	objects, err := ParseDocuments([]byte(`
 apiVersion: clowder/v1
 kind: Secret
-metadata: {namespace: shop, name: db-password}
+metadata: {namespace: shop, name: db}
 spec:
-  value: !secret |
-    -----BEGIN AGE ENCRYPTED FILE-----
-    YWJj
-    -----END AGE ENCRYPTED FILE-----
+  data:
+    password: !secret |
+      -----BEGIN AGE ENCRYPTED FILE-----
+      YWJj
+      -----END AGE ENCRYPTED FILE-----
+    tls.key: !secret |
+      -----BEGIN AGE ENCRYPTED FILE-----
+      YWJj
+      -----END AGE ENCRYPTED FILE-----
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
 	spec, err := DecodeSecretSpec(objects[0].Spec)
-	if err != nil || spec.Encrypted != testArmor {
+	if err != nil || len(spec.Encrypted) != 2 || spec.Encrypted["password"] != testArmor ||
+		spec.Encrypted["tls.key"] != testArmor {
 		t.Errorf("spec %+v, %v", spec, err)
 	}
 }
 
 func TestASecretValueStandsOnlyEncryptedAndOnlyInASecret(t *testing.T) {
-	block := "!secret |\n    " + strings.ReplaceAll(strings.TrimSpace(testArmor), "\n", "\n    ") + "\n"
+	block := func(indent string) string {
+		return "!secret |\n" + indent + strings.ReplaceAll(strings.TrimSpace(testArmor), "\n", "\n"+indent) + "\n"
+	}
 	for text, want := range map[string]string{
-		"apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: token}\nspec: {value: s3cret}":           "write its value encrypted",
-		"apiVersion: clowder/v1\nkind: Volume\nmetadata: {name: data}\nspec:\n  class: " + block:         "only in a Secret's spec.value",
-		"apiVersion: clowder/v1\nkind: Secret\nmetadata:\n  name: " + block + "spec:\n  value: " + block: "only in spec.value",
+		"apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: token}\nspec: {data: {token: s3cret}}":   "write the value of token encrypted",
+		"apiVersion: clowder/v1\nkind: Volume\nmetadata: {name: data}\nspec:\n  class: " + block("    "): "only in a Secret's spec.data",
+		"apiVersion: clowder/v1\nkind: Secret\nmetadata:\n  name: " + block("    ") +
+			"spec:\n  data:\n    token: " + block("      "): "only in spec.data",
 	} {
 		_, err := ParseDocuments([]byte(text))
 		if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "s3cret") {

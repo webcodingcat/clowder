@@ -6,7 +6,7 @@ services:
   db:
     image: postgres:17
     env: {POSTGRES_USER: shop, GREETING: Hello $USER}
-    secretEnv: {POSTGRES_PASSWORD: db-password}
+    secretEnv: {POSTGRES_PASSWORD: {name: db, key: password}}
     volumes: [{volume: data, path: /var/lib/postgresql/data}]
     resources:
       reserve: {memory: 512M, cpus: 0.5}
@@ -26,7 +26,7 @@ services:
     workingDir: /app
     user: "1000"
     dependsOn: [db]
-    secrets: [api-key]
+    secrets: [api]
     volumes: [{volume: uploads, path: /app/uploads, readOnly: true}]
     tmpfs: [{path: /tmp, size: 64M}]
     localtime: true

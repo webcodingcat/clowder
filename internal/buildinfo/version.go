@@ -31,9 +31,9 @@ func parse(text string) (parsed, bool) {
 	return result, true
 }
 
-// Compare orders versions as Debian does: a suffix sorts before the plain
-// release (1.2.3~rc1 < 1.2.3). A version that does not parse sorts before
-// every other.
+// Compare orders versions as Debian does: a version with a suffix sorts
+// before the plain release (1.2.3~rc1 < 1.2.3). A version that does not
+// parse sorts before every other version.
 func Compare(a, b string) int {
 	first, firstOK := parse(a)
 	second, secondOK := parse(b)
@@ -80,14 +80,15 @@ func rank(value bool) int {
 	return 0
 }
 
-// Compatible tells whether two builds may talk (a CLI and an agent, or two
-// agents). Before 1.0.0 only builds of the same minor version: the state and
-// the commands may change with any minor release, while a patch release
-// changes neither. From 1.0.0, builds of the same major version at most one
-// minor version apart, as N and N-1 run side by side during an upgrade.
-// Development builds talk to everything (callers warn about that), and so
-// does a caller without a version it can read (curl, a script): the check is
-// there to explain a mismatch, not to keep anyone out.
+// Compatible tells whether two builds may talk to each other (a CLI and an
+// agent, or two agents). Before 1.0.0, only builds of the same minor
+// version may talk: the state and the commands may change with any minor
+// release, while a patch release changes neither. From 1.0.0 on, builds of
+// the same major version may talk if they are at most one minor version
+// apart, because N and N-1 run side by side during an upgrade. Development
+// builds talk to everything (callers warn about that), and so does a
+// caller without a readable version (curl, a script). The check is there
+// to explain a mismatch, not to keep anyone out.
 func Compatible(a, b string) bool {
 	if IsDevelopment(a) || IsDevelopment(b) {
 		return true
@@ -105,17 +106,17 @@ func Compatible(a, b string) bool {
 	}
 }
 
-// IsDevelopment tells whether a version is a development build's, or one
-// that does not read as a version at all (a build without one, "dev").
+// IsDevelopment tells whether a version belongs to a development build, or
+// does not parse as a version at all (a build without one, "dev").
 func IsDevelopment(text string) bool {
 	version, ok := parse(text)
 	return !ok || strings.HasPrefix(version.suffix, "~dev")
 }
 
 // Includes tells whether a build has what release brought: the build's
-// numbers are the release's or later ones, whatever its suffix (1.2.0~rc1
-// includes 1.2.0). A development build is built from the current code and
-// includes every release.
+// numbers are the release's numbers or later ones, whatever its suffix
+// (1.2.0~rc1 includes 1.2.0). A development build is built from the
+// current code and includes every release.
 func Includes(build, release string) bool {
 	if IsDevelopment(build) {
 		return true

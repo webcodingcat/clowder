@@ -20,6 +20,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/agent/loop"
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/docker"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -32,11 +33,13 @@ func newTestRunner(t *testing.T) (*Runner, *agenttest.Cluster, *agenttest.Docker
 	t.Helper()
 	cluster := agenttest.NewCluster(t)
 	docker, volumes := &agenttest.Docker{}, &agenttest.Volumes{Dir: t.TempDir()}
+	files := Files{StacksDir: filepath.Join(t.TempDir(), "stacks"), SecretsDir: t.TempDir()}
 	runner := New(Parts{
-		Files:       Files{StacksDir: filepath.Join(t.TempDir(), "stacks"), SecretsDir: t.TempDir()},
+		Files:       files,
 		Host:        0,
 		NodeAddress: netip.MustParseAddr("10.77.0.1"), Cluster: cluster, Docker: docker, Volumes: volumes,
-		Open: cluster.Keys.Open, DigestKey: []byte("the test's digest key"), Supervisor: fakePauser{&docker.Calls},
+		Open: cluster.Keys.Open, Registries: NewRegistryConfigs(files, cluster.Keys.Open),
+		DigestKey: []byte("the test's digest key"), Supervisor: fakePauser{&docker.Calls},
 		Signal: loop.NewSignal(), Propose: cluster.Propose, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	return runner, cluster, docker, volumes
@@ -276,13 +279,13 @@ func TestTheStacksHoldTheLVsOfTheirComposeFiles(t *testing.T) {
 
 func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 	runner, cluster, docker, _ := newTestRunner(t)
-	password := runner.files.secretFile(shopProject, "db-password")
+	password := runner.files.secretFile(shopProject, "db-password", "value")
 	env := runner.files.secretEnvFile(shopProject)
 
 	cluster.PutSecret("db-password", "first")
 	cluster.PutSecret("api-key", "key")
 	cluster.Put(resource.KindStack, "shop", agenttest.UsingDB(stackspec.Service{
-		Secrets: []string{"db-password"}, SecretEnv: map[string]string{"API_KEY": "api-key"},
+		Secrets: []string{"db-password"}, SecretEnv: map[string]names.SecretKeyRef{"API_KEY": {Name: "api-key", Key: "value"}},
 	}))
 	runner.passAndWait(context.Background())
 	if content, err := os.ReadFile(password); err != nil || string(content) != "first" {
@@ -298,7 +301,7 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 	if len(docker.UpFiles) != 2 || docker.UpFiles[1] != env {
 		t.Errorf("compose up with %v", docker.UpFiles)
 	}
-	want := map[string]string{"db-password": "digest of first", "api-key": "digest of key"}
+	want := map[string]string{"db-password": "digest of value=first", "api-key": "digest of value=key"}
 	if applied := cluster.Stack("shop").AppliedSecrets; !maps.Equal(applied, want) {
 		t.Errorf("applied secrets %v, want %v", applied, want)
 	}
@@ -313,7 +316,7 @@ func TestSecretsReachTheHostAndLeaveWithTheStack(t *testing.T) {
 	if secretsLabel(t, runner) == firstLabel {
 		t.Error("the label of app did not change with its secret file")
 	}
-	if applied := cluster.Stack("shop").AppliedSecrets; applied["db-password"] != "digest of second" {
+	if applied := cluster.Stack("shop").AppliedSecrets; applied["db-password"] != "digest of value=second" {
 		t.Errorf("applied secrets %v after the change", applied)
 	}
 

@@ -25,13 +25,13 @@ func newDecrypt() *cobra.Command {
 	command := &cobra.Command{
 		Use:   "decrypt --identity <file|-> -f <file>",
 		Short: "In an emergency, read the values of a file with the recovery key",
-		Long: "Opens every value tagged !secret in a file with the recovery key (a file, or - for stdin)\n" +
-			"and prints one line per value: where it is, a tab, the value. Where is a Secret's ID, or\n" +
-			"the path in cluster.yaml. A value that is not printable text, starts or ends with a\n" +
-			"space, or starts like one of the markers here shows as base64:... . A value that does\n" +
-			"not open, or is not meant for its place, shows as error: and the reason, the same one an\n" +
-			"apply would give; the command then ends with an error, after all lines. It needs no\n" +
-			"cluster.",
+		Long: "Decrypts every value tagged !secret in a file with the recovery key (a file, or - for\n" +
+			"stdin) and prints one line per value: where the value is, a tab, and the value. Where is\n" +
+			"a Secret's ID and the key (shop/db[password]). A value that is not printable text, that\n" +
+			"starts or ends with a space, or that starts like one of the markers here is shown as\n" +
+			"base64:... . A value that cannot be decrypted, or that is not meant for its place, is\n" +
+			"shown as error: and the reason, the same one an apply would give; the command then ends\n" +
+			"with an error after all lines. It needs no cluster.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if from == "" || identityFile == "" {
@@ -54,16 +54,12 @@ func newDecrypt() *cobra.Command {
 			}
 			failed := 0
 			for _, value := range values {
-				where := value.For
-				if where == secretvalue.Cluster {
-					where = value.place.path
-				}
 				shown, err := shownValue(value, identities)
 				if err != nil {
 					failed++
 					shown = errorMarker + err.Error()
 				}
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\n", where, shown); err != nil {
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\n", value.label(), shown); err != nil {
 					return err
 				}
 			}
@@ -78,10 +74,10 @@ func newDecrypt() *cobra.Command {
 	return command
 }
 
-// shownValue opens a value as decrypt prints it: as it is if it is
-// printable text, else in base64. A space at either end would not show,
-// and text that starts like a marker would read as one, so both show in
-// base64 too.
+// shownValue decrypts a value into the form decrypt prints: as it is if it
+// is printable text, or else in base64. A space at either end would not be
+// visible, and text that starts like a marker would read as a marker, so
+// both are also shown in base64.
 func shownValue(value fileValue, identities []age.Identity) (string, error) {
 	opened, err := secretvalue.OpenFor(value.Encrypted, value.For, identities...)
 	if err != nil {
@@ -97,8 +93,8 @@ func shownValue(value fileValue, identities []age.Identity) (string, error) {
 }
 
 // printable tells whether text prints on one line as it is: without line
-// ends, tabs, other control characters, or spaces a reader cannot tell
-// from others.
+// ends, tabs, other control characters, or spaces that a reader cannot
+// tell apart from normal spaces.
 func printable(text string) bool {
 	return utf8.ValidString(text) && strings.IndexFunc(text, func(r rune) bool { return !unicode.IsPrint(r) }) < 0
 }

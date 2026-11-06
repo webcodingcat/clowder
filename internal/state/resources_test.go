@@ -1,23 +1,16 @@
 package state
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
-
-// putResource is the command clowder apply sends for one resource.
-func putResource(kind, namespace, name string, spec any) PutResource {
-	encoded, err := json.Marshal(spec)
-	if err != nil {
-		panic(err)
-	}
-	return PutResource{Kind: kind, Namespace: namespace, Name: name, Owner: OwnerCLI, Spec: encoded}
-}
 
 // sealedOf stands in for a value of size bytes sealed by datakey: only its
 // length counts for the state.
@@ -26,11 +19,93 @@ func sealedOf(size int) Sealed {
 	return make(Sealed, sealedHeader+size+chunks*sealedTag)
 }
 
+func TestABatchGoesInWholeOrNotAtAll(t *testing.T) {
+	accepted := []ResourceChange{
+		putChange(resource.KindNamespace, "", "shop", nil),
+		putChange(resource.KindSecret, "shop", "token", sealedValue(sealedOf(5), "d")),
+		putChange(resource.KindStack, "shop", "web", shopSpec()),
+	}
+	refused := deleteChange(resource.KindNamespace, "", names.Default)
+	for index := range len(accepted) + 1 {
+		t.Run(fmt.Sprintf("refused at %d", index), func(t *testing.T) {
+			c := newCluster(t)
+			before := c.encoded()
+			changes := slices.Insert(slices.Clone(accepted), index, refused)
+			err := c.apply(KindChangeResources, cliActor, batch(changes...))
+			var command *CommandError
+			var change *ChangeError
+			if !errors.As(err, &command) || !errors.As(err, &change) || change.Index != index ||
+				!strings.Contains(err.Error(), "namespace default belongs to the cluster") {
+				t.Fatalf("want change %d refused, got %v", index, err)
+			}
+			if after := c.encoded(); after != before {
+				t.Errorf("the refused batch changed the state:\nbefore %s\nafter  %s", before, after)
+			}
+		})
+	}
+}
+
+func TestAChangeSeesTheChangesAboveIt(t *testing.T) {
+	tests := []struct {
+		name          string
+		first, second ResourceChange
+		wantError     string
+	}{
+		{
+			"a namespace and its stack",
+			putChange(resource.KindNamespace, "", "shop", nil),
+			putChange(resource.KindStack, "shop", "web", shopSpec()),
+			`no namespace "shop"`,
+		},
+		{
+			"a Secret and the configuration that names it",
+			hetznerSecret(),
+			configChange(testConfig()),
+			"clowder-system has no Secret hetzner",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			c := newCluster(t)
+			err := c.apply(KindChangeResources, cliActor, batch(test.second, test.first))
+			var change *ChangeError
+			if !errors.As(err, &change) || change.Index != 0 || !strings.Contains(err.Error(), test.wantError) {
+				t.Errorf("below what it needs: want change 0 refused with %q, got %v", test.wantError, err)
+			}
+			changes, err := c.changes(KindChangeResources, cliActor, batch(test.first, test.second))
+			if err != nil || len(changes) != 2 {
+				t.Errorf("below what it needs: changes %v, %v", changes, err)
+			}
+		})
+	}
+}
+
+func TestABatchThatChangesNothingLeavesNoAuditEntry(t *testing.T) {
+	c := newCluster(t)
+	c.configure(testConfig())
+	c.put(resource.KindNamespace, "", "shop", nil)
+	before := c.encoded()
+	changes, err := c.changes(KindChangeResources, cliActor, batch(
+		hetznerSecret(),
+		configChange(testConfig()),
+		putChange(resource.KindNamespace, "", "shop", nil),
+		putChange(resource.KindNamespace, "", names.Default, nil),
+	))
+	if err != nil || len(changes) != 0 {
+		t.Errorf("changes %v, %v", changes, err)
+	}
+	if after := c.encoded(); after != before {
+		t.Errorf("an unchanged batch changed the state or its audit:\nbefore %s\nafter  %s", before, after)
+	}
+	c.refuse(KindChangeResources, cliActor, batch(), "no changes")
+	c.refuse(KindChangeResources, cliActor, batch(ResourceChange{}), "a change is one put or one delete")
+}
+
 func TestAnUnchangedResourceIsNoChange(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
-	shop := putResource(resource.KindNamespace, "", "shop", nil)
-	changes, err := c.changes(KindPutResource, cliActor, shop)
+	c.configure(testConfig())
+	shop := putChange(resource.KindNamespace, "", "shop", nil)
+	changes, err := c.changes(KindChangeResources, cliActor, batch(shop))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,13 +113,13 @@ func TestAnUnchangedResourceIsNoChange(t *testing.T) {
 	if !slices.Equal(changes, want) {
 		t.Errorf("changes %v, want %v", changes, want)
 	}
-	volume := putResource(resource.KindVolume, "shop", "data", testVolumeSpec())
-	c.mustApply(KindPutResource, cliActor, volume)
+	volume := putChange(resource.KindVolume, "shop", "data", testVolumeSpec())
+	c.mustApply(KindChangeResources, cliActor, batch(volume))
 	volumeIndex := c.index
 	before := c.encoded()
-	for _, again := range []PutResource{shop, volume, putResource(resource.KindNamespace, "", "default", nil)} {
-		if changes, err := c.changes(KindPutResource, cliActor, again); err != nil || len(changes) != 0 {
-			t.Errorf("%s %s again: changes %v, %v", again.Kind, again.Name, changes, err)
+	for _, again := range []ResourceChange{shop, volume, putChange(resource.KindNamespace, "", "default", nil)} {
+		if changes, err := c.changes(KindChangeResources, cliActor, batch(again)); err != nil || len(changes) != 0 {
+			t.Errorf("%s %s again: changes %v, %v", again.Put.Kind, again.Put.Name, changes, err)
 		}
 	}
 	if after := c.encoded(); after != before {
@@ -57,75 +132,109 @@ func TestAnUnchangedResourceIsNoChange(t *testing.T) {
 
 func TestAResourceBelongsToTheChannelThatAppliedIt(t *testing.T) {
 	c := newCluster(t)
-	shop := putResource(resource.KindNamespace, "", "shop", nil)
-	c.mustApply(KindPutResource, cliActor, shop)
-	gitops := shop
-	gitops.Owner = "gitops:infra" // another channel
+	c.put(resource.KindNamespace, "", "shop", nil)
+	const gitops = "gitops:infra" // another channel
 	// refused even though nothing would change: another channel learns nothing
-	c.refuse(KindPutResource, cliActor, gitops, "belongs to cli, not to gitops:infra")
-	c.refuse(KindDeleteResource, cliActor,
-		DeleteResource{Kind: resource.KindNamespace, Name: "shop", Owner: gitops.Owner}, "belongs to cli")
+	ofGitops := putChange(resource.KindNamespace, "", "shop", nil)
+	ofGitops.Put.Owner = gitops
+	c.refuseChange(ofGitops, "belongs to cli, not to gitops:infra")
+	deleteByGitops := deleteChange(resource.KindNamespace, "", "shop")
+	deleteByGitops.Delete.Owner = gitops
+	c.refuseChange(deleteByGitops, "belongs to cli")
 	// the namespace's owner owns only the namespace
-	secret := putResource(resource.KindSecret, "shop", "token", SealedSecret{Value: sealedOf(5), Digest: "d1"})
-	secret.Owner = gitops.Owner
-	c.mustApply(KindPutResource, cliActor, secret)
+	secret := putChange(resource.KindSecret, "shop", "token", sealedValue(sealedOf(5), "d1"))
+	secret.Put.Owner = gitops
+	c.mustApply(KindChangeResources, cliActor, batch(secret))
 	// default belongs to no channel
-	inDefault := putResource(resource.KindSecret, "default", "token", SealedSecret{Value: sealedOf(5), Digest: "d2"})
-	c.mustApply(KindPutResource, cliActor, inDefault)
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindVolume, "nowhere", "data", testVolumeSpec()),
-		`no namespace "nowhere"`)
-	c.refuse(KindPutResource, cliActor, putResource("Pod", "shop", "web", nil), `no kind of resource "Pod"`)
+	c.put(resource.KindSecret, "default", "token", sealedValue(sealedOf(5), "d2"))
+	c.refuseChange(putChange(resource.KindVolume, "nowhere", "data", testVolumeSpec()), `no namespace "nowhere"`)
+	c.refuseChange(putChange("Pod", "shop", "web", nil), `no kind of resource "Pod"`)
 }
 
 func TestANamespaceGoesOnlyEmptyAndDefaultStays(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindNamespace, "", "shop", nil))
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindNamespace, "", "clowder-system", nil),
-		"do not start with clowder-")
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindNamespace, "shop", "inner", nil),
-		"lives in no namespace")
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindNamespace, "", "blog", map[string]int{"size": 1}),
-		"a namespace has no spec")
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindNamespace, "", "blog", map[string]int{}))
-	c.mustApply(KindPutResource, cliActor,
-		putResource(resource.KindSecret, "shop", "token", SealedSecret{Value: sealedOf(5), Digest: "d"}))
-	shop := DeleteResource{Kind: resource.KindNamespace, Name: "shop", Owner: OwnerCLI}
-	c.refuse(KindDeleteResource, cliActor, shop, "still holds Secret shop/token")
-	c.mustApply(KindDeleteResource, cliActor,
-		DeleteResource{Kind: resource.KindSecret, Namespace: "shop", Name: "token", Owner: OwnerCLI})
-	changes, err := c.changes(KindDeleteResource, cliActor, shop)
+	c.put(resource.KindNamespace, "", "shop", nil)
+	c.refuseChange(putChange(resource.KindNamespace, "", "clowder-apps", nil), "do not start with clowder-")
+	c.refuseChange(putChange(resource.KindNamespace, "shop", "inner", nil), "lives in no namespace")
+	c.put(resource.KindNamespace, "", "blog", map[string]int{})
+	c.put(resource.KindSecret, "shop", "token", sealedValue(sealedOf(5), "d"))
+	shop := deleteChange(resource.KindNamespace, "", "shop")
+	c.refuseChange(shop, "still holds Secret shop/token")
+	c.del(resource.KindSecret, "shop", "token")
+	changes, err := c.changes(KindChangeResources, cliActor, batch(shop))
 	if want := []Change{{Kind: resource.KindNamespace, Name: "shop", ResourceVersion: c.index, Deleted: true}}; err != nil ||
 		!slices.Equal(changes, want) {
 		t.Errorf("changes %v, want %v (%v)", changes, want, err)
 	}
-	c.refuse(KindDeleteResource, cliActor, DeleteResource{Kind: resource.KindNamespace, Name: "default"},
-		"belongs to the cluster")
+	c.refuseChange(deleteChange(resource.KindNamespace, "", "default"), "belongs to the cluster")
+}
+
+func TestANamespacesImagePullSecretsRaiseItsGeneration(t *testing.T) {
+	c := newCluster(t)
+	c.put(resource.KindNamespace, "", "shop", nil)
+	pulling := resource.NamespaceSpec{ImagePullSecrets: []resource.LocalObjectReference{{Name: "ghcr"}}}
+	c.put(resource.KindNamespace, "", "shop", pulling)
+	if shop := c.state.Namespaces["shop"]; shop.Generation != 2 || !sameJSON(shop.Spec, pulling) {
+		t.Errorf("namespace %+v", shop)
+	}
+	if changes, err := c.changes(KindChangeResources, cliActor,
+		batch(putChange(resource.KindNamespace, "", "shop", pulling))); err != nil || len(changes) != 0 {
+		t.Errorf("the same spec again: changes %v, %v", changes, err)
+	}
+	twice := resource.NamespaceSpec{ImagePullSecrets: []resource.LocalObjectReference{{Name: "ghcr"}, {Name: "ghcr"}}}
+	c.refuseChange(putChange(resource.KindNamespace, "", "shop", twice), "imagePullSecrets: ghcr is named twice")
+}
+
+func TestClowderSystemHoldsOnlyTheClustersSecrets(t *testing.T) {
+	c := newCluster(t)
+	if system := c.state.Namespaces[names.System]; system == nil || system.Generation != 1 {
+		t.Fatalf("namespace %s after the bootstrap: %+v", names.System, system)
+	}
+	tests := []struct {
+		name      string
+		change    ResourceChange
+		wantError string
+	}{
+		{"its delete", deleteChange(resource.KindNamespace, "", names.System), "namespace clowder-system belongs to the cluster"},
+		{"a stack", putChange(resource.KindStack, names.System, "shop", shopSpec()), "holds the cluster's Secrets only, no Stacks"},
+		{"a volume", putChange(resource.KindVolume, names.System, "data", testVolumeSpec()), "holds the cluster's Secrets only, no Volumes"},
+		{
+			"image pull secrets",
+			putChange(resource.KindNamespace, "", names.System,
+				resource.NamespaceSpec{ImagePullSecrets: []resource.LocalObjectReference{{Name: "ghcr"}}}),
+			"takes no image pull secrets",
+		},
+	}
+	for _, test := range tests {
+		c.refuseChange(test.change, test.wantError)
+	}
+	// put as it is, it stays as it is
+	if changes, err := c.changes(KindChangeResources, cliActor,
+		batch(putChange(resource.KindNamespace, "", names.System, nil))); err != nil || len(changes) != 0 {
+		t.Errorf("%s put as it is: changes %v, %v", names.System, changes, err)
+	}
 }
 
 func TestAVolumeWaitsForItsStackAndCannotChangeYet(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.configure(testConfig())
 	spec := testVolumeSpec()
 	unknown := spec
 	unknown.Class = "slow"
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "data", unknown),
-		`no storage class "slow"`)
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "data", resource.VolumeSpec{}),
-		"class is required")
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "data", spec))
+	c.refuseChange(putChange(resource.KindVolume, "default", "data", unknown), `no storage class "slow"`)
+	c.refuseChange(putChange(resource.KindVolume, "default", "data", resource.VolumeSpec{}), "class is required")
+	c.put(resource.KindVolume, "default", "data", spec)
 	volume := c.state.Volumes["default/data"]
 	if volume.Status != VolumePending || volume.DataGeneration != 1 || len(volume.Copies) != 0 {
 		t.Errorf("new volume %+v", volume)
 	}
 	larger := spec
 	larger.Size *= 2
-	c.refuse(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "data", larger),
-		"cannot change a volume yet")
+	c.refuseChange(putChange(resource.KindVolume, "default", "data", larger), "cannot change a volume yet")
 	// its class stays while it is there
 	config := testConfig()
 	config.StorageClasses = map[string]clusterspec.StorageClass{"slow": {Pool: "vg-slow/thin"}}
-	c.refuse(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: testSecrets()},
-		"volume default/data has storage class fast, so the class must stay")
+	c.refuseChange(configChange(config), "volume default/data has storage class fast, so the class must stay")
 	// the leader records where it is, and only that
 	placed := *volume
 	placed.Status = VolumeOK
@@ -160,101 +269,109 @@ func TestAVolumeWaitsForItsStackAndCannotChangeYet(t *testing.T) {
 	noCopy.Copies = nil
 	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: noCopy}, "holds data")
 	// a volume made again after its delete starts above its retired copies
-	c.mustApply(KindDeleteResource, cliActor,
-		DeleteResource{Kind: resource.KindVolume, Namespace: "default", Name: "data", Owner: OwnerCLI})
+	c.del(resource.KindVolume, "default", "data")
 	if want := []RetiredCopy{{Volume: "default/data", DataGeneration: 1, Host: 0}}; !slices.Equal(c.state.Retired, want) {
 		t.Errorf("retired %v, want %v", c.state.Retired, want)
 	}
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "data", spec))
+	c.put(resource.KindVolume, "default", "data", spec)
 	if generation := c.state.Volumes["default/data"].DataGeneration; generation != 2 {
 		t.Errorf("data generation %d after a retired copy of 1", generation)
 	}
 }
 
-func TestClusterYAMLKeepsTheClassACopyIsIn(t *testing.T) {
+func TestTheConfigurationKeepsTheClassACopyIsIn(t *testing.T) {
 	c := newCluster(t)
 	config := testConfig()
 	config.StorageClasses["fast"] = clusterspec.StorageClass{Fallback: []string{"bulk"}}
 	config.StorageClasses["bulk"] = clusterspec.StorageClass{Pool: "vg-bulk/thin"}
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: config, Secrets: testSecrets()})
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "data", testVolumeSpec()))
+	c.configure(config)
+	c.put(resource.KindVolume, "default", "data", testVolumeSpec())
 	// fast is only its fallback: the copy is in bulk
 	placed := *c.state.Volumes["default/data"]
 	minor := 0
 	placed.Status, placed.Minor, placed.Copies = VolumeOK, &minor, []VolumeCopy{{Host: 0, Class: "bulk"}}
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: placed})
-	c.refuse(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()},
-		"volume default/data has storage class bulk, so the class must stay")
+	c.refuseChange(configChange(testConfig()), "volume default/data has storage class bulk, so the class must stay")
 }
 
 func TestSecretsChangeByDigestWithinTheirLimits(t *testing.T) {
 	c := newCluster(t)
-	put := func(name string, size int, digest string) PutResource {
-		return putResource(resource.KindSecret, "default", name, SealedSecret{Value: sealedOf(size), Digest: digest})
+	secret := func(name string, size int, digest string) ResourceChange {
+		return putChange(resource.KindSecret, "default", name, sealedValue(sealedOf(size), digest))
 	}
-	c.mustApply(KindPutResource, cliActor, put("token", 10, "d1"))
+	c.mustApply(KindChangeResources, cliActor, batch(secret("token", 10, "d1")))
 	// sealed anew, the same value has the same digest
-	if changes, err := c.changes(KindPutResource, cliActor, put("token", 10, "d1")); err != nil || len(changes) != 0 {
+	if changes, err := c.changes(KindChangeResources, cliActor, batch(secret("token", 10, "d1"))); err != nil || len(changes) != 0 {
 		t.Errorf("the same value: changes %v, %v", changes, err)
 	}
-	c.mustApply(KindPutResource, cliActor, put("token", 12, "d2"))
-	if secret := c.state.Secrets["default/token"]; secret.Generation != 2 || ClearSize(secret.Spec.Value) != 12 {
-		t.Errorf("changed secret %+v", secret.Meta)
+	c.mustApply(KindChangeResources, cliActor, batch(secret("token", 12, "d2")))
+	if stored := c.state.Secrets["default/token"]; stored.Generation != 2 || ClearSize(stored.Spec.Data["value"]) != 12 {
+		t.Errorf("changed secret %+v", stored.Meta)
 	}
-	c.refuse(KindPutResource, cliActor, put("big", resource.MaxSecretBytes+1, "d"), "larger than 65536 bytes")
-	c.refuse(KindPutResource, cliActor, put("empty", 0, "d"), "is empty")
-	c.refuse(KindPutResource, cliActor, put("plain", 10, ""), "no digest")
-	c.refuse(KindPutResource, cliActor,
-		putResource(resource.KindSecret, "default", "short", SealedSecret{Value: Sealed("x"), Digest: "d"}), "not sealed")
+	tests := []struct {
+		name      string
+		change    ResourceChange
+		wantError string
+	}{
+		{"too large", secret("big", resource.MaxSecretBytes+1, "d"), "larger than 65536 bytes"},
+		{"empty", secret("empty", 0, "d"), "the value of value is empty"},
+		{"no digest", secret("plain", 10, ""), "no digest"},
+		{"not sealed", putChange(resource.KindSecret, "default", "short", sealedValue(Sealed("x"), "d")), "the value of value is not sealed"},
+		{"no keys", putChange(resource.KindSecret, "default", "none", SealedSecret{Digest: "d"}), "has no keys"},
+		{
+			"a key that is no file name",
+			putChange(resource.KindSecret, "default", "odd", SealedSecret{Data: map[string]Sealed{"a/b": sealedOf(5)}, Digest: "d"}),
+			`key "a/b"`,
+		},
+	}
+	for _, test := range tests {
+		c.refuseChange(test.change, test.wantError)
+	}
 	for _, name := range []string{"a", "b", "c"} {
-		c.mustApply(KindPutResource, cliActor, put(name, resource.MaxSecretBytes, "d-"+name))
+		c.mustApply(KindChangeResources, cliActor, batch(secret(name, resource.MaxSecretBytes, "d-"+name)))
 	}
-	c.refuse(KindPutResource, cliActor, put("d", resource.MaxSecretBytes, "d"),
+	c.refuseChange(secret("d", resource.MaxSecretBytes, "d"),
 		"the secrets of namespace default would be larger than 262144 bytes")
 }
 
-func TestTheCountOfSecretsHoldsForResourcesAndClusterYAMLAlike(t *testing.T) {
+func TestTheCountOfSecretsHoldsForClowderSystemToo(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
-	// cluster.yaml's one value and 999 resources make the 1000 allowed
+	c.configure(testConfig())
+	// the Hetzner token's Secret and 999 more make the 1000 allowed
+	var secrets []ResourceChange
 	for index := range resource.MaxClusterSecrets - 1 {
 		name := fmt.Sprintf("s%d", index)
-		c.mustApply(KindPutResource, cliActor,
-			putResource(resource.KindSecret, "default", name, SealedSecret{Value: sealedOf(1), Digest: name}))
+		secrets = append(secrets, putChange(resource.KindSecret, "default", name, sealedValue(sealedOf(1), name)))
 	}
-	c.refuse(KindPutResource, cliActor,
-		putResource(resource.KindSecret, "default", "one-more", SealedSecret{Value: sealedOf(1), Digest: "d"}),
-		"the cluster would have 1001 secrets, more than 1000")
-	c.refuse(KindApplyConfig, cliActor, withRegistries(1, 16), "cluster.yaml: the cluster would have 1001 secrets")
+	c.mustApply(KindChangeResources, cliActor, batch(secrets...))
+	for _, namespace := range []string{names.Default, names.System} {
+		c.refuseChange(putChange(resource.KindSecret, namespace, "one-more", sealedValue(sealedOf(1), "d")),
+			"the cluster would have 1001 secrets, more than 1000")
+	}
 }
 
-// withRegistries is testConfig with registry passwords of a size in clear.
-func withRegistries(count, size int) ApplyConfig {
-	applied := ApplyConfig{Spec: testConfig(), Secrets: testSecrets()}
-	applied.Spec.Registries = map[string]clusterspec.Registry{}
-	for index := range count {
-		host := fmt.Sprintf("r%d", index)
-		name := "registries." + host + ".password"
-		applied.Spec.Registries[host] = clusterspec.Registry{Username: "robot", Password: clusterspec.SecretRef(name)}
-		applied.Secrets[name] = SealedSecret{Value: sealedOf(size), Digest: name}
-	}
-	return applied
-}
-
-func TestClusterYAMLsValuesCountTowardsTheClustersSize(t *testing.T) {
+func TestTheSecretsOfTheClusterHaveALimitInAll(t *testing.T) {
 	c := newCluster(t)
-	// 64 values of 64 KiB are the 4 MiB the cluster may hold
-	full := withRegistries(63, resource.MaxSecretBytes)
-	full.Secrets["hetzner.token"] = SealedSecret{Value: sealedOf(resource.MaxSecretBytes), Digest: "d"}
-	c.mustApply(KindApplyConfig, cliActor, full)
-	c.refuse(KindPutResource, cliActor,
-		putResource(resource.KindSecret, "default", "token", SealedSecret{Value: sealedOf(1), Digest: "d"}),
-		"secret default/token: the secrets of the cluster would be larger than 4194304 bytes")
-	over := withRegistries(64, resource.MaxSecretBytes)
-	over.Secrets["hetzner.token"] = SealedSecret{Value: sealedOf(1), Digest: "d"}
-	c.refuse(KindApplyConfig, cliActor, over, "the secrets of the cluster would be larger than 4194304 bytes")
-	big := withRegistries(1, resource.MaxSecretBytes+1)
-	c.refuse(KindApplyConfig, cliActor, big, "registries.r0.password is larger than 65536 bytes")
+	// 16 namespaces with 4 Secrets of 64 KiB each are the 4 MiB the
+	// cluster may hold; clowder-system counts as any other
+	full := []ResourceChange{}
+	namespaces := []string{names.Default, names.System}
+	for index := range 14 {
+		namespace := fmt.Sprintf("n%d", index)
+		namespaces = append(namespaces, namespace)
+		full = append(full, putChange(resource.KindNamespace, "", namespace, nil))
+	}
+	for _, namespace := range namespaces {
+		for index := range 4 {
+			name := fmt.Sprintf("s%d", index)
+			full = append(full, putChange(resource.KindSecret, namespace, name,
+				sealedValue(sealedOf(resource.MaxSecretBytes), namespace+"/"+name)))
+		}
+	}
+	c.mustApply(KindChangeResources, cliActor, batch(full...))
+	c.mustApply(KindChangeResources, cliActor, batch(putChange(resource.KindNamespace, "", "more", nil)))
+	c.refuseChange(putChange(resource.KindSecret, "more", "token", sealedValue(sealedOf(1), "d")),
+		"secret more/token: the secrets of the cluster would be larger than 4194304 bytes")
 }
 
 func TestClearSizeUndoesWhatSealingAdds(t *testing.T) {

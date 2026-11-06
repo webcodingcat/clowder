@@ -45,7 +45,7 @@ func TestAWatchStreamsTheChangesAfterItsList(t *testing.T) {
 	}()
 	// a secret is another kind: the watch leaves it out
 	for _, resources := range [][]resource.Object{
-		{cluster.secretObject("default", "token", "s3cret", "default/token")},
+		{cluster.secretObject("default", "token", map[string]string{"value": "s3cret"})},
 		{object(resource.KindNamespace, "", "shop", "")},
 	} {
 		if _, err := client.ApplyResources(ctx, ApplyRequest{Resources: resources}, false); err != nil {

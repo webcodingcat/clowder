@@ -16,7 +16,7 @@ func newAlert(g *globals) *cobra.Command {
 	alert := &cobra.Command{Use: "alert", Short: "The cluster's alerts"}
 	alert.AddCommand(&cobra.Command{
 		Use:   "test",
-		Short: "Send a test alert to every channel of cluster.yaml",
+		Short: "Send a test alert to every channel of the configuration",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client, err := g.connect()
@@ -33,8 +33,8 @@ func newAlert(g *globals) *cobra.Command {
 	return alert
 }
 
-// printAlertTest shows how each channel took the test alert; it fails if
-// one did not.
+// printAlertTest shows whether each channel accepted the test alert. It
+// fails if one did not.
 func printAlertTest(out io.Writer, results []api.AlertTestResult) error {
 	failed := 0
 	for _, result := range results {
@@ -53,8 +53,8 @@ func printAlertTest(out io.Writer, results []api.AlertTestResult) error {
 	return nil
 }
 
-// printAlerts shows the open alerts and the messages the channels have not
-// taken yet.
+// printAlerts shows the open alerts and the messages that the channels
+// have not accepted yet.
 func printAlerts(out io.Writer, alerts []api.AlertInfo, failures []api.AlertFailure, failuresErr error) error {
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	if len(alerts) == 0 {

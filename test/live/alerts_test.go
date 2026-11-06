@@ -31,7 +31,6 @@ func TestAlerts(t *testing.T) {
 const (
 	mailServerPort = 1025
 	mailAPI        = "http://" + labAddress + ":8025/api/v1/messages"
-	mailCAFile     = "mail-ca.pem"
 )
 
 // The image of Prometheus and promtool, run on the host.
@@ -46,29 +45,18 @@ const heartbeatInterval = 10 * time.Second
 // agent is stopped, and a pool that fills raises its alert and the all-clear.
 func alertsReachTheChannels(t *testing.T, server host) {
 	received := startReceiver(t)
-	caCert, err := os.ReadFile(filepath.Join(workDir, registryCAFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeClusterFile(t, mailCAFile, caCert)
-	setClusterSecrets(t, map[string]string{
-		"alerts.channels[0].webhook": received.url("/discord"), "alerts.channels[1].url": received.url("/webhook"),
-		"alerts.channels[2].smtp.password": "any", "alerts.heartbeat.url": received.url("/heartbeat"),
-	})
+	discord := setSystemSecret(t, "alert-discord", "url", received.url("/discord"))
+	webhook := setSystemSecret(t, "alert-webhook", "url", received.url("/webhook"))
+	heartbeatURL := setSystemSecret(t, "alert-heartbeat", "url", received.url("/heartbeat"))
+	email := emailChannel(t)
 	changeConfig(t, func(config *clusterspec.Config) {
 		config.Alerts = &clusterspec.Alerts{
 			Channels: []clusterspec.AlertChannel{
-				{Type: "discord", Webhook: "alerts.channels[0].webhook"},
-				{Type: "webhook", URL: "alerts.channels[1].url"},
-				{
-					Type: "email", From: "clowder@" + zone, To: []string{"ops@" + zone},
-					SMTP: &clusterspec.SMTP{
-						Host: labAddress, Port: mailServerPort, User: "clowder",
-						Password: "alerts.channels[2].smtp.password", CA: mailCAFile,
-					},
-				},
+				{Type: "discord", WebhookSecretRef: &discord},
+				{Type: "webhook", URLSecretRef: &webhook},
+				email,
 			},
-			Heartbeat: &clusterspec.Heartbeat{URL: "alerts.heartbeat.url", Interval: heartbeatInterval.String()},
+			Heartbeat: &clusterspec.Heartbeat{URLSecretRef: heartbeatURL, Interval: heartbeatInterval.String()},
 		}
 	})
 
@@ -86,6 +74,25 @@ func alertsReachTheChannels(t *testing.T, server host) {
 	// the receiver ends with this step: without the channels, the later
 	// steps' alerts fail no delivery
 	changeConfig(t, func(config *clusterspec.Config) { config.Alerts = nil })
+}
+
+// emailChannel is an email channel to the lab's mail server: its password
+// a Secret of clowder-system, the registry's CA inline, as the server has
+// the registry's certificate.
+func emailChannel(t *testing.T) clusterspec.AlertChannel {
+	t.Helper()
+	caCert, err := os.ReadFile(filepath.Join(workDir, registryCAFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	password := setSystemSecret(t, "alert-smtp", "password", "any")
+	return clusterspec.AlertChannel{
+		Type: "email", From: "clowder@" + zone, To: []string{"ops@" + zone},
+		SMTP: &clusterspec.SMTP{
+			Host: labAddress, Port: mailServerPort, User: "clowder",
+			PasswordSecretRef: &password, CA: string(caCert),
+		},
+	}
 }
 
 // mailSubjects are the subjects of the mail that came, one per line.

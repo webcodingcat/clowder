@@ -13,25 +13,26 @@ import (
 const minTiebreakerHosts = 3
 
 // keepCopies brings the copies of every placed volume to what its replicas
-// ask for, one change per volume and plan, in this order:
-//   - a missing copy, on the host that takes stacks with the most free
-//     space in the volume's pool; a tiebreaker there gets a disk;
-//   - a surplus copy given up, once the others are synced: the one on a
-//     host that leaves first, never the one where its stack runs;
-//   - the tiebreaker of a volume with two copies, on a host without a
-//     copy that holds the fewest tiebreakers, once there are three hosts
-//     that take stacks; one on a host that no longer takes them moves.
+// ask for. It makes one change per volume and plan, in this order:
+//   - it adds a missing copy, on the host that takes stacks and has the
+//     most free space in the volume's pool; a tiebreaker there gets a disk;
+//   - it gives up a surplus copy once the others are synced: first the one
+//     on a host that leaves, never the one where its stack runs;
+//   - it sets the tiebreaker of a volume with two copies, on a host without
+//     a copy that holds the fewest tiebreakers, once three hosts take
+//     stacks; a tiebreaker on a host that no longer takes stacks moves.
 //
 // A change that gives a volume two copies with a disk, or takes the second
-// away, brings the tiebreaker that needs in the same record (fitTiebreaker).
+// one away, sets the tiebreaker that this needs in the same record
+// (fitTiebreaker).
 //
-// The resync limit: a new copy with a disk starts only while no other
-// syncs, in the whole cluster. Each copy then resyncs at
-// replication.resync_rate, and so no link carries more.
+// The resync limit: a new copy with a disk starts only while no other copy
+// syncs in the whole cluster. Each copy then resyncs at
+// replication.resyncRate, so no link carries more.
 //
-// A copy on a host that leaves does not count; one on a draining host
-// does, as draining is for maintenance. A volume an operation holds is
-// left to it.
+// A copy on a host that leaves does not count. A copy on a draining host
+// does count, because draining is for maintenance. A volume that an
+// operation holds is left to that operation.
 func (p *planner) keepCopies() []state.Volume {
 	var records []state.Volume
 	for _, id := range slices.Sorted(maps.Keys(p.current.Volumes)) {
@@ -57,12 +58,12 @@ func (p *planner) keepCopies() []state.Volume {
 	return records
 }
 
-// leaveThrownAway gives a volume of replicas 0 that no stack runs with a new,
-// empty LV elsewhere when its host leaves: its data is thrown away anyway
-// when its stack moves, and the host can go only once nothing is on it.
-// The new LV goes to the host that takes stacks with the most free space
-// in the pool, in a new data generation. One a stack runs with moves with
-// the stack.
+// leaveThrownAway gives a volume of replicas 0 that no running stack uses a
+// new, empty LV elsewhere when its host leaves. Its data would be thrown
+// away anyway when its stack moves, and the host can go only once nothing
+// is left on it. The new LV goes, in a new data generation, to the host
+// that takes stacks and has the most free space in the pool. A volume that
+// a running stack uses moves with the stack.
 func (p *planner) leaveThrownAway(volume *state.Volume) (state.Volume, bool) {
 	if len(volume.Copies) != 1 || p.counts(volume.Copies[0].Host) {
 		return state.Volume{}, false
@@ -87,10 +88,10 @@ func (p *planner) leaveThrownAway(volume *state.Volume) (state.Volume, bool) {
 	return record, true
 }
 
-// resyncs tells whether a copy with a disk catches up: it takes the resync
-// limit. Only a host that runs does: a copy on a host that is down waits
-// for it, and syncs nothing meanwhile. A copy of a volume that waits for a
-// restore has nothing to sync from.
+// resyncs tells whether a copy with a disk is catching up, and so uses the
+// resync limit. Only a copy on a running host does: a copy on a host that
+// is down waits for the host and syncs nothing meanwhile. A copy of a
+// volume that waits for a restore has nothing to sync from.
 func (p *planner) resyncs(volume *state.Volume, volumeCopy state.VolumeCopy) bool {
 	host, ok := p.current.Hosts[volumeCopy.Host]
 	up := ok && state.Up(host.Phase)
@@ -99,12 +100,12 @@ func (p *planner) resyncs(volume *state.Volume, volumeCopy state.VolumeCopy) boo
 }
 
 // counts tells whether a copy on a host counts toward its volume's
-// replicas: the host runs stacks and stays, or is down but comes back
-// soon. A failed host is not given up while the leader fences it; a
-// fenced one for CopyWait, as the leader powers it on again; a recovering
-// one catches its copies up. A disabled host, or one fenced for longer,
-// has its copies made anew elsewhere (addCopy), and once it is back, the
-// surplus goes (dropSurplus).
+// replicas: the host runs stacks and stays, or it is down but comes back
+// soon. A failed host is not given up while the leader fences it. A fenced
+// host is not given up for CopyWait, because the leader powers it on again.
+// A recovering host catches its copies up. A disabled host, or a host that
+// has been fenced for longer, gets its copies made anew elsewhere
+// (addCopy), and once it is back, the surplus copies go (dropSurplus).
 func (p *planner) counts(id state.HostID) bool {
 	host, ok := p.current.Hosts[id]
 	if !ok {
@@ -172,8 +173,8 @@ func (p *planner) addCopy(volume *state.Volume) (state.Volume, bool) {
 	return record, true
 }
 
-// freeSpace is what a pool on a host has left beside what the plan placed
-// in it.
+// freeSpace returns what a pool on a host has left after what the plan
+// placed in it.
 func (p *planner) freeSpace(host state.HostID, pool string) int64 {
 	free := p.current.Hosts[host].Pools[pool].SizeBytes
 	for _, size := range p.allocated[host][pool] {
@@ -191,8 +192,8 @@ func boolRank(value bool) int {
 }
 
 // dropSurplus gives up one copy beyond replicas, once every copy that
-// stays is synced and counts: the copy that a move or a leaving host left
-// behind.
+// stays is synced and counts. This is the copy that a move or a leaving
+// host left behind.
 func (p *planner) dropSurplus(volume *state.Volume) (state.Volume, bool) {
 	disks := diskCopies(volume)
 	if len(disks) <= volume.Spec.Replicas {
@@ -227,8 +228,8 @@ func (p *planner) dropSurplus(volume *state.Volume) (state.Volume, bool) {
 	return record, true
 }
 
-// stackHostOf is the host of the stack that names the volume, if it has
-// one.
+// stackHostOf returns the host of the stack that names the volume, if that
+// stack has one.
 func (p *planner) stackHostOf(volume *state.Volume) (state.HostID, bool) {
 	for _, id := range slices.Sorted(maps.Keys(p.current.Stacks)) {
 		stack := p.current.Stacks[id]
@@ -239,11 +240,11 @@ func (p *planner) stackHostOf(volume *state.Volume) (state.HostID, bool) {
 	return 0, false
 }
 
-// setTiebreaker gives a volume the tiebreaker its copies need
-// (fitTiebreaker) and moves one from a host that leaves or no longer runs
-// stacks; a draining host keeps its tiebreaker, as it keeps its copies.
-// The old one goes even without a new one: a host that leaves must not
-// keep it.
+// setTiebreaker gives a volume the tiebreaker that its copies need
+// (fitTiebreaker). It moves a tiebreaker away from a host that leaves or no
+// longer runs stacks; a draining host keeps its tiebreaker, as it keeps its
+// copies. The old tiebreaker goes even if there is no new one, because a
+// host that leaves must not keep it.
 func (p *planner) setTiebreaker(volume *state.Volume) (state.Volume, bool) {
 	record := *volume
 	record.Copies = slices.DeleteFunc(slices.Clone(volume.Copies), func(c state.VolumeCopy) bool {
@@ -256,23 +257,24 @@ func (p *planner) setTiebreaker(volume *state.Volume) (state.Volume, bool) {
 	return record, true
 }
 
-// fitTiebreaker gives a volume's record the tiebreaker its copies with a
-// disk need, in the record of the change that needs it: two copies that
-// gain or lose their third vote in a command of its own lack DRBD's quorum
-// in between (one of two nodes), and the failover of the one with the
-// stack hangs should it fail then.
-//   - Two copies with a disk get one: a volume of replicas 2, and one of
-//     replicas 1 while it moves. It goes on the host of prefer if that host
-//     takes stacks: the copy it gives up there becomes the tiebreaker, so no
-//     node joins or leaves the resource (its host detaches the disk and
-//     removes the LV, which the copy's class still names). Else on a host
-//     without a copy that holds the fewest tiebreakers; none while fewer
-//     than minTiebreakerHosts hosts take stacks.
-//   - One copy with a disk loses it: with two nodes, the copy would lose
-//     its quorum with the tiebreaker.
+// fitTiebreaker gives a volume's record the tiebreaker that its copies
+// with a disk need, in the record of the change that needs it. If two
+// copies gained or lost their third vote in a separate command, they would
+// lack DRBD's quorum in between (one of two nodes), and the failover of the
+// copy with the stack would hang if that host failed then.
+//   - Two copies with a disk get a tiebreaker: in a volume of replicas 2,
+//     and in one of replicas 1 while it moves. It goes on the host of
+//     prefer if that host takes stacks: the copy given up there becomes the
+//     tiebreaker, so no node joins or leaves the resource (the host detaches
+//     the disk and removes the LV, which the copy's class still names).
+//     Otherwise it goes on a host without a copy that holds the fewest
+//     tiebreakers. There is none while fewer than minTiebreakerHosts hosts
+//     take stacks.
+//   - One copy with a disk loses its tiebreaker: with two nodes, the copy
+//     would lose its quorum along with the tiebreaker.
 //
-// A tiebreaker that is there stays: with three copies (a move of replicas
-// 2) it does no harm, and it is in place once one of them goes.
+// An existing tiebreaker stays. With three copies (a move of replicas 2) it
+// does no harm, and it is in place once one of them goes.
 func (p *planner) fitTiebreaker(record *state.Volume, prefer *state.VolumeCopy) {
 	index := slices.IndexFunc(record.Copies, func(c state.VolumeCopy) bool { return c.Tiebreaker })
 	disks := len(diskCopies(record))
@@ -304,8 +306,8 @@ func (p *planner) fitTiebreaker(record *state.Volume, prefer *state.VolumeCopy) 
 }
 
 // countTiebreakers moves the plan's count of tiebreakers per host from a
-// volume's last record (planned earlier in this plan, else the state's) to
-// its new record.
+// volume's last record (planned earlier in this plan, or else the state's)
+// to its new record.
 func (p *planner) countTiebreakers(record state.Volume) {
 	last, planned := p.planned[record.ID()]
 	if old := p.current.Volumes[record.ID()]; !planned && old != nil {

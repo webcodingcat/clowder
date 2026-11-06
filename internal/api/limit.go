@@ -8,20 +8,20 @@ import (
 	"time"
 )
 
-// How many tries an agent takes per minute at a route without a
-// certificate (the join's): per sender, so a stranger cannot lock
-// everybody out; in all, so many senders cannot keep the agent busy: each
-// such route works with the data key for anyone who asks.
-// Someone with many addresses can still block the route for minutes; no
-// data is at risk then.
+// How many tries an agent accepts per minute at a route without a client
+// certificate (the join's routes). There is a limit per sender, so that a
+// stranger cannot lock everybody out, and a limit in all, so that many
+// senders cannot keep the agent busy: each such route works with the data
+// key for anyone who asks. Someone with many addresses can still block the
+// route for minutes, but no data is at risk then.
 const (
 	triesPerSender = 10
 	triesInAll     = 100
 )
 
-// limiter counts the tries of the current minute, in memory; each agent
+// limiter counts the tries of the current minute in memory; each agent
 // counts for itself. A refused try is not counted, so the map never holds
-// more than triesInAll senders, however many send.
+// more than triesInAll senders, however many there are.
 type limiter struct {
 	mu       sync.Mutex
 	minute   int64
@@ -29,7 +29,7 @@ type limiter struct {
 	total    int
 }
 
-// allow tells whether a try of sender at now is taken, and counts it.
+// allow tells whether a try of sender at now is accepted, and counts it.
 func (l *limiter) allow(sender netip.Addr, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -44,8 +44,8 @@ func (l *limiter) allow(sender netip.Addr, now time.Time) bool {
 	return true
 }
 
-// senderOf is the address a request counts for: the IPv4 address, or for
-// IPv6 the /64, which one machine usually has whole.
+// senderOf returns the address that a request counts for: the IPv4
+// address, or for IPv6 the /64, which one machine usually has to itself.
 func senderOf(r *http.Request) netip.Addr {
 	addressPort, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil {
@@ -59,7 +59,7 @@ func senderOf(r *http.Request) netip.Addr {
 	return address
 }
 
-// limited lets a route take only the tries that tries allows; the rest
+// limited lets a route accept only the tries that tries allows. The rest
 // get 429.
 func limited(tries *limiter, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

@@ -30,10 +30,11 @@ func HarmlessSecurityOpt(option string) bool {
 	return option == "no-new-privileges" || option == "no-new-privileges:true"
 }
 
-// Privileges lists what a service asks for beyond a normal container: such
-// a container can read the host's keys, other stacks' volumes and secrets,
-// and change the network rules that keep containers apart. Only stacks that
-// cluster.yaml names in stacks.privileged may have them.
+// Privileges lists what a service asks for beyond a normal container. Such
+// a container can read the host's keys and other stacks' volumes and
+// secrets, and it can change the network rules that keep containers apart.
+// Only stacks that the configuration names in stacks.privileged may have
+// privileges.
 func (s Service) Privileges() []string {
 	var asked []string
 	if s.Privileged {

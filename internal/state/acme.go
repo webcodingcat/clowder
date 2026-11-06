@@ -10,9 +10,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/names"
 )
 
-// ACMEAccount is the cluster's account at an ACME directory. A key belongs
-// to one directory: when acme.directory changes, the leader makes a new
-// account.
+// ACMEAccount is the cluster's account at an ACME directory. An account key
+// belongs to one directory, so the leader makes a new account when
+// acme.directory changes.
 type ACMEAccount struct {
 	Directory string `json:"directory"`
 	// URL is the account's ID at the directory (its "kid").
@@ -24,8 +24,8 @@ type ACMEAccount struct {
 // Certificate is the certificate of one domain.
 type Certificate struct {
 	Domain string `json:"domain"`
-	// Key is the private key, PEM (as Traefik reads it, unlike the account
-	// key, which only the leader reads), sealed.
+	// Key is the private key in PEM, sealed. It is PEM because Traefik
+	// reads it; the account key is not, as only the leader reads it.
 	Key Sealed `json:"key"`
 	// Chain is the certificate and its intermediates, PEM.
 	Chain     []byte    `json:"chain"`
@@ -54,7 +54,7 @@ func applyPutACMEAccount(s *State, _ Command, payload PutACMEAccount) (func(), e
 // base64URL is what RFC 8555 allows in a token and a key authorization.
 var base64URL = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
-// PutACMEChallenge publishes the answer to an HTTP-01 challenge: every
+// PutACMEChallenge publishes the answer to an HTTP-01 challenge. Every
 // agent serves it, so whichever host holds the Floating IP can answer.
 type PutACMEChallenge struct {
 	Token            string `json:"token"`
@@ -72,7 +72,7 @@ func applyPutACMEChallenge(s *State, _ Command, payload PutACMEChallenge) (func(
 	return func() { s.Challenges[payload.Token] = payload.KeyAuthorization }, nil
 }
 
-// DeleteACMEChallenge removes an answer once its order ended.
+// DeleteACMEChallenge removes an answer once its order has ended.
 type DeleteACMEChallenge struct {
 	Token string `json:"token"`
 }

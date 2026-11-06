@@ -13,8 +13,8 @@ type CommitIndex struct {
 }
 
 // localCommitIndex answers with this leader's commit index, once a majority
-// confirmed its lead: a leader cut off from the others would name an index
-// the cluster has gone past.
+// has confirmed its lead. A leader cut off from the others would name an
+// index that the cluster has already gone past.
 func (s *Server) localCommitIndex(w http.ResponseWriter, r *http.Request) {
 	if !s.config.Cluster.IsLeader() {
 		writeError(w, http.StatusServiceUnavailable, errors.New("not the leader; try again"))
@@ -29,8 +29,8 @@ func (s *Server) localCommitIndex(w http.ResponseWriter, r *http.Request) {
 
 // CatchUpWithLeader returns once this agent's state holds everything the
 // leader had committed when it was asked. A host that was away (fenced,
-// rebooted) starts its stacks only after it: a stack that moved to another
-// host while it was away must not start here from an old state.
+// rebooted) starts its stacks only after this returns: a stack that moved
+// to another host while it was away must not start here from an old state.
 func (s *Server) CatchUpWithLeader(ctx context.Context) error {
 	id, here, err := s.waitForLeader(ctx)
 	switch {

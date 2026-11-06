@@ -14,25 +14,27 @@ import (
 )
 
 // ErrNotYet is ForgetPeer's answer while a resource cannot forget the peer
-// yet: it is down, or still has the peer configured. Both pass by
-// themselves, so the caller tries again without alarm.
+// yet, because it is down or still has the peer configured. Both conditions
+// clear by themselves, so the caller tries again without raising an alarm.
 var ErrNotYet = errors.New("not yet")
 
-// unknownPeer is how drbdsetup forget-peer refuses a node-id it has no slot
-// for (the kernel's ERR_INVALID_PEER_NODE_ID): there is nothing to forget.
-// DRBD 9.3 says so only for a node-id out of range; one in range that the
-// resource never knew, or forgot already, it forgets again without a word.
-// The case stays for other versions of DRBD.
+// unknownPeer is the message with which drbdsetup forget-peer refuses a
+// node-id that it has no slot for (the kernel's ERR_INVALID_PEER_NODE_ID),
+// so there is nothing to forget. DRBD 9.3 gives this message only for a
+// node-id out of range. A node-id in range that the resource never knew, or
+// already forgot, it silently forgets again. The case stays for other
+// versions of DRBD.
 const unknownPeer = "invalid peer-node-id"
 
 // ForgetPeer forgets a removed host as a peer of every DRBD resource here
-// (drbdsetup forget-peer), so its node-id can serve a host that joins
-// later: the peer's slot in the metadata outlives its removal, and a new
+// (drbdsetup forget-peer), so a host that joins later can use its node-id.
+// The peer's slot in the metadata outlives the peer's removal, and a new
 // host with the same node-id would meet the old peer's data generations.
-// It fails, for the caller to try again, while a resource still has the
-// peer configured (its drbdadm adjust takes it out), while a resource is
-// down (forget-peer reaches only one that is up, and the reconciler brings
-// it up), and for any refusal but that of a peer the resource never knew.
+// ForgetPeer fails, and the caller tries again, in three cases: while a
+// resource still has the peer configured (its drbdadm adjust removes it),
+// while a resource is down (forget-peer works only on a resource that is
+// up, and the reconciler brings it up), and for any refusal other than the
+// one for a peer that the resource never knew.
 func (d Driver) ForgetPeer(ctx context.Context, peer int) error {
 	resources, err := d.resources(ctx)
 	if err != nil {
@@ -57,10 +59,10 @@ func (d Driver) ForgetPeer(ctx context.Context, peer int) error {
 	return nil
 }
 
-// ForgetPeerOf forgets a peer that left one resource here: its copy is
-// gone, and its slot in the metadata would be lost for the next copy that
-// comes (maxPeers). It fails like ForgetPeer, and with ErrNotYet while the
-// resource is down.
+// ForgetPeerOf forgets a peer that left one resource on this host. The
+// peer's copy is gone, and otherwise its slot in the metadata would stay
+// taken for the next new copy (maxPeers). It fails like ForgetPeer, and
+// with ErrNotYet while the resource is down.
 func (d Driver) ForgetPeerOf(ctx context.Context, resource string, peer int) error {
 	resources, err := d.resources(ctx)
 	if err != nil {

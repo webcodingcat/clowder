@@ -17,15 +17,17 @@ func CLIActor(name string) string {
 	return cliActorPrefix + name
 }
 
-// IsCLIActor tells whether an actor is the CLI, whatever its name: the
-// name grants nothing, so nothing here checks it (pki does, at issue).
+// IsCLIActor tells whether an actor is the CLI, whatever its name. The
+// name grants nothing, so nothing here checks it; pki checks it when it
+// issues the certificate.
 func IsCLIActor(actor string) bool {
 	return strings.HasPrefix(actor, cliActorPrefix) && len(actor) > len(cliActorPrefix)
 }
 
 // SetCLICutoff refuses every CLI certificate issued before Cutoff
-// (clowderd credentials --revoke-older): the way to lock out a lost
-// laptop. A host commits it, as root on it issued the new certificate.
+// (clowderd credentials --revoke-older). This is how to lock out a lost
+// laptop. A host commits the command, because root on that host issued the
+// new certificate.
 type SetCLICutoff struct {
 	Cutoff time.Time `json:"cutoff"`
 }
@@ -73,14 +75,14 @@ func (s *State) serialInUse(serial string) bool {
 }
 
 // revokedKept is how long a revoked certificate stays on the list after it
-// expired: a host whose clock runs behind still takes it for valid.
+// has expired: a host whose clock runs behind still treats it as valid.
 const revokedKept = 7 * 24 * time.Hour
 
 // revoke puts a certificate on the revocation list. The list grows only
-// here, so here it also drops the certificates that expired more than
-// revokedKept before the command: no handshake takes them any more. It
-// goes by the command's time, never the clock, so every agent drops the
-// same.
+// here, so this is also where it drops the certificates that expired more
+// than revokedKept before the command; no handshake accepts them any more.
+// It uses the command's time, never the clock, so every agent drops the
+// same certificates.
 func (s *State) revoke(serial string, notAfter, at time.Time) {
 	maps.DeleteFunc(s.Revoked, func(_ string, revocation Revocation) bool {
 		return at.Sub(revocation.NotAfter) > revokedKept

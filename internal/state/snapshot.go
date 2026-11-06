@@ -7,12 +7,13 @@ import (
 	"io"
 )
 
-// SnapshotVersion is the format of the snapshots this build writes. Like
-// commands, a snapshot of the version before stays readable; new fields are
-// optional, so the version only changes when a field changes its meaning.
+// SnapshotVersion is the format of the snapshots this build writes. As with
+// commands, a snapshot of the previous version stays readable. New fields
+// are optional, so the version only changes when a field changes its
+// meaning.
 const SnapshotVersion = 1
 
-// snapshot is the file Raft keeps instead of the log before it.
+// snapshot is the file that Raft keeps in place of the log up to it.
 type snapshot struct {
 	Version int    `json:"version"`
 	State   *State `json:"state"`
@@ -50,9 +51,9 @@ func (s *State) Copy() (*State, error) {
 	return &copied, nil
 }
 
-// ReadSnapshot reads a state written by WriteSnapshot of this release or the
-// one before. Every error is an ErrUnreadable: like an entry of the log, a
-// snapshot the agent cannot read stops it.
+// ReadSnapshot reads a state written by WriteSnapshot of this release or
+// the previous one. Every error is an ErrUnreadable: like a log entry, a
+// snapshot that the agent cannot read stops the agent.
 func ReadSnapshot(in io.Reader) (*State, error) {
 	compressed, err := gzip.NewReader(in)
 	if err != nil {

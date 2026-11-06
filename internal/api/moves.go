@@ -11,16 +11,16 @@ import (
 
 // Volumes is what the API needs of this host's volume copies.
 type Volumes interface {
-	// Progress is what each copy here differs by from a peer, by volume
-	// ID, in bytes: while it resyncs, what is left.
+	// Progress is how far each copy on this host differs from a peer, by
+	// volume ID, in bytes. While a copy resyncs, this is what is left.
 	Progress() map[string]int64
-	// ResolveSplitBrain connects the copy here of a volume, by ID, again to
-	// the peers it stands alone from; with discard it takes their data.
-	// connected is false when no peer of it was StandAlone.
+	// ResolveSplitBrain connects this host's copy of a volume, by ID,
+	// again to the peers it is cut off from; with discard, it takes their
+	// data. connected is false when none of its peers was StandAlone.
 	ResolveSplitBrain(ctx context.Context, volumeID string, discard bool) (connected bool, err error)
 }
 
-// moveStack commits request-move for a host named by the user; the
+// moveStack commits request-move for a host that the user named. The
 // placement starts the move once the stack fits there.
 func (s *Server) moveStack(w http.ResponseWriter, r *http.Request) {
 	var request MoveRequest
@@ -46,10 +46,11 @@ func (s *Server) moveStack(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// leaves is the phase change for a remove of a host that still has stacks
-// or volume copies: it drains and leaves (SetHostPhase.Leaving), and the
-// leader removes it once they moved off. Nil for a host the state would
-// remove at once, or refuse anyway.
+// leaves returns the phase change for removing a host that still has
+// stacks or volume copies. The host drains and leaves
+// (SetHostPhase.Leaving), and the leader removes it once they have moved
+// off. It returns nil for a host that the state would remove at once, or
+// would refuse anyway.
 func (s *Server) leaves(id state.HostID) *state.SetHostPhase {
 	var leave *state.SetHostPhase
 	s.config.Cluster.Read(func(current *state.State) {
@@ -62,7 +63,7 @@ func (s *Server) leaves(id state.HostID) *state.SetHostPhase {
 	return leave
 }
 
-// localProgress answers how far this host's copies are (Volumes).
+// localProgress answers how far this host's copies have synced (Volumes).
 func (s *Server) localProgress(w http.ResponseWriter, _ *http.Request) {
 	if s.config.Volumes == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("this agent keeps no volumes"))
@@ -71,7 +72,8 @@ func (s *Server) localProgress(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.config.Volumes.Progress())
 }
 
-// Progress asks a host how far its copies are (controller.Progress).
+// Progress asks a host how far its copies have synced
+// (controller.Progress).
 func (s *Server) Progress(ctx context.Context, host state.HostID) (map[string]int64, error) {
 	url := "https://" + s.config.APIAddress(host) + "/v1/internal/volumes/progress"
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

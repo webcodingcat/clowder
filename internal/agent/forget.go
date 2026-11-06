@@ -13,9 +13,10 @@ import (
 	"github.com/webcodingcat/clowder/internal/storage"
 )
 
-// forgetPeers forgets the removed hosts the state waits for this host to
-// forget as DRBD peers, and reports each (report-peer-forgotten), until ctx
-// ends: a removed host's ID is free once every host has.
+// forgetPeers runs until ctx ends. The state lists the removed hosts that
+// this host still has to forget as DRBD peers; forgetPeers forgets each one
+// and reports it (report-peer-forgotten). A removed host's ID is free again
+// once every host has forgotten it.
 func forgetPeers(ctx context.Context, cluster loop.Cluster, self state.HostID, driver Storage,
 	propose controller.Propose, logger *slog.Logger,
 ) {

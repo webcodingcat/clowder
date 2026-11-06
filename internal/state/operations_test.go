@@ -18,11 +18,11 @@ import (
 func lockCluster(t *testing.T) *cluster {
 	t.Helper()
 	c := newCluster(t)
-	c.mustApply(KindApplyConfig, cliActor, ApplyConfig{Spec: testConfig(), Secrets: testSecrets()})
+	c.configure(testConfig())
 	c.addHost(testHost(1))
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
 	c.runningShop(nil)
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindVolume, "default", "data", testVolumeSpec()))
+	c.put(resource.KindVolume, "default", "data", testVolumeSpec())
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: c.placedData()})
 	return c
 }
@@ -75,23 +75,23 @@ var lockCases = []lockCase{
 		free: true,
 	},
 	{
-		name: "a user changes a stack", kind: KindPutResource, actor: cliActor, lock: "stack/default/shop",
+		name: "a user changes a stack", kind: KindChangeResources, actor: cliActor, lock: "stack/default/shop",
 		payload: func(*cluster, uint64) any {
 			spec := shopSpec()
 			spec.Services["cache"] = stackspec.Service{Image: "x"}
-			return putResource(resource.KindStack, "default", "shop", spec)
+			return batch(putChange(resource.KindStack, "default", "shop", spec))
 		},
 	},
 	{
-		name: "a user deletes a stack", kind: KindDeleteResource, actor: cliActor, lock: "stack/default/shop",
+		name: "a user deletes a stack", kind: KindChangeResources, actor: cliActor, lock: "stack/default/shop",
 		payload: func(*cluster, uint64) any {
-			return DeleteResource{Kind: resource.KindStack, Namespace: "default", Name: "shop", Owner: OwnerCLI}
+			return batch(deleteChange(resource.KindStack, "default", "shop"))
 		},
 	},
 	{
-		name: "a user deletes a volume", kind: KindDeleteResource, actor: cliActor, lock: "volume/default/data",
+		name: "a user deletes a volume", kind: KindChangeResources, actor: cliActor, lock: "volume/default/data",
 		payload: func(*cluster, uint64) any {
-			return DeleteResource{Kind: resource.KindVolume, Namespace: "default", Name: "data", Owner: OwnerCLI}
+			return batch(deleteChange(resource.KindVolume, "default", "data"))
 		},
 	},
 	{
@@ -157,7 +157,6 @@ var lockCases = []lockCase{
 // case; each says why.
 var unlockedKinds = map[string]string{
 	KindBootstrap:            "makes the cluster",
-	KindApplyConfig:          "changes cluster.yaml, no stack or volume",
 	KindReportHost:           "a host's report, no phase",
 	KindSetIngress:           "names the ingress host, whose phase stays",
 	KindPutACMEAccount:       "the ACME account",
@@ -345,8 +344,7 @@ func TestALeaderCommandPlannedOnAnOlderStateIsRefused(t *testing.T) {
 	c = newCluster(t)
 	c.putShop(shopSpec())
 	planned = c.index
-	deleteShop := DeleteResource{Kind: resource.KindStack, Namespace: "default", Name: "shop", Owner: OwnerCLI}
-	c.mustApply(KindDeleteResource, cliActor, deleteShop)
+	c.del(resource.KindStack, "default", "shop")
 	c.refuse(KindSetStackStatus, LeaderActor, place(planned), "no stack default/shop")
 	c.refuse(KindSetPushedOut, LeaderActor, pushOut(planned), "no stack default/shop")
 
@@ -392,5 +390,5 @@ func TestTheLeaderGivesAHostOnlyToAStackThatHasNone(t *testing.T) {
 func (c *cluster) putBlog() {
 	c.t.Helper()
 	blog := stackspec.Spec{Services: map[string]stackspec.Service{"web": {Image: "x"}}}
-	c.mustApply(KindPutResource, cliActor, putResource(resource.KindStack, "default", "blog", blog))
+	c.put(resource.KindStack, "default", "blog", blog)
 }

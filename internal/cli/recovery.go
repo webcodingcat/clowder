@@ -30,9 +30,9 @@ func newRecoveryRotate(g *globals) *cobra.Command {
 		Use:   "rotate",
 		Short: "Make the cluster's recovery key, its first or a new one",
 		Long: "Makes a recovery key, shows it once and asks for its last 8 characters (or writes it to\n" +
-			"--recovery-out), then puts it in place. A new cluster has none, and nothing can be\n" +
-			"encrypted for it until this made the first. A new key takes the old one's place;\n" +
-			"afterwards, encrypt your files for it: clowder secret rekey.",
+			"--recovery-out), then puts it in place. A new cluster has no recovery key, and nothing\n" +
+			"can be encrypted for the cluster until this command has made the first one. A new key\n" +
+			"replaces the old one; afterwards, encrypt your files for it with clowder secret rekey.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client, err := g.connect()
@@ -63,13 +63,15 @@ func newRecoveryRotate(g *globals) *cobra.Command {
 }
 
 // confirmChars is how much of the recovery key the user types back: enough
-// to show it was written down, not so much that typing it is a chore.
+// to show that it was written down, but not so much that typing it is a
+// chore.
 const confirmChars = 8
 
-// handOverRecoveryKey gives the recovery key to the user, the only time it
-// exists outside the user's keeping: into a new file, or shown on the
-// terminal with its last characters typed back. Nothing has reached the
-// cluster yet, so a key that is not taken costs nothing.
+// handOverRecoveryKey gives the recovery key to the user. This is the only
+// time the key exists outside the user's keeping. It goes into a new file,
+// or it is shown on the terminal and the user types its last characters
+// back. Nothing has reached the cluster yet, so a key that the user does
+// not take costs nothing.
 func handOverRecoveryKey(cmd *cobra.Command, recovery *age.X25519Identity, out string) error {
 	if out != "" {
 		file, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -96,7 +98,7 @@ func handOverRecoveryKey(cmd *cobra.Command, recovery *age.X25519Identity, out s
 	return confirmKey(in, cmd.OutOrStdout(), key)
 }
 
-// confirmKey asks for the key's last characters until they come right, at
+// confirmKey asks for the key's last characters until they are right, at
 // most three times.
 func confirmKey(in io.Reader, out io.Writer, key string) error {
 	want := key[len(key)-confirmChars:]

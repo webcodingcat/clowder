@@ -9,8 +9,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Members are the hosts in Raft's latest configuration, committed or not,
-// each with whether it votes.
+// Members are the hosts in Raft's latest configuration, committed or not.
+// Each says whether it votes.
 func (n *Node) Members() (map[state.HostID]bool, error) {
 	future := n.raft.GetConfiguration()
 	if err := future.Error(); err != nil {
@@ -27,9 +27,9 @@ func (n *Node) Members() (map[state.HostID]bool, error) {
 	return members, nil
 }
 
-// AddNonvoter adds a host that follows the log and does not vote, at its
-// Raft address; a member already there keeps its vote. Only the leader
-// changes the members.
+// AddNonvoter adds a host, at its Raft address, that follows the log and
+// does not vote. A host that is already a member keeps its vote. Only the
+// leader changes the members.
 func (n *Node) AddNonvoter(id state.HostID, address string) error {
 	err := n.raft.AddNonvoter(serverID(id), raft.ServerAddress(address), 0, proposeTimeout).Error()
 	if err != nil {
@@ -38,7 +38,7 @@ func (n *Node) AddNonvoter(id state.HostID, address string) error {
 	return nil
 }
 
-// AddVoter makes a member a voter, or adds a host as one.
+// AddVoter makes a member a voter, or adds a host as a voter.
 func (n *Node) AddVoter(id state.HostID, address string) error {
 	err := n.raft.AddVoter(serverID(id), raft.ServerAddress(address), 0, proposeTimeout).Error()
 	if err != nil {
@@ -47,7 +47,7 @@ func (n *Node) AddVoter(id state.HostID, address string) error {
 	return nil
 }
 
-// DemoteVoter keeps a member, without its vote.
+// DemoteVoter takes a member's vote away and keeps it as a member.
 func (n *Node) DemoteVoter(id state.HostID) error {
 	if err := n.raft.DemoteVoter(serverID(id), 0, proposeTimeout).Error(); err != nil {
 		return fmt.Errorf("take host %d's Raft vote: %w", id, err)
@@ -55,8 +55,8 @@ func (n *Node) DemoteVoter(id state.HostID) error {
 	return nil
 }
 
-// RemoveMember takes a host out of Raft. A leader that took itself out
-// would end its lead abruptly; it hands the lead over first instead
+// RemoveMember takes a host out of Raft. A leader that removed itself would
+// end its lead abruptly. Instead, it hands over the lead first
 // (TransferLeadership), and the next leader removes it.
 func (n *Node) RemoveMember(id state.HostID) error {
 	if err := n.raft.RemoveServer(serverID(id), 0, proposeTimeout).Error(); err != nil {
@@ -65,9 +65,9 @@ func (n *Node) RemoveMember(id state.HostID) error {
 	return nil
 }
 
-// TransferLeadership hands the lead to another voter and returns once it
-// has it, or failed to. Removing the leading host this way spares the
-// cluster an election after a leader that went silent.
+// TransferLeadership hands the lead to another voter. It returns once that
+// voter leads, or once the transfer failed. Removing the leading host this
+// way spares the cluster the election that follows a leader going silent.
 func (n *Node) TransferLeadership() error {
 	if err := n.raft.LeadershipTransfer().Error(); err != nil {
 		return fmt.Errorf("hand the Raft lead over: %w", err)

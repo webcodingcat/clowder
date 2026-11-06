@@ -62,8 +62,9 @@ func newJoinToken(g *globals) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "join-token",
 		Short: "Make a token one host joins the cluster with (clowderd join --token-file)",
-		Long: "Make a token one host joins the cluster with: clowderd join --token-file <file> on the new\n" +
-			"host. It opens once and only until it expires; it is shown only now.",
+		Long: "Makes a token that one host can join the cluster with: run clowderd join --token-file\n" +
+			"<file> on the new host. The token works once and only until it expires. It is shown only\n" +
+			"now.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client, err := g.connect()
@@ -86,7 +87,8 @@ func newJoinToken(g *globals) *cobra.Command {
 	return command
 }
 
-// newHostAction makes the subcommand of one action; a final one asks first.
+// newHostAction makes the subcommand of one action. A final action asks
+// for confirmation first.
 func newHostAction(g *globals, action api.HostAction) *cobra.Command {
 	var yes bool
 	command := &cobra.Command{
@@ -130,8 +132,8 @@ func newHostAction(g *globals, action api.HostAction) *cobra.Command {
 }
 
 // confirmHost asks for the host's name before an action that cannot be
-// undone; without a terminal, --yes is the only way. The question goes to
-// stderr, so it shows even when the output is redirected.
+// undone. Without a terminal, --yes is the only way to confirm. The
+// question goes to stderr, so it shows even when the output is redirected.
 func confirmHost(cmd *cobra.Command, action, name string) error {
 	in, ok := cmd.InOrStdin().(*os.File)
 	if !ok || !term.IsTerminal(int(in.Fd())) {
@@ -150,7 +152,7 @@ func confirmHost(cmd *cobra.Command, action, name string) error {
 	return nil
 }
 
-// findHost takes a host's name or ID.
+// findHost finds a host by its name or ID.
 func findHost(hosts []api.HostInfo, nameOrID string) (api.HostInfo, error) {
 	for _, host := range hosts {
 		if host.Name == nameOrID || strconv.Itoa(host.ID) == nameOrID {

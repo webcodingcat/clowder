@@ -25,13 +25,14 @@ var (
 )
 
 // containerBridges are the interfaces containers send from: clowder's stack
-// bridges, Docker's default bridge and Compose networks clowder did not make.
+// bridges, Docker's default bridge and the Compose networks that clowder did
+// not create.
 const containerBridges = `{ "cbr-*", "docker0", "br-*" }`
 
-// markMask holds the bits of a connection's mark that clowder uses; the
-// others stay as they are. The mark of a packet from a container bridge is
-// clowder's alone: it is set to these bits (nft cannot merge two marks), and
-// nothing else on the host marks such packets.
+// markMask holds the bits of a connection's mark that clowder uses; clowder
+// leaves the other bits unchanged. The mark of a packet from a container
+// bridge belongs to clowder alone: clowder sets it to these bits (nft cannot
+// merge two marks), and nothing else on the host marks such packets.
 const markMask = 0xfff
 
 // Ruleset is what goes into the nft table inet clowder.
@@ -40,23 +41,23 @@ type Ruleset struct {
 	// ClusterHosts are the underlay and public addresses of every host,
 	// sorted.
 	ClusterHosts []netip.Addr
-	// PrivateNetwork is the Hetzner private network between the hosts;
-	// the zero value before the first cluster apply names it.
+	// PrivateNetwork is the Hetzner private network between the hosts. It
+	// is the zero value until the first configuration names it.
 	PrivateNetwork netip.Prefix
 	// Peers are the other hosts this one has a WireGuard interface to,
 	// sorted.
 	Peers []state.HostID
-	// NodeAddress is this host's: a container's connection to a forwarded
-	// port leaves from it (hairpin).
+	// NodeAddress is this host's node address. A container's connection to
+	// a forwarded port leaves from it (hairpin).
 	NodeAddress netip.Addr
 	// Forwards are the published ports whose stacks run on other hosts,
 	// sorted (SortForwards).
 	Forwards []Forward
 }
 
-// Forward is a published port whose stack runs on another host: the
-// connections to it on the Floating IP go to that host's node address,
-// where Docker publishes the port too.
+// Forward is a published port whose stack runs on another host. Connections
+// to the port on the Floating IP go to that host's node address, where
+// Docker publishes the port too.
 type Forward struct {
 	Protocol string // tcp or udp
 	Port     uint16
@@ -71,43 +72,47 @@ func SortForwards(forwards []Forward) {
 	})
 }
 
-// forwardMark marks a connection clowder sent to another host (Forwards);
-// Docker's FORWARD chain lets only those pass (dockerRule).
+// forwardMark marks a connection that clowder sent to another host
+// (Forwards). Docker's FORWARD chain lets only these connections pass
+// (dockerRule).
 const forwardMark = 0x200
 
 // Render writes the table inet clowder. It deletes and recreates the table
-// in one transaction, so nft -f replaces it atomically and nothing else's
-// rules (Docker's) are touched.
+// in one transaction, so nft -f replaces it atomically and does not touch
+// the rules of anyone else (Docker's).
 //
-// What containers may reach on the host: the resolver, the local Traefik
-// on the Floating IP (HTTP hairpin) and answers to their own connections;
-// nothing else (guard_in). On the host and beyond it (guard_fwd), a packet
-// whose source is not of its bridge's network goes first, so a container with NET_RAW
-// can neither spoof another's address nor slip into its connections; the
-// fib lookup asks the routing table whether an answer to the source would
-// leave through the interface the packet came in on. Then what clowder or
-// Docker redirected (DNAT: exports, hairpin, published ports) passes, to
-// any target: every DNAT rule opens its target past the drops that follow.
-// The metadata API, the hosts, the private network and the overlay stay
-// closed; a connection open before the table first loads (the agent's
-// start) passes as established until it ends. The host's own processes do not reach the metadata API either
-// (guard_out); clowderd never needs it, and cloud-init reads it at boot
-// before clowderd starts.
+// On the host, containers may reach only the resolver, the local Traefik on
+// the Floating IP (HTTP hairpin) and the answers to their own connections
+// (guard_in). For traffic to the host and beyond it (guard_fwd), the first
+// rule drops a packet whose source is not in its bridge's network. So a
+// container with NET_RAW can neither spoof another container's address nor
+// slip into its connections. The fib lookup asks the routing table whether
+// an answer to the source would leave through the interface the packet came
+// in on. Next, everything that clowder or Docker redirected (DNAT: exports,
+// hairpin, published ports) passes to any target: every DNAT rule opens its
+// target past the drops that follow. The metadata API, the hosts, the
+// private network and the overlay stay closed. A connection that was open
+// before the table first loads (at the agent's start) passes as established
+// until it ends. The host's own processes cannot reach the metadata API
+// either (guard_out): clowderd never needs it, and cloud-init reads it at
+// boot before clowderd starts.
 //
-// The marks bring a container's answer to a connection from a peer back
-// through that peer. The host's own processes get none: what reaches them
-// from a peer comes from its node address, and the route to it leads back.
-// So a DNAT from another host that keeps the client's address must lead to
-// a container, never to a process in the host's network.
+// The marks route a container's answer to a connection from a peer back
+// through that peer. The host's own processes get no mark: what reaches
+// them from a peer comes from the peer's node address, and the route to
+// that address leads back. So a DNAT from another host that keeps the
+// client's address must lead to a container, never to a process in the
+// host's network.
 //
-// A published port whose stack runs elsewhere goes there with the client's
-// address (forwards): to the node address of the stack's host, through its
-// WireGuard interface, where Docker publishes the port to the container. A
-// port of a stack on this host is Docker's alone. Every host has these
-// rules; Hetzner sends the Floating IP to one, and the others need them
-// for their containers. Such a container's connection leaves from this
-// host's node address (hairpin): an answer to its bridge address would go
-// to a bridge of the same network on the stack's host.
+// A published port whose stack runs on another host is forwarded there with
+// the client's address (forwards): to the node address of the stack's host,
+// through its WireGuard interface, where Docker publishes the port to the
+// container. A port of a stack on this host belongs to Docker alone. Every
+// host has these rules: Hetzner sends the Floating IP to one host, and the
+// others need the rules for their own containers. Such a container's
+// connection leaves from this host's node address (hairpin), because an
+// answer to its bridge address would go to a bridge of the same network on
+// the stack's host.
 func Render(ruleset Ruleset) string {
 	lines := []string{
 		"table inet clowder",
@@ -124,10 +129,10 @@ func Render(ruleset Ruleset) string {
 		"  chain marks {",
 		"    type filter hook prerouting priority mangle; policy accept;",
 	)
-	// answers to a connection that came in from a peer go back to it
-	// (peerTable): the connection keeps the peer's mark, the container's
-	// answer gets it from there. nft binds & before |: the mark's other bits
-	// stay, clowder's become the peer's
+	// answers to a connection that came in from a peer go back to that peer
+	// (peerTable): the connection keeps the peer's mark, and the container's
+	// answer takes it from the connection. nft binds & before |, so the
+	// mark's other bits stay and clowder's bits become the peer's
 	for _, peer := range ruleset.Peers {
 		lines = append(lines, fmt.Sprintf(`    ct state new iifname "%s" ct mark set ct mark & %#x | %#x`,
 			PeerInterface(peer), ^uint32(markMask), peerMark(peer)))
@@ -170,8 +175,9 @@ func Render(ruleset Ruleset) string {
 	)
 	lines = append(lines, forwardChains(ruleset)...)
 	lines = append(lines,
-		// the WireGuard interfaces' MTU is smaller than the containers'; TCP
-		// through them learns it from the handshake (UDP must fit itself)
+		// the WireGuard interfaces have a smaller MTU than the containers;
+		// TCP through them learns it from the handshake (UDP packets must fit
+		// on their own)
 		"  chain mss {",
 		"    type filter hook forward priority mangle; policy accept;",
 		fmt.Sprintf(`    oifname "%s*" tcp flags syn / syn,rst tcp option maxseg size set rt mtu`, peerInterfacePrefix),
@@ -181,9 +187,10 @@ func Render(ruleset Ruleset) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// forwardChains are the chains of the forwards: the DNAT before Docker's
-// (dstnat - 10), with the mark that Docker's FORWARD chain lets pass, and
-// the SNAT of the containers' own connections. None without a Floating IP.
+// forwardChains are the chains of the forwards: the DNAT, which runs before
+// Docker's (dstnat - 10) and sets the mark that Docker's FORWARD chain lets
+// pass, and the SNAT of the containers' own connections. Without a Floating
+// IP there are no such chains.
 func forwardChains(ruleset Ruleset) []string {
 	if !ruleset.FloatingIP.IsValid() || !ruleset.NodeAddress.IsValid() {
 		return nil
@@ -217,5 +224,5 @@ func joinAddresses(addresses []netip.Addr) string {
 }
 
 // toolTimeout bounds nft, ip, wg and conntrack, which answer in
-// milliseconds when well.
+// milliseconds when the host is healthy.
 const toolTimeout = 30 * time.Second

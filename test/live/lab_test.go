@@ -20,11 +20,9 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/webcodingcat/clowder/internal/clusterdir"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
-	"github.com/webcodingcat/clowder/internal/secretvalue"
-	"github.com/webcodingcat/clowder/internal/yamlpath"
+	"github.com/webcodingcat/clowder/internal/resource"
 )
 
 // labAddress is where the test and the tools of bin/dev live run in the
@@ -129,113 +127,111 @@ func download(t *testing.T, url string) []byte {
 	return content
 }
 
-// changeConfig edits the test's cluster.yaml and applies it.
-func changeConfig(t *testing.T, change func(config *clusterspec.Config)) {
-	t.Helper()
-	directory, err := clusterdir.Load(clusterDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	change(&directory.Config)
-	writeConfig(t, directory.Config, directory.Encrypted)
-	mustClowder(t, "cluster", "apply")
+// The configuration's directory holds the cluster's own resources, as a
+// user keeps them in a repository: the Secrets of clowder-system, the
+// ClusterConfiguration that names them, and the namespace default with its
+// registry login. An apply takes a directory's files by name, so the
+// numbers in front put each Secret of clowder-system above the
+// configuration that names it.
+const (
+	configurationFile    = "2-configuration.yaml"
+	defaultNamespaceFile = "3-default.yaml"
+)
+
+// configDir is the configuration's directory.
+func configDir() string { return filepath.Join(workDir, "configuration") }
+
+// systemSecretFile is the file of a Secret of clowder-system in the
+// configuration's directory.
+func systemSecretFile(name string) string {
+	return filepath.Join(configDir(), "1-secret-"+name+".yaml")
 }
 
-// clusterConfigJSON is the test's cluster.yaml as JSON: its settings, with
-// the names of its secrets and not their values, which change at each
-// encrypt.
-func clusterConfigJSON(t *testing.T) []byte {
+// applyConfig applies the configuration's directory. It holds the Secret
+// of the Hetzner token, so the CLI would ask first: --yes.
+func applyConfig(t *testing.T) {
 	t.Helper()
-	directory, err := clusterdir.Load(clusterDir())
+	mustClowder(t, "apply", "-f", configDir(), "--yes")
+}
+
+// changeConfig edits the test's ClusterConfiguration and applies it.
+func changeConfig(t *testing.T, change func(config *clusterspec.Config)) {
+	t.Helper()
+	config := readConfig(t)
+	change(&config)
+	writeConfig(t, config)
+	applyConfig(t)
+}
+
+// readConfig reads the spec of the test's ClusterConfiguration, strictly,
+// as the cluster reads it.
+func readConfig(t *testing.T) clusterspec.Config {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(configDir(), configurationFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	content, err := json.MarshalIndent(directory.Config, "", "  ")
+	objects, err := resource.ParseDocuments(content)
+	if err != nil || len(objects) != 1 || objects[0].Kind != resource.KindClusterConfiguration {
+		t.Fatalf("read %s: %d resources, %v", configurationFile, len(objects), err)
+	}
+	config, err := resource.DecodeClusterConfiguration(objects[0].Spec)
+	if err != nil {
+		t.Fatalf("read %s: %v", configurationFile, err)
+	}
+	return config
+}
+
+// clusterConfigJSON is the spec of the test's ClusterConfiguration as JSON;
+// it names its Secrets, so it stays the same when their values are
+// encrypted anew.
+func clusterConfigJSON(t *testing.T) []byte {
+	t.Helper()
+	content, err := json.MarshalIndent(readConfig(t), "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return content
 }
 
-// encrypted are the values of cluster.yaml the test set, by name (their
-// path), encrypted as clowder secret encrypt does.
-var encrypted = map[string]string{}
-
-// setClusterSecrets encrypts values for cluster.yaml, by their names; the
-// next writeConfig puts them at their places.
-func setClusterSecrets(t *testing.T, values map[string]string) {
+// writeConfig writes the test's ClusterConfiguration with config as its
+// spec. The spec has JSON's names only, so it goes through JSON into YAML,
+// as a user would write it.
+func writeConfig(t *testing.T, config clusterspec.Config) {
 	t.Helper()
-	for name, value := range values {
-		block, err := clowderWithInput(strings.NewReader(value), "secret", "encrypt", "--cluster-yaml")
-		if err != nil {
-			t.Fatal(err)
-		}
-		// the armor without the block's tag line and indentation
-		_, armor, _ := strings.Cut(block, "\n")
-		var lines []string
-		for _, line := range strings.Split(strings.TrimRight(armor, "\n"), "\n") {
-			lines = append(lines, strings.TrimSpace(line))
-		}
-		encrypted[name] = strings.Join(lines, "\n") + "\n"
-	}
-}
-
-// writeConfig writes the test's cluster.yaml: config, with the value of
-// each of its secrets tagged !secret at its place, from known (what the file
-// had) or set by setClusterSecrets.
-func writeConfig(t *testing.T, config clusterspec.Config, known map[string]string) {
-	t.Helper()
-	values := map[string]string{}
-	for _, place := range clusterspec.SecretPlaces(config) {
-		value, ok := encrypted[place.Path]
-		if !ok {
-			value, ok = known[place.Path]
-		}
-		if !ok {
-			t.Fatalf("no value for %s", place.Path)
-		}
-		values[place.Path] = value
-	}
-	var document yaml.Node
-	if err := document.Encode(config); err != nil {
-		t.Fatal(err)
-	}
-	tagSecrets(&document, "", values)
-	content, err := yaml.Marshal(&document)
+	encoded, err := json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(clusterDir(), clusterdir.ConfigFile), content, 0o644); err != nil {
+	var tree any
+	if err := json.Unmarshal(encoded, &tree); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := yaml.Marshal(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := documentIn("", resource.KindClusterConfiguration, resource.ClusterConfigurationName, string(spec))
+	if err := os.WriteFile(filepath.Join(configDir(), configurationFile), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// tagSecrets puts each value at its path in the node tree, as a block
-// tagged !secret, naming the places as the CLI's Extract does.
-func tagSecrets(node *yaml.Node, path string, values map[string]string) {
-	switch node.Kind {
-	case yaml.MappingNode:
-		for index := 0; index+1 < len(node.Content); index += 2 {
-			tagSecrets(node.Content[index+1], yamlpath.Key(path, node.Content[index].Value), values)
-		}
-	case yaml.SequenceNode:
-		for index, item := range node.Content {
-			tagSecrets(item, yamlpath.Index(path, index), values)
-		}
-	case yaml.ScalarNode:
-		if value, ok := values[path]; ok {
-			node.Tag, node.Style, node.Value = secretvalue.Tag, yaml.LiteralStyle, value
-		}
-	}
-}
-
-// writeClusterFile puts a file next to cluster.yaml, as acme.ca and
-// smtp.ca name them.
-func writeClusterFile(t *testing.T, name string, content []byte) {
+// setSystemSecret writes a Secret of clowder-system with one key to the
+// configuration's directory, its value encrypted from stdin as clowder
+// secret encrypt does; the next apply of the directory takes it. It
+// returns the reference the configuration names the value by.
+func setSystemSecret(t *testing.T, name, key, value string) names.SecretKeyRef {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(clusterDir(), name), content, 0o644); err != nil {
+	secret, err := clowderWithInput(strings.NewReader(value), "secret", "encrypt", names.ID(names.System, name),
+		"--from-file", key+"=-")
+	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(systemSecretFile(name), []byte(secret), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return names.SecretKeyRef{Name: name, Key: key}
 }
 
 // runs tells whether a service of a stack has a running container.

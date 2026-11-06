@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// A host joins with a one-time token (internal/jointoken): a user makes one
-// (add-join-token), and the leader adds the host with it (add-host), which
-// uses the token up in the same command. The state keeps only the token's
+// A host joins with a one-time token (internal/jointoken). A user makes the
+// token (add-join-token), and the leader adds the host with it (add-host);
+// that command also uses the token up. The state keeps only the token's
 // hash, and the handlers check its expiry against the command's time.
 
 // JoinToken is an open join token.
@@ -19,9 +19,10 @@ type JoinToken struct {
 	Expires time.Time `json:"expires"`
 }
 
-// The limits of join tokens. A token lives at least a minute, so a host
-// that boots slowly still makes it, and at most a day: it sits in the user
-// data and the OpenTofu state, where it must be worthless soon.
+// The limits of join tokens. A token lives at least a minute, so that a
+// host that boots slowly still makes it in time, and at most a day, because
+// it sits in the user data and the OpenTofu state, where it must soon be
+// worthless.
 const (
 	MinJoinTokenTTL     = time.Minute
 	MaxJoinTokenTTL     = 24 * time.Hour
@@ -72,8 +73,9 @@ func applyAddJoinToken(s *State, cmd Command, payload AddJoinToken) (func(), err
 }
 
 // dropExpiredTokens drops the tokens that expired more than joinTokenKept
-// before at, by the command's time, so every agent drops the same. The list
-// changes only where it is called, with each add-join-token and add-host.
+// before at. It uses the command's time, so every agent drops the same
+// tokens. The list changes only where this is called: with each
+// add-join-token and add-host.
 func (s *State) dropExpiredTokens(at time.Time) {
 	maps.DeleteFunc(s.JoinTokens, func(_ string, token JoinToken) bool {
 		return at.Sub(token.Expires) > joinTokenKept
@@ -81,9 +83,8 @@ func (s *State) dropExpiredTokens(at time.Time) {
 }
 
 // ErrJoinTokenRefused is the answer to a token that does not open: unknown,
-// used or expired. Whoever asks with the token's ID is told which; the ID
-// alone opens nothing, and the 64 bits of a guessed one rarely name a
-// token.
+// used or expired. Whoever asks with the token's ID is told which. The ID
+// alone opens nothing, and a guessed ID of 64 bits rarely names a token.
 var ErrJoinTokenRefused = errors.New("the join token does not open")
 
 // CheckJoinToken refuses a token that is unknown, used up or expired at at.
@@ -140,10 +141,10 @@ func applyAddHost(s *State, cmd Command, payload AddHost) (func(), error) {
 	}, nil
 }
 
-// HostIDFree tells whether a joining host may get the ID: no host has it,
-// or a removed one that every other host forgot as a DRBD peer. DRBD's
-// node-id is the host ID, and a peer's slot in the metadata outlives it
-// until forget-peer.
+// HostIDFree tells whether a joining host may get the ID. That is the case
+// if no host has the ID, or only a removed host that every other host
+// forgot as a DRBD peer. DRBD's node-id is the host ID, and a peer's slot
+// in the metadata outlives the peer until forget-peer.
 func (s *State) HostIDFree(id HostID) bool {
 	host, taken := s.Hosts[id]
 	if !taken {
@@ -153,8 +154,8 @@ func (s *State) HostIDFree(id HostID) bool {
 	return host.Phase == Removed && !forgetting
 }
 
-// FreeHostID is the lowest ID a joining host may get; false if the
-// cluster is full.
+// FreeHostID returns the lowest ID that a joining host may get, or false if
+// the cluster is full.
 func (s *State) FreeHostID() (HostID, bool) {
 	for id := range HostID(MaxHosts) {
 		if s.HostIDFree(id) {
@@ -167,9 +168,9 @@ func (s *State) FreeHostID() (HostID, bool) {
 // CheckJoiningHost refuses a joining host that lacks what a host must
 // bring, whose underlay is outside the private network, whose
 // certificate's serial is in use, or whose name, underlay or server
-// another host has, unless that host is removed: two hosts of one server
-// would fence each other's. The leader asks it before it asks Hetzner,
-// add-host again.
+// another host has, unless that host is removed. Two hosts on one server
+// would fence each other's server. The leader asks before it asks Hetzner,
+// and add-host checks again.
 func (s *State) CheckJoiningHost(host Host) error {
 	if err := checkNewHost(host); err != nil {
 		return err
@@ -194,10 +195,11 @@ func (s *State) CheckJoiningHost(host Host) error {
 	return nil
 }
 
-// ConfirmServer records that Hetzner confirmed a host's server: the first
-// host's, which init took from the metadata service unchecked, once
-// cluster.yaml brought the project's token. ServerID is the server the
-// leader checked; it must still be the host's.
+// ConfirmServer records that Hetzner confirmed a host's server. This is for
+// the first host, whose server init took unchecked from the metadata
+// service; the leader confirms it once the configuration names the
+// project's token. ServerID is the server that the leader checked; it must
+// still be the host's.
 type ConfirmServer struct {
 	Host     HostID `json:"host"`
 	ServerID int64  `json:"server_id"`

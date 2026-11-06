@@ -21,6 +21,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/docker"
+	"github.com/webcodingcat/clowder/internal/hetzner"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/raftnode"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -31,24 +32,24 @@ import (
 const (
 	// shutdownTimeout is how long open API calls get when the agent stops.
 	shutdownTimeout = 5 * time.Second
-	// loopsTimeout is how long the agent waits for its loops when it stops;
-	// well within systemd's stop timeout.
+	// loopsTimeout is how long the agent waits for its loops when it stops.
+	// It is well within systemd's stop timeout.
 	loopsTimeout = 30 * time.Second
 	// catchUpTimeout is how long the agent waits at start for its state to
-	// catch up with the Raft log; well within systemd's start timeout.
+	// catch up with the Raft log. It is well within systemd's start timeout.
 	catchUpTimeout = 15 * time.Second
 )
 
-// HostParts are the host's network, storage and Docker, which the agent
-// changes; tests use fakes.
+// HostParts are the parts of the host that the agent changes: its network,
+// storage and Docker. Tests use fakes.
 type HostParts struct {
 	Network HostNetwork
 	Storage Storage
 	Docker  Docker
 }
 
-// Docker is what the agent and its runners need from Docker; docker.Client
-// is the real one.
+// Docker is what the agent and its runners need from Docker. docker.Client
+// is the real implementation.
 type Docker interface {
 	supervisor.Docker
 	stacks.Docker
@@ -58,7 +59,7 @@ type Docker interface {
 }
 
 // Storage is what the agent and the volume reconciler need from the
-// storage driver; storage.Driver is the real one.
+// storage driver. storage.Driver is the real implementation.
 type Storage interface {
 	volumes.Storage
 	PoolUsage(ctx context.Context, pool string) (sizeBytes int64, dataPercent, metadataPercent float64, err error)
@@ -66,15 +67,15 @@ type Storage interface {
 }
 
 // Run runs the agent until ctx ends, in the order docs/developing/host.md
-// describes (clowderd run). It tells systemd when it serves and keeps its
-// watchdog fed while the state answers.
+// describes (clowderd run). It tells systemd when it serves, and it keeps
+// feeding systemd's watchdog while the state answers.
 func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger) (err error) {
 	if files.SecretsDir == "" {
 		return errors.New("run needs a directory for the stacks' secrets")
 	}
-	// SecretsDir may be left from before or changed by hand, so its owner
-	// and mode are set at each start. The runners do the same for the
-	// directories inside it: Traefik's and each stack's.
+	// SecretsDir may be left over from an earlier run or changed by hand, so
+	// its owner and mode are set at each start. The runners do the same for
+	// the directories inside it: Traefik's and each stack's.
 	if err := atomicfile.EnsureDir(files.SecretsDir, 0o700); err != nil {
 		return err
 	}
@@ -82,8 +83,8 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	if err != nil {
 		return err
 	}
-	// a join that wrote host.json and could not remove join.json leaves the
-	// data key a second time there
+	// a join that wrote host.json but could not remove join.json leaves a
+	// second copy of the data key in join.json
 	if err := os.Remove(files.joinFile()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		logger.Warn("remove what the join left", "file", files.joinFile(), "error", err)
 	}
@@ -98,7 +99,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 		return err
 	}
 	if err := restoreMesh(ctx, files, host.ID, parts.Network); err != nil {
-		// the state brings the mesh too, if a leader is in reach without it
+		// the state brings the mesh too, if a leader can be reached without it
 		logger.Error("start without the mesh of the last run", "error", err)
 	}
 	node, err := openNode(ctx, files, host, credentials, logger)
@@ -113,7 +114,7 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	loopsCtx, cancelLoops := context.WithCancel(ctx)
 	var loops sync.WaitGroup
 	// From here on, every return stops the loops and closes the resolver
-	// and the Raft member; with no loop started yet, that is only closing.
+	// and the Raft member. While no loop has started yet, it only closes.
 	defer func() {
 		err = errors.Join(err, stopLoops(cancelLoops, &loops, loopsTimeout, logger, resolver, node))
 	}()
@@ -124,8 +125,8 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	if err != nil {
 		return err
 	}
-	// serving first: if a port is taken, the agent ends before it started
-	// any container
+	// serve first: if a port is taken, the agent ends before it has
+	// started any container
 	servers, serveErrors, err := daemon.serve()
 	if err != nil {
 		return err
@@ -148,10 +149,10 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 }
 
 // openNode opens this host's Raft member and waits a while for its state to
-// catch up with the log, so the agent answers from the state as the log has
-// it, not from an empty one. A host without quorum starts anyway after
-// catchUpTimeout and says so. Before it starts stacks, the agent catches up
-// with the leader's commit index too (waitForState).
+// catch up with the log, so the agent answers from the state in the log,
+// not from an empty state. A host without quorum starts anyway after
+// catchUpTimeout and logs that. Before it starts stacks, the agent also
+// catches up with the leader's commit index (waitForState).
 func openNode(ctx context.Context, files Files, host Host, credentials credentials, logger *slog.Logger) (
 	*raftnode.Node, error,
 ) {
@@ -160,7 +161,7 @@ func openNode(ctx context.Context, files Files, host Host, credentials credentia
 		Certificate: credentials.certificate, CA: credentials.ca, Logger: logger,
 	})
 	if errors.Is(err, state.ErrUnreadable) {
-		// Open restores the last snapshot, and could not read it
+		// Open restores the last snapshot and could not read it
 		return nil, haltError(err)
 	}
 	if err != nil {
@@ -172,8 +173,8 @@ func openNode(ctx context.Context, files Files, host Host, credentials credentia
 		logger.Warn("serving before the state caught up with the Raft log", "error", err)
 	}
 	// A halt this early ends the agent before its loops start. A follower
-	// may still meet the entry later, as it applies the leader's log; then
-	// watch ends the agent.
+	// may still reach such an entry later, while it applies the leader's
+	// log; then watch ends the agent.
 	if err := node.HaltError(); err != nil {
 		_ = node.Close() // the log is on disk; nothing is lost
 		return nil, haltError(err)
@@ -181,7 +182,7 @@ func openNode(ctx context.Context, files Files, host Host, credentials credentia
 	return node, nil
 }
 
-// shared is what every part of the agent is made with.
+// shared holds what every part of the agent is built from.
 type shared struct {
 	files       Files
 	host        Host
@@ -207,8 +208,8 @@ type daemon struct {
 	heard      *controller.Heard
 	alerts     *controller.Alerts
 	server     *api.Server
-	// caughtUp closes once the state caught up after the start: the API
-	// holds users' calls until then (api.ServerConfig.CaughtUp)
+	// caughtUp is closed once the state has caught up after the start; the
+	// API holds users' calls until then (api.ServerConfig.CaughtUp)
 	caughtUp chan struct{}
 }
 
@@ -216,17 +217,18 @@ type daemon struct {
 //
 //	supervisor ──wakes (loop.Signal)──▶ stack runner, Traefik
 //	volume reconciler ──wakes (loop.Signal)──▶ stack runner
+//	stack runner ──wakes (loop.Signal) once a leaver let go──▶ volume reconciler
 //	stack runner ──asks (Mounted)──▶ volume reconciler
 //	stack runner, Traefik ──call Pause on──▶ supervisor
 //	stack runner, volume reconciler, report, alerts, leader's loops ──commit through (serverProposer)──▶ API server
 //	API server ──answers for──▶ stack runner (containers), volume reconciler (progress), alerts
 //	move steps ──ask──▶ prefetcher, stack runner's files, volume reconciler
 //
-// The signals are made first, so the supervisor needs no runner; the
-// proposer gets the server last, as the server needs the stack runner and
-// the alerts. No loop runs before newDaemon returns.
+// The signals are made first, so the supervisor needs no runner. The
+// proposer gets the server last, because the server needs the stack runner
+// and the alerts. No loop runs before newDaemon returns.
 func newDaemon(base shared) (*daemon, error) {
-	stacksSignal, traefikSignal := loop.NewSignal(), loop.NewSignal()
+	stacksSignal, traefikSignal, volumesSignal := loop.NewSignal(), loop.NewSignal(), loop.NewSignal()
 	dockerRestarted := func() {
 		stacksSignal.DockerRestarted()
 		traefikSignal.DockerRestarted()
@@ -235,8 +237,10 @@ func newDaemon(base shared) (*daemon, error) {
 		dockerRestarted, traefikSignal.Now, base.logger)
 	proposer := &serverProposer{}
 
-	reconciler := newVolumeReconciler(base, stacksSignal, proposer.propose)
-	runner, err := newStackRunner(base, watcher, stacksSignal, reconciler, proposer.propose)
+	reconciler := newVolumeReconciler(base, volumesSignal, stacksSignal, proposer.propose)
+	// the runner and the prefetcher write the namespaces' Docker configs
+	registries := stacks.NewRegistryConfigs(base.files.stackFiles(), base.credentials.dataKey.Open)
+	runner, err := newStackRunner(base, watcher, stacksSignal, volumesSignal, registries, reconciler, proposer.propose)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +256,7 @@ func newDaemon(base shared) (*daemon, error) {
 		propose:    proposer.propose,
 		volumes:    reconciler,
 		runner:     runner,
-		prefetcher: stacks.NewPrefetcher(base.host.ID, base.node, base.parts.Docker, base.logger),
+		prefetcher: stacks.NewPrefetcher(base.host.ID, base.node, base.parts.Docker, registries, base.logger),
 		traefik:    newTraefikRunner(base, watcher, traefikSignal),
 		reporter:   newHostReporter(base, proposer.propose, reconciler.Seen),
 		supervisor: watcher,
@@ -265,7 +269,7 @@ func newDaemon(base shared) (*daemon, error) {
 }
 
 // serverProposer commits through the API server's Propose. newDaemon sets
-// the server last: the server answers for parts that commit.
+// the server last, because the server answers for parts that commit.
 type serverProposer struct {
 	server *api.Server
 }
@@ -274,45 +278,48 @@ func (p *serverProposer) propose(ctx context.Context, cmd state.Command) (uint64
 	return p.server.Propose(ctx, cmd)
 }
 
-// newVolumeReconciler makes the volume reconciler, which leaves alone the
-// copies the stacks' containers may hold and wakes the stack runner when a
-// copy is mounted.
-func newVolumeReconciler(base shared, stacksSignal *loop.Signal, propose controller.Propose) *volumes.Reconciler {
+// newVolumeReconciler makes the volume reconciler. It leaves alone the
+// copies that the stacks' containers may hold, and it wakes the stack
+// runner when a copy is mounted. The stack runner wakes it through signal.
+func newVolumeReconciler(base shared, signal, stacksSignal *loop.Signal, propose controller.Propose,
+) *volumes.Reconciler {
 	return volumes.New(volumes.Parts{
 		Files:       base.files.volumeFiles(),
 		Host:        base.host.ID,
 		Cluster:     base.node,
 		Storage:     base.parts.Storage,
 		Held:        base.files.stackFiles().HeldLVs,
-		Signal:      loop.NewSignal(),
+		Signal:      signal,
 		StacksReady: stacksSignal.Now,
 		Propose:     propose,
 		Logger:      base.logger,
 	})
 }
 
-// newStackRunner makes the stack runner, with the key of its secrets'
-// labels derived from the data key.
-func newStackRunner(base shared, watcher loop.Pauser, signal *loop.Signal, volumes stacks.Volumes,
-	propose controller.Propose,
+// newStackRunner makes the stack runner. The key for its secrets' labels is
+// derived from the data key.
+func newStackRunner(base shared, watcher loop.Pauser, signal, volumesSignal *loop.Signal,
+	registries *stacks.RegistryConfigs, volumes stacks.Volumes, propose controller.Propose,
 ) (*stacks.Runner, error) {
 	digestKey, err := base.credentials.dataKey.Derive(stacks.SecretLabelPurpose)
 	if err != nil {
 		return nil, fmt.Errorf("derive the key of the secrets' labels: %w", err)
 	}
 	return stacks.New(stacks.Parts{
-		Files:       base.files.stackFiles(),
-		Host:        base.host.ID,
-		NodeAddress: base.host.NodeAddress,
-		Cluster:     base.node,
-		Docker:      base.parts.Docker,
-		Volumes:     volumes,
-		Open:        base.credentials.dataKey.Open,
-		DigestKey:   digestKey,
-		Supervisor:  watcher,
-		Signal:      signal,
-		Propose:     propose,
-		Logger:      base.logger,
+		Files:           base.files.stackFiles(),
+		Host:            base.host.ID,
+		NodeAddress:     base.host.NodeAddress,
+		Cluster:         base.node,
+		Docker:          base.parts.Docker,
+		Volumes:         volumes,
+		Open:            base.credentials.dataKey.Open,
+		DigestKey:       digestKey,
+		Supervisor:      watcher,
+		Signal:          signal,
+		Registries:      registries,
+		VolumesReleased: volumesSignal.Now,
+		Propose:         propose,
+		Logger:          base.logger,
 	}), nil
 }
 
@@ -331,7 +338,8 @@ func newTraefikRunner(base shared, watcher loop.Pauser, signal *loop.Signal) *tr
 	}
 }
 
-// newHostReporter makes the report of this host, of its root file system.
+// newHostReporter makes the reporter of this host; it reports the use of
+// the root file system.
 func newHostReporter(base shared, propose controller.Propose, seen func() map[string]storage.Observed) *hostReporter {
 	return &hostReporter{
 		seen:    seen,
@@ -360,8 +368,17 @@ func newAPIServer(base shared, runner *stacks.Runner, volumes api.Volumes, alert
 		Keys: base.credentials.dataKey, Version: buildinfo.Version, Logger: base.logger,
 		HostID: base.host.ID, Containers: runner, Volumes: volumes, Alerts: alertsAPI{alerts}, Beats: heard,
 		Joins: joins, CaughtUp: caughtUp,
+		HetznerServers: func(ctx context.Context, hetznerAPI, token string) ([]int64, error) {
+			ctx, cancel := context.WithTimeout(ctx, hetznerCheckTimeout)
+			defer cancel()
+			return hetzner.New(hetznerAPI, token).ServerIDs(ctx)
+		},
 	})
 }
+
+// hetznerCheckTimeout bounds the single request with which the dry run
+// checks a new Hetzner token, because the user waits for its answer.
+const hetznerCheckTimeout = 20 * time.Second
 
 // startLoops starts every loop of the agent; each ends with ctx.
 func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup) {
@@ -408,10 +425,10 @@ func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup) {
 }
 
 // runOnceCaughtUp runs the volumes, the stacks, Traefik and the report once
-// the state caught up. Until then the state may still place a stack on
-// this host that has already moved to another one, so containers must not
-// start yet, nor its volume become primary here. The report waits too, as
-// it compares the host with the state.
+// the state has caught up. Until then the state may still place a stack on
+// this host that has already moved to another host. So no container may
+// start yet, and no volume of that stack may become primary here. The
+// report waits too, because it compares the host with the state.
 func (d *daemon) runOnceCaughtUp(ctx context.Context, loops *sync.WaitGroup) {
 	if !waitForState(ctx, d.node, d.server, d.logger) {
 		return
@@ -438,14 +455,15 @@ func (d *daemon) runOnceCaughtUp(ctx context.Context, loops *sync.WaitGroup) {
 // errLoopsLeft ends the agent when a loop did not end in time.
 var errLoopsLeft = errors.New("a loop did not end in time; the process ends with it")
 
-// stopLoops ends the agent's loops and waits for them, at most timeout.
-// Every host tool a pass runs has a timeout, so a loop normally ends soon;
-// but a tool hung on a suspended DRBD volume never ends, and must not hold
-// up the stop. Once all loops ended, stopLoops closes what they use (the
-// resolver, the Raft member). If a loop is left behind, it may still use
-// them, so stopLoops closes nothing and returns errLoopsLeft: the process
-// ends right after, which closes them anyway, and systemd sees the
-// failure. Raft's log survives that; it is on disk.
+// stopLoops ends the agent's loops and waits for them, for at most timeout.
+// Every host tool that a pass runs has a timeout, so a loop normally ends
+// soon. But a tool that hangs on a suspended DRBD volume never ends, and it
+// must not hold up the stop. Once all loops have ended, stopLoops closes
+// what they use (the resolver, the Raft member). If a loop is left behind,
+// it may still use them, so stopLoops closes nothing and returns
+// errLoopsLeft. The process ends right after that, which closes them
+// anyway, and systemd sees the failure. Raft's log survives this, because
+// it is on disk.
 func stopLoops(stop context.CancelFunc, loops *sync.WaitGroup, timeout time.Duration, logger *slog.Logger,
 	used ...io.Closer,
 ) error {
@@ -469,7 +487,7 @@ func stopLoops(stop context.CancelFunc, loops *sync.WaitGroup, timeout time.Dura
 
 // waitForState tries until ctx ends to catch the state up with the Raft
 // log, as far as the leader has committed it
-// (api.Server.CatchUpWithLeader); it tells whether it did.
+// (api.Server.CatchUpWithLeader). It tells whether it succeeded.
 func waitForState(ctx context.Context, node *raftnode.Node, server *api.Server, logger *slog.Logger) bool {
 	for ctx.Err() == nil {
 		catchUp, cancel := context.WithTimeout(ctx, catchUpTimeout)
@@ -492,17 +510,17 @@ func waitForState(ctx context.Context, node *raftnode.Node, server *api.Server, 
 	return false
 }
 
-// haltError says why the agent stops at a Raft entry or snapshot it cannot
-// read, and what helps: the error stays a state.ErrUnreadable, which ends
-// the process with an exit status of its own.
+// haltError says why the agent stops at a Raft entry or snapshot that it
+// cannot read, and what helps. The error stays a state.ErrUnreadable, which
+// ends the process with its own exit status.
 func haltError(err error) error {
 	return fmt.Errorf("stopped at what this agent cannot read in the Raft log: written by a newer "+
 		"version (install the version the leader runs), or damaged: %w", err)
 }
 
-// watch runs until ctx ends, the API fails or the Raft member halts, and
-// feeds systemd's watchdog while the state answers: a deadlocked agent stops
-// feeding it and systemd restarts it.
+// watch runs until ctx ends, the API fails or the Raft member halts. It
+// feeds systemd's watchdog while the state answers, so a deadlocked agent
+// stops feeding it and systemd restarts the agent.
 func watch(ctx context.Context, node *raftnode.Node, serveErrors <-chan error, logger *slog.Logger) error {
 	interval := watchdogInterval()
 	var tick <-chan time.Time

@@ -14,27 +14,27 @@ import (
 )
 
 // fsm hands Raft's log entries to the cluster state. Raft calls Apply,
-// Snapshot and Restore from one goroutine; everyone else reads under the
+// Snapshot and Restore from one goroutine; all other callers read under the
 // lock.
 type fsm struct {
 	mu    sync.RWMutex
 	state *state.State
-	// changes are what the applied entries changed, for the watch; only
-	// the log fills it, so a dry run never does
+	// changes are what the applied entries changed, for the watch. Only
+	// the log fills it, so a dry run never adds to it.
 	changes state.ChangeRing
 	// changed is closed and replaced after every applied entry, to wake up
 	// those waiting for an index.
 	changed chan struct{}
-	// shared is a copy of the state for the loops to read, made once per
-	// change and dropped at the next (sharedCopy); sharedMu guards it among
-	// readers, who hold mu only to read
+	// shared is a copy of the state for the loops to read. It is made once
+	// per change and dropped at the next one (sharedCopy). sharedMu guards
+	// it among the readers, who hold mu only for reading.
 	sharedMu sync.Mutex
 	shared   *state.State
 	// halted closes when an entry or a snapshot could not be read
-	// (state.ErrUnreadable), and haltErr says which. From then on the fsm
-	// applies, restores and snapshots nothing: Raft goes on handing it
+	// (state.ErrUnreadable), and haltErr says which one. From then on the
+	// fsm applies, restores and snapshots nothing. Raft keeps handing it
 	// entries until the agent stops, and a snapshot would claim an index
-	// the state never reached.
+	// that the state never reached.
 	halted  chan struct{}
 	haltErr error
 }
@@ -44,12 +44,12 @@ func newFSM() *fsm {
 }
 
 // Apply applies one command. Its error goes back to the proposer as the
-// response; for Raft the entry is applied either way, even one the state
-// could not read.
+// response. For Raft the entry is applied either way, even an entry that
+// the state could not read.
 func (f *fsm) Apply(entry *raft.Log) any {
 	f.mu.Lock()
-	// defers run backwards: unlock first, then wake, which takes the lock
-	// again to swap the channel
+	// defers run in reverse order: unlock first, then wake, which takes
+	// the lock again to swap the channel
 	defer f.wake()
 	defer f.mu.Unlock()
 	if f.haltErr != nil {
@@ -71,7 +71,7 @@ func (f *fsm) halt(err error) {
 	close(f.halted)
 }
 
-// haltError returns why the fsm halted, nil while it did not.
+// haltError returns why the fsm halted, or nil if it has not halted.
 func (f *fsm) haltError() error {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -86,8 +86,8 @@ func (f *fsm) wake() {
 	f.mu.Unlock()
 }
 
-// Snapshot encodes the state at once: Apply goes on while Raft persists the
-// snapshot, and the state is small enough to copy.
+// Snapshot encodes the state at once, because Apply goes on while Raft
+// persists the snapshot. The state is small enough to copy.
 func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -119,7 +119,7 @@ func (f *fsm) Restore(snapshotFile io.ReadCloser) error {
 		return err
 	}
 	f.state = restored
-	// what came before the snapshot is in it, not in the ring
+	// the changes before the snapshot are in the snapshot, not in the ring
 	f.changes.Reset(restored.Index)
 	f.shared = nil
 	f.mu.Unlock()
@@ -143,8 +143,8 @@ func (f *fsm) read(use func(current *state.State)) {
 }
 
 // sharedCopy returns a copy of the state that every caller shares until the
-// next change: the loops that wake at a change each read the state without
-// the lock, and one copy serves them all. Nobody may change it.
+// next change. The loops that wake at a change each read the state without
+// the lock, and one copy serves them all. No caller may change it.
 func (f *fsm) sharedCopy() (*state.State, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -177,7 +177,8 @@ func (f *fsm) waitFor(ctx context.Context, index uint64) error {
 	}
 }
 
-// revoked tells whether a certificate serial is on the state's list.
+// revoked tells whether a certificate serial is on the state's list of
+// revoked certificates.
 func (f *fsm) revoked(serial string) bool {
 	f.mu.RLock()
 	defer f.mu.RUnlock()

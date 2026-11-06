@@ -1,17 +1,17 @@
 // Package secretvalue is clowder's encrypted value: a YAML scalar tagged
-// !secret that holds age's ASCII armor. What age encrypts is an envelope that
-// binds the value to the place it is for (a secret's ID, or "cluster" for
-// cluster.yaml), so a value copied elsewhere is refused when it is opened.
+// !secret that holds age's ASCII armor. What age encrypts is an envelope
+// that binds the value to the Secret it is for (its ID), so a value copied
+// to another Secret is refused when it is decrypted.
 //
-// The package also takes the values out of a YAML file before it is decoded
-// (Extract) and puts new armor in their place without touching the rest of
-// the file (Rewrite). It knows YAML paths, not the kinds of files: which
-// places may hold a secret the caller checks.
+// The package also takes the values out of a YAML file before the file is
+// decoded (Extract), and puts new armor in their place without touching
+// the rest of the file (Rewrite). It knows YAML paths, not the kinds of
+// files: the caller checks which places may hold a secret.
 //
-// No error carries a value: a file may be read with a wrong key or be
+// No error contains a value: a file may be read with a wrong key or be
 // broken, and the message goes to a terminal or a log.
 //
-// cluster.yaml's values and every Secret's value are such values.
+// Every value of a Secret is such a value.
 package secretvalue
 
 import (
@@ -29,14 +29,11 @@ import (
 // Tag is the YAML tag of an encrypted value.
 const Tag = "!secret"
 
-// ArmorHeader starts every value's armor.
+// ArmorHeader is the first line of every value's armor.
 const ArmorHeader = armor.Header
 
-// Cluster is what a value in cluster.yaml is for. A secret's ID always holds
-// a "/", so the two never meet.
-const Cluster = "cluster"
-
-// version is the envelope's format; a newer clowder may write a higher one.
+// version is the envelope's format. A newer clowder may write a higher
+// version.
 const version = 1
 
 // Value is a value in clear and the place it is for.
@@ -45,17 +42,17 @@ type Value struct {
 	Bytes []byte
 }
 
-// envelope is what age encrypts. The value is Base64 (encoding/json does it
-// for []byte): no escaping that changes its size, no question of UTF-8, and
-// binary values need no other format.
+// envelope is what age encrypts. The value is Base64 (encoding/json does
+// this for []byte), so there is no escaping that changes its size, no
+// question of UTF-8, and binary values need no other format.
 type envelope struct {
 	Version int    `json:"v"`
 	For     string `json:"for"`
 	Value   []byte `json:"value"`
 }
 
-// Encrypt encrypts value for the recipients and returns age's armor, as it
-// goes into a file after the tag.
+// Encrypt encrypts value for the recipients and returns age's armor, in
+// the form that goes into a file after the tag.
 func Encrypt(value Value, recipients ...age.Recipient) (string, error) {
 	if value.For == "" {
 		return "", errors.New("encrypt a secret value: it is for no place")
@@ -82,9 +79,9 @@ func Encrypt(value Value, recipients ...age.Recipient) (string, error) {
 	return strings.TrimRight(armored.String(), "\n") + "\n", nil
 }
 
-// OpenFor opens the value found at a place, want: a Secret's ID or Cluster.
-// It refuses a value meant for another place, such as the Hetzner token
-// copied into a Secret.
+// OpenFor decrypts the value found in a Secret whose ID is want. It
+// refuses a value meant for another Secret, such as the Hetzner token of
+// clowder-system copied into a stack's Secret.
 func OpenFor(armored, want string, identities ...age.Identity) (Value, error) {
 	opened, err := Open(armored, identities...)
 	if err != nil {
@@ -96,9 +93,9 @@ func OpenFor(armored, want string, identities ...age.Identity) (Value, error) {
 	return opened, nil
 }
 
-// Open decrypts armor with one of the identities. Whether the value is for
-// the place it was found at is the caller's to check (Value.For), or
-// OpenFor's.
+// Open decrypts armor with one of the identities. The caller checks
+// whether the value is meant for the place where it was found (Value.For),
+// or uses OpenFor, which does that check.
 func Open(armored string, identities ...age.Identity) (Value, error) {
 	reader, err := age.Decrypt(armor.NewReader(strings.NewReader(armored)), identities...)
 	if err != nil {

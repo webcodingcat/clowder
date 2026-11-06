@@ -1,127 +1,185 @@
 package state
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/resource"
 )
 
-// ApplyConfig replaces cluster.yaml and its values with what the user
-// applied. Secrets holds a value for each name of the spec
-// (clusterspec.SecretPlaces), and no other.
-type ApplyConfig struct {
-	Spec    clusterspec.Config      `json:"spec"`
-	Secrets map[string]SealedSecret `json:"secrets"`
-	// Files are the files next to cluster.yaml that it names, by their
-	// names in it (clusterspec.FileNames); none holds a secret.
-	Files map[string][]byte `json:"files,omitempty"`
+// Configured tells whether a ClusterConfiguration was applied. Before that,
+// there is no Hetzner token, no Floating IP, no ACME and no alerts.
+func (s *State) Configured() bool {
+	return s.Config.Generation > 0
 }
 
-// RegistryLogin is the login for one private image registry. The user name
-// is no secret; only the password is sealed.
+// SystemSecret returns the sealed value that a reference names in
+// names.System, or false if there is none.
+func (s *State) SystemSecret(ref names.SecretKeyRef) (Sealed, bool) {
+	secret, ok := s.Secrets[names.ID(names.System, ref.Name)]
+	if !ok {
+		return nil, false
+	}
+	value, ok := secret.Spec.Data[ref.Key]
+	return value, ok
+}
+
+// ErrNotConfigured is returned for the Hetzner token of a cluster without
+// a configuration.
+var ErrNotConfigured = errors.New("the cluster has no ClusterConfiguration yet")
+
+// HetznerToken is the sealed token the configuration names.
+func (s *State) HetznerToken() (Sealed, error) {
+	if !s.Configured() {
+		return nil, ErrNotConfigured
+	}
+	ref := s.Config.Spec.Hetzner.TokenSecretRef
+	token, ok := s.SystemSecret(ref)
+	if !ok {
+		// the state refuses a configuration that names a value it lacks
+		return nil, fmt.Errorf("the Hetzner token %s is not among the Secrets of %s", ref, names.System)
+	}
+	return token, nil
+}
+
+// RegistryLogin is the login for one private image registry. Each part is
+// sealed, as its Secret holds it.
 type RegistryLogin struct {
-	Username string
-	Password Sealed
+	Secret                     string
+	Server, Username, Password Sealed
 }
 
-// ClusterSecret is the sealed value cluster.yaml has under a name; false if
-// it has none.
-func (s *State) ClusterSecret(name clusterspec.SecretRef) (Sealed, bool) {
-	secret, ok := s.ClusterSecrets[string(name)]
-	return secret.Value, ok
-}
-
-// RegistryLogins are the logins for private image registries, by registry.
-func (s *State) RegistryLogins() map[string]RegistryLogin {
-	logins := map[string]RegistryLogin{}
-	for host, registry := range s.Config.Spec.Registries {
-		if password, ok := s.ClusterSecret(registry.Password); ok {
-			logins[host] = RegistryLogin{Username: registry.Username, Password: password}
-		}
+// RegistryLogins returns the logins that a namespace's stacks pull their
+// images with, in the order of its imagePullSecrets. Like the kubelet, it
+// skips a Secret that is missing or lacks a key and goes on, so an image
+// that needs no login still pulls. missing says which Secrets it skipped
+// and why; the stack's host names them when a pull fails.
+func (s *State) RegistryLogins(namespace string) (logins []RegistryLogin, missing error) {
+	held, ok := s.Namespaces[namespace]
+	if !ok {
+		return nil, fmt.Errorf("no namespace %s", namespace)
 	}
-	return logins
+	var problems []error
+	for _, ref := range held.Spec.ImagePullSecrets {
+		secret, ok := s.Secrets[names.ID(namespace, ref.Name)]
+		if !ok {
+			problems = append(problems, fmt.Errorf("namespace %s names the image pull secret %s, which it does not have",
+				namespace, ref.Name))
+			continue
+		}
+		var parts [3]Sealed
+		lacks := slices.IndexFunc(resource.RegistryLoginKeys, func(key string) bool {
+			_, has := secret.Spec.Data[key]
+			return !has
+		})
+		if lacks >= 0 {
+			problems = append(problems, fmt.Errorf("the image pull secret %s of namespace %s has no key %s",
+				ref.Name, namespace, resource.RegistryLoginKeys[lacks]))
+			continue
+		}
+		for index, key := range resource.RegistryLoginKeys {
+			parts[index] = secret.Spec.Data[key]
+		}
+		logins = append(logins, RegistryLogin{Secret: ref.Name, Server: parts[0], Username: parts[1], Password: parts[2]})
+	}
+	return logins, errors.Join(problems...)
 }
 
-// checkClusterSecrets makes sure the values match the spec: one value for
-// each name the spec has, no value for a name it does not have, and a
-// digest for each value. Check has already made sure that each name is
-// the path of its place.
-func checkClusterSecrets(spec clusterspec.Config, secrets map[string]SealedSecret) error {
-	named := map[string]bool{}
-	for _, place := range clusterspec.SecretPlaces(spec) {
-		named[string(place.Name)] = true
-		secret, ok := secrets[string(place.Name)]
-		switch {
-		case !ok:
-			return fmt.Errorf("%s: the value is missing", place.Path)
-		case secret.Digest == "":
-			return fmt.Errorf("%s: the value has no digest", place.Path)
-		}
-	}
-	for _, name := range slices.Sorted(maps.Keys(secrets)) {
-		if !named[name] {
-			return fmt.Errorf("a value for %s, which cluster.yaml does not name", name)
-		}
+func findConfig(s *State, id string) *Meta {
+	if id == resource.ClusterConfigurationName && s.Configured() {
+		return &s.Config.Meta
 	}
 	return nil
 }
 
-// applyConfig refuses a cluster.yaml that a resource of the cluster would
-// no longer pass: a storage class a volume has, a priority category a
-// stack names, a stack's place in stacks.privileged. The state checks it
-// itself, in the log's order, so no resource can slip in between.
-func applyConfig(s *State, _ Command, payload ApplyConfig) (func(), error) {
-	if problems := clusterspec.Check(payload.Spec); len(problems) > 0 {
+// putConfig replaces the configuration. It refuses a configuration that a
+// resource of the cluster would no longer pass: one without a storage class
+// that a volume has, without a priority category that a stack names, or
+// without a stack's entry in stacks.privileged, or one that puts a host's
+// underlay outside the private network. It also refuses a configuration
+// that names a value names.System lacks. The state checks all this itself,
+// in the log's order, so no resource can slip in between.
+func putConfig(s *State, id string, payload PutResource) (func() *Meta, error) {
+	if id != resource.ClusterConfigurationName {
+		return nil, fmt.Errorf("the ClusterConfiguration is named %s, not %s", resource.ClusterConfigurationName, id)
+	}
+	written, err := decodeSpec[clusterspec.Config](payload.Kind, id, payload.Spec)
+	if err != nil {
+		return nil, err
+	}
+	spec := written.WithDefaults()
+	if s.Configured() && sameJSON(s.Config.Spec, spec) {
+		return nil, errUnchanged
+	}
+	if problems := clusterspec.Check(written); len(problems) > 0 {
 		return nil, problems
 	}
-	if problems := clusterspec.CheckFiles(payload.Spec, payload.Files); len(problems) > 0 {
-		return nil, problems
+	for _, place := range clusterspec.SecretPlaces(spec) {
+		if _, ok := s.SystemSecret(place.Ref); !ok {
+			return nil, fmt.Errorf("%s: %s has no Secret %s with the key %s; apply it above the configuration",
+				place.Path, names.System, place.Ref.Name, place.Ref.Key)
+		}
 	}
-	if err := checkClusterSecrets(payload.Spec, payload.Secrets); err != nil {
-		return nil, fmt.Errorf("cluster.yaml: %w", err)
-	}
-	if err := checkSecretLimits(s.Secrets, payload.Secrets); err != nil {
-		return nil, fmt.Errorf("cluster.yaml: %w", err)
-	}
-	spec := payload.Spec.WithDefaults()
-	for _, id := range slices.Sorted(maps.Keys(s.Hosts)) {
-		if host := s.Hosts[id]; host.Phase != Removed {
+	for _, hostID := range slices.Sorted(maps.Keys(s.Hosts)) {
+		if host := s.Hosts[hostID]; host.Phase != Removed {
 			if err := checkUnderlay(spec, host); err != nil {
-				return nil, fmt.Errorf("cluster.yaml: %w", err)
+				return nil, err
 			}
 		}
 	}
-	for _, id := range slices.Sorted(maps.Keys(s.Stacks)) {
-		stack := s.Stacks[id]
-		if stack.Spec.Privileged() && !slices.Contains(spec.Stacks.Privileged, id) {
-			return nil, fmt.Errorf("stack %s asks for privileges, so it must stay in stacks.privileged", id)
+	for _, stackID := range slices.Sorted(maps.Keys(s.Stacks)) {
+		stack := s.Stacks[stackID]
+		if stack.Spec.Privileged() && !slices.Contains(spec.Stacks.Privileged, stackID) {
+			return nil, fmt.Errorf("stack %s asks for privileges, so it must stay in stacks.privileged", stackID)
 		}
 		if _, err := servicesOf(stack.Spec, spec.Priorities); err != nil {
-			return nil, fmt.Errorf("cluster.yaml would break stack %s: %w", id, err)
+			return nil, fmt.Errorf("the configuration would break stack %s: %w", stackID, err)
 		}
 	}
 	// a volume's class, and the class each copy is in (a fallback of it)
-	for _, id := range slices.Sorted(maps.Keys(s.Volumes)) {
-		volume := s.Volumes[id]
+	for _, volumeID := range slices.Sorted(maps.Keys(s.Volumes)) {
+		volume := s.Volumes[volumeID]
 		classes := []string{volume.Spec.Class}
 		for _, volumeCopy := range volume.Copies {
 			classes = append(classes, volumeCopy.Class)
 		}
 		for _, class := range classes {
 			if _, ok := spec.StorageClasses[class]; !ok {
-				return nil, fmt.Errorf("volume %s has storage class %s, so the class must stay", id, class)
+				return nil, fmt.Errorf("volume %s has storage class %s, so the class must stay", volumeID, class)
 			}
 		}
 	}
-	// only the files cluster.yaml names: the payload may carry no others
-	files := map[string][]byte{}
-	for _, name := range clusterspec.FileNames(payload.Spec) {
-		files[name] = payload.Files[name]
-	}
-	return func() {
-		s.Config = ClusterConfig{Revision: s.Config.Revision + 1, Spec: spec, Files: files}
-		s.ClusterSecrets = payload.Secrets
+	return func() *Meta {
+		if !s.Configured() {
+			s.Config.Meta = Meta{Name: id, Owner: payload.Owner}
+		}
+		s.Config.Spec = spec
+		return &s.Config.Meta
 	}, nil
+}
+
+// removeConfig always refuses: without a configuration, fencing and the
+// Floating IP would stop silently.
+func removeConfig(*State, string) (func(), error) {
+	return nil, errors.New("the ClusterConfiguration cannot be deleted, only changed: fencing and the Floating IP need it")
+}
+
+// configNaming returns the first field of the configuration that names a
+// key of the Secret name in names.System that the Secret would no longer
+// have (keep holds the keys it keeps; nil keeps none). It returns false if
+// there is no such field.
+func (s *State) configNaming(name string, keep map[string]Sealed) (clusterspec.SecretPlace, bool) {
+	if !s.Configured() {
+		return clusterspec.SecretPlace{}, false
+	}
+	for _, place := range clusterspec.SecretPlaces(s.Config.Spec) {
+		if _, kept := keep[place.Ref.Key]; place.Ref.Name == name && !kept {
+			return place, true
+		}
+	}
+	return clusterspec.SecretPlace{}, false
 }

@@ -2,9 +2,9 @@
 // old content or the new one, never half of one.
 //
 // Every file it writes gets this process's user and group as owner and
-// exactly the mode asked for, whatever was there before. WriteChanged and
+// exactly the requested mode, whatever was there before. WriteChanged and
 // EnsureDir also set owner and mode on what they do not write: an
-// unchanged file, a directory that exists.
+// unchanged file, or a directory that already exists.
 package atomicfile
 
 import (
@@ -16,10 +16,11 @@ import (
 	"runtime"
 )
 
-// Write writes content to path with mode, creating the directory (mode 0700)
-// if needed: a new file next to it, synced, renamed over the old one, and
-// the directory synced so the rename lasts. Two writers of one path at once
-// are not supported: each may remove the other's temporary file.
+// Write writes content to path with mode, creating the directory (mode
+// 0700) if needed. It writes a new file next to the old one, syncs it,
+// renames it over the old one, and syncs the directory so that the rename
+// lasts. Two writers of one path at the same time are not supported, as
+// each may remove the other's temporary file.
 func Write(path string, content []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -39,8 +40,9 @@ func Write(path string, content []byte, mode os.FileMode) error {
 }
 
 // WriteChanged writes content to path like Write, unless path is a regular
-// file that holds content already; then it only sets the file's owner to
-// this process's and its mode to mode, as Write would have made them.
+// file that already holds content. In that case it only sets the file's
+// owner to this process's user and group and its mode to mode, as Write
+// would have done.
 func WriteChanged(path string, content []byte, mode os.FileMode) error {
 	// whatever cannot be read as a regular file is written anew
 	info, err := os.Lstat(path)
@@ -56,10 +58,10 @@ func WriteChanged(path string, content []byte, mode os.FileMode) error {
 	return nil
 }
 
-// EnsureDir makes dir with its parents if it is missing, and gives it this
-// process as owner and mode, also when it was there already. A symbolic
-// link or a file in its place is an error: what goes into dir would land
-// elsewhere.
+// EnsureDir makes dir with its parents if it is missing, and sets its
+// owner to this process and its mode to mode, even if it already existed.
+// A symbolic link or a file in its place is an error, because what goes
+// into dir would land elsewhere.
 func EnsureDir(dir string, mode os.FileMode) error {
 	if err := os.MkdirAll(dir, mode); err != nil {
 		return fmt.Errorf("make the directory %s: %w", dir, err)
@@ -77,9 +79,10 @@ func EnsureDir(dir string, mode os.FileMode) error {
 	return nil
 }
 
-// writeSynced makes a new file and waits until it is on disk. One that a
-// crash left behind goes first: opened as it is, it would keep its owner and
-// mode and pass them on with the rename.
+// writeSynced makes a new file and waits until it is on disk. It first
+// removes a temporary file that a crash left behind: if it were opened as
+// it is, it would keep its owner and mode and pass them on with the
+// rename.
 func writeSynced(path string, content []byte, mode os.FileMode) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -107,8 +110,8 @@ func writeSynced(path string, content []byte, mode os.FileMode) error {
 
 // own sets path's owner to this process's user and group and its mode to
 // mode. Windows has neither (the agent runs on Linux; the tests run
-// anywhere), so there it does nothing. Chmod follows a link: the callers
-// made path themselves or checked that it is none.
+// anywhere), so there it does nothing. Chmod follows a link, so the
+// callers either made path themselves or checked that it is not a link.
 func own(path string, mode os.FileMode) error {
 	if runtime.GOOS == "windows" {
 		return nil

@@ -1,8 +1,8 @@
-// Package api is the agents' HTTP API (v1): the types both sides use, the
-// server every agent runs and the client of the CLI. Every call is mutual
-// TLS: the CLI presents its certificate, agents their host certificate.
-// Any agent answers; writes go on to the leader, reads come from the agent's
-// own copy of the state.
+// Package api is the agents' HTTP API (v1): the types that both sides use,
+// the server that every agent runs, and the CLI's client. Every call uses
+// mutual TLS: the CLI presents its certificate, and agents present their
+// host certificate. Any agent answers. Writes go on to the leader, and
+// reads come from the agent's own copy of the state.
 package api
 
 import (
@@ -19,7 +19,7 @@ const Port = 7443
 
 // Headers of the API.
 const (
-	// VersionHeader carries the caller's version; an agent refuses a caller
+	// VersionHeader carries the caller's version. An agent refuses a caller
 	// whose version is not compatible with its own (buildinfo.Compatible).
 	VersionHeader = "X-Clowder-Version"
 	// IndexHeader carries the Raft index of a write in its answer.
@@ -55,11 +55,11 @@ func (e *StatusError) Error() string {
 // Status is the overview of the cluster.
 type Status struct {
 	Name string `json:"name"`
-	// Revision of the applied cluster.yaml; 0 before the first apply.
-	Revision int64      `json:"revision"`
-	Leader   string     `json:"leader"` // host name; empty without a leader
-	Index    uint64     `json:"index"`
-	Hosts    []HostInfo `json:"hosts"`
+	// Generation of the ClusterConfiguration; 0 before the first apply.
+	Generation int64      `json:"generation"`
+	Leader     string     `json:"leader"` // host name; empty without a leader
+	Index      uint64     `json:"index"`
+	Hosts      []HostInfo `json:"hosts"`
 	// Alerts are the open alerts, oldest first.
 	Alerts []AlertInfo `json:"alerts,omitempty"`
 }
@@ -73,15 +73,15 @@ type AlertInfo struct {
 	Since    time.Time `json:"since"`
 }
 
-// AlertTestResult is how one channel took the test alert; Error is empty
-// if it did.
+// AlertTestResult says whether one channel accepted the test alert. Error
+// is empty if it did.
 type AlertTestResult struct {
 	Channel string `json:"channel"`
 	Error   string `json:"error,omitempty"`
 }
 
-// AlertFailure is a message of an alert that a channel has not taken yet;
-// the leader tries again.
+// AlertFailure is a message of an alert that a channel has not accepted
+// yet. The leader tries again.
 type AlertFailure struct {
 	Channel   string `json:"channel"`
 	Key       string `json:"key"`
@@ -116,8 +116,8 @@ type Written struct {
 }
 
 // HostActionAnswer is the answer to a host action. Leaving says that a
-// removed host still has stacks or volume copies: it drains, they move off
-// it, and then it goes.
+// removed host still has stacks or volume copies. The host drains, they
+// move off it, and then it goes.
 type HostActionAnswer struct {
 	Written
 	Leaving bool `json:"leaving,omitempty"`
@@ -128,9 +128,9 @@ type MoveRequest struct {
 	To string `json:"to"`
 }
 
-// HostAction is something a user does to a host: POST
-// /v1/hosts/{id}/{name} moves the host from one of From (any phase if
-// empty) to To. The CLI makes its host subcommands from this list.
+// HostAction is something a user does to a host. POST
+// /v1/hosts/{id}/{name} moves the host from one of the phases in From (any
+// phase if empty) to To. The CLI makes its host subcommands from this list.
 type HostAction struct {
 	Name        string
 	Description string

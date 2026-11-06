@@ -48,7 +48,8 @@ func specTarget() Target {
 		Resolver:     netip.MustParseAddr("169.254.77.53"),
 		Volumes:      map[string]MountedVolume{"data": mounted("data"), "uploads": mounted("uploads")},
 		SecretsDir:   "/run/clowder-secrets/shop_web/files",
-		SecretLabels: map[string]string{"app": "digest-of-api-key"},
+		SecretKeys:   map[string][]string{"api": {"key", "tls.crt"}},
+		SecretLabels: map[string]string{"app": "digest-of-api"},
 		Restarted:    map[string]time.Time{"app": time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)},
 	}
 }
@@ -90,10 +91,12 @@ func TestARenderedSpecMatchesTheGoldenFile(t *testing.T) {
 
 func TestTheSecretVariablesMatchTheGoldenFile(t *testing.T) {
 	spec := loadSpec(t)
-	if _, err := RenderSecretEnv("web", spec, map[string]string{}); err == nil {
+	if _, err := RenderSecretEnv("web", spec, map[names.SecretKeyRef]string{}); err == nil {
 		t.Error("rendered without the value")
 	}
-	rendered, err := RenderSecretEnv("web", spec, map[string]string{"db-password": "pa$$word", "api-key": "k"})
+	rendered, err := RenderSecretEnv("web", spec, map[names.SecretKeyRef]string{
+		{Name: "db", Key: "password"}: "pa$$word", {Name: "api", Key: "key"}: "k",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
