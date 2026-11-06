@@ -186,7 +186,7 @@ func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
 	}
 }
 
-func TestTheLeaderHoldsBackAKindAnOlderAgentCannotRead(t *testing.T) {
+func TestTheLeaderWritesNoKindItCannotRead(t *testing.T) {
 	cluster := newTestCluster(t)
 	node := cluster.open(0, t.TempDir(), freeAddress(t))
 	defer func() { _ = node.Close() }()
@@ -195,23 +195,21 @@ func TestTheLeaderHoldsBackAKindAnOlderAgentCannotRead(t *testing.T) {
 	}
 	waitForLeader(t, node)
 	ctx := context.Background()
-	if _, err := node.Propose(ctx, bootstrapCommand(t)); err != nil {
-		t.Fatal(err)
-	}
-	report, err := state.NewCommand(state.KindReportHost, time.Now(), state.HostActor(0),
-		state.ReportHost{Host: 0, Version: "0.1.0"})
+	index, err := node.Propose(ctx, bootstrapCommand(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := node.Propose(ctx, report); err != nil {
-		t.Fatal(err)
+	if _, err := node.Propose(ctx, command(t, "make-coffee", struct{}{})); err == nil {
+		t.Error("an unknown kind was written")
 	}
-	initialized := command(t, state.KindSetVolumeInitialized, state.SetVolumeInitialized{Volume: "shop/data"})
-	_, err = node.Propose(ctx, initialized)
-	var refused *state.Refused
-	if !errors.Is(err, state.ErrNotReadByAll) || errors.As(err, &refused) {
-		t.Errorf("a kind of 0.2.0 with an agent of 0.1.0: %v", err)
+	if err := node.HaltError(); err != nil {
+		t.Errorf("the node halted: %v", err)
 	}
+	node.Read(func(current *state.State) {
+		if current.Index != index {
+			t.Errorf("index %d after the unknown kind, want %d", current.Index, index)
+		}
+	})
 }
 
 func TestTheWatchSeesWhatTheLogChangedAfterItsSnapshot(t *testing.T) {

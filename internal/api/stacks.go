@@ -58,7 +58,7 @@ func (s *Server) stackPs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if host != s.config.HostID {
-		s.relay(w, r, s.forwarder, host, "/v1/internal/stacks/"+url.PathEscape(project)+"/ps")
+		s.relay(w, r, s.config.Peers.forwarder, host, "/v1/internal/stacks/"+url.PathEscape(project)+"/ps")
 		return
 	}
 	s.ps(w, r, project)
@@ -70,7 +70,7 @@ func (s *Server) stackLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if host != s.config.HostID {
-		s.relay(w, r, s.streamer, host, "/v1/internal/stacks/"+url.PathEscape(project)+"/logs?"+r.URL.RawQuery)
+		s.relay(w, r, s.config.Peers.streamer, host, "/v1/internal/stacks/"+url.PathEscape(project)+"/logs?"+r.URL.RawQuery)
 		return
 	}
 	s.logs(w, r, project)

@@ -249,7 +249,7 @@ An operation is a long task in steps, such as moving a stack or fencing a host.
 ### Fencing a host
 
 `fence-host` (`HostFence`) is started and driven by the fencing loop
-([Fencing](loops.md#fencing-controllerhealthgo-controllerfencinggo-agenthealthgo)).
+([Fencing](loops.md#fencing-controllerhealthgo-controllerfencinggo-clowderddaemonhealthgo)).
 
 - It locks the host, and its start makes the host `fencing` in the same command.
 - Its steps are `FenceStart`, then `FenceOff` once the server is off and the host is
@@ -264,7 +264,7 @@ An operation is a long task in steps, such as moving a stack or fencing a host.
 ### Moving a stack
 
 `move-stack` (`StackMove`) is started by the placement and driven by
-`controller.RunMoves`. It locks the stack and its volumes. Each step is named after the
+`controller.Moves`. It locks the stack and its volumes. Each step is named after the
 last thing done:
 
 1. `MoveCopies`: the leader placed a copy of each volume on the new host.
@@ -294,9 +294,9 @@ The leader finishes the move once the stack runs on the new host.
 - A running stack that cannot move gets the alert `stack-waiting` with "cannot move".
 
 To follow a move through the code: `scheduler.place` decides it, `controller.startMove`
-starts it, `controller.mover.placeCopies` (with `scheduler.MoveVolumes`) runs the first
+starts it, `controller.Moves.placeCopies` (with `scheduler.MoveVolumes`) runs the first
 step, `agent.moveSteps.synced` and `stoppedHere` record the hosts' steps,
-`controller.mover.setHost` records the leader's last step, and `controller.mover.late`
+`controller.Moves.setHost` records the leader's last step, and `controller.Moves.late`
 watches the deadlines.
 
 ## Volume copies
@@ -440,28 +440,23 @@ agent skipped a `revoke`, for example, a certificate would keep working on that 
   ([Shipping](shipping.md#packages-and-units)), and the other hosts see it fail. A refusal
   (`CommandError`, `ErrNotBootstrapped`) is the same on every agent of a version, so it
   moves the index on.
-- **The gate.** Each kind names the release that introduced it (`commandKinds`).
-  `Node.Propose` commits a kind only once `State.MinVersion`, the oldest release that an
-  agent reported, includes that release (`buildinfo.Includes`: `0.2.0~rc1` includes
-  `0.2.0`). Otherwise the command fails with `state.ErrNotReadByAll`, which is not a
-  refusal, and its caller tries again later. Development builds read every kind of their
-  code and do not count, and neither do hosts that have not reported a version yet. Fail-stop
-  catches whatever slips through. Before `v1.0.0` the gate rarely acts, because a patch
-  release adds no kind and different minor versions do not run together; it is there for
-  the rules from `v1.0.0` on ([roadmap](../roadmap.md), step 8, decides whether it starts
-  anew with phase 2b's release).
+- **Only known kinds are written.** `Node.Propose` refuses a kind that this build does not
+  read (`state.CheckKnown`), before it reaches the log, where it would stop every agent.
 - **Until `v1.0.0`** the state, the commands and the specs change freely, without
   migrations. Only agents and CLIs of the same minor version work together
-  (`buildinfo.Compatible`), and a patch release changes neither the state nor the
-  commands. `CommandVersion` and `SnapshotVersion` stay at 1, so fail-stop and the gate
-  catch a new kind, but not a payload whose fields changed their meaning. That is why
-  different minor versions must not run side by side. A cluster is updated host by host
-  only within a minor version ([Updating a cluster](../operating.md#updating-a-cluster)).
+  (`buildinfo.Compatible`). A patch release changes neither the state nor the commands,
+  and adds no kind of command. `CommandVersion` and `SnapshotVersion` stay at 1, so
+  fail-stop catches a new kind, but not a payload whose fields changed their meaning. That
+  is why different minor versions must not run side by side: a new minor version stops
+  every agent first ([Updating a cluster](../operating.md#updating-a-cluster)). So no
+  agent ever meets a kind that a newer release wrote, and there is no gate that holds new
+  kinds back.
 - **From `v1.0.0`** a release reads its own `CommandVersion` and `SnapshotVersion` and the
   previous one, and CLI and agents work together across one minor version. Payload fields
   are added, not changed. Unknown fields are ignored, so an agent of the previous release
-  drops a new field from its state. A field that later commands depend on therefore needs
-  its own gate on `MinVersion`.
+  drops a new field from its state. A new kind, or a field that later commands depend on,
+  then needs a gate that waits until every agent runs the release that brings it; the
+  updates of clowder itself ([roadmap](../roadmap.md), phase 2c) bring it.
 - The json tags of `clusterspec.Config` are part of this format.
 
 ## Invariants

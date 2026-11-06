@@ -22,6 +22,7 @@ TestBoundaries 1.5 three
 TestJoin 1.2 three
 TestMoveInterrupted 1.2 three
 TestAccess 0.1 three
+TestRolesRecover 8.0 roles
 TestRolesFailover 2.3 roles
 TestRoles 1.0 roles
 TestSingleHost 2.7 single

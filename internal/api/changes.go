@@ -273,7 +273,9 @@ func (s *Server) encryptSecret(id string, values map[string][]byte) (state.Encry
 }
 
 func (s *Server) runOnLeader(w http.ResponseWriter, r *http.Request, batch changeBatch) {
-	leader, here, err := s.waitForLeader(r.Context())
+	waiting, cancel := context.WithTimeout(r.Context(), waitTimeout)
+	defer cancel()
+	leader, here, err := s.config.waitForLeader(waiting)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
@@ -282,7 +284,7 @@ func (s *Server) runOnLeader(w http.ResponseWriter, r *http.Request, batch chang
 	if here {
 		answer = s.runChanges(r.Context(), batch)
 	} else {
-		if answer, err = s.forwardChanges(r.Context(), leader, batch); err != nil {
+		if answer, err = s.forwardChanges(waiting, leader, batch); err != nil {
 			var statusError *StatusError
 			if errors.As(err, &statusError) {
 				writeError(w, statusError.Status, errors.New(statusError.Message))
@@ -310,7 +312,7 @@ func (s *Server) forwardChanges(ctx context.Context, leader state.HostID, batch 
 	}
 	request.Header.Set(VersionHeader, s.config.Version)
 	var answer ChangeResult
-	if err := send(s.forwarder, request, &answer); err != nil {
+	if err := send(s.config.Peers.forwarder, request, &answer); err != nil {
 		return ChangeResult{}, fmt.Errorf("forward to the leader (host %d): %w", leader, err)
 	}
 	return answer, nil
@@ -395,7 +397,7 @@ func (s *Server) runChanges(ctx context.Context, batch changeBatch) ChangeResult
 	}
 	ctx, cancel := context.WithTimeout(ctx, waitTimeout)
 	defer cancel()
-	index, err := s.proposeHere(ctx, cmd)
+	index, err := s.config.proposeHere(ctx, cmd)
 	var refused *state.Refused
 	switch {
 	case errors.As(err, &refused):
@@ -492,8 +494,8 @@ func (s *Server) describe(ctx context.Context, answer *ChangeResult, changes []s
 }
 
 // secretDifferences compares digests and never shows a value. It names the
-// keys data. also for a SealedSecret, because its encryptedData is stored
-// as that Secret.
+// changed keys under data, also for a SealedSecret, because the cluster
+// stores a SealedSecret's encryptedData as a Secret's data.
 func secretDifferences(was, is state.EncryptedSecret) []string {
 	var differs []string
 	for _, key := range is.Keys() {
@@ -537,7 +539,10 @@ func differences(old, updated resource.Object) []string {
 
 // checkNewToken returns nil if the batch does not change the token. It
 // never refuses the batch, because a user may change the token on purpose
-// before moving the servers to its project.
+// before moving the servers to its project. A configuration always names a
+// token: Check refuses one without, and the state one whose Secret is
+// missing. So the new state lacks a token only before the first
+// configuration.
 func (s *Server) checkNewToken(ctx context.Context, before, after *state.State) *TokenCheck {
 	newEncrypted, err := after.HetznerToken()
 	if err != nil {

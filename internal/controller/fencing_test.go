@@ -21,7 +21,7 @@ import (
 // the other voters say when asked: voter -> host -> silence; a voter that
 // is missing does not answer.
 type testFencer struct {
-	*fencer
+	*Fencing
 	l        *leader
 	api      *hetznertest.API
 	clock    time.Time
@@ -52,11 +52,12 @@ func newTestFencer(t *testing.T) *testFencer {
 		}
 		return silence, nil
 	}
-	test.fencer = newFencer(FenceParts{
+	test.Fencing = NewFencing(FenceParts{
 		Cluster: l, Propose: l.propose, Heard: heard, Ask: ask, Self: 0, Conditions: NewConditions(),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Open:   openPadded,
-	}, time.Millisecond)
+	})
+	test.pause = time.Millisecond
 	return test
 }
 
@@ -73,7 +74,7 @@ func (f *testFencer) pass(t *testing.T) {
 func (f *testFencer) passWithin(t *testing.T) {
 	t.Helper()
 	done := make(chan error, 1)
-	go func() { done <- f.fencer.pass(context.Background()) }()
+	go func() { done <- f.Fencing.pass(context.Background()) }()
 	select {
 	case err := <-done:
 		if err != nil {

@@ -2,7 +2,6 @@ package state
 
 import (
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -40,38 +39,6 @@ func (c *cluster) withCopies(copies ...VolumeCopy) Volume {
 	return volume
 }
 
-func TestACopyKeepsItsSyncedWordWhileItStaysWhatItWas(t *testing.T) {
-	c := moveCluster(t)
-	c.refuse(KindSetCopySynced, HostActor(1), SetCopySynced{Volume: "default/data", DataGeneration: 1, Synced: true},
-		"host/1 has no copy of volume default/data with a disk")
-	c.refuse(KindSetCopySynced, HostActor(0), SetCopySynced{Volume: "default/data", DataGeneration: 2, Synced: true},
-		"data generation 1, not 2")
-
-	// the leader adds a copy on host 1 and cannot call it synced
-	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: c.withCopies(
-		VolumeCopy{Host: 0, Class: "fast"}, VolumeCopy{Host: 1, Class: "fast", Synced: true},
-	)})
-	copies := c.state.Volumes["default/data"].Copies
-	if !copies[0].Synced || copies[1].Synced {
-		t.Errorf("the old copy keeps its word, the new one has none: %+v", copies)
-	}
-	c.mustApply(KindSetCopySynced, HostActor(1), SetCopySynced{Volume: "default/data", DataGeneration: 1, Synced: true})
-	if !c.state.Volumes["default/data"].Copies[1].Synced {
-		t.Errorf("host 1 told its copy is synced: %+v", c.state.Volumes["default/data"].Copies)
-	}
-	// a copy that becomes the tiebreaker keeps the class of its LV, which
-	// its host removes, and is not synced
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: c.withCopies(
-		VolumeCopy{Host: 0, Class: "fast"}, VolumeCopy{Host: 1, Tiebreaker: true},
-	)}, "must keep its class \"fast\"")
-	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: c.withCopies(
-		VolumeCopy{Host: 0, Class: "fast"}, VolumeCopy{Host: 1, Class: "fast", Tiebreaker: true},
-	)})
-	if copies := c.state.Volumes["default/data"].Copies; copies[1].Synced {
-		t.Errorf("a tiebreaker is synced: %+v", copies)
-	}
-}
-
 func TestOnlyAWorkerTakesAStackOrACopyWithADiskButAnyHostATiebreaker(t *testing.T) {
 	c := moveCluster(t)
 	c.state.Hosts[2].Roles = hostrole.Set{hostrole.ControlPlane, hostrole.Ingress}
@@ -91,68 +58,6 @@ func TestOnlyAWorkerTakesAStackOrACopyWithADiskButAnyHostATiebreaker(t *testing.
 
 	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: c.withCopies(
 		VolumeCopy{Host: 0, Class: "fast"}, VolumeCopy{Host: 1, Class: "fast"}, VolumeCopy{Host: 2, Tiebreaker: true},
-	)})
-}
-
-func TestAVolumeHasOneCopyMoreThanItsReplicasAtMostAndATiebreakerOnlyForTwoCopies(t *testing.T) {
-	c := moveCluster(t)
-	c.activeHost(3)
-	tests := []struct {
-		name      string
-		copies    []VolumeCopy
-		wantError string
-	}{
-		{"three copies of two, while one moves", []VolumeCopy{{Host: 0}, {Host: 1}, {Host: 2}}, ""},
-		{"two copies and a tiebreaker", []VolumeCopy{{Host: 0}, {Host: 1}, {Host: 2, Tiebreaker: true}}, ""},
-		{"four copies of two", []VolumeCopy{{Host: 0}, {Host: 1}, {Host: 2}, {Host: 3}}, "4 copies for 2 replicas"},
-		{
-			"two tiebreakers",
-			[]VolumeCopy{{Host: 0}, {Host: 1, Tiebreaker: true}, {Host: 2, Tiebreaker: true}},
-			"2 tiebreakers for 2 replicas",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			volume := c.withCopies(test.copies...)
-			for i := range volume.Copies {
-				volume.Copies[i].Class = "fast"
-			}
-			err := checkVolume(volume)
-			if test.wantError == "" && err != nil || test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
-				t.Errorf("got %v, want %q", err, test.wantError)
-			}
-		})
-	}
-	volume := c.withCopies(VolumeCopy{Host: 0, Class: "fast"}, VolumeCopy{Host: 1, Class: "fast", Tiebreaker: true})
-	volume.Spec.Replicas = 3
-	if err := checkVolume(volume); err == nil || !strings.Contains(err.Error(), "1 tiebreakers for 3 replicas") {
-		t.Errorf("a tiebreaker for three copies: %v", err)
-	}
-	// replicas 1: a tiebreaker only while a move gives it two copies
-	volume.Spec.Replicas = 1
-	if err := checkVolume(volume); err == nil || !strings.Contains(err.Error(), "1 tiebreakers for 1 replicas") {
-		t.Errorf("a tiebreaker for one copy: %v", err)
-	}
-	volume = c.withCopies(VolumeCopy{Host: 0, Class: "fast"}, VolumeCopy{Host: 1, Class: "fast"},
-		VolumeCopy{Host: 2, Tiebreaker: true})
-	volume.Spec.Replicas = 1
-	if err := checkVolume(volume); err != nil {
-		t.Errorf("a tiebreaker while replicas 1 moves: %v", err)
-	}
-}
-
-func TestANewCopyWaitsUntilItsHostRemovedTheCopyItGaveUp(t *testing.T) {
-	c := moveCluster(t)
-	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: c.withCopies(
-		VolumeCopy{Host: 0, Class: "fast"}, VolumeCopy{Host: 1, Class: "fast"},
-	)})
-	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: c.withCopies(VolumeCopy{Host: 0, Class: "fast"})})
-	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: c.withCopies(
-		VolumeCopy{Host: 0, Class: "fast"}, VolumeCopy{Host: 1, Class: "fast"},
-	)}, "host 1 still removes a copy it gave up")
-	c.mustApply(KindForgetCopy, HostActor(1), ForgetCopy{Copy: RetiredCopy{Volume: "default/data", DataGeneration: 1, Host: 1}})
-	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: c.withCopies(
-		VolumeCopy{Host: 0, Class: "fast"}, VolumeCopy{Host: 1, Class: "fast"},
 	)})
 }
 

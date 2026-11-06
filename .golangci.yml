@@ -33,7 +33,7 @@ linters:
             - "**/cmd/clowder/**"
             - "**/internal/cli/**"
           deny:
-            - pkg: github.com/webcodingcat/clowder/internal/agent
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd
               desc: Linux only (clowderd)
             - pkg: github.com/webcodingcat/clowder/internal/supervisor
               desc: Linux only (clowderd)
@@ -59,6 +59,94 @@ linters:
               desc: "agent only (clowderd); compiles anywhere but the CLI has no use for it"
             - pkg: github.com/webcodingcat/clowder/internal/datakey
               desc: "agent only (clowderd): the data key never leaves the hosts"
+        # Each command of clowderd stands on its own: what the commands
+        # share is in hostfiles, hostsetup (init and join only) and service.
+        # Only tests cross, to set a host up with init or to print through
+        # credentials and sealing-key.
+        # The commands are listed by hand, because depguard matches a pkg by
+        # its prefix and no prefix covers the commands but not what they
+        # share: a new command package goes into the files and deny of
+        # clowderd-commands and into the deny of clowderd-daemon and
+        # clowderd-shared.
+        clowderd-commands:
+          files:
+            - "**/internal/clowderd/initialize/*.go"
+            - "**/internal/clowderd/join/*.go"
+            - "**/internal/clowderd/credentials/*.go"
+            - "**/internal/clowderd/sealingkey/*.go"
+            - "**/internal/clowderd/recovery/*.go"
+            - "**/internal/clowderd/check/*.go"
+            - "!**/*_test.go"
+          deny:
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/daemon
+              desc: a command does not import the daemon (share through hostfiles)
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/initialize
+              desc: a command does not import another (share through hostfiles)
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/join
+              desc: a command does not import another (share through hostfiles)
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/credentials
+              desc: a command does not import another (share through hostfiles)
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/sealingkey
+              desc: a command does not import another (share through hostfiles)
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/recovery
+              desc: a command does not import another (share through hostfiles)
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/check
+              desc: a command does not import another (share through hostfiles)
+        clowderd-daemon:
+          files:
+            - "**/internal/clowderd/daemon/**"
+            - "!**/*_test.go"
+          deny:
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/initialize
+              desc: the daemon does not import a command (share through hostfiles)
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/join
+              desc: the daemon does not import a command (share through hostfiles)
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/credentials
+              desc: the daemon does not import a command (share through hostfiles)
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/sealingkey
+              desc: the daemon does not import a command (share through hostfiles)
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/recovery
+              desc: the daemon does not import a command (share through hostfiles)
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/check
+              desc: the daemon does not import a command (share through hostfiles)
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/hostsetup
+              desc: the daemon sets no host up (hostsetup is for init and join)
+        # What the commands and the daemon share imports neither of them.
+        clowderd-shared:
+          files:
+            - "**/internal/clowderd/hostfiles/*.go"
+            - "**/internal/clowderd/hostsetup/*.go"
+            - "**/internal/clowderd/service/*.go"
+            - "!**/*_test.go"
+          deny:
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/daemon
+              desc: what the commands share does not import the daemon
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/initialize
+              desc: what the commands share does not import a command
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/join
+              desc: what the commands share does not import a command
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/credentials
+              desc: what the commands share does not import a command
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/sealingkey
+              desc: what the commands share does not import a command
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/recovery
+              desc: what the commands share does not import a command
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/check
+              desc: what the commands share does not import a command
+        # The stack runner and the volume reconciler reach each other only
+        # through what the daemon hands them.
+        daemon-stacks:
+          files:
+            - "**/internal/clowderd/daemon/stacks/*.go"
+          deny:
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/daemon/volumes
+              desc: the daemon hands the stack runner what it needs of the volumes
+        daemon-volumes:
+          files:
+            - "**/internal/clowderd/daemon/volumes/*.go"
+          deny:
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd/daemon/stacks
+              desc: the daemon hands the volume reconciler what it needs of the stacks
         # Every agent must apply the same commands to the same state: the
         # state reads no files, network, clock or randomness (the time comes
         # with the command).
@@ -79,7 +167,7 @@ linters:
           deny:
             - pkg: os
               desc: the state does no I/O
-            - pkg: github.com/webcodingcat/clowder/internal/agent
+            - pkg: github.com/webcodingcat/clowder/internal/clowderd
               desc: the state does no I/O
             - pkg: github.com/webcodingcat/clowder/internal/controller
               desc: the state does no I/O

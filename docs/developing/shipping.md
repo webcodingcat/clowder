@@ -22,6 +22,9 @@ restic, git) are added with those phases.
   goes every few seconds would hide its failure from the other hosts. The unit stays
   `failed`, with the reason in the journal; nothing reboots the host. The same holds for
   status 4: the agent of a server that `clowderd recover` retired must never start again.
+- A worker that `clowderd recover` kept ends its agent with status 5, to start again as a
+  fresh Raft member (Recover in [cluster.md](cluster.md)). `SuccessExitStatus=5` counts
+  that as a success, so the unit shows no failure, and `Restart=always` starts it again.
 - An upgrade restarts a running agent (`postinstall.sh`, `systemctl try-restart`) and also
   starts one that failed. So an agent that stopped at an entry it could not read continues
   with the version that can read it. A helper of the old agent (`docker compose up`,

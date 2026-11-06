@@ -9,6 +9,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/notify"
+	"github.com/webcodingcat/clowder/internal/passes"
 )
 
 // noLeaderFor is how long an agent must know no leader before it sends an
@@ -47,14 +48,10 @@ func NewQuorumWatch(alerts *Alerts, host string, leader func() bool) *QuorumWatc
 
 // Run runs a round every alertsInterval until ctx ends.
 func (w *QuorumWatch) Run(ctx context.Context) {
-	for {
+	passes.Run(ctx, nil, nil, func() time.Duration {
 		w.round(ctx, time.Now())
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(alertsInterval):
-		}
-	}
+		return alertsInterval
+	})
 }
 
 // round leaves a message pending for a channel that fails, so that the

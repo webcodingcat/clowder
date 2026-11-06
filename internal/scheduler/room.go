@@ -56,8 +56,7 @@ func (r resources) String() string {
 // in and Check made sure that they parse.
 func parseResources(config clusterspec.Resources) resources {
 	memory, _ := units.ParseSize(config.Memory)
-	cpus, _ := strconv.ParseFloat(config.CPUs, 64)
-	return resources{memory, milli(cpus)}
+	return resources{memory, milli(config.CPUs)}
 }
 
 func milli(cpus float64) int64 {
@@ -67,10 +66,6 @@ func milli(cpus float64) int64 {
 // serviceRef names one service of one stack, by the stack's ID.
 type serviceRef struct {
 	stack, service string
-}
-
-func (s serviceRef) String() string {
-	return s.stack + "/" + s.service
 }
 
 // room tracks what the services of the stacks on each host take, as the

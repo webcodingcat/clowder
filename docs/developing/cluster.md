@@ -71,12 +71,12 @@ replicated, and how a cluster that lost its majority goes on. The state itself i
   before it powers a server off or moves the Floating IP, because a leader cut off from
   the others believes that it leads until its lease runs out.
 - **Catching up.** `CatchUp` waits for a leader (and, on the leader, for the barrier). A
-  follower then asks for the leader's commit index (`api.Server.CatchUpWithLeader`,
+  follower then asks for the leader's commit index (`api.Peers.CatchUpWithLeader`,
   `/v1/internal/commit-index`, answered after `VerifyLeader`) and waits until its state
   holds that index (`WaitCommitted`). Raft's own entries never reach the state, so it waits
   for Raft to have applied the index, and then for the last command up to it.
   - The agent starts its stacks and volumes only after that
-    ([The agent](host.md#the-agent-internalagent)), because a host that was away must not
+    ([The agent](host.md#the-agent-internalclowderd)), because a host that was away must not
     start a stack that moved in the meantime.
   - Until then, the API holds users' calls for at most `waitTimeout`
     (`ServerConfig.CaughtUp`), because a state that has not caught up may still be empty
@@ -119,7 +119,7 @@ replicated, and how a cluster that lost its majority goes on. The state itself i
 
   Raft changes its members one by one, so the third host's join passes through a few
   seconds with two voters. During those seconds, the loss of either one stops the cluster
-  until it is back. The leader handles one join at a time (`joiner.mu`), so two hosts
+  until it is back. The leader handles one join at a time (`joinLeader.mu`), so two hosts
   never get the same ID.
 - **The data key** is an age identity in a file that only root can read, on control-plane
   hosts only. `Encrypt` and `Decrypt` turn secrets into `state.Encrypted` and back. A
@@ -134,7 +134,7 @@ replicated, and how a cluster that lost its majority goes on. The state itself i
   strangers refused, a member that recovers alone, and a non-voter that was ahead of it and
   follows it with a fresh log.
 
-## Recover (`clowderd recover`, `agent/recover.go`)
+## Recover (`clowderd recover`, `clowderd/recovery`)
 
 A cluster that has lost the majority of its voters for good decides nothing, but the
 control-plane host that is left still has current copies of its volumes, and so may the
@@ -191,14 +191,14 @@ in this order, and each step is safe to run again after a failure.
    entries that the old majority committed without this host; its state applied them
    already, and the new leader would never send them, and a higher term would end its
    lead. A non-voter's log is only a copy, so the worker sets it aside and follows the new
-   leader from its snapshot ([A rejoin](host.md#the-agent-internalagent)): it runs
+   leader from its snapshot ([A rejoin](host.md#the-agent-internalclowderd)): it runs
    `DropPeers` as step 6 does, stops its Raft member before it answers, ends its agent,
    and at the next start moves `raft/` aside. The worker refuses while it knows a leader,
    and a control-plane host refuses to rejoin. This step comes before this host's agent
    starts, so the new leader never meets a worker of the old term.
 8. It starts the agent. Its loops do the rest: the members loop adds the workers to Raft
    as non-voters, the mesh drops the removed hosts, the Floating IP comes to an ingress
-   host, the placement places what waits, and `forgetPeers` runs `forget-peer` on every
+   host, the placement places what waits, and `peerForgetter` runs `forget-peer` on every
    host that is left.
 
 `recover-remap` (`state/recover.go`, `RecoverRemap`: the survivor, the retired hosts and
@@ -231,7 +231,7 @@ SealedSecrets sealed anew with the exported sealing key, and the data from backu
 ([Known limits](../operating.md#known-limits)).
 
 A retired host's agent ends at its start (`checkRetired`,
-[The agent](host.md#the-agent-internalagent)), because the label names its certificate. A
+[The agent](host.md#the-agent-internalclowderd)), because the label names its certificate. A
 server that is set up anew gets a certificate of its own and starts, label or not. If
 Hetzner's API does not answer at the start, a retired host starts as before
 ([Known limits](../operating.md#known-limits)), so recover tells the user to set such

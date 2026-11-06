@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"maps"
 	"net/http"
 	"net/netip"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,8 +76,84 @@ func TestEachRouteTakesItsCallers(t *testing.T) {
 	}
 }
 
+// TestCLIKindsAreTheKindsOfTheCLIsWrites ties the CLI's senders in
+// proposers to the routes: a follower forwards a CLI write to the leader
+// through internal/propose, which takes only the kinds that proposers
+// marks cli. A new write route must name its kind here, and proposers must
+// then mark it, or the route works on the leader only.
+func TestCLIKindsAreTheKindsOfTheCLIsWrites(t *testing.T) {
+	// the kind that each of the CLI's write routes proposes; "" for a route
+	// that proposes nothing as the CLI
+	writes := map[string]string{
+		"POST /v1/hosts/{id}/{action}":                           state.KindSetHostPhase,
+		"POST /v1/join-tokens":                                   state.KindAddJoinToken,
+		"POST /v1/stacks/{namespace}/{name}/restart":             state.KindRestartStack,
+		"POST /v1/stacks/{namespace}/{name}/move":                state.KindRequestMove,
+		"POST /v1/apply":                                         "", // internal/changes
+		"POST /v1/delete":                                        "", // internal/changes
+		"POST /v1/volumes/{namespace}/{name}/resolve-splitbrain": "", // the volume's host commits as itself
+		"POST /v1/alerts/test":                                   "", // commits nothing
+	}
+	kinds := map[string]bool{}
+	for _, route := range newTestCluster(t).apis[0].routes() {
+		if route.caller != cliCaller || !strings.HasPrefix(route.pattern, "POST ") {
+			continue
+		}
+		kind, ok := writes[route.pattern]
+		if !ok {
+			t.Errorf("%s: name the kind that this write route proposes", route.pattern)
+		}
+		if kind != "" {
+			kinds[kind] = true
+		}
+	}
+	cliKinds := map[string]bool{}
+	for kind, allowed := range proposers {
+		if allowed.cli {
+			cliKinds[kind] = true
+		}
+	}
+	if !maps.Equal(kinds, cliKinds) {
+		t.Errorf("proposers takes %v from the CLI, want the kinds of the CLI's write routes %v",
+			slices.Sorted(maps.Keys(cliKinds)), slices.Sorted(maps.Keys(kinds)))
+	}
+}
+
+// TestEachSenderMayProposeOnlyItsKinds checks mayPropose by the actor: the
+// CLI's actor only through a control-plane host, a host only as itself, and
+// the cluster's commands only from a control-plane host.
+func TestEachSenderMayProposeOnlyItsKinds(t *testing.T) {
+	controlPlane := pki.Identity{Role: pki.RoleHost, Name: "host-0", HostID: 0, HostRoles: hostrole.DefaultInit}
+	worker := pki.Identity{Role: pki.RoleHost, Name: "host-2", HostID: 2, HostRoles: hostrole.Set{hostrole.Worker}}
+	tests := []struct {
+		name     string
+		identity pki.Identity
+		actor    string
+		kind     string
+		want     bool
+	}{
+		{"the CLI's host action through the control plane", controlPlane, state.CLIActor("alice"), state.KindSetHostPhase, true},
+		{"the CLI's host action through a worker", worker, state.CLIActor("alice"), state.KindSetHostPhase, false},
+		{"a host's own phase", worker, state.HostActor(2), state.KindSetHostPhase, true},
+		{"another host's phase", worker, state.HostActor(0), state.KindSetHostPhase, false},
+		{"a report by the CLI", controlPlane, state.CLIActor("alice"), state.KindReportHost, false},
+		{"a restart by a host", controlPlane, state.HostActor(0), state.KindRestartStack, false},
+		{"the cutoff by the control plane", controlPlane, state.HostActor(0), state.KindSetCLICutoff, true},
+		{"the cutoff by a worker", worker, state.HostActor(2), state.KindSetCLICutoff, false},
+		{"a kind the leader writes", controlPlane, state.HostActor(0), state.KindPutVolume, false},
+		{"as the leader", controlPlane, state.LeaderActor, state.KindReportHost, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := mayPropose(test.identity, state.Command{Kind: test.kind, Actor: test.actor}); got != test.want {
+				t.Errorf("mayPropose = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestEachRuleAdmitsItsCallers(t *testing.T) {
-	server := &Server{config: ServerConfig{HostID: 0}}
+	server := &Server{config: ServerConfig{HostConfig: HostConfig{HostID: 0}}}
 	callers := map[string]pki.Identity{
 		"the CLI":              {Role: pki.RoleCLI, Name: "alice"},
 		"this host":            {Role: pki.RoleHost, Name: "host-0", HostID: 0, HostRoles: hostrole.DefaultInit},

@@ -189,7 +189,7 @@ func runFloatingIPUntil(t *testing.T, l *leader, open Open, conditions *Conditio
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		RunFloatingIP(ctx, l, l.propose, open, conditions, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		NewFloatingIP(l, l.propose, open, conditions, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
 	}()
 	defer func() {
 		cancel()

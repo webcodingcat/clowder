@@ -2,17 +2,35 @@
 
 Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that change its host.
 
-## The agent (`internal/agent`)
+## The agent (`internal/clowderd`)
 
-The package holds the daemon and the one-shot host commands. Some files have similar names:
+clowderd has a package per command under `internal/clowderd`:
+
+| Package | Holds |
+|---|---|
+| `clowderd` | the commands' wiring (`root.go`): `NewRoot` builds the host's files (`hostfiles.Default`) and drivers (`hostNetwork`, `hostStorage`, `hostParts`) once and adds each package's `NewCommand`; `version`, which belongs to no package |
+| `clowderd/hostfiles` | what the commands and the daemon share: a host's files under `DefaultDir` (`Files`, `Default`), `host.json` (`Host`), its keys and certificates (`Credentials`, `WriteKeys`), `net.json` (`WriteMesh`, `ReadMesh`) |
+| `clowderd/hostsetup` | what init and join share to set a host up: their flags (`HostFlags`), the new host they describe (`NewHost`), and the start of the agent (`StartService`) |
+| `clowderd/service` | starting and stopping `clowderd.service` through systemctl, with `service.Timeout` (init, join, recover) |
+| `clowderd/initialize`, `clowderd/join` | `clowderd init` and `clowderd join`, run on the new host |
+| `clowderd/credentials`, `clowderd/sealingkey` | `clowderd credentials` and `clowderd sealing-key export` |
+| `clowderd/recovery` | `clowderd recover` |
+| `clowderd/check` | `clowderd check` |
+| `clowderd/daemon` | `clowderd run`, and below it `loop`, `stacks`, `volumes` and `daemontest` |
+
+Every command package exports `NewCommand`, which takes what it needs of the host's files
+and drivers. The commands and the daemon import `hostfiles` and `service` (init and join
+also `hostsetup`), never each other; depguard checks it (rules `clowderd-commands`,
+`clowderd-daemon`, `clowderd-shared`). Only tests cross: the
+daemon's and recover's tests set a host up with `initialize.Init`, and `clowderd/daemon/run_test.go`
+prints credentials and the sealing key through their packages. In the daemon, some files
+have similar names:
 
 | File | Holds |
 |---|---|
-| `init.go`, `join.go` | `clowderd init` and `clowderd join`, run on the new host |
-| `joiner.go` | the leader's side of a join |
-| `recover.go` | `clowderd recover` |
+| `joinleader.go` | the leader's side of a join |
 | `rejoin.go` | a worker's part of a recover: drop the retired hosts, follow the new leader |
-| `recovery.go` | a fenced host's report that it is back (`recovering`, then `active`) |
+| `backfromfence.go` | a fenced host's report that it is back (`recovering`, then `active`) |
 | `retired.go` | the check at start whether `clowderd recover` retired this host |
 | `forget.go` | forgetting removed hosts as DRBD peers |
 | `restart.go` | the supervisor's restart rules, taken from the state |
@@ -50,7 +68,7 @@ The package holds the daemon and the one-shot host commands. Some files have sim
      (`api.JoiningCluster.Join`). Write the answer into `join.json` at once. The
      certificate must name the roles that the host asked for (`checkJoinCertificate`).
   3. From `join.json`, write the keys, the certificate and, on a control-plane host only,
-     the data key (`writeKeys`, as init does), `clowder0`, and `net.json` with the other
+     the data key (`Files.WriteKeys`, as init does), `clowder0`, and `net.json` with the other
      hosts as peers. Then write `host.json` and delete `join.json`.
 
   If a join fails after step 2, the next attempt continues from `join.json` without asking
@@ -60,28 +78,29 @@ The package holds the daemon and the one-shot host commands. Some files have sim
   once its agent runs and reports (The cluster, Raft). join refuses a host that has a
   `raft/` directory or `host.json`.
 - **`clowderd credentials [--name <name>] [--endpoint <address>]... [--revoke-older]`**
-  (`agent/credentials.go`) prints a CLI config with one context, like `kubeadm kubeconfig
+  (`clowderd/credentials`) prints a CLI config with one context, like `kubeadm kubeconfig
   user`. It creates the key locally and asks its own agent for the certificate, using the
   host's certificate ([Credentials from a host](api.md#credentials-from-a-host)). The
   agent must be running; `--revoke-older` also needs the leader. Like `clowderd
   sealing-key export` and `clowderd recover`, it runs only on a control-plane host, as
-  `host.json` says (`Host.checkControlPlane`; the join wrote the roles from its
+  `host.json` says (`Host.CheckControlPlane`; the join wrote the roles from its
   certificate).
 - **`clowderd recover --power-off`** makes this host the only control-plane host of its
   cluster when the majority of the voters is gone for good. It powers off the hosts that
   take no connection and labels their servers `clowder-retired`; workers that answer stay
-  ([Recover](cluster.md#recover-clowderd-recover-agentrecovergo)). It stops the agent
+  ([Recover](cluster.md#recover-clowderd-recover-clowderdrecovery)). It stops the agent
   while it changes Raft's files and starts it again afterwards.
 - **A rejoin** (`rejoin.go`) is a worker's part of a recover on a control-plane host
   (`/v1/internal/recover/rejoin`). The worker drops the retired hosts from its DRBD
   resources (`DropPeers`), writes the marker `rejoin`, stops its Raft member before it
-  answers, and ends its agent (`errRejoining`); systemd starts it again.
+  answers, and ends its agent (`ErrRejoining`, exit status 5); systemd counts that as a
+  success and starts it again.
 - **`clowderd run`** (the service) starts in this order:
   1. After a rejoin, it moves its Raft directory aside to `raft.set-aside-<time>`
      (`setRaftAsideToRejoin`), so it follows the new leader as a fresh non-voter. Then it
      reads the state from its Raft log on disk (`raftnode.ReadState`) and checks that
      `host.json`, the host's certificate and the state name the same roles
-     (`Host.checkRoles`; a state that does not know the host yet is not compared). The API
+     (`Host.CheckRoles`; a state that does not know the host yet is not compared). The API
      trusts the certificates, but the loops read `host.json` and the state, so the agent
      does not start while they differ. Only a change by hand makes them differ.
   2. A control-plane host asks Hetzner whether `clowderd recover` retired it
@@ -103,30 +122,36 @@ The package holds the daemon and the one-shot host commands. Some files have sim
      time, the agent ends here, before its loops start. A follower may also meet such an
      entry later, when it applies the leader's log.
   5. It starts the containers' DNS resolver.
-  6. `newDaemon` creates the parts from what they all share (`shared`: the files, this
-     host, its keys (the data key on a control-plane host only), the Raft member, the
-     host's parts, the logger). It starts the API on
+  6. `newDaemon` creates the parts and the loops from what they all share (`shared`: the
+     files, this host, its keys (the data key on a control-plane host only), the Raft
+     member, the host's parts, the logger). It builds `api.Peers` first, through which
+     every part commits and opens its secrets, and the API server last, because the server
+     answers for the parts. It starts nothing. Then the agent starts the API on
      the underlay, the node address and, on a control-plane host, the public address
-     (`Host.apiAddresses`). Other hosts serve only the control plane, which calls them
+     (`Host.APIAddresses`). Other hosts serve only the control plane, which calls them
      over the private network. The listeners use `IP_FREEBIND` (`freeBind`), because at
      boot the public address may come up after the agent, which must neither fail nor
      lock users out then. Then it starts the servers for ACME's challenges and the
      metrics. If any of them cannot listen, the agent ends before it starts a container.
      Later, only a failing API ends the agent; the host runs its stacks without the other
      two, so their failure is only logged.
-  7. It starts the loops (`startLoops`):
-     - this host's loops that start no container: the network, the supervisor, and the
-       beats to the voters;
-     - on a control-plane host only (`startControlPlaneLoops`), which holds the data key:
-       the leader's loops, which do nothing while this host does not lead, and the watch
-       that alerts while there is no leader (`QuorumWatch`). Other hosts never vote, so
-       they never lead;
-     - after the state has caught up with the leader's commit index (`runOnceCaughtUp`,
-       `waitForState`; [Raft](cluster.md#raft-internalraftnode-and-the-data-key-internaldatakey)):
+  7. It starts the loops (`startLoops`). Every loop has one form: a value that
+     `newDaemon` builds, with a method `Run(ctx)` that runs until the agent stops. A value
+     with a second loop has a second method of the same form (`volumes.Reconciler.Trim`,
+     `controller.Alerts.RunHeartbeat`). `newDaemon` puts each loop in one of three groups
+     (`loopGroups`), which start at different times:
+     - `always`, at once: the network (`networkReconciler`), the supervisor, and the beats
+       to the voters (`beatSender`);
+     - `controlPlane`, at once on a control-plane host only (`controlPlaneLoops`), which
+       holds the data key: the leader's loops, which do nothing while this host does not
+       lead, and the watch that alerts while there is no leader (`QuorumWatch`). Other
+       hosts never vote, so they never lead;
+     - `caughtUp`, once the state has caught up with the leader's commit index
+       (`waitForState`; [Raft](cluster.md#raft-internalraftnode-and-the-data-key-internaldatakey)):
        the report, Traefik, the volume reconciler and its trim, forgetting removed hosts
-       (`forgetPeers`: `storage.ForgetPeer`, then `report-peer-forgotten`), the
+       (`peerForgetter`: `storage.ForgetPeer`, then `report-peer-forgotten`), the
        prefetcher, the steps of moves (`moveSteps`), the report of a host that is back
-       after a fence (`reportRecovery`), and the stack runner. They wait because a host
+       after a fence (`backFromFenceReporter`), and the stack runner. They wait because a host
        that was away must not start a stack that has moved in the meantime.
   8. It tells systemd `READY=1`. It feeds the watchdog as long as the state's lock
      answers.
@@ -139,14 +164,17 @@ The package holds the daemon and the one-shot host commands. Some files have sim
 
   When its Raft member halts at an entry it cannot read (`Node.Halted`,
   [Versions](state.md#versions)), the agent exits with status 3 (`exitUnreadable` in
-  `cmd/clowderd`). systemd restarts it neither after status 3 nor 4 (Shipping).
+  `cmd/clowderd`). systemd restarts it neither after status 3 nor 4, and counts status 5,
+  a rejoin, as a success ([Shipping](shipping.md)).
 - **`HostParts`** are what the agent changes on its host: the network, the storage driver
   and Docker. `clowderd run` passes the real ones, and the tests pass fakes. The tests
   fake Hetzner's API with `hetzner/hetznertest`, set in the configuration's `hetzner.api`.
-- **Reconcilers** run after each change of the state and every `loop.Interval`, so they
-  repair changes made by hand. `reconcileNetwork` keeps the nft rules, the volume
+- **Reconcilers** run after each change of the state and every `passes.Interval`, so they
+  repair changes made by hand. Every loop of the agent and of the leader runs its passes
+  through `passes.Run` (`internal/passes`); `clowderd/daemon/loop.Run` is its form for the agent,
+  whose passes always wait `passes.Interval`. `networkReconciler` keeps the nft rules, the volume
   reconciler keeps the volume copies, and the stack runner keeps the stacks.
-- **The volume reconciler** (`agent/volumes`, `volumes.Reconciler`) keeps every copy that
+- **The volume reconciler** (`clowderd/daemon/volumes`, `volumes.Reconciler`) keeps every copy that
   the state places on this host, whether or not a stack here uses it. The target for a
   copy is:
   - primary and mounted, when a stack placed here names the volume;
@@ -177,7 +205,7 @@ The package holds the daemon and the one-shot host commands. Some files have sim
   A volume's steps run in a job, its own goroutine, because mkfs, `mkdir data/`, mount
   and unmount write to the volume and hang while DRBD suspends I/O. A volume has at most
   one job at a time (`busy`). The pass does not wait for it; a successful job starts the
-  next pass. A failed job is retried at the next change of the state or `loop.Interval`,
+  next pass. A failed job is retried at the next change of the state or `passes.Interval`,
   because an immediate retry of a failing step would spin. `Run` waits for the jobs when
   it stops, within the agent's `loopsTimeout`.
 
@@ -194,7 +222,7 @@ The package holds the daemon and the one-shot host commands. Some files have sim
 
   Files: the pass is in `reconciler.go`, the targets in `desired.go`, the records in
   `records.go`, and the trim in `trim.go`.
-- **The stack runner** (`agent/stacks`, `stacks.Runner`) keeps everything of a stack under
+- **The stack runner** (`clowderd/daemon/stacks`, `stacks.Runner`) keeps everything of a stack under
   its Compose project (`names.Project`). A pass first stops the stacks that left the host
   (`compose down`). Then it starts a job for each stack that the state places here and
   that has no job running (`Runner.start`). So a long image pull, or a `compose up` that
@@ -223,7 +251,7 @@ The package holds the daemon and the one-shot host commands. Some files have sim
   `OpenSecret` and the supervisor.
 - **Secrets from the control plane.** `OpenSecret` gives a Secret's values for the digest
   that the state names. The agent (`newSecretOpener`, `controlPlaneCache`) keeps what
-  `api.Server.SecretsOfThisHost` gave it in memory, and asks again only when the state
+  `api.Peers.SecretsOfThisHost` gave it in memory, and asks again only when the state
   names a digest it does not have, as the kubelet keeps its pods' secrets. Each answer
   replaces all it kept. After a failed call it waits `askAgainAfter` before it asks
   again, so a pass does not wait for the API's timeout each time. Traefik's runner keeps
@@ -242,7 +270,7 @@ The package holds the daemon and the one-shot host commands. Some files have sim
   logins only for the stacks that run on it. An image that fails to pull in a namespace
   with image pull secrets is left for the stack's start, and a move does not wait for it
   (`Ready`).
-- **The steps of moves** (`agent/moves.go`, `moveSteps`) record each step of a move that
+- **The steps of moves** (`clowderd/daemon/moves.go`, `moveSteps`) record each step of a move that
   this host owns, once its loops have done it. On the new host, the steps are: each copy
   synced (or the volume never held data), and the images present. On the old host: the
   stack stopped (`stacks.Files.Stopped`), and each copy released.
@@ -312,14 +340,14 @@ The package holds the daemon and the one-shot host commands. Some files have sim
   - The runner removes the configs of namespaces with no stack here
     (`removeRegistryConfigsOfOthers`), so logins stay no longer than needed.
 - **Other loops.** The agent also runs the supervisor and, while it leads, the leader's
-  loops: the placement (`controller.RunPlacement`) and those in [Ingress, certificates,
+  loops: the placement (`controller.Placement`) and those in [Ingress, certificates,
   alerts and metrics](loops.md).
 - **The trim** (the exception in [Volumes](../../DEVELOPING.md#volumes)): every
   `trimInterval`, the reconciler trims the copies that its last pass saw mounted, and
   only those with DRBD's quorum or no DRBD. It claims each volume as a job would, so no
   job unmounts it meanwhile. The driver skips a copy that is no longer mounted, because
   fstrim on an empty mount point would trim the root file system. Until every mounted copy
-  is trimmed, the trim tries again every hour.
+  is trimmed, the trim tries again every `trimCheckInterval`.
 - **The host's report** (`hostReporter`, `report-host`) carries the inputs of the alerts:
   - version, memory and CPUs;
   - the pools' data and metadata use;
@@ -329,28 +357,28 @@ The package holds the daemon and the one-shot host commands. Some files have sim
 
   It runs in its own loop after the state has caught up, so a hanging Docker cannot block
   the report that says so. Each probe ends at its driver's timeout (Docker's ping, lvs).
-  It probes every `loop.Interval` and when a new configuration generation may name a new
+  It probes every `passes.Interval` and when a new configuration generation may name a new
   pool, but not at every change of the state, because lvs is slow when DRBD hangs. A
   failed probe keeps the value in the state, so a pool does not vanish for the placement
   when `lvs` times out. The report commits only when a value changed, which is seldom:
   each value is a bool or a whole percent. Percents are rounded up, so a threshold trips
   early rather than late, and a small pool trips as early as a large one.
 - **Tests.**
-  - The package's own test runs the whole way on 127.0.0.1: init, the agent with a notify
+  - The daemon's own test (`run_test.go`) runs the whole way on 127.0.0.1: init, the agent with a notify
     socket, the first credentials, apply and diff, the Floating IP in the nft rules, and a
     volume and a stack applied, listed and deleted. It also checks that a `Run` that fails
     at its start leaves nothing open. `restart_test.go` covers the supervisor's restart
     rules.
-  - `agent/agenttest` has fakes of Docker, the storage driver (each copy's state in
+  - `clowderd/daemon/daemontest` has fakes of Docker, the storage driver (each copy's state in
     memory), the volume reconciler, and a cluster in memory. The cluster fails a test
     whose loop writes into its copy of the state (`statetest.ReadOnlyCopy`).
-  - `agent/stacks` runs single passes against that cluster: `runner_test.go` (failing
+  - `clowderd/daemon/stacks` runs single passes against that cluster: `runner_test.go` (failing
     stacks, the paused supervisor, data generations, waiting for copies, held LVs, secret
     labels), `leavers_test.go` (a volume passes on only after the old stack has stopped,
     including when a stop or `compose up` fails or the leavers cannot be listed),
     `secrets_test.go` (decrypting, replacing only what changed, rights, removal after the
     stop) and `containers_test.go` (registry configs, `compose ps`).
-  - In `agent/volumes`, `plan_test.go` is a table of target and observation, and
+  - In `clowderd/daemon/volumes`, `plan_test.go` is a table of target and observation, and
     `reconciler_test.go` runs passes and waits for their jobs: formatting once, release
     and takeover without `--force`, held copies, a hanging job, errors that reach the
     stack, data generations, removal, the records and the weekly trim.
@@ -360,7 +388,7 @@ The package holds the daemon and the one-shot host commands. Some files have sim
 ## Network (`internal/network`)
 
 - `clowder0` carries the node address and the resolver's address (`network.Resolver`).
-- **The agent's network loop** (`agent/network.go`) reads the wanted network from the
+- **The agent's network loop** (`clowderd/daemon/network.go`) reads the wanted network from the
   state (`readWantedNetwork`). At every change and every loop interval, it applies the nft
   rules first and then the WireGuard mesh. Every other host is a peer until it is removed,
   and the addresses of all hosts stay closed to containers. The loop keeps the mesh it

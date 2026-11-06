@@ -73,7 +73,7 @@ func (s *Server) internalCredentials(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		index, ok := s.commit(w, r, cmd, s.Propose)
+		index, ok := s.commit(w, r, cmd, s.config.Peers.Propose)
 		if !ok {
 			return
 		}

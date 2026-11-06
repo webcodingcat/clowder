@@ -26,6 +26,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/ingress"
 	"github.com/webcodingcat/clowder/internal/network"
+	"github.com/webcodingcat/clowder/internal/passes"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/units"
 )
@@ -68,8 +69,9 @@ type retry struct {
 	backoff time.Duration
 }
 
-// acmeRunner's fields other than the state are replaced by the tests.
-type acmeRunner struct {
+// ACME keeps the routes' certificates. The tests replace its fields other
+// than the state.
+type ACME struct {
 	cluster Cluster
 	propose Propose
 	keys    Keys
@@ -84,28 +86,24 @@ type acmeRunner struct {
 	retries map[string]retry
 }
 
-// RunACME keeps a certificate for each domain of an HTTP route while this
-// agent leads, until ctx ends, with HTTP-01.
-func RunACME(ctx context.Context, cluster Cluster, propose Propose, keys Keys, logger *slog.Logger) {
-	runner := &acmeRunner{
+// NewACME creates the leader's certificate keeper; Run runs it.
+func NewACME(cluster Cluster, propose Propose, keys Keys, logger *slog.Logger) *ACME {
+	return &ACME{
 		cluster: cluster, propose: propose, keys: keys, lookup: net.DefaultResolver.LookupNetIP,
 		httpPort: 80, logger: logger, retries: map[string]retry{},
 	}
-	for {
-		changed := cluster.Changed()
-		if cluster.IsLeader() {
-			runner.pass(ctx)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-changed:
-		case <-time.After(interval):
-		}
-	}
 }
 
-func (r *acmeRunner) pass(ctx context.Context) {
+// Run keeps a certificate for each domain of an HTTP route while this
+// agent leads, until ctx ends, with HTTP-01.
+func (r *ACME) Run(ctx context.Context) {
+	runWhileLeading(ctx, r.cluster, passes.Interval, func(ctx context.Context) time.Duration {
+		r.pass(ctx)
+		return passes.Interval
+	}, nil)
+}
+
+func (r *ACME) pass(ctx context.Context) {
 	copied := r.cluster.SharedCopy()
 	if !copied.Configured() {
 		return // no configuration yet: no Floating IP
@@ -183,13 +181,13 @@ func (r *acmeRunner) pass(ctx context.Context) {
 }
 
 // failed is only for a failure that reached the CA.
-func (r *acmeRunner) failed(domain string, now time.Time, err error) {
+func (r *ACME) failed(domain string, now time.Time, err error) {
 	backoff := max(r.retries[domain].backoff, firstBackoff)
 	r.retries[domain] = retry{at: now.Add(backoff), backoff: min(2*backoff, maxBackoff)}
 	r.logger.Warn("ordering a certificate failed", "domain", domain, "error", err, "retry_in", backoff)
 }
 
-func (r *acmeRunner) commitOrLog(ctx context.Context, kind string, payload any) {
+func (r *ACME) commitOrLog(ctx context.Context, kind string, payload any) {
 	if _, err := commit(ctx, r.propose, kind, payload); err != nil {
 		r.logger.Warn("keep the certificates", "command", kind, "error", err)
 	}
@@ -238,7 +236,7 @@ func renewalDue(certificate *state.Certificate, config clusterspec.ACME, now tim
 // checkDNS makes sure, before the CA is asked, that a domain resolves to
 // the Floating IP and to nothing else. A failed validation counts against
 // the CA's limits, and a validation that reaches another address fails.
-func (r *acmeRunner) checkDNS(ctx context.Context, domain string, floatingIP netip.Addr) error {
+func (r *ACME) checkDNS(ctx context.Context, domain string, floatingIP netip.Addr) error {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	addresses, err := r.lookup(ctx, "ip", domain)
@@ -257,7 +255,7 @@ func (r *acmeRunner) checkDNS(ctx context.Context, domain string, floatingIP net
 }
 
 // connect creates the cluster's account if it has none at the directory.
-func (r *acmeRunner) connect(ctx context.Context, copied *state.State) (*acme.Client, error) {
+func (r *ACME) connect(ctx context.Context, copied *state.State) (*acme.Client, error) {
 	config := copied.Config.Spec.ACME
 	httpClient, err := acmeHTTPClient([]byte(config.CA))
 	if err != nil {
@@ -328,7 +326,7 @@ func acmeHTTPClient(caPEM []byte) (*http.Client, error) {
 	return &http.Client{Transport: transport}, nil
 }
 
-func (r *acmeRunner) order(ctx context.Context, client *acme.Client, domain string, checkAt netip.AddrPort) error {
+func (r *ACME) order(ctx context.Context, client *acme.Client, domain string, checkAt netip.AddrPort) error {
 	ctx, cancel := context.WithTimeout(ctx, orderTimeout)
 	defer cancel()
 	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(domain))
@@ -383,7 +381,7 @@ func (r *acmeRunner) order(ctx context.Context, client *acme.Client, domain stri
 
 // authorize lets the CA validate only once the answer comes back through
 // the ingress host's Traefik (checkAddress).
-func (r *acmeRunner) authorize(ctx context.Context, client *acme.Client, url, domain string, checkAt netip.AddrPort) error {
+func (r *ACME) authorize(ctx context.Context, client *acme.Client, url, domain string, checkAt netip.AddrPort) error {
 	authorization, err := client.GetAuthorization(ctx, url)
 	if err != nil {
 		return fmt.Errorf("read the authorization: %w", err)
@@ -428,7 +426,7 @@ func (r *acmeRunner) authorize(ctx context.Context, client *acme.Client, url, do
 	return nil
 }
 
-func (r *acmeRunner) selfCheck(ctx context.Context, checkAt netip.AddrPort, domain, token, keyAuthorization string) error {
+func (r *ACME) selfCheck(ctx context.Context, checkAt netip.AddrPort, domain, token, keyAuthorization string) error {
 	ctx, cancel := context.WithTimeout(ctx, selfCheckTimeout)
 	defer cancel()
 	url := "http://" + checkAt.String() + ingress.ChallengePath + token
@@ -478,7 +476,7 @@ func fetchChallenge(ctx context.Context, client *http.Client, url, domain, want 
 // checkAddress returns the ingress host's Traefik, where the CA's request
 // lands too. The leader's own Traefik is not enough: the leader may not be
 // the ingress host, and the ingress host may apply the challenge later.
-func (r *acmeRunner) checkAddress(copied *state.State, floatingIP netip.Addr) netip.AddrPort {
+func (r *ACME) checkAddress(copied *state.State, floatingIP netip.Addr) netip.AddrPort {
 	if copied.Ingress == nil {
 		return netip.AddrPortFrom(floatingIP, r.httpPort)
 	}

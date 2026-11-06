@@ -42,11 +42,12 @@ const (
 	powerOnAgain = 30 * time.Second
 )
 
-// fencer keeps its records in memory only, so a new leader may power on a
-// fenced host a second time, which does no harm. The fence-host operations
-// in the state say how far each fence got, and a new leader goes on from
-// there.
-type fencer struct {
+// Fencing marks silent hosts as failed, fences them and powers them on
+// again. It keeps its records in memory only, so a new leader may power on
+// a fenced host a second time, which does no harm. The fence-host
+// operations in the state say how far each fence got, and a new leader
+// goes on from there.
+type Fencing struct {
 	FenceParts
 
 	// pause is powerOffPause; tests shorten it
@@ -65,7 +66,7 @@ type fencer struct {
 	// The loop and the power-off jobs share what follows; mu guards
 	// powering and fenceAfter.
 
-	// jobs counts the running power-offs, so that RunFencing returns only
+	// jobs counts the running power-offs, so that Run returns only
 	// after they end
 	jobs sync.WaitGroup
 	mu   sync.Mutex
@@ -89,42 +90,35 @@ type FenceParts struct {
 	Logger     *slog.Logger
 }
 
-func newFencer(parts FenceParts, pause time.Duration) *fencer {
-	return &fencer{
-		FenceParts: parts, pause: pause,
+// NewFencing creates the leader's fencing; Run runs it.
+func NewFencing(parts FenceParts) *Fencing {
+	return &Fencing{
+		FenceParts: parts, pause: powerOffPause,
 		powerOnAfter: map[state.HostID]time.Time{}, poweredOn: map[state.HostID]bool{},
 		powering: map[state.HostID]context.CancelFunc{}, fenceAfter: map[state.HostID]time.Time{},
 	}
 }
 
-// RunFencing fails, fences and powers on hosts by their beats while this
-// agent leads, until ctx ends.
-func RunFencing(ctx context.Context, parts FenceParts) {
-	f := newFencer(parts, powerOffPause)
+// Run fails, fences and powers on hosts by their beats while this agent
+// leads, until ctx ends. It runs a pass every BeatInterval, not every
+// passes.Interval, because a host's silence counts in beats.
+func (f *Fencing) Run(ctx context.Context) {
 	defer f.jobs.Wait()
-	for {
-		changed := f.Cluster.Changed()
-		if f.Cluster.IsLeader() {
-			if err := f.pass(ctx); err != nil {
-				f.Logger.Error("watch the hosts", "error", err)
-			}
-		} else {
-			f.stopJobs()
-			clear(f.powerOnAfter)
-			clear(f.poweredOn)
+	runWhileLeading(ctx, f.Cluster, BeatInterval, func(ctx context.Context) time.Duration {
+		if err := f.pass(ctx); err != nil {
+			f.Logger.Error("watch the hosts", "error", err)
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-changed:
-		case <-time.After(BeatInterval):
-		}
-	}
+		return BeatInterval
+	}, func() {
+		f.stopJobs()
+		clear(f.powerOnAfter)
+		clear(f.poweredOn)
+	})
 }
 
 // pass works on one copy of the state, so a change that depends on another
 // change's commit happens in the next pass.
-func (f *fencer) pass(ctx context.Context) error {
+func (f *Fencing) pass(ctx context.Context) error {
 	copied := f.Cluster.SharedCopy()
 	now := time.Now()
 	return errors.Join(f.watch(ctx, copied), f.fence(ctx, copied, now), f.powerOn(ctx, copied, now))
@@ -132,7 +126,7 @@ func (f *fencer) pass(ctx context.Context) error {
 
 // watch needs a majority of the voters for each change, so a host that only
 // the leader cannot hear (a cut between the two) does not fail.
-func (f *fencer) watch(ctx context.Context, copied *state.State) error {
+func (f *Fencing) watch(ctx context.Context, copied *state.State) error {
 	var errs []error
 	for _, id := range slices.Sorted(maps.Keys(copied.Hosts)) {
 		host := copied.Hosts[id]
@@ -169,7 +163,7 @@ func (f *fencer) watch(ctx context.Context, copied *state.State) error {
 // voters reports whether a majority of the voters agree on the host's
 // silence. A voter that does not answer does not count, and neither does
 // the host itself, so an unreachable voter keeps the host as it is.
-func (f *fencer) voters(ctx context.Context, copied *state.State, host state.HostID, agrees func(time.Duration) bool) bool {
+func (f *Fencing) voters(ctx context.Context, copied *state.State, host state.HostID, agrees func(time.Duration) bool) bool {
 	ctx, cancel := context.WithTimeout(ctx, askTimeout)
 	defer cancel()
 	var (
@@ -213,7 +207,7 @@ func (f *fencer) voters(ctx context.Context, copied *state.State, host state.Hos
 // fence drives the fences that run and starts one for each failed host
 // that needs one and may have one. Fences of several hosts may run at the
 // same time, each with a power-off job of its own.
-func (f *fencer) fence(ctx context.Context, copied *state.State, now time.Time) error {
+func (f *Fencing) fence(ctx context.Context, copied *state.State, now time.Time) error {
 	var errs []error
 	for _, id := range slices.Sorted(maps.Keys(copied.Operations)) {
 		if operation := copied.Operations[id]; operation.Fence != nil && operation.State == state.OpRunning {
@@ -266,7 +260,7 @@ func needsFence(copied *state.State, id state.HostID) bool {
 // may. An unchecked server ID might power off another server. When several
 // hosts fail at once, the network is the likely cause, and powering hosts
 // off would not help.
-func (f *fencer) whyNotFence(copied *state.State, host *state.Host, now time.Time) string {
+func (f *Fencing) whyNotFence(copied *state.State, host *state.Host, now time.Time) string {
 	total, active := 0, 0
 	for _, voter := range copied.Hosts {
 		if !voter.Voter || voter.Phase == state.Removed {
@@ -293,13 +287,13 @@ func (f *fencer) whyNotFence(copied *state.State, host *state.Host, now time.Tim
 	return ""
 }
 
-func (f *fencer) failedPowerOff(id state.HostID) time.Time {
+func (f *Fencing) failedPowerOff(id state.HostID) time.Time {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.fenceAfter[id]
 }
 
-func (f *fencer) step(ctx context.Context, copied *state.State, operation *state.Operation, now time.Time) error {
+func (f *Fencing) step(ctx context.Context, copied *state.State, operation *state.Operation, now time.Time) error {
 	// the host exists: its lock keeps it from being removed
 	host := copied.Hosts[operation.Fence.Host]
 	switch {
@@ -325,7 +319,7 @@ func (f *fencer) step(ctx context.Context, copied *state.State, operation *state
 	return nil
 }
 
-func (f *fencer) isPowering(id state.HostID) bool {
+func (f *Fencing) isPowering(id state.HostID) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	_, running := f.powering[id]
@@ -344,7 +338,7 @@ func (f *fencer) isPowering(id state.HostID) bool {
 // So once powering no longer names the host (both read under mu), the
 // current copy holds the job's outcome, and no second power-off starts for
 // a fence that is over.
-func (f *fencer) startPowerOff(ctx context.Context, operationID uint64, hostID state.HostID) {
+func (f *Fencing) startPowerOff(ctx context.Context, operationID uint64, hostID state.HostID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, running := f.powering[hostID]; running {
@@ -374,7 +368,7 @@ func (f *fencer) startPowerOff(ctx context.Context, operationID uint64, hostID s
 
 // stopJobs ends the power-off jobs when this agent no longer leads, and
 // forgets the failed tries: the next leader decides on its own.
-func (f *fencer) stopJobs() {
+func (f *Fencing) stopJobs() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, cancel := range f.powering {
@@ -385,7 +379,7 @@ func (f *fencer) stopJobs() {
 
 // powerOff records the phase fenced before the step; step handles a leader
 // that stopped in between.
-func (f *fencer) powerOff(ctx context.Context, copied *state.State, operation *state.Operation, host *state.Host) error {
+func (f *Fencing) powerOff(ctx context.Context, copied *state.State, operation *state.Operation, host *state.Host) error {
 	client, err := OpenHetzner(copied, f.Open)
 	if err == nil {
 		err = f.tryPowerOff(ctx, client, host)
@@ -419,7 +413,7 @@ func (f *fencer) powerOff(ctx context.Context, copied *state.State, operation *s
 // pauses (about two and a half minutes). The lead is confirmed before each
 // try, because a leader that is cut off from the others must not power off
 // a host that the others still run.
-func (f *fencer) tryPowerOff(ctx context.Context, client *hetzner.Client, host *state.Host) error {
+func (f *Fencing) tryPowerOff(ctx context.Context, client *hetzner.Client, host *state.Host) error {
 	pause := f.pause
 	var err error
 	for try := 1; try <= powerOffTries; try++ {
@@ -461,7 +455,7 @@ func stacksMovedOff(copied *state.State, fence *state.HostFence) bool {
 	return true
 }
 
-func (f *fencer) advance(ctx context.Context, operation *state.Operation) error {
+func (f *Fencing) advance(ctx context.Context, operation *state.Operation) error {
 	_, err := commit(ctx, f.Propose, state.KindAdvanceOperation, state.AdvanceOperation{
 		ID: operation.ID, FromStep: state.FenceStart, Step: state.FenceOff,
 	})
@@ -471,7 +465,7 @@ func (f *fencer) advance(ctx context.Context, operation *state.Operation) error 
 	return nil
 }
 
-func (f *fencer) finish(ctx context.Context, operation *state.Operation, failed bool, why string) error {
+func (f *Fencing) finish(ctx context.Context, operation *state.Operation, failed bool, why string) error {
 	_, err := commit(ctx, f.Propose, state.KindFinishOperation, state.FinishOperation{
 		ID: operation.ID, Failed: failed, Error: why,
 	})
@@ -484,7 +478,7 @@ func (f *fencer) finish(ctx context.Context, operation *state.Operation, failed 
 // powerOn powers on each fenced host once per leader: a host that does not
 // come back after Hetzner powered it on is likely broken. It stays fenced,
 // and its copies are made anew elsewhere after scheduler.CopyWait.
-func (f *fencer) powerOn(ctx context.Context, copied *state.State, now time.Time) error {
+func (f *Fencing) powerOn(ctx context.Context, copied *state.State, now time.Time) error {
 	var errs []error
 	for _, id := range slices.Sorted(maps.Keys(copied.Hosts)) {
 		host := copied.Hosts[id]

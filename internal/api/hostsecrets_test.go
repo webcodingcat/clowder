@@ -20,7 +20,6 @@ func withWorkerStack(t *testing.T) *testCluster {
 	t.Helper()
 	cluster := newTestCluster(t)
 	keys := cluster.apis[0].config.Keys
-	cluster.apis[workerHost].config.Keys = nil
 	secret := func(value string) *state.Secret {
 		encrypted, err := keys.Encrypt([]byte(value))
 		if err != nil {
@@ -48,7 +47,7 @@ func withWorkerStack(t *testing.T) *testCluster {
 func TestAWorkerGetsOnlyTheSecretsOfItsStacks(t *testing.T) {
 	cluster := withWorkerStack(t)
 	ctx := context.Background()
-	secrets, err := cluster.apis[workerHost].SecretsOfThisHost(ctx)
+	secrets, err := cluster.peers[workerHost].SecretsOfThisHost(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +62,7 @@ func TestAWorkerGetsOnlyTheSecretsOfItsStacks(t *testing.T) {
 	if err := cluster.client(cluster.hostCertificate(1), testVersion, 0).Get(ctx, "/v1/internal/hosts/self/secrets", &asked); err != nil || len(asked) != 0 {
 		t.Errorf("host 1 got %v, %v", slices.Sorted(maps.Keys(asked)), err)
 	}
-	if own, err := cluster.apis[1].SecretsOfThisHost(ctx); err != nil || len(own) != 0 {
+	if own, err := cluster.peers[1].SecretsOfThisHost(ctx); err != nil || len(own) != 0 {
 		t.Errorf("host 1 opened %v, %v", slices.Sorted(maps.Keys(own)), err)
 	}
 }
@@ -73,11 +72,11 @@ func TestTheLeaderAnswersAWorkerFromAStateAsNewAsItsOwn(t *testing.T) {
 	cluster.clusters[workerHost].setIndex(5)
 	short, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	if secrets, err := cluster.apis[workerHost].SecretsOfThisHost(short); err == nil {
+	if secrets, err := cluster.peers[workerHost].SecretsOfThisHost(short); err == nil {
 		t.Errorf("the leader answered from an older state: %v", slices.Sorted(maps.Keys(secrets)))
 	}
 	cluster.clusters[0].setIndex(5)
-	if _, err := cluster.apis[workerHost].SecretsOfThisHost(context.Background()); err != nil {
+	if _, err := cluster.peers[workerHost].SecretsOfThisHost(context.Background()); err != nil {
 		t.Errorf("once the leader caught up: %v", err)
 	}
 }
@@ -92,12 +91,12 @@ func TestOnlyTheHostOfTheFloatingIPGetsTheCertificatesKeys(t *testing.T) {
 		current.Certificates["shop.example.com"] = &state.Certificate{Domain: "shop.example.com", Key: key, Chain: []byte("chain")}
 	})
 	ctx := context.Background()
-	if _, err := cluster.apis[workerHost].CertificatesOfThisHost(ctx); statusOf(err) != http.StatusForbidden {
+	if _, err := cluster.peers[workerHost].CertificatesOfThisHost(ctx); statusOf(err) != http.StatusForbidden {
 		t.Errorf("a worker without the Floating IP: %v, want HTTP 403", err)
 	}
 	worker := workerHost
 	cluster.clusters[0].Read(func(current *state.State) { current.Ingress = &worker })
-	certificates, err := cluster.apis[workerHost].CertificatesOfThisHost(ctx)
+	certificates, err := cluster.peers[workerHost].CertificatesOfThisHost(ctx)
 	if certificate := certificates["shop.example.com"]; err != nil || string(certificate.Key) != "the key" ||
 		string(certificate.Chain) != "chain" {
 		t.Errorf("the host of the Floating IP got %v, %v", certificates, err)
@@ -106,10 +105,10 @@ func TestOnlyTheHostOfTheFloatingIPGetsTheCertificatesKeys(t *testing.T) {
 
 func TestAHostWithoutTheDataKeyOpensNothing(t *testing.T) {
 	worker := withWorkerStack(t).apis[workerHost]
-	if _, err := worker.secretsOf(workerHost); statusOf(err) != http.StatusServiceUnavailable {
+	if _, err := worker.config.secretsOf(workerHost); statusOf(err) != http.StatusServiceUnavailable {
 		t.Errorf("secrets: %v, want HTTP 503", err)
 	}
-	if _, err := worker.certificatesOf(workerHost); statusOf(err) != http.StatusServiceUnavailable {
+	if _, err := worker.config.certificatesOf(workerHost); statusOf(err) != http.StatusServiceUnavailable {
 		t.Errorf("certificates: %v, want HTTP 503", err)
 	}
 	if _, err := worker.authority(); err == nil {

@@ -70,7 +70,7 @@ type Node struct {
 	// closed ends followLead
 	closed chan struct{}
 	// closeOnce and closeErr make Close safe to call twice: a rejoin closes
-	// the member before the agent stops (agent/rejoin.go)
+	// the member before the agent stops (clowderd/daemon/rejoin.go)
 	closeOnce sync.Once
 	closeErr  error
 	logger    *slog.Logger
@@ -179,13 +179,10 @@ func (n *Node) Bootstrap() error {
 
 // Propose commits a command through the leader and returns its index. The
 // error is either the state's refusal or the reason why the command did not
-// commit: not the leader, no quorum, a timeout, or a kind that not every
-// agent reads yet.
+// commit: not the leader, no quorum, a timeout, or an unknown kind.
 func (n *Node) Propose(ctx context.Context, cmd state.Command) (uint64, error) {
-	var unknown error
-	n.fsm.read(func(current *state.State) { unknown = current.CheckKnown(cmd.Kind) })
-	if unknown != nil {
-		return 0, fmt.Errorf("commit %s: %w", cmd.Kind, unknown)
+	if err := state.CheckKnown(cmd.Kind); err != nil {
+		return 0, fmt.Errorf("commit %s: %w", cmd.Kind, err)
 	}
 	encoded, err := json.Marshal(cmd)
 	if err != nil {

@@ -91,7 +91,7 @@ func running(t *testing.T) (*Supervisor, *fakeDocker) {
 		fake.miss, fake.see, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go supervisor.Run(ctx, "clowder.stack")
+	go supervisor.Run(ctx)
 	return supervisor, fake
 }
 

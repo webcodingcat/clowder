@@ -39,11 +39,8 @@ func addActiveHost(l *leader, id state.HostID) {
 
 // newMover is the move loop of l, for passes one by one; progress answers
 // for the hosts.
-func newMover(l *leader, progress Progress) *mover {
-	return &mover{
-		cluster: l, propose: l.propose, progress: progress, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		looks: map[uint64]look{},
-	}
+func newMover(l *leader, progress Progress) *Moves {
+	return NewMoves(l, l.propose, progress, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 // runningShopOnZero places shop on host 0 and has the host report it
@@ -181,7 +178,7 @@ func TestALateResyncGetsMoreTimeOnlyWhileItGetsOn(t *testing.T) {
 
 // startedMove has the placement start shop's move to host 1 and returns
 // the mover, whose progress answers with left, or err.
-func startedMove(t *testing.T, left map[string]int64, err *error) (*leader, *mover) {
+func startedMove(t *testing.T, left map[string]int64, err *error) (*leader, *Moves) {
 	t.Helper()
 	l := newLeader(t, 100<<30)
 	addActiveHost(l, 1)
@@ -194,7 +191,7 @@ func startedMove(t *testing.T, left map[string]int64, err *error) (*leader, *mov
 }
 
 // lateStep runs the mover's step as if the move's deadline had passed.
-func (m *mover) lateStep(t *testing.T, l *leader) {
+func (m *Moves) lateStep(t *testing.T, l *leader) {
 	t.Helper()
 	var copied *state.State
 	l.Read(func(current *state.State) { copied = current })

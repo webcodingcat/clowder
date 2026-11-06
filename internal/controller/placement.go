@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/passes"
 	"github.com/webcodingcat/clowder/internal/scheduler"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -18,9 +19,9 @@ import (
 // only bridges a short dip, for example while a stack is replaced.
 const comeBackAfter = 60 * time.Second
 
-// placer is the leader's placement and what it keeps in memory between
+// Placement is the leader's placement and what it keeps in memory between
 // passes. A new leader starts with an empty memory.
-type placer struct {
+type Placement struct {
 	cluster Cluster
 	propose Propose
 	logger  *slog.Logger
@@ -34,30 +35,22 @@ type placer struct {
 	plannedAt uint64
 }
 
-// RunPlacement places stacks and their new volumes, pushes services out
-// and brings them back while this agent leads, until ctx ends.
-func RunPlacement(ctx context.Context, cluster Cluster, propose Propose, conditions *Conditions, logger *slog.Logger) {
-	p := &placer{cluster: cluster, propose: propose, logger: logger, conditions: conditions}
-	for {
-		changed := cluster.Changed()
-		wait := interval
-		if cluster.IsLeader() {
-			if again := p.pass(ctx); again > 0 {
-				wait = min(wait, again)
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-changed:
-		case <-time.After(wait):
-		}
-	}
+// NewPlacement creates the leader's placement; Run runs it.
+func NewPlacement(cluster Cluster, propose Propose, conditions *Conditions, logger *slog.Logger) *Placement {
+	return &Placement{cluster: cluster, propose: propose, logger: logger, conditions: conditions}
+}
+
+// Run places stacks and their new volumes, pushes services out and brings
+// them back while this agent leads, until ctx ends.
+func (p *Placement) Run(ctx context.Context) {
+	runWhileLeading(ctx, p.cluster, passes.Interval, func(ctx context.Context) time.Duration {
+		return passes.Soonest(p.pass(ctx))
+	}, nil)
 }
 
 // pass returns how soon the next pass should run: when a pushed-out service
 // will have fit long enough, or else 0.
-func (p *placer) pass(ctx context.Context) time.Duration {
+func (p *Placement) pass(ctx context.Context) time.Duration {
 	// Plan weighs every stack on every host. That is too slow to do under
 	// the state's lock, which Raft's Apply waits for.
 	copied := p.cluster.SharedCopy()
@@ -91,7 +84,7 @@ func (p *placer) pass(ctx context.Context) time.Duration {
 // next pass plans again. A command at the index right after plannedAt
 // becomes part of the planned state, so the pass's next commands may change
 // what it changed.
-func (p *placer) commitOrLog(ctx context.Context, kind string, payload any) bool {
+func (p *Placement) commitOrLog(ctx context.Context, kind string, payload any) bool {
 	index, err := commit(ctx, p.propose, kind, payload)
 	switch {
 	case errors.Is(err, state.ErrStale):
@@ -107,7 +100,7 @@ func (p *placer) commitOrLog(ctx context.Context, kind string, payload any) bool
 	return true
 }
 
-func (p *placer) noteOverCapacity(copied *state.State, hosts []state.HostID) {
+func (p *Placement) noteOverCapacity(copied *state.State, hosts []state.HostID) {
 	for _, id := range slices.Sorted(maps.Keys(copied.Hosts)) {
 		if copied.Hosts[id].Phase == state.Removed {
 			continue // its condition is forgotten (conditionKeys)
@@ -122,7 +115,7 @@ func (p *placer) noteOverCapacity(copied *state.State, hosts []state.HostID) {
 // commitWaitReasons writes a reason only when it changes, because each
 // change is a Raft write and an audit entry. So a reason holds only what
 // stays the same from pass to pass: no free space, no times.
-func (p *placer) commitWaitReasons(ctx context.Context, copied *state.State, waiting []scheduler.Waiting) {
+func (p *Placement) commitWaitReasons(ctx context.Context, copied *state.State, waiting []scheduler.Waiting) {
 	reasons := map[string]string{}
 	for _, wait := range waiting {
 		reasons[wait.Stack] = wait.Reason
@@ -143,7 +136,7 @@ func (p *placer) commitWaitReasons(ctx context.Context, copied *state.State, wai
 // the volumes when it sees the stack. If the leader changes in between, the
 // services stay pushed out without the new stack, and come back later
 // (comeBack).
-func (p *placer) commitPlacement(ctx context.Context, placement scheduler.Placement) {
+func (p *Placement) commitPlacement(ctx context.Context, placement scheduler.Placement) {
 	if placement.PushedOut != nil &&
 		!p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: placement.PushedOut, PlannedAt: p.plannedAt}) {
 		return
@@ -164,7 +157,7 @@ func (p *placer) commitPlacement(ctx context.Context, placement scheduler.Placem
 // comeBack brings back one service per decision, because each return
 // changes the free room, so the next service's wait starts again. It
 // returns how long until the service will have fit long enough, or 0.
-func (p *placer) comeBack(ctx context.Context, back *scheduler.ComeBack) time.Duration {
+func (p *Placement) comeBack(ctx context.Context, back *scheduler.ComeBack) time.Duration {
 	if back == nil {
 		p.fitting = ""
 		return 0
@@ -188,7 +181,7 @@ func (p *placer) comeBack(ctx context.Context, back *scheduler.ComeBack) time.Du
 // startMove starts a move-stack operation, which RunMoves carries out. If
 // the start fails after the push-out, the pushed-out services come back by
 // the usual rule (comeBack).
-func (p *placer) startMove(ctx context.Context, copied *state.State, move scheduler.Move) {
+func (p *Placement) startMove(ctx context.Context, copied *state.State, move scheduler.Move) {
 	if move.PushedOut != nil &&
 		!p.commitOrLog(ctx, state.KindSetPushedOut, state.SetPushedOut{Stacks: move.PushedOut, PlannedAt: p.plannedAt}) {
 		return

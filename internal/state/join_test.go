@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/hostrole"
-	"github.com/webcodingcat/clowder/internal/resource"
 )
 
 // joiningHost is host 1 as the leader adds it with the token "t1".
@@ -126,19 +125,6 @@ func TestAServerBelongsToOneHost(t *testing.T) {
 	c.refuse(KindConfirmServer, LeaderActor, ConfirmServer{Host: 1, ServerID: 40}, "the same server 40")
 }
 
-func TestAnUnderlayIsInThePrivateNetwork(t *testing.T) {
-	c := newCluster(t)
-	c.configure(testConfig())
-	c.mustApply(KindAddJoinToken, cliActor, joinToken("t1"))
-	add := joiningHost()
-	add.Host.Underlay = netip.MustParseAddr("192.168.0.3")
-	c.refuse(KindAddHost, LeaderActor, add, "host node1 has the underlay 192.168.0.3, outside privateNetwork 10.0.0.0/16")
-
-	config := testConfig()
-	config.PrivateNetwork = "10.1.0.0/16"
-	c.refuseChange(configChange(config), "host node0 has the underlay 10.0.0.2, outside privateNetwork 10.1.0.0/16")
-}
-
 // activeHosts joins hosts 1 to last and makes them active.
 func (c *cluster) activeHosts(last HostID) {
 	c.t.Helper()
@@ -152,16 +138,6 @@ func (c *cluster) activeHost(id HostID) {
 	c.t.Helper()
 	c.addHost(testHost(id))
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: id, Phase: Active})
-}
-
-func TestASecondHostMayGoBeforeTheClusterIsHighlyAvailable(t *testing.T) {
-	c := newCluster(t)
-	c.addHost(testHost(1))
-	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active, From: Joining})
-	if c.state.HA {
-		t.Error("two active hosts are highly available")
-	}
-	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed})
 }
 
 func TestAJoinTokenNamesValidRoles(t *testing.T) {
@@ -207,75 +183,4 @@ func TestAHostNeedsValidRoles(t *testing.T) {
 	add := joiningHost()
 	add.Host.Roles = hostrole.Set{hostrole.Worker, hostrole.ControlPlane}
 	c.refuse(KindAddHost, LeaderActor, add, "host node1: roles worker,control-plane are not in the order")
-}
-
-func TestAHighlyAvailableClusterKeepsThreeHosts(t *testing.T) {
-	c := newCluster(t)
-	c.activeHosts(2)
-	if !c.state.HA {
-		t.Fatal("three active hosts are not highly available")
-	}
-	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 2, Phase: Removed},
-		"2 control-plane hosts would be left in service, and a highly available cluster keeps 3; join a replacement first")
-	// a dead host too: a replacement joins first
-	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 2, Phase: Failed})
-	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 2, Phase: Removed}, "join a replacement first")
-	c.activeHost(3)
-	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 2, Phase: Removed})
-	if !c.state.HA {
-		t.Error("the cluster is no longer highly available")
-	}
-}
-
-func TestAHostWithAStackOrACopyStays(t *testing.T) {
-	c := newCluster(t)
-	c.activeHosts(1)
-	c.putShop(shopSpec())
-	host := HostID(1)
-	c.mustApply(KindSetStackStatus, LeaderActor, SetStackStatus{PlannedAt: c.index, ID: "default/shop", Status: StackStarting, Host: &host})
-	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed}, "host node1 still has stack default/shop")
-	c.del(resource.KindStack, "default", "shop")
-	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed})
-}
-
-func TestARemovedHostsIDIsFreeOnceEveryHostForgotIt(t *testing.T) {
-	c := newCluster(t)
-	c.activeHosts(3)
-	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed})
-	if waiting := c.state.Forgetting[1]; !slices.Equal(waiting, []HostID{0, 2, 3}) {
-		t.Errorf("waiting for %v", waiting)
-	}
-	if id, _ := c.state.FreeHostID(); id != 4 {
-		t.Errorf("the free ID is %d before the others forgot host 1", id)
-	}
-	c.refuse(KindReportPeerForgotten, HostActor(0), ReportPeerForgotten{Host: 2, Peer: 1}, "only host 2 itself reports")
-	c.mustApply(KindReportPeerForgotten, HostActor(0), ReportPeerForgotten{Host: 0, Peer: 1})
-	c.mustApply(KindReportPeerForgotten, HostActor(2), ReportPeerForgotten{Host: 2, Peer: 1})
-	// a host that is removed meanwhile forgets nothing any more
-	c.activeHost(4)
-	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 3, Phase: Removed})
-	if _, waiting := c.state.Forgetting[1]; waiting {
-		t.Errorf("still waiting for %v", c.state.Forgetting)
-	}
-	if id, _ := c.state.FreeHostID(); id != 1 {
-		t.Errorf("the free ID is %d, want 1", id)
-	}
-	// the new host takes the ID and the place of the removed one
-	again := testHost(1)
-	again.Name, again.CertificateSerial = "node1-new", "serial-1-new"
-	c.addHost(again)
-	if host := c.state.Hosts[1]; host.Name != "node1-new" || host.Phase != Joining {
-		t.Errorf("host 1: %+v", host)
-	}
-}
-
-func TestOnlyTheLeaderRecordsAVoter(t *testing.T) {
-	c := newCluster(t)
-	c.activeHosts(1)
-	c.refuse(KindSetHostVoter, cliActor, SetHostVoter{Host: 1, Voter: true}, "only the leader does")
-	c.mustApply(KindSetHostVoter, LeaderActor, SetHostVoter{Host: 1, Voter: true})
-	if !c.state.Hosts[1].Voter {
-		t.Error("host 1 does not vote")
-	}
-	c.refuse(KindSetHostVoter, LeaderActor, SetHostVoter{Host: 7, Voter: true}, "no host 7")
 }

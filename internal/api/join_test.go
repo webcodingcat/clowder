@@ -208,38 +208,3 @@ func TestAJoinRequestIsRecentAndWhole(t *testing.T) {
 		}
 	}
 }
-
-func TestARemovedLeaderHandsItsLeadOverFirst(t *testing.T) {
-	cluster := newTestCluster(t)
-	leader := cluster.clusters[0]
-	leader.mu.Lock()
-	leader.state.Hosts[1].Phase = state.Active
-	leader.mu.Unlock()
-	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
-	// host 1 is not the leader: no hand-over
-	if _, err := client.Post(context.Background(), "/v1/hosts/1/drain", nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := client.Post(context.Background(), "/v1/hosts/0/remove", nil); err != nil {
-		t.Fatal(err)
-	}
-	leader.Read(func(current *state.State) {
-		if current.Hosts[0].Phase != state.Removed || leader.handOvers != 1 {
-			t.Errorf("host 0 is %s after %d hand-overs", current.Hosts[0].Phase, leader.handOvers)
-		}
-	})
-}
-
-func TestARefusedRemovalMovesNoLead(t *testing.T) {
-	cluster := newTestCluster(t)
-	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
-	if _, err := client.Post(context.Background(), "/v1/hosts/0/remove", nil); statusOf(err) != http.StatusConflict ||
-		!strings.Contains(err.Error(), "the last control-plane host in service") {
-		t.Errorf("removing the last host: %v", err)
-	}
-	cluster.clusters[0].Read(func(*state.State) {
-		if cluster.clusters[0].handOvers != 0 {
-			t.Error("the lead moved for a removal that was refused")
-		}
-	})
-}

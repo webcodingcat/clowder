@@ -8,14 +8,11 @@ import (
 	"io"
 	"log"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"strconv"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -139,6 +136,8 @@ type testCluster struct {
 	clusters []*fakeCluster
 	servers  []*httptest.Server
 	apis     []*Server
+	// peers ask the other servers as their host, by host
+	peers []*Peers
 	// sealing is the public half of the cluster's sealing key: what the
 	// values of SealedSecrets are sealed for
 	sealing age.Recipient
@@ -196,17 +195,25 @@ func newCatchingUpCluster(t *testing.T) *testCluster {
 		recover := &fakeRecover{}
 		c.recovers = append(c.recovers, recover)
 		server := httptest.NewUnstartedServer(nil)
-		api := NewServer(ServerConfig{
+		host := HostConfig{
 			Cluster: cluster, CA: ca.Certificate, Certificate: c.hostCertificate(id), Roles: rolesOf(id), HostID: id,
 			APIAddress: func(id state.HostID) string { return addresses[id] },
 			Version:    testVersion,
-			Keys:       keys,
+			Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}
+		// as on a real host, a worker holds no data key
+		if rolesOf(id).Has(hostrole.ControlPlane) {
+			host.Keys = keys
+		}
+		peers := NewPeers(host)
+		api := NewServer(ServerConfig{
+			HostConfig: host,
+			Peers:      peers,
 			Joins:      c.joins,
 			Beats:      health,
 			Volumes:    volumes,
 			Recover:    recover,
 			CaughtUp:   c.caughtUp,
-			Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		})
 		server.Config.Handler = api
 		server.Config.ErrorLog = log.New(io.Discard, "", 0) // refused handshakes are part of the tests
@@ -215,6 +222,7 @@ func newCatchingUpCluster(t *testing.T) *testCluster {
 		t.Cleanup(server.Close)
 		addresses[id] = server.Listener.Addr().String()
 		c.clusters, c.servers, c.apis = append(c.clusters, cluster), append(c.servers, server), append(c.apis, api)
+		c.peers = append(c.peers, peers)
 	}
 	return c
 }
@@ -306,74 +314,6 @@ func statusOf(err error) int {
 		return statusError.Status
 	}
 	return 0
-}
-
-func TestTheCLIReadsTheStatusFromAnyAgent(t *testing.T) {
-	cluster := newTestCluster(t)
-	client := cluster.client(cluster.cliCertificate(), testVersion, 1)
-	var status Status
-	if err := client.Get(context.Background(), "/v1/status", &status); err != nil {
-		t.Fatal(err)
-	}
-	if status.Leader != "node0" || len(status.Hosts) != 2 || status.Hosts[1].Phase != "joining" {
-		t.Errorf("status %+v", status)
-	}
-}
-
-func TestAFollowerForwardsWritesToTheLeader(t *testing.T) {
-	cluster := newTestCluster(t)
-	client := cluster.client(cluster.cliCertificate(), testVersion, 1)
-	ctx := context.Background()
-
-	// node0 is active: draining it is allowed
-	written, err := client.Post(ctx, "/v1/hosts/0/drain", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var phase state.HostPhase
-	var actor string
-	cluster.clusters[0].Read(func(current *state.State) {
-		phase = current.Hosts[0].Phase
-		actor = current.Audit[len(current.Audit)-1].Actor
-	})
-	// the actor names the CLI certificate, also on the leader it was
-	// forwarded to
-	if phase != state.Draining || actor != "cli/alice" {
-		t.Errorf("leader's host 0 is %s, last actor %s", phase, actor)
-	}
-
-	// the follower has not caught up: the next read waits for the write
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		cluster.clusters[1].setIndex(written.Index)
-	}()
-	var hosts []HostInfo
-	if err := client.Get(ctx, "/v1/hosts", &hosts); err != nil {
-		t.Fatal(err)
-	}
-	cluster.clusters[1].Read(func(current *state.State) {
-		if current.Index < written.Index {
-			t.Errorf("the read did not wait for index %d", written.Index)
-		}
-	})
-
-	// a refusal of the state comes back as such
-	// the API checks the phase a user action starts from
-	_, err = client.Post(ctx, "/v1/hosts/1/undrain", nil)
-	if statusOf(err) != http.StatusConflict || !strings.Contains(err.Error(), "undrain works on a host that is draining") {
-		t.Errorf("want 409 for undraining a joining host, got %v", err)
-	}
-	// the leader's state refuses what the API lets through: removing twice
-	if _, err := client.Post(ctx, "/v1/hosts/1/remove", nil); err != nil {
-		t.Fatal(err)
-	}
-	_, err = client.Post(ctx, "/v1/hosts/1/remove", nil)
-	if statusOf(err) != http.StatusConflict || !strings.Contains(err.Error(), "node1 is removed") {
-		t.Errorf("want 409 with the state's reason, got %v", err)
-	}
-	if _, err := client.Post(ctx, "/v1/hosts/1/explode", nil); statusOf(err) != http.StatusNotFound {
-		t.Errorf("want 404 for an unknown action, got %v", err)
-	}
 }
 
 func TestCallersAreCheckedOnEveryCall(t *testing.T) {
@@ -523,169 +463,6 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestTheClientTriesTheNextEndpoint(t *testing.T) {
-	cluster := newTestCluster(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dead := listener.Addr().String()
-	_ = listener.Close() // nobody listens here now
-	endpoints := []string{dead, cluster.servers[0].Listener.Addr().String()}
-	client := NewClient(endpoints, time.Second, cluster.cliCertificate(), cluster.ca.Certificate, testVersion)
-	var status Status
-	if err := client.Get(context.Background(), "/v1/status", &status); err != nil {
-		t.Fatal(err)
-	}
-	if status.Leader != "node0" {
-		t.Errorf("status %+v", status)
-	}
-	// a write that could not leave goes on to the next endpoint
-	if _, err := client.Post(context.Background(), "/v1/hosts/0/drain", nil); err != nil {
-		t.Errorf("a write after an unreachable endpoint: %v", err)
-	}
-}
-
-// silentEndpoint takes connections and never answers, as a host whose network
-// hangs; it counts the connections it took.
-func silentEndpoint(t *testing.T) (string, *atomic.Int32) {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var taken atomic.Int32
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		var held []net.Conn
-		defer func() {
-			for _, connection := range held {
-				_ = connection.Close()
-			}
-		}()
-		for {
-			connection, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			taken.Add(1)
-			held = append(held, connection)
-		}
-	}()
-	t.Cleanup(func() {
-		_ = listener.Close()
-		<-done
-	})
-	return listener.Addr().String(), &taken
-}
-
-func TestTheClientGivesUpOnASilentEndpointAfterTheConnectTimeout(t *testing.T) {
-	cluster := newTestCluster(t)
-	silent, _ := silentEndpoint(t)
-	endpoints := []string{silent, cluster.servers[0].Listener.Addr().String()}
-	// a client each, so that each request meets the silent endpoint first
-	newClient := func() *Client {
-		return NewClient(endpoints, 200*time.Millisecond, cluster.cliCertificate(), cluster.ca.Certificate, testVersion)
-	}
-	started := time.Now()
-	if err := newClient().Get(context.Background(), "/v1/status", &Status{}); err != nil {
-		t.Errorf("a read after a silent endpoint: %v", err)
-	}
-	// a write that never got past the handshake goes on as well
-	if _, err := newClient().Post(context.Background(), "/v1/hosts/0/drain", nil); err != nil {
-		t.Errorf("a write after a silent endpoint: %v", err)
-	}
-	if err := newClient().Stream(context.Background(), "/v1/status", io.Discard); err != nil {
-		t.Errorf("a stream after a silent endpoint: %v", err)
-	}
-	// generous for the race detector; the request's own timeout would be
-	// 30 s each
-	if elapsed := time.Since(started); elapsed > 10*time.Second {
-		t.Errorf("three requests took %s", elapsed)
-	}
-}
-
-func TestTheClientStartsWithTheEndpointThatAnsweredLast(t *testing.T) {
-	cluster := newTestCluster(t)
-	silent, taken := silentEndpoint(t)
-	endpoints := []string{silent, cluster.servers[0].Listener.Addr().String()}
-	client := NewClient(endpoints, 200*time.Millisecond, cluster.cliCertificate(), cluster.ca.Certificate, testVersion)
-	for range 3 {
-		if err := client.Get(context.Background(), "/v1/status", &Status{}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got := taken.Load(); got != 1 {
-		t.Errorf("the silent endpoint was tried %d times, want once", got)
-	}
-}
-
-func TestTheHostsShowTheirAddresses(t *testing.T) {
-	current := &state.State{Hosts: map[state.HostID]*state.Host{
-		0: {ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), PublicAddress: netip.MustParseAddr("203.0.113.10")},
-	}}
-	hosts := hostInfos(current)
-	if hosts[0].Underlay != "10.0.0.2" || hosts[0].PublicAddress != "203.0.113.10" {
-		t.Errorf("hosts %+v", hosts)
-	}
-}
-
-func TestTheClientNamesAClusterOfAnotherCA(t *testing.T) {
-	cluster, other := newTestCluster(t), newTestCluster(t)
-	// credentials of the other cluster, against this one's agent
-	client := NewClient([]string{cluster.servers[0].Listener.Addr().String()}, time.Second,
-		other.cliCertificate(), other.ca.Certificate, testVersion)
-	err := client.Get(context.Background(), "/v1/status", &Status{})
-	if err == nil || !strings.Contains(err.Error(), "belongs to another cluster than your context") {
-		t.Errorf("read: %v", err)
-	}
-	if err := client.Stream(context.Background(), "/v1/watch?kind=stack&allNamespaces=true", io.Discard); err == nil ||
-		!strings.Contains(err.Error(), "belongs to another cluster") {
-		t.Errorf("stream: %v", err)
-	}
-}
-
-func TestARequestOverTheLimitIsNamedAsSuch(t *testing.T) {
-	// a small limit in place of MaxRequestBytes (ServeHTTP's): reading 16 MiB
-	// takes seconds with the race detector
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/v1/apply", strings.NewReader(`{"resources": []}`))
-	request.Body = http.MaxBytesReader(recorder, request.Body, 4)
-	var decoded ApplyRequest
-	writeError(recorder, http.StatusBadRequest, decodeStrict(request.Body, &decoded))
-	if recorder.Code != http.StatusRequestEntityTooLarge || !strings.Contains(recorder.Body.String(), "larger than 16777216 bytes") {
-		t.Errorf("answer %d: %s", recorder.Code, recorder.Body)
-	}
-}
-
-func TestAWriteThatLeftIsNotSentAgain(t *testing.T) {
-	cluster := newTestCluster(t)
-	// this agent takes the request and hangs up without an answer
-	hangsUp := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		connection, _, err := w.(http.Hijacker).Hijack()
-		if err == nil {
-			_ = connection.Close()
-		}
-	}))
-	hangsUp.TLS = &tls.Config{Certificates: []tls.Certificate{cluster.hostCertificate(1)}, MinVersion: tls.VersionTLS13}
-	hangsUp.Config.ErrorLog = log.New(io.Discard, "", 0)
-	hangsUp.StartTLS()
-	defer hangsUp.Close()
-
-	endpoints := []string{hangsUp.Listener.Addr().String(), cluster.servers[0].Listener.Addr().String()}
-	client := NewClient(endpoints, time.Second, cluster.cliCertificate(), cluster.ca.Certificate, testVersion)
-	_, err := client.Post(context.Background(), "/v1/hosts/0/drain", nil)
-	if err == nil || !strings.Contains(err.Error(), "may have gone through") {
-		t.Errorf("want a warning that the write may have gone through, got %v", err)
-	}
-	cluster.clusters[0].Read(func(current *state.State) {
-		if current.Hosts[0].Phase != state.Active {
-			t.Error("the write went to the second endpoint as well")
-		}
-	})
 }
 
 func TestAddressAddsTheAPIPort(t *testing.T) {

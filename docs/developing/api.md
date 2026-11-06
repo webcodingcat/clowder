@@ -5,7 +5,13 @@ it, and what the CLI does with the answer.
 
 ## Requests and the leader
 
-- **Every call is checked.** Every agent serves `/v1` with mutual TLS (`agent.APIPort`).
+- **Two sides.** `api.Server` answers the calls to this agent. `api.Peers` (`peers.go`) asks
+  the other agents as this host: it commits through the leader (`Peers.Propose`), sends
+  beats and asks voters for silences, asks the leader for this host's secrets and its
+  commit index, and asks a host for its copies' progress. The agent builds `Peers` first
+  and hands it to its parts, and the server forwards through it too. Both get the same
+  `HostConfig`: the state, the certificates, the roles, the data key and the addresses.
+- **Every call is checked.** Every agent serves `/v1` with mutual TLS (`hostfiles.APIPort`).
   Each call is checked against the CA, the state's revocation list and, for the CLI,
   `CLICutoff`, so a revoked certificate is refused at once on every agent. Every request
   body is limited (`MaxRequestBytes`). A larger one gets 413, and `apply` then advises
@@ -16,8 +22,9 @@ it, and what the CLI does with the answer.
   reads (`X-Clowder-Min-Index`), and the agent waits until it has applied it.
 - **Waiting for a leader.** During an election, after a peer restarted, or while a new
   leader is still at its barrier, there is no leader. Every path to the leader (a command,
-  the batch of an apply, a join, the catch-up) then waits up to `leaderWait` for one
-  (`waitForLeader`) instead of failing at once.
+  the batch of an apply, a join, the catch-up) then waits for one (`waitForLeader`)
+  instead of failing at once. The wait and the call to the leader share one budget:
+  `waitTimeout`, or `joinTimeout` for a join.
 - A refusal by the state is HTTP 409 with its reason; a write that did not commit is 503.
 - `api.HostActions` lists the user's host actions with the phases they start from. The
   server checks them, and the CLI builds its subcommands from them.
@@ -51,15 +58,19 @@ without its callers.
   go to the voters (beats) and to the leader (its reports, the commit index, its secrets).
   `TestAWorkerTakesOnlyTheControlPlane` checks this.
 - **Who speaks.** The actor of a command is the caller of the first agent, and its time
-  (`At`) is the leader's clock. `/v1/internal/propose` accepts only three things
-  (`mayPropose`):
-  - the CLI's command that a control-plane follower forwards (`cliKinds`: exactly the kinds
-    that the CLI's routes make, with any CLI actor);
-  - what any host reports about itself, as itself (`hostKinds`). The state checks that each
+  (`At`) is the leader's clock. `/v1/internal/propose` accepts only the kinds in one table,
+  `proposers`, and for each kind only its senders (`mayPropose`, decided by the actor):
+  - `cli`: the CLI's command that a control-plane follower forwards, with any CLI actor.
+    These are exactly the kinds that the CLI's write routes make
+    (`TestCLIKindsAreTheKindsOfTheCLIsWrites`);
+  - `anyHost`: what any host reports about itself, as itself. The state checks that each
     report is about the actor's own host (its stacks, its copies, the operation it owns),
     as Kubernetes' NodeRestriction does;
-  - what a control-plane host does for the cluster, as itself (`controlPlaneKinds`: the
-    cutoff of `clowderd credentials --revoke-older`).
+  - `controlPlane`: what a control-plane host does for the cluster, as itself (the cutoff
+    of `clowderd credentials --revoke-older`).
+
+  A kind may have more than one sender (`set-host-phase` is the CLI's and a host's own).
+  A kind that is not in the table only the leader writes.
 
   `/v1/internal/changes` accepts only the CLI's resource commands ([Resources](#resources)).
   The leader's own commands (placements, the ingress) are made on the leader and never come
@@ -78,9 +89,9 @@ without its callers.
 ## Keys only on the control plane
 
 Only control-plane hosts hold the data key, and with it the CA's key, the sealing key and
-every secret. A join's answer carries the data key only for them (`agent/joiner.go`), and
-the agent reads it only on them (`agent.Files.readCredentials`). On any other host
-`ServerConfig.Keys` is nil, and whatever needs a key refuses with 503 (`errNoKeys`,
+every secret. A join's answer carries the data key only for them (`clowderd/daemon/joinleader.go`), and
+the agent reads it only on them (`hostfiles.Files.ReadCredentials`). On any other host
+`HostConfig.Keys` is nil, and whatever needs a key refuses with 503 (`errNoKeys`,
 answered through `writeFailure`).
 
 Any other host asks the leader for what it needs, and gets only that, as Kubernetes' node
@@ -97,7 +108,7 @@ authorizer gives a node only the secrets of its pods (`api/hostsecrets.go`):
 - **Each for itself.** Both take any host (`anyHost`) and answer for the caller's own
   certificate. The host sends its state's index (`X-Clowder-Min-Index`), so the leader
   does not judge from an older state than the host's.
-- **One way on every host.** `Server.SecretsOfThisHost` and `CertificatesOfThisHost` open
+- **One way on every host.** `Peers.SecretsOfThisHost` and `CertificatesOfThisHost` open
   the values themselves on a control-plane host, with the same rules, and ask the leader
   on any other. The agent keeps the answers in memory and asks again only for a new
   digest or chain ([A host](host.md)).
@@ -366,7 +377,7 @@ describes the format of a sealed value.
   (`{"recipient":"age1..."}`, `api/cluster.go`). **`secret seal`** (`cli/secret.go`) asks
   for it each time, unless `--cert <file>` gives it, and seals each value for the ID of its
   Secret (`secretvalue.Seal`). It writes each value on one line, as kubeseal does.
-- **`clowderd sealing-key export [--public]`** (`agent/sealingkey.go`) asks the host's own
+- **`clowderd sealing-key export [--public]`** (`clowderd/sealingkey`) asks the host's own
   agent for the sealing key, with the host's certificate (`GET /v1/internal/sealing-key`),
   as `clowderd credentials` does for a certificate. The agent logs a warning ("the sealing
   key was exported"). The command prints the key (`AGE-SECRET-KEY-1...`), or with
@@ -394,7 +405,7 @@ describes the format of a sealed value.
 ## Joining hosts
 
 A host joins with a token that the CLI created (`clowder host join-token`, `api/join.go`,
-`agent/join.go`). The token names the roles a host may take (`--roles`, `worker,ingress`
+`clowderd/join`). The token names the roles a host may take (`--roles`, `worker,ingress`
 by default), and `clowderd join --roles` picks from them. So whoever reads a worker's
 token from its user data cannot join as a control-plane host. kubeadm needs a second
 secret for that (`--certificate-key`). clowder's token opens only once, so the roles in it
@@ -411,7 +422,7 @@ are enough.
    (`pki.ClientTLSToControlPlane`), as kubeadm joins through the control plane's endpoint.
    The joining host waits longer for the answer than the leader may take
    (`joinClientTimeout`).
-3. The leader (`agent.joiner`) accepts a request only within `joinMaxAge`, and each one
+3. The leader (`agent.joinLeader`) accepts a request only within `joinMaxAge`, and each one
    only once while it leads (a nonce in its memory). This is little more than insurance:
    only the cluster's agents see a request, over TLS, and whoever saw one has seen its
    token.
@@ -428,7 +439,7 @@ are enough.
 5. A refusal says why, because only the holder of an open token's secret gets that far,
    and the token stays open for another try. The answer carries the certificate, the data
    key and the other hosts, for the host's first WireGuard interfaces
-   ([Join](host.md#the-agent-internalagent)).
+   ([Join](host.md#the-agent-internalclowderd)).
 
 - **The join's routes need no certificate,** so each control-plane agent accepts at most
   `triesPerSender` tries a minute per sender and `triesInAll` in total, counted in memory
@@ -450,7 +461,7 @@ root@<host> clowderd credentials | clowder config import -`. The CA is trusted t
 so the first host's user data holds no secret, and no route except the join's is open
 without a certificate.
 
-- **`clowderd credentials`** (`agent/credentials.go`) creates the CLI's key on the host. It
+- **`clowderd credentials`** (`clowderd/credentials`) creates the CLI's key on the host. It
   asks its own agent, with the host's certificate, for a certificate with the name from
   `--name` (`POST /v1/internal/credentials`, `api/credentials.go`). The agent opens the
   CA's key from the state with the data key, issues the certificate, and answers with the
@@ -470,5 +481,5 @@ without a certificate.
 
 The tests run real HTTPS servers: a follower forwarding to the leader, refused callers,
 and the CLI against an agent with a credentials file in a temporary home.
-`agent/run_test.go` runs the whole way: init, the first credentials printed and imported,
+`clowderd/daemon/run_test.go` runs the whole way: init, the first credentials printed and imported,
 the sealing key exported, new credentials with `--revoke-older`, apply and diff.

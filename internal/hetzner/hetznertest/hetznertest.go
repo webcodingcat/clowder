@@ -112,13 +112,6 @@ func (a *API) SetLabel(serverID int64, key, value string) {
 	a.servers[serverID].labels[key] = value
 }
 
-// Labels returns the server's labels.
-func (a *API) Labels(serverID int64) map[string]string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return maps.Clone(a.servers[serverID].labels)
-}
-
 // Changes returns what the requests changed so far, in order: "poweroff
 // 41", "poweron 41", "assign 203.0.113.10 41", "label 41
 // clowder-retired=s1". Failed actions are included.

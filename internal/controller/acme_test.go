@@ -252,7 +252,7 @@ func (prefixKeys) Decrypt(encrypted state.Encrypted) ([]byte, error) {
 // shop.example.com, on a cluster whose Floating IP is 127.0.0.1 and whose
 // ACME directory is ca. The agents' challenge server listens there, as
 // Traefik's web entrypoint would, and the domain resolves to it.
-func newACMERunner(t *testing.T, ca *fakeCA) (*acmeRunner, *leader) {
+func newACMERunner(t *testing.T, ca *fakeCA) (*ACME, *leader) {
 	t.Helper()
 	l := &leader{t: t, state: &state.State{}, changed: make(chan struct{})}
 	l.apply(state.KindBootstrap, state.LeaderActor, state.Bootstrap{
@@ -298,13 +298,11 @@ func newACMERunner(t *testing.T, ca *fakeCA) (*acmeRunner, *leader) {
 		t.Fatal(err)
 	}
 	ca.challenges = address.Host
-	runner := &acmeRunner{
-		cluster: l, propose: l.propose, keys: prefixKeys{},
-		lookup: func(context.Context, string, string) ([]netip.Addr, error) {
-			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
-		},
-		httpPort: uint16(port), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), retries: map[string]retry{},
+	runner := NewACME(l, l.propose, prefixKeys{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
 	}
+	runner.httpPort = uint16(port)
 	return runner, l
 }
 
@@ -436,7 +434,7 @@ func TestRenewalComesWhenAThirdOfTheLifetimeIsLeftOrAsConfigured(t *testing.T) {
 }
 
 func TestTheSelfCheckAsksTheIngressHostsTraefik(t *testing.T) {
-	runner := &acmeRunner{httpPort: 80}
+	runner := &ACME{httpPort: 80}
 	floatingIP := netip.MustParseAddr("203.0.113.10")
 	current := &state.State{}
 	if got := runner.checkAddress(current, floatingIP); got.String() != "203.0.113.10:80" {

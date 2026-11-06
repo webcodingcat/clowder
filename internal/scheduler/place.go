@@ -144,18 +144,14 @@ type decision struct {
 
 func (d *Decisions) add(decided ...decision) {
 	for _, one := range decided {
-		d.addOne(one)
-	}
-}
-
-func (d *Decisions) addOne(one decision) {
-	switch {
-	case one.reason != "":
-		d.Waiting = append(d.Waiting, Waiting{Stack: one.placement.Stack, Reason: one.reason})
-	case one.move != nil:
-		d.Moves = append(d.Moves, *one.move)
-	case one.placement.SetsHost || len(one.placement.Volumes) > 0:
-		d.Placements = append(d.Placements, one.placement)
+		switch {
+		case one.reason != "":
+			d.Waiting = append(d.Waiting, Waiting{Stack: one.placement.Stack, Reason: one.reason})
+		case one.move != nil:
+			d.Moves = append(d.Moves, *one.move)
+		case one.placement.SetsHost || len(one.placement.Volumes) > 0:
+			d.Placements = append(d.Placements, one.placement)
+		}
 	}
 }
 

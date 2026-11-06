@@ -12,6 +12,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/notify"
+	"github.com/webcodingcat/clowder/internal/passes"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -93,20 +94,10 @@ func NewAlerts(cluster Cluster, propose Propose, open Open, conditions *Conditio
 
 // Run raises, resolves and delivers until ctx ends.
 func (a *Alerts) Run(ctx context.Context) {
-	for {
-		changed := a.cluster.Changed()
-		if a.cluster.IsLeader() {
-			a.pass(ctx)
-		} else {
-			a.forget()
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-changed:
-		case <-time.After(alertsInterval):
-		}
-	}
+	runWhileLeading(ctx, a.cluster, alertsInterval, func(ctx context.Context) time.Duration {
+		a.pass(ctx)
+		return alertsInterval
+	}, a.forget)
 }
 
 // forget drops what this agent kept while it led, because the new leader
@@ -126,19 +117,15 @@ func (a *Alerts) forget() {
 // channel that is slow to take a message cannot delay the heartbeat and
 // make an outside service raise a false alarm.
 func (a *Alerts) RunHeartbeat(ctx context.Context) {
-	for {
-		wait := alertsInterval
+	// it keeps time only: a change of the state does not call the URL early
+	passes.Run(ctx, nil, nil, func() time.Duration {
 		if a.cluster.IsLeader() {
 			if every, ok := a.heartbeat(ctx); ok {
-				wait = every
+				return every
 			}
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(wait):
-		}
-	}
+		return alertsInterval
+	})
 }
 
 // heartbeat calls the heartbeat's URL once and returns how long to wait

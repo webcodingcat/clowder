@@ -396,8 +396,8 @@ spec:
 | `priorities.categories` | priority categories by name, each 0 to 1000 | `critical` 900, `high` 700, `normal` 500, `low` 200 |
 | `priorities.default` | the category of services that name no priority; required with your own categories | `normal` |
 | `stacks.privileged` | the stacks, as `<namespace>/<stack>`, that may have [privileges](#privileges) | none |
-| `defaults.reservations` | what a service reserves without its own `reserve`: `{memory, cpus}` | `128M`, `"0.1"` |
-| `systemReserve` | what each host keeps for itself (the system, Docker, clowder): `{memory, cpus}` | `512M`, `"0.25"` |
+| `defaults.reservations` | what a service reserves without its own `reserve`: `{memory, cpus}` | `128M`, `0.1` |
+| `systemReserve` | what each host keeps for itself (the system, Docker, clowder): `{memory, cpus}` | `512M`, `0.25` |
 | `alerts.channels` | where alerts go ([alerts](#alerts)) | none |
 | `alerts.heartbeat` | a URL that the cluster calls at an interval ([alerts](#alerts)) | none |
 | `acme.directory` | the full URL of another ACME directory, for test labs | Let's Encrypt |
@@ -406,7 +406,7 @@ spec:
 | `acme.renewBefore` | how long before its end a certificate is renewed, such as `30d` | when a third of its lifetime is left |
 
 A storage class has either a `pool` or a `fallback`, not both. In `defaults.reservations`
-and `systemReserve`, write `cpus` as text in quotes (`"0.1"`), unlike a stack's `cpus`.
+and `systemReserve`, `cpus` is a number as in a stack (`0.1`); `0` means the default.
 
 When `hetzner.api` or `acme.directory` is set, an apply warns that clowder talks to another
 service than Hetzner's or Let's Encrypt's. Over `http://`, the token or the ACME requests

@@ -22,7 +22,7 @@ files:
 | [The API and the CLI](docs/developing/api.md) | `api`, `cli`: access, resources, the watch, secret values, joins, credentials |
 | [Placement](docs/developing/placement.md) | `scheduler`, and the placement in `controller` |
 | [Certificates, Raft and Recover](docs/developing/cluster.md) | `pki`, `raftnode`, `datakey`, `clowderd recover` |
-| [A host](docs/developing/host.md) | `agent`, `network`, `storage`, `docker`, `supervisor`, `hostcheck` |
+| [A host](docs/developing/host.md) | `clowderd` and its packages, `network`, `storage`, `docker`, `supervisor`, `hostcheck` |
 | [Ingress, fencing, certificates, alerts and metrics](docs/developing/loops.md) | `ingress`, `hetzner`, the other loops of `controller`, `notify`, `metrics` |
 | [Shipping](docs/developing/shipping.md) | packages and units, CI, releases |
 
@@ -47,8 +47,8 @@ in HLab. [docs/roadmap.md](docs/roadmap.md) says how far the work is and what co
 ## The big picture
 
 ```
-user's machine                 any control-plane agent leader                stack's host
-──────────────                 ─────────────────────── ──────                ────────────
+user's machine                 any control-plane agent   the leader            stack's host
+──────────────                 ───────────────────────   ──────────            ────────────
 clowder apply -f    ──mTLS──▶  API: read, encrypt ──▶ leader decides ──▶ Raft log ──▶ every agent's state
   (resources)                                            │
                                                          ▼
@@ -85,17 +85,17 @@ the rules.
    the puts in order on a copy, all of them or none. `applyPutResource` checks who owns
    the resource (not the actor: the cluster has no users), then calls the kind's `put`, here
    `state/stacks.go` `putStack`. New volumes and the new stack are `pending`.
-5. **The placement finds a host.** `controller/placement.go` `RunPlacement` runs on the
+5. **The placement finds a host.** `controller/placement.go` `Placement.Run` runs on the
    leader. `scheduler/place.go` `Plan` picks a host for the stack and a pool for each new
    volume. The controller commits `put-volume` and `set-stack-status starting`.
-6. **The host runs the stack.** `agent/volumes/reconciler.go` `Reconciler.pass` sees the
-   volume copies placed on its host and a stack that names them. `plan` decides the steps,
-   and a job per volume creates the copy, makes it primary and mounts it.
-   `agent/stacks/runner.go` `Runner.pass` sees the stack placed on its host and waits until
-   its copies are mounted (`stackVolumes`). `agent/stacks/apply.go` `apply` renders the
-   Compose file (`render`), and `up` writes the secrets to tmpfs and runs
-   `docker compose up`. The host then reports `running` (`reportRunning`, through
-   `agent/loop` `CommitAsHost`). If that fails, it reports `failing` with the reason
+6. **The host runs the stack.** `clowderd/daemon/volumes/reconciler.go` `Reconciler.pass`
+   sees the volume copies placed on its host and a stack that names them. `plan` decides
+   the steps, and a job per volume creates the copy, makes it primary and mounts it.
+   `clowderd/daemon/stacks/runner.go` `Runner.pass` sees the stack placed on its host and
+   waits until its copies are mounted (`stackVolumes`). `clowderd/daemon/stacks/apply.go`
+   `apply` renders the Compose file (`render`), and `up` writes the secrets to tmpfs and
+   runs `docker compose up`. The host then reports `running` (`reportRunning`, through
+   `clowderd/daemon/loop` `CommitAsHost`). If that fails, it reports `failing` with the reason
    (`reportFailing`) and tries again at the next pass.
 7. **The supervisor keeps the stack running.** Docker restarts nothing by itself;
    `supervisor.Supervisor` follows Docker's events and restarts what crashes.
@@ -143,6 +143,8 @@ Each word is explained here once, in alphabetical order.
 - **context**: the way into one cluster in the CLI's credentials file
   (`~/.clowder/config`, `clientconfig`), like a kubeconfig context. It holds the
   endpoints, the CA, and the CLI's key and certificate; `current_context` picks one.
+- **daemon**: the package `internal/clowderd/daemon`: the agent that `clowderd run`
+  starts. The docs call it the agent.
 - **data generation**: of a volume, a number in its LV's name that grows with each new,
   empty LV. A new LV comes when a volume of replicas 0 moves, fails over, or starts anew
   after a recover.
@@ -202,11 +204,22 @@ Each word is explained here once, in alphabetical order.
 | Binary | Package | Runs on | Does |
 |---|---|---|---|
 | `clowder` | `cmd/clowder`, `internal/cli` | Linux, macOS, Windows | the user's CLI: reads its credentials file and the resource files, talks to an agent over mTLS |
-| `clowderd` | `cmd/clowderd`, `internal/agent` | Linux | the agent (`run`, systemd service `clowderd`) and the host commands `check`, `init`, `join`, `credentials`, `sealing-key`, `recover` |
+| `clowderd` | `cmd/clowderd`, `internal/clowderd` | Linux | the agent (`run`, systemd service `clowderd`) and the host commands `check`, `init`, `join`, `credentials`, `sealing-key`, `recover` |
 
 `cmd/clowderd` has the build constraint `linux`. Both binaries get their version from
 `internal/buildinfo.Version`. `bin/dev build` sets it from the Git tag, or to
 `0.0.0~dev+<commit>` when there is no tag.
+
+`internal/clowderd` has a package per command of `clowderd`: `daemon` (`run`),
+`initialize` (`init`), `join`, `credentials`, `sealingkey`, `recovery` (`recover`) and
+`check`. Each exports `NewCommand`; `clowderd` itself (`root.go`) builds the host's files
+(`hostfiles.Default`) and drivers once, hands each `NewCommand` what it needs, and adds
+`version`, which belongs to no package. `hostfiles` holds what they share: a host's files,
+`host.json` and its credentials; `hostsetup` holds what init and join share to set a host
+up (their flags, the start of the agent); `service` starts and stops `clowderd.service`.
+The commands and the daemon import `hostfiles` and `service` (init and join also
+`hostsetup`), never each other, and depguard (rules `clowderd-commands`,
+`clowderd-daemon`, `clowderd-shared`) checks it outside the tests ([A host](docs/developing/host.md#the-agent-internalclowderd)).
 
 ## Layers
 
@@ -227,6 +240,11 @@ The package layout is planned for all of v1; packages appear as the phases add t
   `resource`, `stackspec` and `clusterspec`. Their tests need no host, files or network.
   depguard (rule `state-pure`) keeps out `os`, `net/http` and randomness, and forbidigo
   keeps out the clock (`time.Now`, `time.Since`, `time.Until`).
+- **`passes`, runs the loops**: the one way every loop of the agent and of the leader
+  runs its passes (`passes.Run`, `passes.Interval`). It knows neither the state nor the
+  host, so `controller` and the agent share it without depending on each other.
+  `clowderd/daemon/loop.Run` is its form for the agent's passes, which always wait
+  `passes.Interval`.
 - **Decides**: `controller` (the leader's loops) writes Raft commands. It talks to external
   services that only the leader uses (Hetzner's API, ACME, alert channels),
   but it never changes the host. Its loops run only on control-plane hosts, which hold the
@@ -236,18 +254,20 @@ The package layout is planned for all of v1; packages appear as the phases add t
   `x/crypto/acme`. Hetzner is the only cloud clowder runs on, with no layer in between;
   `hetzner/hetznertest` fakes its API for the tests. depguard keeps these
   clients out of the CLI, the state and the scheduler. The join, `clowderd recover` and the
-  agent's start use `hetzner` too. The agent starts the controller's loops, so `agent`
-  imports `controller` and never the other way round. The agent also uses
-  `controller.Propose` for the commands it writes itself.
-- **Changes the host**: `agent`, `supervisor`, `raftnode` (Raft over mTLS), `datakey` (the
-  key file), `command` (host tools with a timeout), and the drivers `network`, `storage`,
-  `docker` and `ingress` (Traefik's files; `ingress` renders them, the agent writes them).
-  Within the agent, `agent/stacks` is the stack runner, `agent/volumes` is the volume
-  reconciler, and `agent/loop` holds what all of the agent's loops share (when a pass runs,
-  the supervisor's signal, committing as the host). `agent` imports all three.
-  `agent/stacks` and `agent/volumes` import `agent/loop` but not each other; each reaches
-  the other through what the agent hands it (an interface, a function). None of them
-  imports `agent`. `agent/agenttest` has the fakes that the tests of all four share.
+  agent's start use `hetzner` too. The agent starts the controller's loops, so
+  `clowderd/daemon` imports `controller` and never the other way round. The agent also
+  uses `controller.Propose` for the commands it writes itself.
+- **Changes the host**: `clowderd` and its packages, `supervisor`, `raftnode` (Raft over
+  mTLS), `datakey` (the key file), `command` (host tools with a timeout), and the drivers
+  `network`, `storage`, `docker` and `ingress` (Traefik's files; `ingress` renders them,
+  the agent writes them). Within the daemon, `clowderd/daemon/stacks` is the stack runner,
+  `clowderd/daemon/volumes` is the volume reconciler, and `clowderd/daemon/loop` holds
+  what all of the agent's loops share (reading the state, the supervisor's signal,
+  committing as the host). `daemon` imports all three. `stacks` and `volumes` import
+  `loop` but not each other; each reaches the other through what the daemon hands it (an
+  interface, a function), and depguard (rules `daemon-stacks`, `daemon-volumes`) checks
+  it. None of them imports `daemon`. `clowderd/daemon/daemontest` has
+  the fakes that the tests of all four share.
 - **Reads the host**: `hostcheck` (for `clowderd check`). It compiles anywhere, but only the
   agent uses it, so depguard keeps it out of the CLI like the packages above.
 
@@ -276,7 +296,7 @@ promotion) runs in a job per volume. The job is a goroutine that the pass does n
 for, and it runs each tool through `internal/command` with a timeout. A job that hangs holds
 up only its own volume and the stacks that wait for it.
 
-There is one exception: the weekly trim (`fstrim`, `agent/volumes/trim.go`) writes to
+There is one exception: the weekly trim (`fstrim`, `clowderd/daemon/volumes/trim.go`) writes to
 mounted copies from its own loop and waits for each one. It trims only a copy whose DRBD
 has quorum, so fstrim does not start on a volume that hangs. If the quorum is lost while
 fstrim runs, its timeout lets the loop go on, and only the trim waits.

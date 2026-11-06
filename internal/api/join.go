@@ -251,7 +251,7 @@ func (s *Server) newJoinToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	index, ok := s.commit(w, r, cmd, s.Propose)
+	index, ok := s.commit(w, r, cmd, s.config.Peers.Propose)
 	if !ok {
 		return
 	}
@@ -303,7 +303,7 @@ func (s *Server) join(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), joinTimeout)
 	defer cancel()
 	var answer JoinAnswer
-	leader, here, err := s.waitForLeader(ctx)
+	leader, here, err := s.config.waitForLeader(ctx)
 	switch {
 	case err != nil:
 	case here:
@@ -368,7 +368,7 @@ func (s *Server) forwardJoin(ctx context.Context, id state.HostID, request JoinR
 	var answer JoinAnswer
 	// not the forwarder: its waitTimeout is shorter than the joinTimeout
 	// that the leader may take. The streamer has no timeout; ctx ends it.
-	if err := send(s.streamer, httpRequest, &answer); err != nil {
+	if err := send(s.config.Peers.streamer, httpRequest, &answer); err != nil {
 		var statusError *StatusError
 		if errors.As(err, &statusError) {
 			return JoinAnswer{}, statusError

@@ -38,7 +38,7 @@ A lab's cluster has one of three layouts (`test/live/layouts_test.go`):
 | Layout | Hosts | For |
 |---|---|---|
 | `three` (default) | `clowder0` to `clowder2`, each with every role; the joined two drained, so stacks start on the first | most scenarios |
-| `roles` | `clowder0` to `clowder2` with `control-plane` only, `clowder3` and `clowder4` with `worker,ingress` | the roles: `TestRoles`, `TestRolesFailover` |
+| `roles` | `clowder0` to `clowder2` with `control-plane` only, `clowder3` and `clowder4` with `worker,ingress` | the roles: `TestRoles`, `TestRolesFailover`, `TestRolesRecover` |
 | `single` | `clowder0` alone, with every role | a cluster of one host: `TestSingleHost` |
 
 `bin/dev live up --layout <layout>` writes the layout's name into the lab's volume
@@ -219,7 +219,7 @@ a single step.
    outside the private network (created through HLab's Cloud API), because the request
    does not come from that server's address. It also refuses a join that names a joined
    host's server. Neither creates a host. Because the test sends from its own address, a
-   unit test (`agent/join_test.go`) checks that the server's addresses at Hetzner must
+   unit test (`clowderd/daemon/joinleader_test.go`) checks that the server's addresses at Hetzner must
    match the host's.
 
 ### `TestReplace`
@@ -488,6 +488,22 @@ The joined hosts take stacks. The stack `echo` (as in `TestIngress`, but on
 1. `keeper` (two replicas) runs on a worker, with its copies on both workers.
 2. Its worker freezes. `keeper` fails over to the other worker within the budget, with its
    data, and the fenced worker comes back active; the copies are on the workers again.
+
+### `TestRolesRecover` (layout `roles`)
+
+Not yet run: it comes with the final live tests of phase 2b.
+
+1. `keeper` (two replicas) runs on a worker, with its copies on both workers and data.
+2. `clowder1` and `clowder2` freeze, and `clowderd recover --power-off --yes` runs on the
+   first host. It says that it retired the two, and that both workers stay.
+3. The first host leads alone. The two servers are off and labeled `clowder-retired`, the
+   hosts are removed, and the alert `no-ha` is open.
+4. Both workers are active, without a vote, and have set their old Raft log aside
+   (`raft.set-aside-*`).
+5. `keeper` runs on the same worker in the same container and writes. Its volume has both
+   copies synced and its tiebreaker on the first host. The Floating IP is on a worker.
+6. New servers with the old names join as control-plane hosts while `keeper` runs. The
+   cluster has three voters again, `keeper`'s container stays, and `no-ha` is resolved.
 
 ### `TestSingleHost` (layout `single`)
 

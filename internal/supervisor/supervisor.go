@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/compose"
 	"github.com/webcodingcat/clowder/internal/docker"
 )
 
@@ -125,9 +126,9 @@ func (s *Supervisor) Pause(stack string) (resume func()) {
 
 // Run follows Docker's events for clowder's containers until ctx ends. When
 // the stream breaks (Docker restarted), Run follows it again after a pause.
-func (s *Supervisor) Run(ctx context.Context, label string) {
+func (s *Supervisor) Run(ctx context.Context) {
 	for following := false; ctx.Err() == nil; following = true {
-		events, failed := s.docker.Events(ctx, label)
+		events, failed := s.docker.Events(ctx, compose.LabelStack)
 		if following {
 			s.missed()
 		}

@@ -24,7 +24,7 @@ import (
 )
 
 // The host's own certificate and its key, as the agent keeps them
-// (agent.Files).
+// (hostfiles.Files).
 const (
 	hostCertificateFile = "/var/lib/clowder/pki/host.pem"
 	hostKeyFile         = "/var/lib/clowder/pki/host-key.pem"
@@ -229,7 +229,7 @@ func workerRefusesTheCLI(t *testing.T, hosts map[string]host, tofu outputs) {
 	}
 }
 
-// dataKeyFile is the data key, as the agent keeps it (agent.Files).
+// dataKeyFile is the data key, as the agent keeps it (hostfiles.Files).
 const dataKeyFile = "/var/lib/clowder/keys/data-key.txt"
 
 // workerGetsOnlyItsSecrets runs the stack keyed, which names the secret

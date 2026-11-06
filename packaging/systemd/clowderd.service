@@ -24,6 +24,10 @@ RestartSec=2
 # see it fail. Nothing reboots the host. Nor an agent on a server that
 # clowderd recover retired (exit status 4): it must never start again.
 RestartPreventExitStatus=3 4
+# A worker that clowderd recover kept ends its agent to start again as a
+# fresh Raft member (exit status 5). That is no failure, and Restart=always
+# starts it again.
+SuccessExitStatus=5
 # Only the agent itself is stopped. Its helpers (docker compose, drbdadm, a
 # volume copy) finish their step instead of being killed halfway; one that
 # hangs in state D could not be killed anyway. Containers belong to dockerd

@@ -1,15 +1,11 @@
 package api
 
 import (
-	"bytes"
 	"cmp"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"maps"
 	"net/http"
 	"slices"
@@ -18,14 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/webcodingcat/clowder/internal/hostrole"
-	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
 )
-
-// waitTimeout limits how long a read waits for its minimum index, and how
-// long a write waits for the leader.
-const waitTimeout = 10 * time.Second
 
 // MaxRequestBytes limits every request body. The largest body is an apply
 // with every secret of the cluster (resource.MaxClusterSecretBytes in
@@ -59,21 +49,14 @@ type Cluster interface {
 	WaitCommitted(ctx context.Context, index uint64) error
 }
 
-// ServerConfig is what an agent's API server needs.
+// ServerConfig is what an agent's API server needs: what it knows about its
+// host, the same HostConfig that its Peers have, and the parts it answers
+// for.
 type ServerConfig struct {
-	Cluster Cluster
-	CA      *x509.Certificate
-	// Certificate is the host's certificate, for TLS and to forward writes.
-	Certificate tls.Certificate
-	// Roles are the host's roles, as its certificate names them (the agent
-	// checks that at its start).
-	Roles hostrole.Set
-	// APIAddress gives a host's API address (its node address and the API
-	// port).
-	APIAddress func(id state.HostID) string
-	Keys       Keys
-	// HostID is this agent's host. Containers answers for its stacks.
-	HostID     state.HostID
+	HostConfig
+	// Peers forwards what the server cannot answer itself.
+	Peers *Peers
+	// Containers answers for the stacks of this host.
 	Containers Containers
 	// Volumes is nil on an agent without a volume reconciler.
 	Volumes Volumes
@@ -93,8 +76,6 @@ type ServerConfig struct {
 	// leader's after its start. Until then, CLI calls wait, because the
 	// state may still be empty. Nil means caught up (tests).
 	CaughtUp <-chan struct{}
-	Version  string
-	Logger   *slog.Logger
 }
 
 // Alerts is what the API needs from the agent's alerts loop.
@@ -106,24 +87,10 @@ type Alerts interface {
 	Failures() []AlertFailure
 }
 
-// Keys is the cluster's data key as the server uses it. It is nil on a host
-// without the control-plane role, which holds no data key.
-type Keys interface {
-	Encrypt(plaintext []byte) (state.Encrypted, error)
-	Decrypt(encrypted state.Encrypted) ([]byte, error)
-	// Derive gives a separate key for one purpose (the secrets' digests).
-	Derive(purpose string) ([]byte, error)
-}
-
 // Server is an agent's API.
 type Server struct {
 	config ServerConfig
 	mux    *http.ServeMux
-	// forwarder carries writes to the leader. streamer relays answers from
-	// other hosts that may take long (logs that follow), so it has no
-	// timeout.
-	forwarder *http.Client
-	streamer  *http.Client
 	// streams ends with EndStreams. Answers that run until the client
 	// stops (a watch, logs that follow) end with it, so that stopping the
 	// agent does not wait for them.
@@ -140,15 +107,6 @@ type Server struct {
 func NewServer(config ServerConfig) *Server {
 	server := &Server{config: config, mux: http.NewServeMux()}
 	server.streams, server.endStreams = context.WithCancel(context.Background())
-	// a host without the control plane calls only the control plane: the
-	// voters with its beats, and the leader with its reports
-	toHosts := pki.ClientTLSToHosts
-	if !config.Roles.Has(hostrole.ControlPlane) {
-		toHosts = pki.ClientTLSToControlPlane
-	}
-	transport := &http.Transport{TLSClientConfig: toHosts(config.Certificate, config.CA, server.revoked)}
-	server.forwarder = &http.Client{Timeout: waitTimeout, Transport: transport}
-	server.streamer = &http.Client{Transport: transport}
 	for _, route := range server.routes() {
 		server.handle(route.pattern, route.caller, route.handler)
 	}
@@ -283,7 +241,7 @@ func (s *Server) alertFailures(w http.ResponseWriter, r *http.Request) {
 	case !ok:
 		writeError(w, http.StatusServiceUnavailable, errors.New("the cluster has no leader right now"))
 	case leader != s.config.HostID:
-		s.relay(w, r, s.forwarder, leader, "/v1/internal/alerts/failures")
+		s.relay(w, r, s.config.Peers.forwarder, leader, "/v1/internal/alerts/failures")
 	default:
 		s.localAlertFailures(w, r)
 	}
@@ -352,7 +310,7 @@ func (s *Server) hostAction(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, err)
 				return
 			}
-			if index, ok := s.commit(w, r, cmd, s.Propose); ok {
+			if index, ok := s.commit(w, r, cmd, s.config.Peers.Propose); ok {
 				writeJSON(w, http.StatusOK, HostActionAnswer{Written: Written{Index: index}, Leaving: true})
 			}
 			return
@@ -364,8 +322,6 @@ func (s *Server) hostAction(w http.ResponseWriter, r *http.Request) {
 	}
 	s.commitRequest(w, r, state.KindSetHostPhase, move)
 }
-
-const leaderPoll = 50 * time.Millisecond
 
 // handOverLeadOf makes a leader that is about to be removed hand over
 // first, because the removal revokes its certificate and would end its
@@ -413,7 +369,7 @@ func (s *Server) askLeaderToHandOver(ctx context.Context, id state.HostID) error
 		return fmt.Errorf("ask host %d to hand its lead over: %w", id, err)
 	}
 	request.Header.Set(VersionHeader, s.config.Version)
-	if err := send(s.forwarder, request, nil); err != nil {
+	if err := send(s.config.Peers.forwarder, request, nil); err != nil {
 		return fmt.Errorf("ask host %d to hand its lead over: %w", id, err)
 	}
 	return nil
@@ -480,7 +436,7 @@ func (s *Server) internalPropose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// no second hop: if another agent leads by now, the caller asks again
-	if index, ok := s.commit(w, r, cmd, s.proposeHere); ok {
+	if index, ok := s.commit(w, r, cmd, s.config.proposeHere); ok {
 		writeJSON(w, http.StatusOK, Written{Index: index})
 	}
 }
@@ -492,7 +448,7 @@ func (s *Server) commitRequest(w http.ResponseWriter, r *http.Request, kind stri
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if index, ok := s.commit(w, r, cmd, s.Propose); ok {
+	if index, ok := s.commit(w, r, cmd, s.config.Peers.Propose); ok {
 		writeJSON(w, http.StatusOK, Written{Index: index})
 	}
 }
@@ -521,53 +477,6 @@ func (s *Server) commit(w http.ResponseWriter, r *http.Request, cmd state.Comman
 	return 0, false
 }
 
-// proposeHere stamps the leader's time (Command.At), whichever agent took
-// the request.
-func (s *Server) proposeHere(ctx context.Context, cmd state.Command) (uint64, error) {
-	if !s.config.Cluster.IsLeader() {
-		return 0, errors.New("not the leader; try again")
-	}
-	cmd.At = time.Now().UTC()
-	return s.config.Cluster.Propose(ctx, cmd)
-}
-
-// Propose commits a command, on the leader or through it. It is the only
-// way to commit, for the API's routes as well as for the agent's own
-// reports and the leader's controllers.
-func (s *Server) Propose(ctx context.Context, cmd state.Command) (uint64, error) {
-	id, here, err := s.waitForLeader(ctx)
-	switch {
-	case err != nil:
-		return 0, err
-	case here:
-		return s.proposeHere(ctx, cmd)
-	}
-	body, err := json.Marshal(cmd)
-	if err != nil {
-		return 0, fmt.Errorf("encode the command: %w", err)
-	}
-	url := "https://" + s.config.APIAddress(id) + "/v1/internal/propose"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return 0, fmt.Errorf("forward to the leader (host %d): %w", id, err)
-	}
-	request.Header.Set(VersionHeader, s.config.Version)
-	var written Written
-	if err := send(s.forwarder, request, &written); err != nil {
-		// pass the leader's answer back unchanged; a 409 stays a refusal
-		var statusError *StatusError
-		switch {
-		case errors.As(err, &statusError) && statusError.Status == http.StatusConflict:
-			return 0, &state.Refused{Err: errors.New(statusError.Message)}
-		case errors.As(err, &statusError):
-			return 0, statusError
-		default:
-			return 0, fmt.Errorf("forward to the leader (host %d): %w", id, err)
-		}
-	}
-	return written.Index, nil
-}
-
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -584,31 +493,4 @@ func writeError(w http.ResponseWriter, status int, err error) {
 		err = fmt.Errorf("the request is larger than %d bytes", MaxRequestBytes)
 	}
 	writeJSON(w, status, Error{Message: err.Error()})
-}
-
-// leaderWait is how long a write waits for a leader. An election takes
-// seconds, and a peer that restarts may lose its leader for a moment.
-const leaderWait = 10 * time.Second
-
-// waitForLeader lets a write wait a moment instead of failing during an
-// election, or while this agent has just become leader and still applies
-// its log (raftnode.Node.IsLeader).
-func (s *Server) waitForLeader(ctx context.Context) (leader state.HostID, here bool, err error) {
-	deadline := time.Now().Add(leaderWait)
-	for {
-		if s.config.Cluster.IsLeader() {
-			return s.config.HostID, true, nil
-		}
-		if id, ok := s.config.Cluster.Leader(); ok && id != s.config.HostID {
-			return id, false, nil
-		}
-		if time.Now().After(deadline) {
-			return 0, false, errors.New("the cluster has no leader right now")
-		}
-		select {
-		case <-ctx.Done():
-			return 0, false, fmt.Errorf("wait for a leader: %w", ctx.Err())
-		case <-time.After(leaderPoll):
-		}
-	}
 }

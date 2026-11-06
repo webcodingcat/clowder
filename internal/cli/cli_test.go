@@ -167,11 +167,14 @@ func startCluster(t *testing.T) {
 	}
 	host := &oneHost{state: current, changed: make(chan struct{})}
 	host.changes.Reset(current.Index)
-	agent := api.NewServer(api.ServerConfig{
+	agentHost := api.HostConfig{
 		Cluster: host, CA: ca.Certificate, Certificate: serverCertificate, Roles: hostrole.DefaultInit,
 		APIAddress: func(state.HostID) string { return server.Listener.Addr().String() },
 		Version:    buildinfo.Version, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Alerts: fakeAlerts{}, Keys: ageKeys{dataKey},
+		Keys: ageKeys{dataKey},
+	}
+	agent := api.NewServer(api.ServerConfig{
+		HostConfig: agentHost, Peers: api.NewPeers(agentHost), Alerts: fakeAlerts{},
 		HetznerServers: func(context.Context, string, string) ([]int64, error) { return testServers, nil },
 	})
 	server.Config.Handler = agent

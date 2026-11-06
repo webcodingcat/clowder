@@ -179,7 +179,7 @@ func reserving(service, priority, memory string) stackspec.Spec {
 func runPlacement(t *testing.T, l *leader) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go RunPlacement(ctx, l, l.propose, NewConditions(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	go newPlacer(l).Run(ctx)
 }
 
 // waitFor fails the test unless the state comes to hold what check says.
@@ -209,11 +209,8 @@ func TestAPendingStackIsPlacedWithItsVolumes(t *testing.T) {
 
 // newPlacer is the placement of l, for passes one by one, so a test knows
 // how many ran.
-func newPlacer(l *leader) *placer {
-	return &placer{
-		cluster: l, propose: l.propose, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		conditions: NewConditions(),
-	}
+func newPlacer(l *leader) *Placement {
+	return NewPlacement(l, l.propose, NewConditions(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func TestAStackThatFitsNowhereShowsWhyUntilItFits(t *testing.T) {

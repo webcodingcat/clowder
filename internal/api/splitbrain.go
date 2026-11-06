@@ -159,7 +159,7 @@ func (s *Server) resolveOn(ctx context.Context, host state.HostID, volumeID stri
 	}
 	request.Header.Set(VersionHeader, s.config.Version)
 	var resolved ResolvedCopy
-	if err := send(s.forwarder, request, &resolved); err != nil {
+	if err := send(s.config.Peers.forwarder, request, &resolved); err != nil {
 		return false, err
 	}
 	return resolved.Connected, nil

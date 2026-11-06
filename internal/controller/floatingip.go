@@ -13,6 +13,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/hetzner"
 	"github.com/webcodingcat/clowder/internal/hostrole"
+	"github.com/webcodingcat/clowder/internal/passes"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -20,50 +21,52 @@ import (
 // the assignment of the Floating IP.
 const hetznerTimeout = 2 * time.Minute
 
-// RunFloatingIP keeps the Floating IP on the ingress host while this agent
-// leads, until ctx ends. While it fails, it observes the condition
-// ingressNotHeld.
-func RunFloatingIP(ctx context.Context, cluster Cluster, propose Propose, open Open, conditions *Conditions,
-	logger *slog.Logger,
-) {
+// FloatingIP keeps the Floating IP on the ingress host.
+type FloatingIP struct {
+	cluster    Cluster
+	propose    Propose
+	open       Open
+	conditions *Conditions
+	logger     *slog.Logger
+}
+
+// NewFloatingIP creates the leader's keeper of the Floating IP; Run runs
+// it.
+func NewFloatingIP(cluster Cluster, propose Propose, open Open, conditions *Conditions, logger *slog.Logger,
+) *FloatingIP {
+	return &FloatingIP{cluster: cluster, propose: propose, open: open, conditions: conditions, logger: logger}
+}
+
+// Run keeps the Floating IP on the ingress host while this agent leads,
+// until ctx ends. While it fails, it observes the condition ingressNotHeld.
+func (f *FloatingIP) Run(ctx context.Context) {
 	var next time.Time // when the API may be read again
 	var warned []string
-	for {
-		changed := cluster.Changed()
-		if cluster.IsLeader() {
-			// warn on the leader, because only the leader talks to
-			// Hetzner's API and the ACME CA
-			warned = warnServiceURLs(cluster, warned, logger)
-		}
-		if cluster.IsLeader() && !time.Now().Before(next) {
-			asked, err := holdFloatingIP(ctx, cluster, propose, open, logger)
+	runWhileLeading(ctx, f.cluster, passes.Interval, func(ctx context.Context) time.Duration {
+		// warn on the leader, because only the leader talks to Hetzner's
+		// API and the ACME CA
+		warned = warnServiceURLs(f.cluster, warned, f.logger)
+		if !time.Now().Before(next) {
+			asked, err := holdFloatingIP(ctx, f.cluster, f.propose, f.open, f.logger)
 			if asked {
-				next = time.Now().Add(interval)
+				next = time.Now().Add(passes.Interval)
 			}
 			if err != nil {
-				logger.Warn("the Floating IP is not on the ingress host", "error", err)
+				f.logger.Warn("the Floating IP is not on the ingress host", "error", err)
 			}
 			// a pass that did not ask Hetzner proves nothing, unless it
 			// failed before it could ask (for example, no host can hold
 			// the Floating IP)
 			if asked || err != nil {
-				conditions.Observe(ingressNotHeld, err != nil)
+				f.conditions.Observe(ingressNotHeld, err != nil)
 			}
 			if asked {
-				conditions.Observe(hetznerTokenRefused, hetzner.TokenRefused(err))
+				f.conditions.Observe(hetznerTokenRefused, hetzner.TokenRefused(err))
 			}
 		}
-		wait := interval
-		if untilNext := time.Until(next); untilNext > 0 && untilNext < interval {
-			wait = untilNext // a change came early: run once the API may be read again
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-changed:
-		case <-time.After(wait):
-		}
-	}
+		// a change that came early runs once the API may be read again
+		return passes.Soonest(time.Until(next))
+	}, nil)
 }
 
 // warnServiceURLs logs the warnings only when they differ from logged, so

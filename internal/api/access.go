@@ -61,46 +61,52 @@ func (s *Server) admits(rule caller, identity pki.Identity) bool {
 	}
 }
 
-// cliKinds are the commands that a control-plane host may forward for the
-// CLI. The list holds exactly the kinds that the CLI's routes make; add a
-// kind here when you add its route. The host could name another CLI actor,
-// which is accepted, because the name grants nothing.
-var cliKinds = map[string]bool{
-	state.KindSetHostPhase: true, state.KindRestartStack: true, state.KindRequestMove: true,
-	state.KindAddJoinToken: true,
+// senders says who may send a kind of command through internal/propose.
+// Every sender is a host: its certificate is the caller's.
+type senders struct {
+	// cli: a control-plane host that forwards the CLI's command, with the
+	// CLI's actor. The host could name another CLI actor, which is
+	// accepted, because the name grants nothing.
+	cli bool
+	// anyHost: any host about itself, as itself. The state checks that the
+	// command is about the actor's own host.
+	anyHost bool
+	// controlPlane: a control-plane host for the cluster, as itself.
+	controlPlane bool
 }
 
-// hostKinds are the reports that any host sends about itself, as itself.
-// The state checks that each report is about the actor's own host.
-var hostKinds = map[string]bool{
-	state.KindReportHost:     true,
-	state.KindSetStackStatus: true, state.KindForgetCopy: true, state.KindSetVolumeInitialized: true,
-	state.KindReportPeerForgotten: true, state.KindSetCopySynced: true,
-	state.KindAdvanceOperation: true, // a step of an operation the host owns
-	state.KindSetHostPhase:     true, // its own: recovering, then active (the state checks who)
-}
-
-// controlPlaneKinds are the commands that a control-plane host sends for
-// the cluster, as itself.
-var controlPlaneKinds = map[string]bool{
-	state.KindSetCLICutoff: true,
+// proposers holds every kind that may come in from outside, with who may
+// send it; the leader writes every other kind itself. The CLI's kinds are
+// exactly those of its write routes (TestCLIKindsAreTheKindsOfTheCLIsWrites).
+var proposers = map[string]senders{
+	// the CLI's host actions, and a host's own way back from a fence
+	// (recovering, then active)
+	state.KindSetHostPhase:         {cli: true, anyHost: true},
+	state.KindRestartStack:         {cli: true},
+	state.KindRequestMove:          {cli: true},
+	state.KindAddJoinToken:         {cli: true},
+	state.KindReportHost:           {anyHost: true},
+	state.KindSetStackStatus:       {anyHost: true},
+	state.KindForgetCopy:           {anyHost: true},
+	state.KindSetVolumeInitialized: {anyHost: true},
+	state.KindReportPeerForgotten:  {anyHost: true},
+	state.KindSetCopySynced:        {anyHost: true},
+	state.KindAdvanceOperation:     {anyHost: true}, // a step of an operation the host owns
+	state.KindSetCLICutoff:         {controlPlane: true},
 }
 
 // mayPropose guards internal/propose, the only way a command comes in from
 // outside. No host may speak for another host or for the leader. The route
 // takes only host certificates (anyHost), so identity is always a host's.
+// The actor decides which of a kind's senders applies.
 func mayPropose(identity pki.Identity, cmd state.Command) bool {
-	itself := cmd.Actor == actorOf(identity)
+	allowed := proposers[cmd.Kind]
 	controlPlane := identity.HostRoles.Has(hostrole.ControlPlane)
-	// a kind may be in more than one set (set-host-phase is the CLI's and
-	// a host's own); the actor decides which set applies
 	switch {
-	case state.IsCLIActor(cmd.Actor) && cliKinds[cmd.Kind]:
-		return controlPlane
-	case hostKinds[cmd.Kind]:
-		return itself
-	case controlPlaneKinds[cmd.Kind]:
-		return itself && controlPlane
+	case state.IsCLIActor(cmd.Actor):
+		return allowed.cli && controlPlane
+	case cmd.Actor == actorOf(identity):
+		return allowed.anyHost || (allowed.controlPlane && controlPlane)
 	}
 	return false
 }
@@ -111,7 +117,7 @@ func mayPropose(identity pki.Identity, cmd state.Command) bool {
 // accepts only control-plane hosts.
 func (s *Server) TLSConfig() *tls.Config {
 	if !s.config.Roles.Has(hostrole.ControlPlane) {
-		return pki.ServerTLSForControlPlane(s.config.Certificate, s.config.CA, s.revoked)
+		return pki.ServerTLSForControlPlane(s.config.Certificate, s.config.CA, s.config.revoked)
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(s.config.CA)
@@ -133,7 +139,7 @@ func (s *Server) handle(pattern string, rule caller, handler http.HandlerFunc) {
 			writeError(w, http.StatusUnauthorized, errors.New("a client certificate is required"))
 			return
 		}
-		identity, err := pki.Verify(s.config.CA, r.TLS.PeerCertificates[0], s.revoked, time.Now())
+		identity, err := pki.Verify(s.config.CA, r.TLS.PeerCertificates[0], s.config.revoked, time.Now())
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, err)
 			return
@@ -201,14 +207,6 @@ func (s *Server) warnAboutDevelopment(callerVersion string) {
 		s.config.Logger.Warn("a development build talks to another build; their formats may differ",
 			"caller", callerVersion, "agent", s.config.Version)
 	}
-}
-
-func (s *Server) revoked(serial string) bool {
-	var revoked bool
-	s.config.Cluster.Read(func(current *state.State) {
-		_, revoked = current.Revoked[serial]
-	})
-	return revoked
 }
 
 // waitForCatchUp holds only CLI requests, because the catch-up itself, the

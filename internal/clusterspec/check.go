@@ -225,10 +225,8 @@ func checkResources(where string, resources Resources) Problems {
 			problems = append(problems, fmt.Sprintf("%s.memory: %v", where, err))
 		}
 	}
-	if resources.CPUs != "" {
-		if cpus, err := strconv.ParseFloat(resources.CPUs, 64); err != nil || cpus <= 0 {
-			problems = append(problems, fmt.Sprintf("%s.cpus %q is not a positive number", where, resources.CPUs))
-		}
+	if resources.CPUs < 0 {
+		problems = append(problems, fmt.Sprintf("%s.cpus %v is negative", where, resources.CPUs))
 	}
 	return problems
 }
@@ -264,6 +262,9 @@ func checkChannel(index int, channel AlertChannel) Problems {
 	}
 	if channel.Type != "webhook" && channel.URLSecretRef != nil {
 		report("urlSecretRef is a webhook channel's")
+	}
+	if channel.Type != "email" && (channel.SMTP != nil || channel.From != "" || len(channel.To) > 0) {
+		report("smtp, from and to are an email channel's")
 	}
 	if channel.SMTP != nil {
 		for _, problem := range checkCA("smtp.ca", channel.SMTP.CA) {

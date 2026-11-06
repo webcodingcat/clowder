@@ -150,7 +150,7 @@ reservations plus 5 % fit its host's free room for 60 s.
 
 ## Committing the plan
 
-`controller.RunPlacement` runs on every agent but acts only on the leader. It plans on a
+`controller.Placement` runs on every control-plane agent but acts only on the leader. It plans on a
 copy of the state (`SharedCopy`), outside the lock that Raft's `Apply` waits for.
 
 1. It first writes the push-outs of hosts over capacity. If one fails, it places nothing
@@ -170,8 +170,8 @@ change what that one changed. When something else came in between, the state ref
 command about what that changed (`ErrStale`, logged as info), and the next pass plans
 again.
 
-`controller.RunMoves` runs the leader's steps of each move and watches their deadlines;
-`agent/moves.go` records a host's steps once its loops have done them.
+`controller.Moves` runs the leader's steps of each move and watches their deadlines;
+`clowderd/daemon/moves.go` records a host's steps once its loops have done them.
 
 ## On the host
 

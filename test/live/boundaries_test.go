@@ -16,7 +16,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
-// The agent's ports (agent.APIPort, agent.RaftPort, agent.MetricsPort);
+// The agent's ports (hostfiles.APIPort, hostfiles.RaftPort, daemon.MetricsPort);
 // copied, as the host's files are: the test checks the host as a container
 // would find it.
 const (

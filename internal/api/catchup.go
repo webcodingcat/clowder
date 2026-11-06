@@ -1,9 +1,7 @@
 package api
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"net/http"
 )
 
@@ -26,29 +24,4 @@ func (s *Server) localCommitIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, CommitIndex{Index: s.config.Cluster.CommitIndex()})
-}
-
-// CatchUpWithLeader returns once this agent's state holds everything that
-// the leader had committed when it was asked. A host that was away (fenced,
-// rebooted) starts its stacks only after this returns. A stack that moved
-// to another host in the meantime must not start here from an old state.
-func (s *Server) CatchUpWithLeader(ctx context.Context) error {
-	id, here, err := s.waitForLeader(ctx)
-	switch {
-	case err != nil:
-		return err
-	case here:
-		return nil // IsLeader is true only once the barrier applied the log (raftnode.Node)
-	}
-	url := "https://" + s.config.APIAddress(id) + "/v1/internal/commit-index"
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return fmt.Errorf("ask the leader (host %d) for its commit index: %w", id, err)
-	}
-	request.Header.Set(VersionHeader, s.config.Version)
-	var answer CommitIndex
-	if err := send(s.forwarder, request, &answer); err != nil {
-		return fmt.Errorf("ask the leader (host %d) for its commit index: %w", id, err)
-	}
-	return s.config.Cluster.WaitCommitted(ctx, answer.Index)
 }

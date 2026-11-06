@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/names"
+	"github.com/webcodingcat/clowder/internal/passes"
 	"github.com/webcodingcat/clowder/internal/scheduler"
 	"github.com/webcodingcat/clowder/internal/state"
 	"github.com/webcodingcat/clowder/internal/units"
@@ -23,8 +24,9 @@ type Progress func(ctx context.Context, host state.HostID) (map[string]int64, er
 // has passed, as long as it still makes progress.
 const progressWindow = 5 * time.Minute
 
-// mover keeps its looks in memory only, so a new leader starts them afresh.
-type mover struct {
+// Moves carries out the move-stack operations. It keeps its looks in
+// memory only, so a new leader starts them afresh.
+type Moves struct {
 	cluster  Cluster
 	propose  Propose
 	progress Progress
@@ -34,33 +36,25 @@ type mover struct {
 	looks map[uint64]look
 }
 
-// RunMoves carries out the move-stack operations while this agent leads,
-// until ctx ends.
-func RunMoves(ctx context.Context, cluster Cluster, propose Propose, progress Progress, logger *slog.Logger) {
-	m := &mover{cluster: cluster, propose: propose, progress: progress, logger: logger, looks: map[uint64]look{}}
-	for {
-		changed := cluster.Changed()
-		wait := interval
-		if cluster.IsLeader() {
-			if soonest := m.pass(ctx); soonest > 0 {
-				wait = min(wait, soonest)
-			}
-		} else {
-			// if this agent leads again later, it starts its looks afresh
-			clear(m.looks)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-changed:
-		case <-time.After(wait):
-		}
-	}
+// NewMoves creates the leader's moves; Run runs them.
+func NewMoves(cluster Cluster, propose Propose, progress Progress, logger *slog.Logger) *Moves {
+	return &Moves{cluster: cluster, propose: propose, progress: progress, logger: logger, looks: map[uint64]look{}}
+}
+
+// Run carries out the move-stack operations while this agent leads, until
+// ctx ends.
+func (m *Moves) Run(ctx context.Context) {
+	runWhileLeading(ctx, m.cluster, passes.Interval, func(ctx context.Context) time.Duration {
+		return passes.Soonest(m.pass(ctx))
+	}, func() {
+		// if this agent leads again later, it starts its looks afresh
+		clear(m.looks)
+	})
 }
 
 // pass looks at each move once and returns how soon the next deadline
 // comes.
-func (m *mover) pass(ctx context.Context) time.Duration {
+func (m *Moves) pass(ctx context.Context) time.Duration {
 	copied := m.cluster.SharedCopy()
 	now := time.Now()
 	soonest := time.Duration(0)
@@ -80,7 +74,7 @@ func (m *mover) pass(ctx context.Context) time.Duration {
 	return soonest
 }
 
-func (m *mover) step(ctx context.Context, copied *state.State, operation *state.Operation, now time.Time) error {
+func (m *Moves) step(ctx context.Context, copied *state.State, operation *state.Operation, now time.Time) error {
 	move := operation.Move
 	stack, ok := copied.Stacks[move.Stack]
 	down, isDown := downHost(copied, move)
@@ -116,7 +110,7 @@ func (m *mover) step(ctx context.Context, copied *state.State, operation *state.
 	return nil
 }
 
-func (m *mover) placeCopies(ctx context.Context, copied *state.State, operation *state.Operation, now time.Time) error {
+func (m *Moves) placeCopies(ctx context.Context, copied *state.State, operation *state.Operation, now time.Time) error {
 	move := operation.Move
 	volumes, reason := scheduler.MoveVolumes(copied, move.Stack, move.To)
 	if reason != "" {
@@ -155,7 +149,7 @@ func syncTime(copied *state.State, stackID string) time.Duration {
 }
 
 // setHost runs the step after the old host has stopped the stack.
-func (m *mover) setHost(ctx context.Context, copied *state.State, operation *state.Operation) error {
+func (m *Moves) setHost(ctx context.Context, copied *state.State, operation *state.Operation) error {
 	move := operation.Move
 	stack := copied.Stacks[move.Stack]
 	for _, name := range stack.Spec.VolumeNames() {
@@ -187,7 +181,7 @@ func (m *mover) setHost(ctx context.Context, copied *state.State, operation *sta
 
 // late ends a move past its point of no return as failed: the stack stays
 // where the move left it, and the placement takes it from there.
-func (m *mover) late(ctx context.Context, copied *state.State, operation *state.Operation, now time.Time) error {
+func (m *Moves) late(ctx context.Context, copied *state.State, operation *state.Operation, now time.Time) error {
 	if operation.Step >= state.MoveStopped {
 		return m.finish(ctx, operation, true, fmt.Sprintf("it did not get past %s in time", state.MoveStepName(operation.Step)))
 	}
@@ -217,7 +211,7 @@ func (m *mover) late(ctx context.Context, copied *state.State, operation *state.
 //     and so does a second look without an answer.
 //
 // Each change of leader gives at most one more window.
-func (m *mover) lateResync(ctx context.Context, copied *state.State, operation *state.Operation) string {
+func (m *Moves) lateResync(ctx context.Context, copied *state.State, operation *state.Operation) string {
 	last, looked := m.looks[operation.ID]
 	if copiesSynced(copied, operation.Move) {
 		m.looks[operation.ID] = look{synced: true}
@@ -273,7 +267,7 @@ func copiesSynced(copied *state.State, move *state.StackMove) bool {
 }
 
 // rollBack rolls a move back: the stack keeps its old host or gets it back.
-func (m *mover) rollBack(ctx context.Context, operation *state.Operation, reason string) error {
+func (m *Moves) rollBack(ctx context.Context, operation *state.Operation, reason string) error {
 	m.logger.Warn("a move rolls back", "operation", operation.ID, "stack", operation.Move.Stack, "reason", reason)
 	_, err := commit(ctx, m.propose, state.KindRollBackOperation, state.RollBackOperation{
 		ID: operation.ID, FromStep: operation.Step, Error: reason,
@@ -281,7 +275,7 @@ func (m *mover) rollBack(ctx context.Context, operation *state.Operation, reason
 	return err
 }
 
-func (m *mover) finish(ctx context.Context, operation *state.Operation, failed bool, reason string) error {
+func (m *Moves) finish(ctx context.Context, operation *state.Operation, failed bool, reason string) error {
 	if failed {
 		m.logger.Warn("a move failed", "operation", operation.ID, "stack", operation.Move.Stack,
 			"reason", cmp.Or(reason, operation.Error))
@@ -310,7 +304,7 @@ func downHost(copied *state.State, move *state.StackMove) (*state.Host, bool) {
 
 // abandon keeps the stack on its old host. If the old host is the one that
 // is down, the failover takes the stack once the host is fenced.
-func (m *mover) abandon(ctx context.Context, operation *state.Operation, reason string) error {
+func (m *Moves) abandon(ctx context.Context, operation *state.Operation, reason string) error {
 	if operation.Step >= state.MoveStopped {
 		return m.finish(ctx, operation, true, reason)
 	}

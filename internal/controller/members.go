@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/hostrole"
+	"github.com/webcodingcat/clowder/internal/passes"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -45,32 +46,40 @@ type memberStep struct {
 	voter bool
 }
 
-// RunMembers keeps Raft's members and the hosts' roles as the state wants
-// them while this agent leads, until ctx ends. raftAddress is a host's Raft
-// address.
-func RunMembers(ctx context.Context, cluster Cluster, members Members, propose Propose,
-	raftAddress func(state.HostID) string, self state.HostID, logger *slog.Logger,
-) {
-	for {
-		changed := cluster.Changed()
-		wait := interval
-		if cluster.IsLeader() {
-			step, err := tendMembers(ctx, cluster, members, propose, raftAddress, self)
-			switch {
-			case err != nil:
-				logger.Warn("keep Raft's members", "error", err)
-			case step.action != noMemberAction:
-				logger.Info("Raft's members change", "action", string(step.action), "host", step.host)
-				wait = 0 // the next change may follow at once
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-changed:
-		case <-time.After(wait):
-		}
+// Membership keeps Raft's members and the hosts' roles as the state wants
+// them.
+type Membership struct {
+	cluster Cluster
+	members Members
+	propose Propose
+	// raftAddress is a host's Raft address
+	raftAddress func(state.HostID) string
+	self        state.HostID
+	logger      *slog.Logger
+}
+
+// NewMembership creates the leader's membership keeper; Run runs it.
+func NewMembership(cluster Cluster, members Members, propose Propose, raftAddress func(state.HostID) string,
+	self state.HostID, logger *slog.Logger,
+) *Membership {
+	return &Membership{
+		cluster: cluster, members: members, propose: propose, raftAddress: raftAddress, self: self, logger: logger,
 	}
+}
+
+// Run keeps the members while this agent leads, until ctx ends.
+func (m *Membership) Run(ctx context.Context) {
+	runWhileLeading(ctx, m.cluster, passes.Interval, func(ctx context.Context) time.Duration {
+		step, err := tendMembers(ctx, m.cluster, m.members, m.propose, m.raftAddress, m.self)
+		switch {
+		case err != nil:
+			m.logger.Warn("keep Raft's members", "error", err)
+		case step.action != noMemberAction:
+			m.logger.Info("Raft's members change", "action", string(step.action), "host", step.host)
+			return 0 // the next change may follow at once
+		}
+		return passes.Interval
+	}, nil)
 }
 
 func tendMembers(ctx context.Context, cluster Cluster, members Members, propose Propose,

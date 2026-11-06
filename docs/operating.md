@@ -137,9 +137,9 @@ instead of skipping it, but this does not make mixing minor versions safe.
   registry logins of the stacks that run on it, and the certificates' keys while it holds
   the Floating IP, and nothing else.
 - A removed control-plane host keeps these keys. If it kept its disk, it can still issue
-  certificates that the revocations do not name. Wipe a removed host's disk. A new
-  sealing key would need every file sealed anew with `secret rekey`; there is no key
-  rotation yet. A removed worker holds no keys: revoking its certificate is enough.
+  certificates that the revocations do not name. Delete a removed host's server, or wipe
+  its disk; clowder does not rotate its keys. A removed worker holds no keys: revoking its
+  certificate is enough.
 - The CLI checks an agent's certificate against the CA, not against the revocations. So a
   removed host could answer the CLI as the cluster, with a sealing key of its own for
   `secret seal`, or take the values of `create secret` and of a `Secret` in clear. Remove

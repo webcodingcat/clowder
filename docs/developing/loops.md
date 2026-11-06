@@ -4,7 +4,7 @@ Part of [DEVELOPING.md](../../DEVELOPING.md). This file covers Traefik, which ru
 host, and the leader's loops that talk to the outside world: Hetzner Cloud (Floating IP,
 fencing), ACME and the alert channels.
 
-## Traefik (`internal/ingress`, `agent/traefik.go`)
+## Traefik (`internal/ingress`, `clowderd/daemon/traefik.go`)
 
 - Every agent runs Traefik (`ingress.Image`, pinned) as the Compose project
   `clowder-traefik` in the host network. Like every container, it has `restart: "no"`.
@@ -109,7 +109,7 @@ calls Hetzner's API directly, with no abstraction layer.
 - `hetzner/hetznertest` fakes the API (servers, Floating IPs, instant power actions,
   labels) and records what the requests changed. A test puts its URL in `hetzner.api`, so
   the real client talks to it.
-- **Floating IP.** `controller.RunFloatingIP` (`floatingip.go`) runs only on the
+- **Floating IP.** `controller.FloatingIP` (`floatingip.go`) runs only on the
   leader. It picks the ingress host (`State.Ingress`, `set-ingress`) among the active hosts
   with the role `ingress`. It keeps the recorded ingress host while that host is active, so
   the Floating IP never moves back by itself. Otherwise it takes the first host in
@@ -142,19 +142,19 @@ calls Hetzner's API directly, with no abstraction layer.
 
   On the Floating IP, ports 80 and 443 belong to Traefik.
 
-## Fencing (`controller/health.go`, `controller/fencing.go`, `agent/health.go`)
+## Fencing (`controller/health.go`, `controller/fencing.go`, `clowderd/daemon/health.go`)
 
 When a host fails, the leader powers it off through Hetzner's API before any of its stacks
 or volumes start elsewhere. Until then the failed host is the only one that runs them, and
 it may still write.
 
 - **Beats.** Every agent tells every voter every `BeatInterval` that it is alive
-  (`sendBeats`, `POST /v1/internal/beats`). It starts at agent start, before its state has
+  (`beatSender`, `POST /v1/internal/beats`). It starts at agent start, before its state has
   caught up: a beat says that the agent runs, not what it runs. Beats are not in the Raft
   log. Each voter keeps the last beat of each host in memory (`controller.Heard`); after its
   own start it counts from that start. Since every voter has the beats, a new leader knows
   at once how long each host has been silent.
-- **Failed** (`fencer.watch`). A host that is active, draining or recovering becomes
+- **Failed** (`Fencing.watch`). A host that is active, draining or recovering becomes
   `failed` when a majority of the voters has not heard from it for `FailAfter`. The leader
   counts itself and asks the others with `GET /v1/internal/beats/{id}` (`askTimeout` each).
   A voter that does not answer, and the host itself, always count against the change. So a
@@ -169,7 +169,7 @@ it may still write.
   without the worker role), or for one whose stacks no other worker could take. Such a host
   stays failed, with its alert, and becomes active again once a majority hears it. A
   control-plane host is never fenced for its vote: it keeps it while it is down.
-- **Fenced** (`fencer.fence`, `fencer.step`). The leader starts a fence-host operation for
+- **Fenced** (`Fencing.fence`, `Fencing.step`). The leader starts a fence-host operation for
   each failed host that may be fenced (`whyNotFence`). A host may be fenced when:
   - a configuration names the Hetzner token;
   - Hetzner has confirmed the host's server;
@@ -191,9 +191,9 @@ it may still write.
   `failed`, the operation fails, and the alert `fencing-blocked` is raised. A user can then
   run `clowder host fence-confirm` to state that the server is off. The operation ends once
   the host's stacks run elsewhere, or after `StepTime`.
-- **Back** (`fencer.powerOn`, `agent/recovery.go`). A fenced host whose operation is over is
-  powered on, once per fence and leader, if Hetzner confirmed its server (otherwise, after
-  a `fence-confirm`, the user powers it on). The host boots and starts nothing: no
+- **Back** (`Fencing.powerOn`, `clowderd/daemon/backfromfence.go`). A fenced host whose operation
+  is over is powered on, once per fence and leader, if Hetzner confirmed its server
+  (otherwise, after a `fence-confirm`, the user powers it on). The host boots and starts nothing: no
   container runs after a boot, and `stacks.Runner` starts none on a host that is not
   `KeepsStacks`. It catches up with the leader
   ([Raft](cluster.md#raft-internalraftnode-and-the-data-key-internaldatakey)) and reports
@@ -211,7 +211,7 @@ it may still write.
 
 ## Certificates of the routes (`controller/acme.go`)
 
-- `controller.RunACME` runs only on the leader and uses `golang.org/x/crypto/acme`. It runs
+- `controller.ACME` runs only on the leader and uses `golang.org/x/crypto/acme`. It runs
   at each change of the state and every 30 s. It keeps one certificate per domain of an
   HTTP route (`State.Certificates`, key encrypted). It deletes the certificates of domains
   that no stack names.
@@ -331,13 +331,13 @@ of them alerts nobody, and the voters see it fail. Once it has had no Raft leade
 every `remindEvery`, and the all-clear once a leader is back. It keeps what it has sent in
 memory, not in the state, so an agent that restarts without a leader sends the alert again.
 
-## Metrics (`internal/metrics`, `agent/metrics.go`)
+## Metrics (`internal/metrics`, `clowderd/daemon/metrics.go`)
 
 - Every agent serves `/metrics` on its node address, port 7444 (`MetricsPort`), over plain
   HTTP without authentication. Only the cluster's hosts reach the node address, through
   WireGuard; containers do not (the nft table blocks them). No setting changes this.
 - `internal/metrics` writes Prometheus' text format by hand, sorted, so it can be tested
-  against golden files (`agent/testdata/metrics-*.golden.txt`). The official client
+  against golden files (`clowderd/daemon/testdata/metrics-*.golden.txt`). The official client
   library would pull more into clowderd than a few dozen values need.
 - Each agent exports values about its own host: its phase and whether it leads, the Raft
   index, the pools' use, Docker, the root file system, the containers of its stacks by

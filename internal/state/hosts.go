@@ -377,18 +377,20 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), err
 	if err := s.checkUnlocked(HostLock(host.ID), payload.Operation); err != nil {
 		return nil, err
 	}
+	// each check below runs on its own, so a new one cannot hide another
 	who, allowed := phaseChanges[host.Phase][payload.Phase]
-	switch {
-	case payload.Leaving && payload.Phase != Draining:
-		return nil, fmt.Errorf("host %s: only a draining host leaves", host.Name)
-	case payload.Leaving:
+	if payload.Leaving {
+		if payload.Phase != Draining {
+			return nil, fmt.Errorf("host %s: only a draining host leaves", host.Name)
+		}
 		// a remove of a host that still has stacks or copies: it may go
 		// as soon as they have moved
 		if err := s.checkMayGo(host); err != nil {
 			return nil, err
 		}
 		allowed = allowed || host.Phase == Draining
-	case payload.Phase == Removed:
+	}
+	if payload.Phase == Removed {
 		if err := s.checkRemoval(host); err != nil {
 			return nil, err
 		}
@@ -397,17 +399,20 @@ func applySetHostPhase(s *State, cmd Command, payload SetHostPhase) (func(), err
 	if !allowed {
 		return nil, fmt.Errorf("host %s cannot go from %s to %s", host.Name, host.Phase, payload.Phase)
 	}
-	fromHost := IsHostActor(cmd.Actor)
-	switch {
-	case who == byTheHost && cmd.Actor != HostActor(host.ID):
+	// who may make the change
+	if who == byTheHost && cmd.Actor != HostActor(host.ID) {
 		return nil, fmt.Errorf("only host %s itself reports %s", host.Name, payload.Phase)
-	case who == byLeaderOrCLI && fromHost:
+	}
+	if who == byLeaderOrCLI && IsHostActor(cmd.Actor) {
 		return nil, fmt.Errorf("%s cannot move host %s to %s; only the leader or the CLI does", cmd.Actor, host.Name, payload.Phase)
-	case host.Phase == Recovering && payload.Phase == Active:
+	}
+	// what the change needs
+	if host.Phase == Recovering && payload.Phase == Active {
 		if err := s.checkCaughtUp(host); err != nil {
 			return nil, err
 		}
-	case host.Phase == Fencing && (s.FenceOf(host.ID) == nil || s.FenceOf(host.ID).ID != payload.Operation):
+	}
+	if host.Phase == Fencing && (s.FenceOf(host.ID) == nil || s.FenceOf(host.ID).ID != payload.Operation) {
 		return nil, fmt.Errorf("host %s is fencing; only its fence-host operation moves it on", host.Name)
 	}
 	return func() {

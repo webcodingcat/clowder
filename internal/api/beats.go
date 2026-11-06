@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -38,34 +37,4 @@ func (s *Server) localSilence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, Silence{SilentFor: s.config.Beats.Silence(state.HostID(number))})
-}
-
-// Beat tells a voter that this host is alive.
-func (s *Server) Beat(ctx context.Context, voter state.HostID) error {
-	url := "https://" + s.config.APIAddress(voter) + "/v1/internal/beats"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
-	if err != nil {
-		return fmt.Errorf("beat to host %d: %w", voter, err)
-	}
-	request.Header.Set(VersionHeader, s.config.Version)
-	if err := send(s.forwarder, request, nil); err != nil {
-		return fmt.Errorf("beat to host %d: %w", voter, err)
-	}
-	return nil
-}
-
-// AskSilence asks a voter how long it has not heard from a host
-// (controller.AskSilence).
-func (s *Server) AskSilence(ctx context.Context, voter, host state.HostID) (time.Duration, error) {
-	url := fmt.Sprintf("https://%s/v1/internal/beats/%d", s.config.APIAddress(voter), host)
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return 0, fmt.Errorf("ask host %d about host %d: %w", voter, host, err)
-	}
-	request.Header.Set(VersionHeader, s.config.Version)
-	var answer Silence
-	if err := send(s.forwarder, request, &answer); err != nil {
-		return 0, fmt.Errorf("ask host %d about host %d: %w", voter, host, err)
-	}
-	return answer.SilentFor, nil
 }

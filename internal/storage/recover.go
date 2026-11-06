@@ -6,7 +6,19 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+
+	"github.com/webcodingcat/clowder/internal/state"
 )
+
+// Peers turns host IDs into DRBD's node-ids, which are the same numbers
+// (RenderResource), for DropPeers.
+func Peers(hosts []state.HostID) []int {
+	peers := make([]int, 0, len(hosts))
+	for _, id := range hosts {
+		peers = append(peers, int(id))
+	}
+	return peers
+}
 
 // DiskStates returns DRBD's disk state (DiskUpToDate, ...) of each resource
 // that is up on this host, by its name, for clowderd recover. It reads the

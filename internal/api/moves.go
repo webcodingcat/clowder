@@ -69,19 +69,3 @@ func (s *Server) localProgress(w http.ResponseWriter, _ *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, s.config.Volumes.Progress())
 }
-
-// Progress asks a host how far its copies have synced
-// (controller.Progress).
-func (s *Server) Progress(ctx context.Context, host state.HostID) (map[string]int64, error) {
-	url := "https://" + s.config.APIAddress(host) + "/v1/internal/volumes/progress"
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("ask host %d how far its copies are: %w", host, err)
-	}
-	request.Header.Set(VersionHeader, s.config.Version)
-	var progress map[string]int64
-	if err := send(s.forwarder, request, &progress); err != nil {
-		return nil, fmt.Errorf("ask host %d how far its copies are: %w", host, err)
-	}
-	return progress, nil
-}

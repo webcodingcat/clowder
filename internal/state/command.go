@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/webcodingcat/clowder/internal/buildinfo"
 )
 
 // CommandVersion is the format of the commands that this build writes.
@@ -96,48 +94,43 @@ func NewCommand(kind string, at time.Time, actor string, payload any) (Command, 
 // trace (docs/developing/state.md, Rules).
 type handler func(s *State, cmd Command) (change func(), err error)
 
-// commandKind says how Apply runs one kind of command, and which release
-// introduced the kind. The leader writes a kind only once every agent can
-// read it (State.CheckKnown).
-type commandKind struct {
-	since string
-	apply handler
-}
-
-var commandKinds = map[string]commandKind{
-	KindBootstrap:            {"0.1.0", decoded(applyBootstrap)},
-	KindSetHostPhase:         {"0.1.0", decoded(applySetHostPhase)},
-	KindReportHost:           {"0.1.0", decoded(applyReportHost)},
-	KindSetIngress:           {"0.1.0", decoded(applySetIngress)},
-	KindPutACMEAccount:       {"0.1.0", decoded(applyPutACMEAccount)},
-	KindPutACMEChallenge:     {"0.1.0", decoded(applyPutACMEChallenge)},
-	KindDeleteACMEChallenge:  {"0.1.0", decoded(applyDeleteACMEChallenge)},
-	KindPutCertificate:       {"0.1.0", decoded(applyPutCertificate)},
-	KindDeleteCertificate:    {"0.1.0", decoded(applyDeleteCertificate)},
-	KindSetCLICutoff:         {"0.2.0", decoded(applySetCLICutoff)},
-	KindChangeResources:      {"0.2.0", decoded(applyChangeResources)},
-	KindRestartStack:         {"0.1.0", decoded(applyRestartStack)},
-	KindSetStackStatus:       {"0.1.0", decoded(applySetStackStatus)},
-	KindSetStackWaitReason:   {"0.1.0", decoded(applySetStackWaitReason)},
-	KindSetPushedOut:         {"0.1.0", decoded(applySetPushedOut)},
-	KindPutAlert:             {"0.1.0", decoded(applyPutAlert)},
-	KindResolveAlert:         {"0.1.0", decoded(applyResolveAlert)},
-	KindPutVolume:            {"0.1.0", decoded(applyPutVolume)},
-	KindForgetCopy:           {"0.1.0", decoded(applyForgetCopy)},
-	KindSetVolumeInitialized: {"0.2.0", decoded(applySetVolumeInitialized)},
-	KindStartOperation:       {"0.2.0", decoded(applyStartOperation)},
-	KindAdvanceOperation:     {"0.2.0", decoded(applyAdvanceOperation)},
-	KindFinishOperation:      {"0.2.0", decoded(applyFinishOperation)},
-	KindAddJoinToken:         {"0.2.0", decoded(applyAddJoinToken)},
-	KindAddHost:              {"0.2.0", decoded(applyAddHost)},
-	KindConfirmServer:        {"0.2.0", decoded(applyConfirmServer)},
-	KindSetHostVoter:         {"0.2.0", decoded(applySetHostVoter)},
-	KindReportPeerForgotten:  {"0.2.0", decoded(applyReportPeerForgotten)},
-	KindSetCopySynced:        {"0.2.0", decoded(applySetCopySynced)},
-	KindExtendOperation:      {"0.2.0", decoded(applyExtendOperation)},
-	KindRollBackOperation:    {"0.2.0", decoded(applyRollBackOperation)},
-	KindRequestMove:          {"0.2.0", decoded(applyRequestMove)},
-	KindRecoverRemap:         {"0.2.0", decoded(applyRecoverRemap)},
+// commandKinds are the kinds of commands that this build reads, each with
+// its handler. A patch release adds no kind (docs/developing/state.md,
+// Versions).
+var commandKinds = map[string]handler{
+	KindBootstrap:            decoded(applyBootstrap),
+	KindSetHostPhase:         decoded(applySetHostPhase),
+	KindReportHost:           decoded(applyReportHost),
+	KindSetIngress:           decoded(applySetIngress),
+	KindPutACMEAccount:       decoded(applyPutACMEAccount),
+	KindPutACMEChallenge:     decoded(applyPutACMEChallenge),
+	KindDeleteACMEChallenge:  decoded(applyDeleteACMEChallenge),
+	KindPutCertificate:       decoded(applyPutCertificate),
+	KindDeleteCertificate:    decoded(applyDeleteCertificate),
+	KindSetCLICutoff:         decoded(applySetCLICutoff),
+	KindChangeResources:      decoded(applyChangeResources),
+	KindRestartStack:         decoded(applyRestartStack),
+	KindSetStackStatus:       decoded(applySetStackStatus),
+	KindSetStackWaitReason:   decoded(applySetStackWaitReason),
+	KindSetPushedOut:         decoded(applySetPushedOut),
+	KindPutAlert:             decoded(applyPutAlert),
+	KindResolveAlert:         decoded(applyResolveAlert),
+	KindPutVolume:            decoded(applyPutVolume),
+	KindForgetCopy:           decoded(applyForgetCopy),
+	KindSetVolumeInitialized: decoded(applySetVolumeInitialized),
+	KindStartOperation:       decoded(applyStartOperation),
+	KindAdvanceOperation:     decoded(applyAdvanceOperation),
+	KindFinishOperation:      decoded(applyFinishOperation),
+	KindAddJoinToken:         decoded(applyAddJoinToken),
+	KindAddHost:              decoded(applyAddHost),
+	KindConfirmServer:        decoded(applyConfirmServer),
+	KindSetHostVoter:         decoded(applySetHostVoter),
+	KindReportPeerForgotten:  decoded(applyReportPeerForgotten),
+	KindSetCopySynced:        decoded(applySetCopySynced),
+	KindExtendOperation:      decoded(applyExtendOperation),
+	KindRollBackOperation:    decoded(applyRollBackOperation),
+	KindRequestMove:          decoded(applyRequestMove),
+	KindRecoverRemap:         decoded(applyRecoverRemap),
 }
 
 // decoded turns a function that takes a typed payload into a handler. It
@@ -180,7 +173,7 @@ func (s *State) ApplyEntry(index uint64, data []byte) ([]Change, error) {
 // command that this agent cannot read (ErrUnreadable) leaves the index
 // unchanged too.
 func (s *State) Apply(index uint64, cmd Command) ([]Change, error) {
-	kind, err := readable(cmd)
+	apply, err := readable(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("the command at index %d: %w", index, err)
 	}
@@ -190,7 +183,7 @@ func (s *State) Apply(index uint64, cmd Command) ([]Change, error) {
 		return nil, fmt.Errorf("%s: %w", cmd.Kind, ErrNotBootstrapped)
 	}
 	s.makeMaps()
-	change, err := kind.apply(s, cmd)
+	change, err := apply(s, cmd)
 	switch {
 	case errors.Is(err, errUnchanged):
 		// no audit entry: a GitOps loop applies the same files every few
@@ -212,54 +205,26 @@ func (s *State) Apply(index uint64, cmd Command) ([]Change, error) {
 
 // readable returns how to apply a command whose version and kind this agent
 // reads, or else an ErrUnreadable.
-func readable(cmd Command) (commandKind, error) {
+func readable(cmd Command) (handler, error) {
 	if cmd.Version < max(1, CommandVersion-1) || cmd.Version > CommandVersion {
-		return commandKind{}, fmt.Errorf("%s: command version %d is %w (it reads %d)",
+		return nil, fmt.Errorf("%s: command version %d is %w (it reads %d)",
 			cmd.Kind, cmd.Version, ErrUnreadable, CommandVersion)
 	}
-	kind, ok := commandKinds[cmd.Kind]
+	apply, ok := commandKinds[cmd.Kind]
 	if !ok {
-		return commandKind{}, fmt.Errorf("unknown command %q: %w", cmd.Kind, ErrUnreadable)
+		return nil, fmt.Errorf("unknown command %q: %w", cmd.Kind, ErrUnreadable)
 	}
-	return kind, nil
+	return apply, nil
 }
 
-// ErrNotReadByAll is CheckKnown's error for a kind that some agent of the
-// cluster may not read yet. It is not a refusal: the command may commit
-// later, once every agent runs the release that introduced the kind.
-var ErrNotReadByAll = errors.New("not every agent reads it yet")
-
-// CheckKnown returns ErrNotReadByAll while the oldest agent (MinVersion)
-// may not read a kind of command yet, because an agent stops at an entry
-// that it cannot read.
-func (s *State) CheckKnown(kind string) error {
-	known, ok := commandKinds[kind]
-	if !ok {
+// CheckKnown returns an error for a kind of command that this build does
+// not read. The leader checks before it writes, because every agent stops
+// at an entry that it cannot read.
+func CheckKnown(kind string) error {
+	if _, ok := commandKinds[kind]; !ok {
 		return fmt.Errorf("unknown command %q", kind)
 	}
-	if oldest := s.MinVersion(); oldest != "" && !buildinfo.Includes(oldest, known.since) {
-		return fmt.Errorf("%s: %w: it came with %s, the oldest agent runs %s",
-			kind, ErrNotReadByAll, known.since, oldest)
-	}
 	return nil
-}
-
-// MinVersion is the oldest release that an agent of the cluster runs, or
-// empty if no agent counts. Removed hosts, hosts that have not reported a
-// version yet, and development builds (which read every kind of their code)
-// do not count. A joined host that cannot read a kind written before its
-// first report stops at it.
-func (s *State) MinVersion() string {
-	var oldest string
-	for _, host := range s.Hosts {
-		if host.Phase == Removed || host.Version == "" || buildinfo.IsDevelopment(host.Version) {
-			continue
-		}
-		if oldest == "" || buildinfo.Compare(host.Version, oldest) < 0 {
-			oldest = host.Version
-		}
-	}
-	return oldest
 }
 
 // CommandError is a command that its handler refused. It holds the

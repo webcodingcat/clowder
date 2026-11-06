@@ -94,8 +94,8 @@ func (c Config) WithDefaults() Config {
 // without resources.reserve. DefaultSystemReserve is what a host keeps for
 // itself (the system, Docker, clowderd, Traefik).
 var (
-	DefaultReservations  = Resources{Memory: "128M", CPUs: "0.1"}
-	DefaultSystemReserve = Resources{Memory: "512M", CPUs: "0.25"}
+	DefaultReservations  = Resources{Memory: "128M", CPUs: 0.1}
+	DefaultSystemReserve = Resources{Memory: "512M", CPUs: 0.25}
 )
 
 // DefaultResyncRate is how fast a copy resyncs when the configuration has
@@ -106,7 +106,7 @@ func (r Resources) withDefaults(defaults Resources) Resources {
 	if r.Memory == "" {
 		r.Memory = defaults.Memory
 	}
-	if r.CPUs == "" {
+	if r.CPUs == 0 {
 		r.CPUs = defaults.CPUs
 	}
 	return r
@@ -185,10 +185,11 @@ type Defaults struct {
 	Reservations Resources `json:"reservations,omitzero"`
 }
 
-// Resources are memory (such as "128M") and CPUs (such as "0.1").
+// Resources are memory (such as "128M") and CPUs (such as 0.1). Zero CPUs
+// means the default, as an empty memory does.
 type Resources struct {
-	Memory string `json:"memory,omitempty"`
-	CPUs   string `json:"cpus,omitempty"`
+	Memory string  `json:"memory,omitempty"`
+	CPUs   float64 `json:"cpus,omitempty"`
 }
 
 // Alerts are the channels and the optional heartbeat.
