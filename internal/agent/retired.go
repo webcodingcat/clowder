@@ -3,13 +3,12 @@ package agent
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/controller"
 	"github.com/webcodingcat/clowder/internal/pki"
-	"github.com/webcodingcat/clowder/internal/raftnode"
+	"github.com/webcodingcat/clowder/internal/state"
 )
 
 // ErrRetired ends the agent of a host that clowderd recover took out of the
@@ -38,11 +37,7 @@ const retiredCheckTimeout = 20 * time.Second
 // host must not stay down because of an outage at Hetzner, and a retired
 // host only does harm if it is switched on while the API is down, together
 // with another retired host.
-func checkRetired(ctx context.Context, files Files, host Host, credentials credentials, logger *slog.Logger) error {
-	current, err := raftnode.ReadState(files.raftDir())
-	if err != nil {
-		return fmt.Errorf("read the state before the start: %w", err)
-	}
+func checkRetired(ctx context.Context, current *state.State, host Host, credentials credentials, logger *slog.Logger) error {
 	if !current.Configured() {
 		return nil
 	}

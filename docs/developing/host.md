@@ -55,35 +55,42 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   ([Recover](cluster.md#recover-clowderd-recover-agentrecovergo)). It stops the agent while
   it works on Raft's files and starts it again when it is done.
 - **`clowderd run`** (the service) starts in this order:
-  1. It asks Hetzner whether `clowderd recover` retired this host (`checkRetired`). A host
+  1. It reads the state that its Raft log on disk holds (`raftnode.ReadState`) and checks
+     that `host.json`, the host's certificate and that state name the same roles
+     (`Host.checkRoles`; a state that does not know the host yet is not compared). The API
+     checks callers by their certificates, while the loops read `host.json` and the state,
+     so the agent does not start while they differ; they differ only after a change by
+     hand.
+  2. It asks Hetzner whether `clowderd recover` retired this host (`checkRetired`). A host
      is retired when the label `clowder-retired` of its server names the host's
      certificate ([Recover](cluster.md#recover-clowderd-recover-agentrecovergo)). The
-     agent asks with the token from the state that its Raft log on disk holds
-     (`raftnode.ReadState`). A retired server's agent ends with `ErrRetired`, exit status
+     agent asks with the token from that state on disk. A retired server's agent ends with `ErrRetired`, exit status
      4, before it starts Raft, the mesh or any stack, because two retired hosts would
      still hold the old cluster's majority. A cluster without a ClusterConfiguration has
      no token to ask with. A host whose API call does not return within
      `retiredCheckTimeout` starts as before.
-  2. It sets up `clowder0` with the node address. This is a dummy interface, so the
+  3. It sets up `clowder0` with the node address. This is a dummy interface, so the
      address exists even on a host without peers. Then it restores the WireGuard mesh from
      `net.json` (`restoreMesh`). Raft runs over the mesh, so after a reboot a host would
      otherwise have to learn its peers from a leader that it cannot reach without them.
      The mesh from the state replaces it once the state answers.
-  3. It starts the Raft member, which waits up to `catchUpTimeout` for its state to catch
+  4. It starts the Raft member, which waits up to `catchUpTimeout` for its state to catch
      up with the Raft log. If the state has met an entry or snapshot it cannot read by
      then, the agent ends here, before its loops start. A follower may meet such an entry
      later, as it applies the leader's log.
-  4. It starts the containers' DNS resolver.
-  5. `newDaemon` creates the parts, each from what they all share (`shared`: the files,
+  5. It starts the containers' DNS resolver.
+  6. `newDaemon` creates the parts, each from what they all share (`shared`: the files,
      this host, its keys, the Raft member, the host's parts, the logger). Then it starts
-     the API, once each on the underlay, the node address and the public address. It
+     the API, once each on the underlay, the node address and, on a control-plane host,
+     the public address (`Host.apiAddresses`). A host without the control plane serves
+     only the control plane, which reaches it over the private network. It
      binds them with `IP_FREEBIND` (`freeBind`), because at boot the public address may
      come up after the agent, and the agent must neither fail nor lock users out then.
      Then it starts the server for ACME's challenges and the metrics. If any of them cannot
      listen, the agent ends before it has started any container. Once they serve, only a
      failing API ends the agent. Without the other two the host still runs its stacks, so
      their failure is only logged.
-  6. It starts the loops (`startLoops`):
+  7. It starts the loops (`startLoops`):
      - this host's loops that start no container: the network, the supervisor, and the
        beats to the voters;
      - the leader's loops, which do nothing while this host does not lead;
@@ -94,7 +101,7 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
        report of a host that is back after a fence (`reportRecovery`), and the stack
        runner. They wait because a host that was away must not start a stack that moved
        in the meantime.
-  7. It tells systemd `READY=1` and feeds the watchdog as long as the state's lock
+  8. It tells systemd `READY=1` and feeds the watchdog as long as the state's lock
      answers.
 
   When the agent stops, it ends its loops and waits for them, at most `loopsTimeout`,
@@ -491,7 +498,7 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   copies that give up their changes (`--discard-my-data`) must be secondary. A human
   decides which copy is kept. `clowder volume resolve-splitbrain <volume> --keep <host>`
   asks the hosts that give up their changes first, then the host to keep and the
-  tiebreaker, through any agent (`api/splitbrain.go`). It refuses while the stack runs on a
+  tiebreaker, through any control-plane agent (`api/splitbrain.go`). It refuses while the stack runs on a
   host other than the one kept.
 
 ## Containers (`internal/docker`, `internal/supervisor`)

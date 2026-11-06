@@ -131,7 +131,8 @@ func (f *fakeCluster) setIndex(index uint64) {
 }
 
 // testCluster is a CA, a bootstrapped state with hosts 0 and 1, and an API
-// server per host: host 0 leads.
+// server per host 0, 1 and 2: host 0 leads, host 2 is a worker (rolesOf)
+// that the state does not know unless a test adds it.
 type testCluster struct {
 	t        *testing.T
 	ca       *pki.CA
@@ -183,7 +184,7 @@ func newCatchingUpCluster(t *testing.T) *testCluster {
 		t.Fatal(err)
 	}
 	addresses := map[state.HostID]string{}
-	for id := range state.HostID(2) {
+	for id := range state.HostID(3) {
 		cluster := newFakeCluster(t, id == 0)
 		cluster.state.Keys.SealingKey = sealingKey
 		health := &fakeHealth{beats: map[state.HostID]int{}}
@@ -192,7 +193,7 @@ func newCatchingUpCluster(t *testing.T) *testCluster {
 		c.volumes = append(c.volumes, volumes)
 		server := httptest.NewUnstartedServer(nil)
 		api := NewServer(ServerConfig{
-			Cluster: cluster, CA: ca.Certificate, Certificate: c.hostCertificate(id), HostID: id,
+			Cluster: cluster, CA: ca.Certificate, Certificate: c.hostCertificate(id), Roles: rolesOf(id), HostID: id,
 			APIAddress: func(id state.HostID) string { return addresses[id] },
 			Version:    testVersion,
 			Keys:       keys,
@@ -261,9 +262,21 @@ func (c *testCluster) certificate(issue func(public ed25519.PublicKey) ([]byte, 
 	return tls.Certificate{Certificate: [][]byte{leaf.Raw}, PrivateKey: key, Leaf: leaf}
 }
 
+// workerHost is the test cluster's host without the control plane.
+const workerHost state.HostID = 2
+
+// rolesOf gives a host of the test cluster its roles: hosts 0 and 1 have
+// every role, host 2 is a worker with ingress.
+func rolesOf(id state.HostID) hostrole.Set {
+	if id == workerHost {
+		return hostrole.DefaultJoin
+	}
+	return hostrole.DefaultInit
+}
+
 func (c *testCluster) hostCertificate(id state.HostID) tls.Certificate {
 	return c.certificate(func(public ed25519.PublicKey) ([]byte, error) {
-		return c.ca.IssueHost(public, int(id), hostrole.DefaultInit, []netip.Addr{netip.MustParseAddr("127.0.0.1")}, time.Now())
+		return c.ca.IssueHost(public, int(id), rolesOf(id), []netip.Addr{netip.MustParseAddr("127.0.0.1")}, time.Now())
 	})
 }
 
@@ -420,52 +433,73 @@ func TestInternalStackRoutesTakeOnlyStackNames(t *testing.T) {
 
 func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 	cluster := newTestCluster(t)
+	cluster.clusters[0].Read(func(current *state.State) {
+		current.Hosts[workerHost] = &state.Host{ID: workerHost, Name: "node2", Roles: rolesOf(workerHost), Phase: state.Active}
+	})
+	// to the leader, as hosts forward with their own certificate
 	host1 := cluster.client(cluster.hostCertificate(1), testVersion, 0)
+	worker := cluster.client(cluster.hostCertificate(workerHost), testVersion, 0)
 	tests := []struct {
 		name    string
+		from    *Client
 		kind    string
 		actor   string
 		payload any
 		allowed bool
 	}{
 		{
-			"its own version", state.KindReportHost, state.HostActor(1),
+			"its own version", host1, state.KindReportHost, state.HostActor(1),
 			state.ReportHost{Host: 1, Version: testVersion},
 			true,
 		},
 		{
-			"the CLI's write it forwards", state.KindSetHostPhase, state.CLIActor("alice"),
+			"the CLI's write it forwards", host1, state.KindSetHostPhase, state.CLIActor("alice"),
 			state.SetHostPhase{Host: 1, Phase: state.Active},
 			true,
 		},
 		{
-			"another host's version", state.KindReportHost, state.HostActor(0),
+			"another host's version", host1, state.KindReportHost, state.HostActor(0),
 			state.ReportHost{Host: 0, Version: "9.9.9"},
 			false,
 		},
 		{
-			"its own cutoff of the CLI certificates", state.KindSetCLICutoff, state.HostActor(1),
+			"its own cutoff of the CLI certificates", host1, state.KindSetCLICutoff, state.HostActor(1),
 			state.SetCLICutoff{Cutoff: time.Now()},
 			true,
 		},
 		{
-			"another host's cutoff", state.KindSetCLICutoff, state.HostActor(0),
+			"another host's cutoff", host1, state.KindSetCLICutoff, state.HostActor(0),
 			state.SetCLICutoff{Cutoff: time.Now()},
 			false,
 		},
 		{
-			"a command as the leader", state.KindAddJoinToken, state.LeaderActor,
+			"a command as the leader", host1, state.KindAddJoinToken, state.LeaderActor,
 			state.AddJoinToken{},
 			false,
 		},
 		{
-			"the CLI's write as itself", state.KindAddJoinToken, state.HostActor(1),
+			"the CLI's write as itself", host1, state.KindAddJoinToken, state.HostActor(1),
 			state.AddJoinToken{},
 			false,
 		},
 		{
-			"the leader's own work for the CLI", state.KindSetIngress, state.CLIActor("alice"),
+			"the leader's own work for the CLI", host1, state.KindSetIngress, state.CLIActor("alice"),
 			state.SetIngress{Host: 0},
+			false,
+		},
+		{
+			"a worker's own version", worker, state.KindReportHost, state.HostActor(workerHost),
+			state.ReportHost{Host: workerHost, Version: testVersion},
+			true,
+		},
+		{
+			"the CLI's write from a worker", worker, state.KindSetHostPhase, state.CLIActor("alice"),
+			state.SetHostPhase{Host: 1, Phase: state.Active},
+			false,
+		},
+		{
+			"a worker's cutoff of the CLI certificates", worker, state.KindSetCLICutoff, state.HostActor(workerHost),
+			state.SetCLICutoff{Cutoff: time.Now()},
 			false,
 		},
 	}
@@ -475,7 +509,7 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = host1.Post(context.Background(), "/v1/internal/propose", cmd)
+			_, err = test.from.Post(context.Background(), "/v1/internal/propose", cmd)
 			switch {
 			case test.allowed && err != nil:
 				t.Errorf("refused: %v", err)

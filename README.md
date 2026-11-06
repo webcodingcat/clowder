@@ -120,9 +120,10 @@ tofu apply ... -var 'hosts=["clowder1", "clowder2"]' \
 
 The second control-plane host runs stacks (if it is a worker) but does not vote. With the
 third, all three vote, and `clowder host remove` refuses to go below three control-plane
-hosts. A host's roles are fixed once it joins. The CLI reaches the cluster only
-through the `endpoints` of its context, so after joins fetch new credentials or add the
-new hosts' public addresses there. Give each cluster a Hetzner project of its own.
+hosts. A host's roles are fixed once it joins. Only control-plane hosts serve the CLI
+and the join; the others answer only the control plane, over the private network. The
+CLI reaches the cluster only through the `endpoints` of its context, so after joins fetch
+new credentials or add the new control-plane hosts' public addresses there. Give each cluster a Hetzner project of its own.
 
 When a host fails and Hetzner's API cannot power it off, an alert says so; once you know
 the server is off, `clowder host fence-confirm <host>` lets its stacks start elsewhere.

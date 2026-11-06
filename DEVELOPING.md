@@ -43,8 +43,8 @@ results of the phase 0 spike.
 ## The big picture
 
 ```
-user's machine                 any agent               leader                stack's host
-──────────────                 ─────────               ──────                ────────────
+user's machine                 any control-plane agent leader                stack's host
+──────────────                 ─────────────────────── ──────                ────────────
 clowder apply -f    ──mTLS──▶  API: read, encrypt ──▶ leader decides ──▶ Raft log ──▶ every agent's state
   (resources)                                            │
                                                          ▼
@@ -69,7 +69,7 @@ the rules.
    their names, and the resources in each file from top to bottom. A secret's values are in
    clear (a `Secret`) or sealed for the cluster (a `SealedSecret`). `api.Client.ApplyResources`
    sends the resources in that order in one request (`POST /v1/apply`).
-2. **Any agent takes the request.** `api/changes.go` `applyResources` turns each resource
+2. **Any control-plane agent takes the request.** `api/changes.go` `applyResources` turns each resource
    into a put (`putChange`). It reads the spec strictly. It opens a SealedSecret's values
    with the sealing key (`unsealSecret`), and it encrypts every secret's values with the
    data key (`encryptSecret`).
@@ -99,7 +99,7 @@ the rules.
 What follows from this:
 
 - `clowder get stacks` shows the stack. `clowder stack ps|logs shop` asks the stack's
-  host, through any agent.
+  host, through any control-plane agent.
 - A changed spec raises the stack's generation, and a running stack becomes `starting`
   again. It keeps its host; the placement adds only the volumes that the stack newly names.
   Compose recreates only the containers whose configuration or secrets changed.
@@ -157,9 +157,9 @@ More on some of these words:
   them in turn and learns no others.
 - **context**: like a context in a kubeconfig, it holds the endpoints, the CA, and the CLI's
   key and certificate. `current_context` picks one.
-- **role**: like a Kubernetes node role. A `control-plane` host may vote, lead and run
-  the host commands that need the cluster's keys (`clowderd credentials`,
-  `sealing-key`, `recover`). A `worker` runs stacks and holds volume copies with a disk.
+- **role**: like a Kubernetes node role. A `control-plane` host may vote, lead, serve
+  the CLI and the join, and run the host commands that need the cluster's keys
+  (`clowderd credentials`, `sealing-key`, `recover`). A `worker` runs stacks and holds volume copies with a disk.
   An `ingress` host may take the Floating IP. A tiebreaker needs no role. The join token
   names the roles a host may take, and the host's certificate names the roles it took.
 - **active, in service**: an active host takes stacks if it is a worker, and may vote if
@@ -171,10 +171,11 @@ More on some of these words:
 - **actor**: `<name>` is the name in the CLI's certificate (`state.CLIActor`,
   `state.IsCLIActor`). The cluster has no users: the name is for the audit and grants
   nothing. Whoever holds a CLI certificate controls the cluster, as with kubeadm's
-  `admin.conf`. A host is trusted as fully as the CLI. It holds the data key and the CA's
-  key, it forwards the CLI's commands with their actor (and could name another actor), and
-  it prints credentials for root (`clowderd credentials`). So a compromised host means a
-  compromised cluster.
+  `admin.conf`. A control-plane host is trusted as fully as the CLI: it forwards the CLI's
+  commands with their actor (and could name another actor), and it prints credentials for
+  root (`clowderd credentials`). A worker may act only for itself (cluster.md, Who may
+  call what). Every host still holds the data key and the CA's key, though, so for now a
+  compromised host of any role means a compromised cluster (the roadmap's Known gaps).
 - **channel, owner**: today the only channel is `cli` (`clowder apply`, whatever the
   certificate's name is); a GitOps source will come later. Only the owning channel changes a
   resource. The word `cli` names three separate things: this channel, the role of a CLI

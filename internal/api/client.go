@@ -38,7 +38,9 @@ type Client struct {
 }
 
 // NewClient connects with a certificate (the CLI's, or a host's for
-// clowderd's own commands) to the agents at endpoints.
+// clowderd's own commands) to the agents at endpoints. It takes only
+// control-plane hosts; a worker among the endpoints fails the handshake and
+// is skipped like an endpoint that cannot be reached.
 // An endpoint that has not connected within connectTimeout, or has not
 // finished TLS within the same time again, is skipped like an endpoint that
 // refused the connection. A host that is cut off drops the packets, and
@@ -47,7 +49,7 @@ type Client struct {
 func NewClient(endpoints []string, connectTimeout time.Duration, certificate tls.Certificate, ca *x509.Certificate,
 	version string,
 ) *Client {
-	transport := endpointTransport(pki.ClientTLSToHosts(certificate, ca, nil), connectTimeout)
+	transport := endpointTransport(pki.ClientTLSToControlPlane(certificate, ca, nil), connectTimeout)
 	return &Client{
 		endpoints: endpoints,
 		version:   version,

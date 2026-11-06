@@ -43,14 +43,6 @@ resource "hcloud_firewall" "host" {
     source_ips  = var.admin_cidrs
   }
 
-  rule {
-    description = "clowder's API"
-    direction   = "in"
-    protocol    = "tcp"
-    port        = "7443"
-    source_ips  = var.admin_cidrs
-  }
-
   # Traefik on the Floating IP; the ACME CA validates its challenges over
   # HTTP from anywhere
   rule {
@@ -81,6 +73,21 @@ resource "hcloud_firewall" "host" {
   }
 }
 
+# clowder's API, on the control-plane hosts only: they serve the CLI, while
+# a host without the control plane serves only the control plane, over the
+# private network.
+resource "hcloud_firewall" "api" {
+  name = "${var.name}-api"
+
+  rule {
+    description = "clowder's API"
+    direction   = "in"
+    protocol    = "tcp"
+    port        = "7443"
+    source_ips  = var.admin_cidrs
+  }
+}
+
 # Created apart from the server and attached later, so the server's user data
 # can name the Floating IP and the volumes without a dependency cycle.
 resource "hcloud_floating_ip" "ingress" {
@@ -106,7 +113,7 @@ resource "hcloud_server" "host" {
   image        = var.image
   location     = var.location
   ssh_keys     = [hcloud_ssh_key.admin.id]
-  firewall_ids = [hcloud_firewall.host.id]
+  firewall_ids = local.firewalls[var.name]
   user_data    = local.first_user_data
   labels       = { clowder = var.name }
 
@@ -166,7 +173,7 @@ resource "hcloud_server" "joining" {
   image        = var.image
   location     = var.location
   ssh_keys     = [hcloud_ssh_key.admin.id]
-  firewall_ids = [hcloud_firewall.host.id]
+  firewall_ids = local.firewalls[each.key]
   user_data    = local.joining_user_data[each.key]
   labels       = { clowder = var.name }
 
@@ -197,6 +204,13 @@ locals {
   roles = { for host in concat([var.name], var.hosts) : host => lookup(var.roles, host, "control-plane,worker,ingress") }
   # only a worker holds copies with a disk, so only a worker gets volumes
   workers = [for host, roles in local.roles : host if contains(split(",", roles), "worker")]
+  # only a control-plane host opens clowder's API
+  firewalls = {
+    for host, roles in local.roles : host => (contains(split(",", roles), "control-plane")
+      ? [hcloud_firewall.host.id, hcloud_firewall.api.id]
+      : [hcloud_firewall.host.id]
+    )
+  }
   # the first host's volumes, by class
   first_volumes = contains(local.workers, var.name) ? var.storage_classes : {}
   # each joining host's volumes, by "<host>-<class>"

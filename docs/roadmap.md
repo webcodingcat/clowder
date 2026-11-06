@@ -11,7 +11,7 @@ clowder is built in phases, and each phase ends with live tests on HLab
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
 | 2 | three hosts: replication, failover with fencing | done, passes the live tests |
-| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 4 done, step 5 next |
+| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 5 done, step 5b next |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -35,11 +35,11 @@ once it is complete.
   tests are green.
 - Each step gets the full review loop (junior and senior) over what it changed. Steps 1
   to 7 touch access, keys, the state or a format; step 8 touches much of the documentation.
-- After step 5, the live tests run once in between. By then access, configuration,
-  secrets, roles and the rules of who may call what are in place, and every host still
-  holds the keys, so the cluster is complete and not a bridge. A fault found there lies in
-  five steps, not eight. `test/live`, `bin/dev live` and the lab of roles change for this
-  run, before step 6.
+- After step 5c, the live tests run once in between. By then access, configuration,
+  secrets, roles, the rules of who may call what and the cheaper copies of the state are
+  in place, and every host still holds the keys, so the cluster is complete and not a
+  bridge. A fault found there lies in the first steps, not in all of them. `test/live`,
+  `bin/dev live` and the lab of roles change for this run, before step 6.
 - At the end come the live tests over the whole phase, then a last review round over the
   whole, then the merge. The state and every format change, so a cluster of an earlier
   build must be set up anew.
@@ -56,7 +56,7 @@ once it is complete.
 ### Step 1: access the way of kubeadm
 
 Done on `phase-2b` (lint and unit tests green, the full review loop over it; the live
-tests come after step 5). Beyond the plan, the step added `clowder config delete-context`,
+tests come after step 5c). Beyond the plan, the step added `clowder config delete-context`,
 and `config import --as <name>` (not `--context`, which picks the context a command uses)
 with `--replace` for renewed credentials. `test/live` already follows, as lint builds it.
 
@@ -73,7 +73,7 @@ grants nothing, and lasts one year. `cluster.yaml` has no `name` and no `endpoin
 ### Step 2: the configuration as a resource
 
 Done on `phase-2b` (lint and unit tests green, the full review loop over it; the live
-tests come after step 5). As decided with the operator, the step went beyond the plan.
+tests come after step 5c). As decided with the operator, the step went beyond the plan.
 Secrets already have keys (`spec.data: {<key>: !secret}`), and each value is bound to the
 Secret's ID. Whatever names a value names a Secret and a key (`{name, key}`, as
 `secretKeyRef`): the configuration's `hetzner.tokenSecretRef`, `webhookSecretRef`,
@@ -100,7 +100,7 @@ applied, the configuration can be changed but not deleted. The details are in
 ### Step 3: Secret and SealedSecret
 
 Done on `phase-2b` (lint and unit tests green, the full review loop over it; the live
-tests come after step 5). A value comes in one of two ways, as in Kubernetes with
+tests come after step 5c). A value comes in one of two ways, as in Kubernetes with
 Bitnami's sealed secrets, and both end up as the same Secret in the state:
 
 - A `Secret` holds its values in clear (`spec.data` in Base64, `spec.stringData` as
@@ -137,12 +137,12 @@ API change, so a cluster of an earlier build must be set up anew. The details ar
 ### Step 4: host roles
 
 Done on `phase-2b` (lint and unit tests green, the full review loop over it; the live
-tests come after step 5). A host has roles, as a Kubernetes node does, in the new package
+tests come after step 5c). A host has roles, as a Kubernetes node does, in the new package
 `hostrole`:
 
 - `control-plane`: may vote in Raft and lead, and runs `clowderd credentials`,
   `clowderd sealing-key export` and `clowderd recover`. That only control-plane hosts
-  serve the CLI's API and forward its commands comes with step 5.
+  serve the CLI's API and forward its commands came with step 5.
 - `worker`: runs stacks and holds volume copies with a disk.
 - `ingress`: may take the Floating IP. Every host still runs Traefik for its own stacks.
 
@@ -189,8 +189,34 @@ Certificates, Raft, Joining hosts, Placement).
 
 ### Step 5: who may call what
 
-Every way into a host checks the caller's roles, so an attacker who takes over a worker
-gets no further than its own stacks. Today any host certificate passes everywhere.
+Done on `phase-2b` (lint and unit tests green, the full review loop over it; the interim
+live tests come after step 5c). Every way into a host checks the caller's roles, so an attacker who
+takes over a worker's certificate gets no further than its own stacks. The plan below
+stands as built; [cluster.md](developing/cluster.md) (Who may call what, A host without
+the control plane, Raft, Certificates) has the details. As decided with the operator, the
+step went beyond the plan in these points:
+
+- **A worker answers only the control plane.** Its API takes only control-plane hosts
+  already in the TLS handshake, so it serves neither the CLI nor the join, and it listens
+  only on the private network (the underlay and the node address), not on its public
+  address. Only the control plane calls a worker; a worker calls the voters (beats) and
+  the leader (its reports, the commit index), so it forwards nothing for others.
+  `examples/hetzner` opens the API's port only on control-plane hosts (a second Cloud
+  firewall).
+- **The join goes through the control plane,** as kubeadm's does: a worker refuses it,
+  and the joining host takes only a control-plane host.
+- **`internal/sealing-key`**, which the table below missed, takes only the host's own
+  certificate, as `internal/credentials` does; on a worker, the handshake refuses both.
+- **`clowderd credentials` lists only control-plane hosts** as the CLI's endpoints.
+- `set-cli-cutoff` is checked in the API's route table only, not again in the state: the
+  table is the one place that says who may send what, and Raft takes entries only from
+  the control plane.
+
+What changed, for the operator: the CLI and `clowderd join --via` reach a cluster only
+through control-plane hosts, and a worker's API answers neither on its public address
+nor without a control-plane certificate. Credentials of an earlier build that list
+workers among their endpoints skip them; fetch new ones. An agent whose `host.json`, its
+certificate and its state on disk name different roles does not start. The plan:
 
 - **The routes:** the server checks the caller's certificate, with a test per route
   (`api/server.go`). The CLI's routes answer on control-plane hosts only, and
@@ -219,6 +245,61 @@ gets no further than its own stacks. Today any host certificate passes everywher
 - **One set of roles per host:** a host's roles stand in the state, in its certificate and
   in its `host.json` (step 4). The checks above read the certificate, so the agent checks
   at its start that the three agree, and refuses to run otherwise.
+
+Until step 6, every host still holds the data key and with it the CA's key, so root on a
+worker can still issue itself any certificate; the rules above hold against a worker's
+certificate, and against root on a worker only from step 6 on. Step 5b starts from here.
+In the interim live tests, the lab of roles has workers whose public API port is closed,
+so `test/live` reaches the cluster through control-plane hosts only.
+
+### Step 5b: copy the state only where it changes
+
+Today the state is copied whole, through a JSON round trip (`State.Copy`), in two places
+that run inside Raft's FSM, under the state's lock:
+
+- every `change-resources` (`applyChangeResources`, `state/resources.go`) works on a copy of
+  the whole state, so that a batch goes in whole or not at all;
+- after every applied entry, the first loop that reads gets a shared copy
+  (`raftnode` `fsm.sharedCopy`), even for an entry that changed one host's report.
+
+The state holds every Secret's encrypted values (up to about 8 MiB) and the audit, so on a
+host with 4 GB each apply and each report costs memory and time that grow with the
+cluster. The step makes both cheaper without changing what they guarantee:
+
+- A batch is still all or nothing, and a loop still never sees a state that changes
+  under it.
+- Only what a command changes is copied: for example, typed clones of the maps and
+  resources a change touches, or an undo of the batch's changes on failure instead of a
+  copy before it. The session weighs the ways with the operator and names the choice.
+- The audit and the encrypted values are not copied when nothing touches them.
+- A test shows the cost: a state of `resource.MaxClusterSecretBytes` in secrets, and a
+  report and an apply against it, with the allocations they make.
+
+The dry run (`api/changes.go`) may keep its own full copy, as it runs outside Raft.
+Review: the full loop; the step changes how the state applies its commands.
+
+### Step 5c: smaller documentation
+
+The documentation part of step 8, brought forward: every session reads the docs, and
+their size costs each one. Without new behavior.
+
+- `docs/roadmap.md` keeps the state and the plan; the finished steps of phase 2b shrink
+  to what still holds (the decisions and the Known gaps), and the Git log keeps the
+  history.
+- `docs/developing/cluster.md` is cut down and split where a part stands on its own (for
+  example the API and the CLI, Recover), so that a reader opens only the part about the
+  package they change.
+- DEVELOPING.md's Words name each word in one place, not in the table and again below
+  it.
+- Comments that have grown into essays (such as `MaxRequestBytes` in `api/server.go`)
+  keep the reason and lose the rest.
+- Sentences that are simple but hard to read are rewritten in plain technical English
+  (normal word order, one point per sentence).
+- The README states no progress (the roadmap does): its line on what comes next and its
+  Getting started match the roadmap.
+
+Review: the full loop (junior and senior); the documentation changes much, and a junior
+must understand it. Step 8 then only checks the documentation against the code again.
 
 ### Step 6: keys only on the control plane
 
@@ -310,9 +391,8 @@ The last step, before the final live tests, so that they run on what is merged.
 - **The agent's loops start one way:** today `agent/run.go` (`startLoops`,
   `runOnceCaughtUp`) starts them as functions with arguments, with a parts struct, as
   methods, through a constructor and as a value's `run`. Every loop gets the same form.
-- **The documentation shrinks:** `docs/roadmap.md` keeps the state and the plan, and the
-  finished steps of phase 2b shrink to what still holds (the Git log keeps the history).
-  `docs/developing/cluster.md` is cut down and split where a part stands on its own.
+- **The documentation still fits:** step 5c made it smaller; this step checks it against
+  the code of steps 6 to 8 and shrinks steps 5b to 8 in this file as 5c did the others.
 - **A new release, not an update:** phase 2b's release fits no earlier cluster, so every
   command kind is new with it. The command kinds' release gate (`since`,
   `State.CheckKnown`) starts anew from that release or goes, and the README's Getting
@@ -325,7 +405,7 @@ The last step, before the final live tests, so that they run on what is merged.
 - Review: the full loop (junior and senior), even though no behavior is new. The
   documentation changes much, and a junior must understand it.
 
-### The live tests (after step 5, and at the end)
+### The live tests (after step 5c, and at the end)
 
 - `test/live` and `bin/dev live` follow the whole phase: credentials fetched over SSH into
   `~/.clowder/config` (through `$CLOWDER_CONFIG`), the `ClusterConfiguration` and the
@@ -347,7 +427,7 @@ The last step, before the final live tests, so that they run on what is merged.
     Raft; the CLI refusing a worker; a worker's failover to the other worker; and a
     recover after the loss of two control-plane hosts in which the workers' stacks and
     copies stay.
-- The run after step 5 has every scenario except those of steps 6 and 7 (a worker that
+- The run after step 5c has every scenario except those of steps 6 and 7 (a worker that
   gets only the secrets of its stacks, the recover with workers).
 - All live tests must be green; a failure goes back to the step it came from.
 
@@ -384,6 +464,9 @@ Phase 4 (comfort and operations):
 
 - A removed host keeps the cluster's keys until `cluster rotate-keys` exists (see Keys of
   a removed host, below). Until then, wipe its disk.
+- Until step 6 of phase 2b, every host holds the data key and the CA's key. The route
+  table keeps a worker's certificate to its own work, but root on a worker can issue
+  itself any certificate.
 - A host that comes back after a fence resyncs all its copies at once, each at the rate of
   the resync limit; meanwhile the limit holds back only new copies.
 - A failed host that is not fenced keeps its copies counted, and no copy is made anew
@@ -394,8 +477,8 @@ Phase 4 (comfort and operations):
   remove is kept.
 - A disabled voter keeps its vote until it is removed: with more than three control-plane
   hosts, an active one that does not vote does not take its place.
-- The CLI learns no hosts from the cluster. `clowderd credentials` writes the hosts of the
-  time into the context's `endpoints`. After joins and removes, the user fetches new
+- The CLI learns no hosts from the cluster. `clowderd credentials` writes the
+  control-plane hosts of the time into the context's `endpoints`. After joins and removes, the user fetches new
   credentials or edits the endpoints; otherwise the CLI cannot reach the cluster while the
   endpoints it lists are down.
 - If a stack with a published port moved while the agent of the ingress host was down,
@@ -413,9 +496,11 @@ Phase 4 (comfort and operations):
   dead: a replacement joins first. If none can join (`examples/hetzner` joins through its
   first host), the cluster stays at two control-plane hosts. `clowderd recover --power-off` is the way out
   only when two hosts are gone.
-- A retired host whose agent starts while Hetzner's API does not answer starts as before,
-  and two such hosts would have the old cluster's majority. recover tells the user to set
-  retired servers up anew or delete them.
+- The check for a retired host fails open: a retired host whose agent starts while
+  Hetzner's API does not answer starts as before (`checkRetired`), and two such hosts
+  would have the old cluster's majority. This is on purpose, so that an outage at Hetzner
+  does not keep hosts down. recover tells the user to set retired servers up anew or
+  delete them.
 - recover knows the hosts that this host's log knows. A host that the others added after
   this one fell behind is neither asked nor retired: power its server off by hand.
 - A placement is several commands in a row (push-outs, volumes, the stack's host). A new

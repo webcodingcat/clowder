@@ -11,6 +11,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -38,8 +39,9 @@ type CredentialsAnswer struct {
 	CACertificate string `json:"ca_certificate"`
 	Certificate   string `json:"certificate"`
 	ClusterName   string `json:"cluster_name"`
-	// Endpoints are the public addresses of the hosts that are not
-	// removed, as the state knows them now.
+	// Endpoints are the public addresses of the control-plane hosts that
+	// are not removed, as the state knows them now. Only those serve the
+	// CLI.
 	Endpoints []string `json:"endpoints"`
 }
 
@@ -106,10 +108,10 @@ func (s *Server) internalCredentials(w http.ResponseWriter, r *http.Request) {
 		// without a port: the client adds the API's port (Address). A host
 		// that is down now may be back later, and costs the CLI only its
 		// connect timeout once per command (the client starts with the
-		// endpoint that answered last), so every host that is not removed
-		// counts.
+		// endpoint that answered last), so every control-plane host that is
+		// not removed counts.
 		for _, id := range slices.Sorted(maps.Keys(current.Hosts)) {
-			if host := current.Hosts[id]; host.Phase != state.Removed {
+			if host := current.Hosts[id]; host.Phase != state.Removed && host.Roles.Has(hostrole.ControlPlane) {
 				answer.Endpoints = append(answer.Endpoints, host.PublicAddress.String())
 			}
 		}

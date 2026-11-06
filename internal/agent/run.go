@@ -92,7 +92,15 @@ func Run(ctx context.Context, files Files, parts HostParts, logger *slog.Logger)
 	if err != nil {
 		return err
 	}
-	if err := checkRetired(ctx, files, host, credentials, logger); err != nil {
+	// Raft does not run yet; the state comes from its log on disk
+	onDisk, err := raftnode.ReadState(files.raftDir())
+	if err != nil {
+		return fmt.Errorf("read the state before the start: %w", err)
+	}
+	if err := host.checkRoles(credentials.certificate.Leaf, onDisk); err != nil {
+		return err
+	}
+	if err := checkRetired(ctx, onDisk, host, credentials, logger); err != nil {
 		return err
 	}
 	if err := parts.Network.SetUpInterface(ctx, host.NodeAddress); err != nil {
@@ -360,7 +368,7 @@ func newAPIServer(base shared, runner *stacks.Runner, volumes api.Volumes, alert
 	heard *controller.Heard, joins api.Joins, caughtUp <-chan struct{},
 ) *api.Server {
 	return api.NewServer(api.ServerConfig{
-		Cluster: base.node, CA: base.credentials.ca, Certificate: base.credentials.certificate,
+		Cluster: base.node, CA: base.credentials.ca, Certificate: base.credentials.certificate, Roles: base.host.Roles,
 		APIAddress: func(id state.HostID) string {
 			// every host has the same API port; tests on 127.0.0.1 have one host
 			return net.JoinHostPort(network.NodeAddress(id).String(), strconv.Itoa(base.host.APIPort))

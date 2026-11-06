@@ -168,7 +168,7 @@ func startCluster(t *testing.T) {
 	host := &oneHost{state: current, changed: make(chan struct{})}
 	host.changes.Reset(current.Index)
 	agent := api.NewServer(api.ServerConfig{
-		Cluster: host, CA: ca.Certificate, Certificate: serverCertificate,
+		Cluster: host, CA: ca.Certificate, Certificate: serverCertificate, Roles: hostrole.DefaultInit,
 		APIAddress: func(state.HostID) string { return server.Listener.Addr().String() },
 		Version:    buildinfo.Version, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Alerts: fakeAlerts{}, Keys: ageKeys{dataKey},

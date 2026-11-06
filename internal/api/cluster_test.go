@@ -87,10 +87,10 @@ func TestTheCLIGetsThePublicSealingKey(t *testing.T) {
 	}
 }
 
-func TestOnlyAHostGetsTheSealingKey(t *testing.T) {
+func TestOnlyTheHostItselfGetsTheSealingKey(t *testing.T) {
 	cluster := newTestCluster(t)
 	var answer SealingKeyAnswer
-	host := cluster.client(cluster.hostCertificate(1), testVersion, 0)
+	host := cluster.client(cluster.hostCertificate(1), testVersion, 1)
 	if err := host.Get(context.Background(), "/v1/internal/sealing-key", &answer); err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestOnlyAHostGetsTheSealingKey(t *testing.T) {
 	if err != nil || identity.Recipient().String() != cluster.sealing.(*age.X25519Recipient).String() {
 		t.Errorf("the sealing key %v does not belong to the cluster's public key", err)
 	}
-	cli := cluster.client(cluster.cliCertificate(), testVersion, 0)
+	cli := cluster.client(cluster.cliCertificate(), testVersion, 1)
 	if err := cli.Get(context.Background(), "/v1/internal/sealing-key", &answer); statusOf(err) != http.StatusForbidden {
 		t.Errorf("the CLI asked for the sealing key: %v", err)
 	}

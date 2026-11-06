@@ -17,11 +17,17 @@ import (
 
 var loopback = []netip.Addr{netip.MustParseAddr("127.0.0.1")}
 
-// hostAt issues a host certificate as of a time.
+// hostAt issues a host certificate with every role as of a time.
 func hostAt(t *testing.T, ca *CA, id int, at time.Time) (ed25519.PrivateKey, *x509.Certificate) {
 	t.Helper()
+	return hostWith(t, ca, id, hostrole.DefaultInit, at)
+}
+
+// hostWith issues a host certificate with roles as of a time.
+func hostWith(t *testing.T, ca *CA, id int, roles hostrole.Set, at time.Time) (ed25519.PrivateKey, *x509.Certificate) {
+	t.Helper()
 	return issued(t, func(public ed25519.PublicKey) ([]byte, error) {
-		return ca.IssueHost(public, id, hostrole.DefaultInit, loopback, at)
+		return ca.IssueHost(public, id, roles, loopback, at)
 	})
 }
 
@@ -66,8 +72,9 @@ func TestTheTLSCheckLetsOnlyHostsOfTheCAThrough(t *testing.T) {
 		{"a host not valid yet", []*x509.Certificate{notYetValid}, "is before"},
 	}
 	configs := map[string]*tls.Config{
-		"client": ClientTLSToHosts(tls.Certificate{}, ca.Certificate, revoked),
-		"server": ServerTLSForHosts(tls.Certificate{}, ca.Certificate, revoked),
+		"client to hosts":          ClientTLSToHosts(tls.Certificate{}, ca.Certificate, revoked),
+		"client to control plane":  ClientTLSToControlPlane(tls.Certificate{}, ca.Certificate, revoked),
+		"server for control plane": ServerTLSForControlPlane(tls.Certificate{}, ca.Certificate, revoked),
 	}
 	for side, config := range configs {
 		for _, test := range tests {
@@ -83,8 +90,20 @@ func TestTheTLSCheckLetsOnlyHostsOfTheCAThrough(t *testing.T) {
 		}
 	}
 
+	// a worker passes where any host may talk, and nowhere else
+	_, worker := hostWith(t, ca, 5, hostrole.DefaultJoin, time.Now())
+	workerState := tls.ConnectionState{PeerCertificates: []*x509.Certificate{worker}}
+	if err := configs["client to hosts"].VerifyConnection(workerState); err != nil {
+		t.Errorf("a client to any host refused a worker: %v", err)
+	}
+	for _, side := range []string{"client to control plane", "server for control plane"} {
+		if err := configs[side].VerifyConnection(workerState); err == nil || !strings.Contains(err.Error(), "no control-plane host") {
+			t.Errorf("%s: want a worker refused, got %v", side, err)
+		}
+	}
+
 	// the CLI does not know the revoked serials
-	withoutList := ClientTLSToHosts(tls.Certificate{}, ca.Certificate, nil)
+	withoutList := ClientTLSToControlPlane(tls.Certificate{}, ca.Certificate, nil)
 	if err := withoutList.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{revokedHost}}); err != nil {
 		t.Errorf("without a list of revoked serials: %v", err)
 	}
@@ -133,10 +152,17 @@ func TestHostsTalkThroughTheTLSConfigsAndOthersDoNot(t *testing.T) {
 	host := func(id int) tls.Certificate {
 		return tlsCertificate(hostAt(t, ca, id, time.Now()))
 	}
-	server := ServerTLSForHosts(host(0), ca.Certificate, nil)
+	server := ServerTLSForControlPlane(host(0), ca.Certificate, nil)
 
 	if serverErr, clientErr := handshake(t, server, ClientTLSToHosts(host(1), ca.Certificate, nil)); serverErr != nil || clientErr != nil {
 		t.Errorf("two hosts: server %v, client %v", serverErr, clientErr)
+	}
+	// the CLI's side: a worker cannot answer it as the cluster
+	cliSide := ClientTLSToControlPlane(tls.Certificate{}, ca.Certificate, nil)
+	workerServer := ServerTLSForControlPlane(tlsCertificate(hostWith(t, ca, 2, hostrole.DefaultJoin, time.Now())),
+		ca.Certificate, nil)
+	if _, clientErr := handshake(t, workerServer, cliSide); clientErr == nil || !strings.Contains(clientErr.Error(), "no control-plane host") {
+		t.Errorf("a client to the control plane took a worker: %v", clientErr)
 	}
 
 	user := tlsCertificate(issued(t, func(public ed25519.PublicKey) ([]byte, error) {
@@ -150,6 +176,7 @@ func TestHostsTalkThroughTheTLSConfigsAndOthersDoNot(t *testing.T) {
 	for name, certificate := range map[string]tls.Certificate{
 		"a user":               user,
 		"a host of another CA": stranger,
+		"a worker":             tlsCertificate(hostWith(t, ca, 3, hostrole.DefaultJoin, time.Now())),
 		"no certificate":       {},
 	} {
 		serverErr, _ := handshake(t, server, ClientTLSToHosts(certificate, ca.Certificate, nil))
@@ -159,7 +186,7 @@ func TestHostsTalkThroughTheTLSConfigsAndOthersDoNot(t *testing.T) {
 	}
 
 	// the other way round: a host's client refuses a server of another CA
-	strangeServer := ServerTLSForHosts(stranger, otherCA.Certificate, nil)
+	strangeServer := ServerTLSForControlPlane(stranger, otherCA.Certificate, nil)
 	if _, clientErr := handshake(t, strangeServer, ClientTLSToHosts(host(1), ca.Certificate, nil)); clientErr == nil ||
 		!strings.Contains(clientErr.Error(), "unknown authority") {
 		t.Errorf("the client took a server of another CA: %v", clientErr)

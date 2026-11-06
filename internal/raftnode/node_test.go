@@ -333,7 +333,9 @@ func TestThreeHostsReplicateOverMutualTLS(t *testing.T) {
 	}
 }
 
-func TestOnlyHostsOfTheClusterGetIn(t *testing.T) {
+// A worker could otherwise send entries of its own past every check of the
+// API, so only control-plane hosts get in.
+func TestOnlyControlPlaneHostsOfTheClusterGetIn(t *testing.T) {
 	cluster := newTestCluster(t)
 	address := freeAddress(t)
 	node := cluster.open(0, t.TempDir(), address)
@@ -342,8 +344,13 @@ func TestOnlyHostsOfTheClusterGetIn(t *testing.T) {
 	cli := cluster.certificate(func(public ed25519.PublicKey) ([]byte, error) {
 		return cluster.ca.IssueCLI(public, "alice", time.Now())
 	})
+	worker := cluster.certificate(func(public ed25519.PublicKey) ([]byte, error) {
+		return cluster.ca.IssueHost(public, 2, hostrole.DefaultJoin, []netip.Addr{netip.MustParseAddr("127.0.0.1")}, time.Now())
+	})
 	stranger := newTestCluster(t).hostCertificate(1)
-	for name, certificate := range map[string]tls.Certificate{"the CLI": cli, "another cluster's host": stranger} {
+	for name, certificate := range map[string]tls.Certificate{
+		"the CLI": cli, "a worker of the cluster": worker, "another cluster's host": stranger,
+	} {
 		connection, err := tls.Dial("tcp", address, &tls.Config{
 			Certificates: []tls.Certificate{certificate}, InsecureSkipVerify: true, // only the server's check is tested
 			MinVersion: tls.VersionTLS13,

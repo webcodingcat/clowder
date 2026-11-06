@@ -231,21 +231,32 @@ func Verify(caCertificate, certificate *x509.Certificate, revoked func(serial st
 		if err != nil || HostName(id) != identity.Name {
 			return Identity{}, fmt.Errorf("host certificate with the name %q", identity.Name)
 		}
-		// DER sorts a SET OF by its encoding, so the organizations come
-		// back in another order than IssueHost wrote them; New sorts them
-		named := make([]hostrole.Role, 0, len(certificate.Subject.Organization))
-		for _, organization := range certificate.Subject.Organization {
-			named = append(named, hostrole.Role(organization))
-		}
-		roles, err := hostrole.New(named...)
+		roles, err := HostRoles(certificate)
 		if err != nil {
-			return Identity{}, fmt.Errorf("host certificate %s: %w", identity.Name, err)
+			return Identity{}, err
 		}
 		identity.HostID, identity.HostRoles = id, roles
 	default:
 		return Identity{}, fmt.Errorf("certificate %s has no known role", identity.Name)
 	}
 	return identity, nil
+}
+
+// HostRoles reads the roles that a host certificate names, without
+// verifying the certificate. The agent compares them with its own files at
+// its start, when its certificate may have expired; Verify uses it too.
+func HostRoles(certificate *x509.Certificate) (hostrole.Set, error) {
+	// DER sorts a SET OF by its encoding, so the organizations come back in
+	// another order than IssueHost wrote them; New sorts them
+	named := make([]hostrole.Role, 0, len(certificate.Subject.Organization))
+	for _, organization := range certificate.Subject.Organization {
+		named = append(named, hostrole.Role(organization))
+	}
+	roles, err := hostrole.New(named...)
+	if err != nil {
+		return nil, fmt.Errorf("host certificate %s: %w", certificate.Subject.CommonName, err)
+	}
+	return roles, nil
 }
 
 // Serial returns a certificate's serial number in the form the cluster

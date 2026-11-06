@@ -455,9 +455,15 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - `TrustProof` (HMAC-SHA256 over the CA certificate) is how a joining host trusts the CA on
   first contact. Its proof key is the join token's hash (`jointoken.ProofKey`). The CLI
   needs no proof, because its first credentials come over SSH with the CA included.
-- `tls_test.go` tests both TLS configs against every peer they must refuse: none, the CLI,
-  a host of another CA, a stranger showing a host's certificate behind its own, and a
-  revoked, an expired and a not yet valid host. It runs the handshakes on 127.0.0.1.
+- Three TLS configs check hosts, by the chain and the role, never by the name:
+  `ClientTLSToHosts` (an agent that calls a host of any role, as the leader calls a
+  worker), `ClientTLSToControlPlane` (the CLI, a joining host and clowderd's own commands,
+  so that a worker, even a removed one, cannot answer as the cluster) and
+  `ServerTLSForControlPlane` (Raft, and the API of a host without the control plane).
+  `tls_test.go` tests them against every peer they must refuse: none, the CLI, a host of
+  another CA, a stranger showing a host's certificate behind its own, a revoked, an
+  expired and a not yet valid host, and a worker where only the control plane may answer
+  or call. It runs the handshakes on 127.0.0.1.
 
 ## Raft (`internal/raftnode`) and the data key (`internal/datakey`)
 
@@ -465,10 +471,18 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   `snapshotThreshold` entries, and the state of `internal/state` as the replicated
   machine. Raft's own log lines go through `log/slog`.
 - Raft uses mutual TLS on the node address: both sides present a host certificate of the
-  cluster CA that is not revoked. CLI certificates and other clusters' hosts fail the
-  handshake, and removing a host revokes its certificate, so it leaves Raft and the API at
-  once. `pki.ClientTLSToHosts` and `pki.ServerTLSForHosts` are the one way hosts are
-  checked, by Raft and by the API alike: by the chain and the role, not by the name.
+  cluster CA that is not revoked. Every host's listener takes only control-plane hosts
+  (`pki.ServerTLSForControlPlane`): only the leader and the candidates send, and they are
+  voters, while a worker that got in could send entries of its own past every check of the
+  API. The dial takes any host (`pki.ClientTLSToHosts`), because the leader also sends to
+  the hosts that follow the log without a vote. CLI certificates, workers and other
+  clusters' hosts fail the handshake (`TestOnlyControlPlaneHostsOfTheClusterGetIn`), and
+  removing a host revokes its certificate, so it leaves Raft and the API at once. The API
+  checks the revocation list with every request, so an open keep-alive connection gains
+  nothing; Raft checks it at the handshake, and a removed host also leaves Raft's
+  configuration, so the leader no longer sends to it. Kubernetes
+  has no such listener on its workers; clowder's hosts follow the log themselves instead of
+  watching an API server, which keeps a small cluster to one process per host.
 - **Leading starts with a barrier.** `followLead` sets `IsLeader` only once Raft's barrier
   has applied every entry from before the lead. A new leader may not yet have applied what
   its predecessor committed, and its loops and `runOnLeader` would then decide on an old
@@ -599,12 +613,31 @@ or delete them.
 
 - **Every call is checked.** Every agent serves `/v1` with mutual TLS (`agent.APIPort`).
   Each call is checked against the CA, the state's revocation list and, for the CLI,
-  `CLICutoff`, so a revoked certificate is refused at once on every agent. The CLI's routes
-  accept CLI certificates, and `/v1/internal/*` accepts only host certificates. Every
+  `CLICutoff`, so a revoked certificate is refused at once on every agent. Every
   request body is limited (`MaxRequestBytes`; its comment explains why 16 MiB). A larger
   one gets 413, and `apply` then advises applying the namespaces' directories one at a
   time.
-- **Any agent answers.** Reads come from its own copy of the state. Writes it commits as
+- **Who may call what** (`api/access.go`). Like Kubernetes' node authorizer, each route
+  names its callers (`Server.routes`), and a refused caller gets 403:
+
+  | Routes | Caller (`caller`) |
+  |---|---|
+  | the CLI's (`/v1/…` except `internal`) | a CLI certificate (`cliCaller`) |
+  | `GET` and `POST /v1/join` | anyone with an open join token (`handleOpen`, limited per sender) |
+  | `internal/propose`, `internal/beats` (both), `internal/commit-index`, `internal/leader` | any host (`anyHost`) |
+  | `internal/changes`, `internal/join`, `internal/hand-over`, `internal/alerts/failures`, `internal/stacks/…/ps\|logs`, `internal/volumes/progress`, `internal/volumes/…/resolve-splitbrain` | a control-plane host (`controlPlaneHost`) |
+  | `internal/credentials`, `internal/sealing-key` | this host's own certificate (`thisHost`) |
+
+  `TestEachRouteTakesItsCallers` holds the table a second time, so a new route cannot come
+  without its callers.
+- **A host without the control plane** serves only the control plane. Its API takes only
+  control-plane hosts already in the TLS handshake (`Server.TLSConfig`,
+  `pki.ServerTLSForControlPlane`), so it serves neither the CLI nor the join, and it
+  listens only on the underlay and the node address. The control plane is all that calls
+  it (a stack's `ps` and `logs`, the copies' progress, a split brain, `clowderd
+  recover`); its own calls go to the voters (beats) and the leader (its reports, the
+  commit index). `TestAWorkerTakesOnlyTheControlPlane` checks this.
+- **Any control-plane agent answers.** Reads come from its own copy of the state. Writes it commits as
   the leader, or forwards to the leader's `/v1/internal/propose`. A write answers with its
   Raft index (`X-Clowder-Index`). The client sends that index with later reads
   (`X-Clowder-Min-Index`), and the agent waits until it has applied it. Without a leader
@@ -612,26 +645,29 @@ or delete them.
   barrier), every path to the leader (a command, the batch of an apply, a join, the
   catch-up) waits up to `leaderWait` for one (`waitForLeader`) instead of failing at once.
 - **Who speaks.** The actor of a command is the caller of the first agent, and its time
-  (`At`) is the leader's clock. `/v1/internal/propose` accepts only two things:
-  - the CLI's command that a follower forwards (`cliKinds`, exactly the kinds that the
-    CLI's routes make, with any CLI actor);
-  - what a host commits as itself (`hostKinds`: its reports, and the cutoff of `clowderd
-    credentials --revoke-older`).
+  (`At`) is the leader's clock. `/v1/internal/propose` accepts only three things
+  (`mayPropose`):
+  - the CLI's command that a control-plane follower forwards (`cliKinds`, exactly the
+    kinds that the CLI's routes make, with any CLI actor);
+  - what any host reports about itself, as itself (`hostKinds`). The state checks that
+    each report is about the actor's own host (its stacks, its copies, the operation it
+    owns), as Kubernetes' NodeRestriction does;
+  - what a control-plane host does for the cluster, as itself (`controlPlaneKinds`: the
+    cutoff of `clowderd credentials --revoke-older`).
 
   `/v1/internal/changes` accepts only the CLI's resource commands (Resources, below). The
   leader's own commands (placements, the ingress) are made on the leader and never come in
   from outside. A host never speaks for another host or for the leader.
-- **A host certificate may speak for the CLI.** The CLI's certificate ends at the first
+- **A control-plane host may speak for the CLI.** The CLI's certificate ends at the first
   agent, so the leader cannot check that a forwarded command really came from the CLI. This
-  is on purpose, just as kubeadm's control plane trusts its own nodes. A host holds the
-  data key, the CA's key and the whole Raft state, and root on a host can print credentials
-  anyway (`clowderd credentials`), so a host is trusted with everything. A host names the
+  is on purpose, just as Kubernetes trusts its API servers. A control-plane host names the
   CLI's actor (`cli/<name>`) and could name another; that is accepted, because the name
   grants nothing. The agent that takes a CLI request logs its actor with every write (`a
   CLI request`, in that agent's journal only). The record that every agent keeps is the
-  actor of the Raft command and the state's `Audit`. The checks on the internal routes
-  catch a bug in an agent, not a host that lies. What keeps strangers out is the CA, and
-  removing a host revokes its certificate.
+  actor of the Raft command and the state's `Audit`. What keeps strangers out is the CA,
+  and removing a host revokes its certificate. A worker cannot speak for the CLI, nor for
+  another host. Every host still holds the data key and the CA's key, though, so root on a
+  worker can still issue itself any certificate (Known gaps in the roadmap).
 - A refusal by the state is HTTP 409 with its reason; a write that did not commit is 503.
 - **JSON names.** What users write and read as resources (`resource.Object`, the specs and
   the statuses that `get` shows, including the ClusterConfiguration) is camelCase, as in
@@ -731,8 +767,11 @@ or delete them.
 
 ### The CLI
 
-- **The client** tries the endpoints of the context in turn and trusts any host certificate
-  of the cluster's CA, whatever name the endpoint has. A read moves on to the next endpoint
+- **The client** tries the endpoints of the context in turn and trusts any control-plane
+  host certificate of the cluster's CA, whatever name the endpoint has
+  (`pki.ClientTLSToControlPlane`). A worker among the endpoints fails the handshake and is
+  skipped like one that cannot be reached, so a removed worker cannot answer as the
+  cluster. A read moves on to the next endpoint
   after any network error. A write moves on only if it was never sent (`httptrace`),
   because a write that was sent may have committed without an answer.
 - **The endpoints** are all the CLI knows. It learns no other agents from the cluster, so
@@ -740,7 +779,8 @@ or delete them.
   kubectl reaches several control-plane nodes only through a load balancer, a VIP or DNS
   in front of them. clowder keeps a list instead, so a cluster needs nothing in front of
   it, and whoever puts something there lists its one address. `clowderd credentials` writes
-  the public addresses of the hosts at that time (`CredentialsAnswer.Endpoints`), or what
+  the public addresses of the control-plane hosts at that time
+  (`CredentialsAnswer.Endpoints`), or what
   `--endpoint` names. After joins and removals, the user fetches new credentials or edits
   the endpoints (`host list` shows the public addresses).
 - **An endpoint that does not answer** costs little. One that has not connected within
@@ -880,7 +920,7 @@ or delete them.
   its Secret (`secretvalue.Seal`). It writes each value on one line, as kubeseal does.
 - **`clowderd sealing-key export [--public]`** (`agent/sealingkey.go`) asks the host's
   own agent, with the host's certificate, for the sealing key (`GET
-  /v1/internal/sealing-key`, host role only), as `clowderd credentials` does for a
+  /v1/internal/sealing-key`, the host's own certificate only), as `clowderd credentials` does for a
   certificate. The agent logs a warning ("the sealing key was exported"). The command
   prints the key (`AGE-SECRET-KEY-1...`), or with `--public` only its public half
   (`age1...`), which `secret seal --cert` takes. The help of `clowderd init` says to
@@ -915,8 +955,11 @@ or delete them.
     matches its token (`api.FindClusterByToken`).
   - `POST /v1/join`, over TLS checked against that CA, carries the token itself, the host's
     name, addresses, server ref and public keys (its own key and WireGuard's; the private
-    halves stay on the host), a nonce and the time. Any agent accepts it and hands it to
-    the leader (`/v1/internal/join`). The joining host waits longer for the answer than the
+    halves stay on the host), a nonce and the time. Any control-plane agent accepts it
+    and hands it to the leader (`/v1/internal/join`); a worker refuses the joining host
+    in the handshake, and the joining host takes only a control-plane host
+    (`pki.ClientTLSToControlPlane`), as kubeadm joins through the control plane's
+    endpoint. The joining host waits longer for the answer than the
     leader may take (`joinClientTimeout`).
   - The leader (`agent.joiner`) accepts a request only within `joinMaxAge`, and each one
     only once while it leads (a nonce in its memory). This is little more than insurance,
@@ -935,7 +978,7 @@ or delete them.
   - A refusal says why, because only the holder of an open token's secret gets that far,
     and the token stays open for another try. The answer carries the certificate, the data
     key and the other hosts, for the host's first WireGuard interfaces (A host, Join).
-- **The join's routes need no certificate,** so each agent accepts at most
+- **The join's routes need no certificate,** so each control-plane agent accepts at most
   `triesPerSender` tries a minute per sender and `triesInAll` in total, counted in memory
   (`api/limit.go`); after that it answers 429. A sender is its IPv4 address, or its /64
   for IPv6.
@@ -958,7 +1001,9 @@ or delete them.
   asks its own agent, with the host's certificate, for a certificate with the name from
   `--name` (`POST /v1/internal/credentials`, `api/credentials.go`). The agent opens the
   CA's key from the state with the data key, issues the certificate, and answers with the
-  cluster's name and the public addresses of the hosts that are not removed. The command
+  cluster's name and the public addresses of the control-plane hosts that are not
+  removed. Only the host's own certificate may ask (`thisHost`), and only a control-plane
+  host takes it in the handshake. The command
   prints a CLI config with one context named after the cluster, with those addresses as its
   endpoints unless `--endpoint` names others. The key crosses SSH, as kubeadm's
   `admin.conf` does.

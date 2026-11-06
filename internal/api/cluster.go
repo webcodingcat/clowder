@@ -32,9 +32,9 @@ type SealingKeyAnswer struct {
 	Identity string `json:"identity"`
 }
 
-// internalSealingKey gives the sealing key to any host that asks with its
-// certificate; clowderd sealing-key export asks its own agent, as
-// clowderd credentials does for the CLI's certificate. A host holds the
+// internalSealingKey gives the sealing key to root on this host, which
+// asks with the host's certificate (clowderd sealing-key export), as
+// clowderd credentials does for the CLI's certificate. The host holds the
 // data key that opens the sealing key in the state anyway, so the route
 // gives it nothing new; it only saves root from reading the state. The log
 // tells which host exported it.

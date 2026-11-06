@@ -71,7 +71,7 @@ func KnowsLeader(ctx context.Context, address string, certificate tls.Certificat
 	client := &http.Client{Timeout: leaderAnswerTimeout, Transport: &http.Transport{
 		DialContext: dialer.DialContext,
 		// no revocation list: recover's own may be behind
-		TLSClientConfig: pki.ClientTLSToHosts(certificate, ca, func(string) bool { return false }),
+		TLSClientConfig: pki.ClientTLSToHosts(certificate, ca, nil),
 	}}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+address+"/v1/internal/leader", nil)
 	if err != nil {

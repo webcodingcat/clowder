@@ -121,11 +121,37 @@ func (h Host) raftAddress() string {
 	return net.JoinHostPort(h.NodeAddress.String(), strconv.Itoa(h.RaftPort))
 }
 
+// checkRoles makes sure that host.json, the host's certificate and the
+// state on disk name the same roles. The API checks a caller by its
+// certificate, while the agent's loops read host.json and the state; if
+// they differed, a host would do one thing and be allowed another. They
+// differ only if a file was changed by hand. A state that does not know
+// the host yet (before the first entries of a join) is not compared.
+func (h Host) checkRoles(certificate *x509.Certificate, current *state.State) error {
+	named, err := pki.HostRoles(certificate)
+	if err != nil {
+		return err
+	}
+	if !slices.Equal(named, h.Roles) {
+		return fmt.Errorf("host.json names the roles %s, the host's certificate %s; set the host up anew", h.Roles, named)
+	}
+	if host, ok := current.Hosts[h.ID]; ok && !slices.Equal(host.Roles, h.Roles) {
+		return fmt.Errorf("host.json names the roles %s, the cluster's state %s; set the host up anew", h.Roles, host.Roles)
+	}
+	return nil
+}
+
 // apiAddresses are where the host serves the API: the underlay, the node
-// address and the public address, each once.
+// address and, on a control-plane host, the public address, each once. A
+// host without the control plane serves only the control plane, which
+// reaches it over the private network.
 func (h Host) apiAddresses() []string {
+	reached := []netip.Addr{h.Underlay, h.NodeAddress}
+	if h.Roles.Has(hostrole.ControlPlane) {
+		reached = append(reached, h.PublicAddress)
+	}
 	var addresses []string
-	for _, address := range []netip.Addr{h.Underlay, h.NodeAddress, h.PublicAddress} {
+	for _, address := range reached {
 		hostPort := net.JoinHostPort(address.String(), strconv.Itoa(h.APIPort))
 		if address.IsValid() && !slices.Contains(addresses, hostPort) {
 			addresses = append(addresses, hostPort)

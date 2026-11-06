@@ -210,7 +210,7 @@ func uncheckedClient(connectTimeout time.Duration) *http.Client {
 func checkedClient(ca *x509.Certificate, connectTimeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout:   answerTimeout,
-		Transport: endpointTransport(pki.ClientTLSToHosts(tls.Certificate{}, ca, nil), connectTimeout),
+		Transport: endpointTransport(pki.ClientTLSToControlPlane(tls.Certificate{}, ca, nil), connectTimeout),
 	}
 }
 

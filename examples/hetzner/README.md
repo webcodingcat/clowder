@@ -15,7 +15,9 @@ runs `clowderd init` on the first host and `clowderd join` on the others. The ma
   server's private and public addresses are the host's, and it never accepts the same
   server twice.
 - **The Cloud firewall is the only filter** in front of SSH and clowder's API (port 7443).
-  `admin_cidrs` names who can reach them; it does not accept `0.0.0.0/0`. HTTP and HTTPS
+  `admin_cidrs` names who can reach them; it does not accept `0.0.0.0/0`. Only
+  control-plane hosts get the API's rule (a second firewall): a host without
+  `control-plane` serves only the control plane, over the private network. HTTP and HTTPS
   are open to everyone (for Traefik and the ACME CA's checks). To open a port that your
   stacks publish, add it to `published_ports` (`["udp/9987"]`).
 - **The first credentials** come over SSH from root on the first host, as kubeadm's

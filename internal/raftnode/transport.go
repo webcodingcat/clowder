@@ -13,8 +13,12 @@ import (
 )
 
 // tlsStream is Raft's network layer over mutual TLS. Both sides present a
-// host certificate from the cluster CA that is not revoked. Certificates of
-// users and of strangers fail the handshake.
+// host certificate from the cluster CA that is not revoked. The listener
+// takes only control-plane hosts: only the leader and the candidates send,
+// and they are voters, while a worker that got in could send entries of its
+// own past every check of the API. The dial takes any host, because the
+// leader also sends to the hosts that follow the log without a vote.
+// CLI certificates and strangers' certificates fail the handshake.
 type tlsStream struct {
 	net.Listener
 	advertise net.Addr
@@ -25,7 +29,7 @@ type tlsStream struct {
 func newTLSStream(bind string, advertise net.Addr, certificate tls.Certificate, ca *x509.Certificate,
 	revoked func(serial string) bool,
 ) (*tlsStream, error) {
-	listener, err := tls.Listen("tcp", bind, pki.ServerTLSForHosts(certificate, ca, revoked))
+	listener, err := tls.Listen("tcp", bind, pki.ServerTLSForControlPlane(certificate, ca, revoked))
 	if err != nil {
 		return nil, fmt.Errorf("listen for Raft on %s: %w", bind, err)
 	}
