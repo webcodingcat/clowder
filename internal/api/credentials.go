@@ -11,8 +11,6 @@ import (
 	"slices"
 	"time"
 
-	"filippo.io/age"
-
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -131,7 +129,7 @@ func (s *Server) authority() (*pki.CA, error) {
 	if keys == nil {
 		return nil, state.ErrNotBootstrapped
 	}
-	keyPEM, err := s.config.Keys.Open(keys.CAKey)
+	keyPEM, err := s.config.Keys.Decrypt(keys.CAKey)
 	if err != nil {
 		return nil, fmt.Errorf("open the CA key: %w", err)
 	}
@@ -146,24 +144,4 @@ func (s *Server) cliCutoffPassed(notBefore time.Time) bool {
 	var cutoff time.Time
 	s.config.Cluster.Read(func(current *state.State) { cutoff = current.CLICutoff })
 	return !notBefore.Before(cutoff)
-}
-
-// RotateRequest asks for a new recovery key.
-type RotateRequest struct {
-	Recipient string `json:"recipient"`
-}
-
-// rotateRecovery puts a new recovery key in place. The CLI's certificate is
-// enough, because whoever holds it controls the cluster anyway.
-func (s *Server) rotateRecovery(w http.ResponseWriter, r *http.Request) {
-	var request RotateRequest
-	if err := decodeStrict(r.Body, &request); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	if _, err := age.ParseX25519Recipient(request.Recipient); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("the recovery key's recipient: %w", err))
-		return
-	}
-	s.commitRequest(w, r, state.KindSetRecoveryRecipient, state.SetRecoveryRecipient{Recipient: request.Recipient})
 }

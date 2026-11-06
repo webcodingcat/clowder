@@ -19,39 +19,39 @@ func newKey(t *testing.T) *Key {
 	return key
 }
 
-func TestSealedSecretsOpenOnlyWithTheirKey(t *testing.T) {
+func TestEncryptedSecretsDecryptOnlyWithTheirKey(t *testing.T) {
 	key := newKey(t)
-	sealed, err := key.Seal([]byte("hcloud-token"))
+	encrypted, err := key.Encrypt([]byte("hcloud-token"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(sealed), "hcloud-token") {
-		t.Error("the sealed secret shows the secret")
+	if strings.Contains(string(encrypted), "hcloud-token") {
+		t.Error("the encrypted secret shows the secret")
 	}
-	opened, err := key.Open(sealed)
-	if err != nil || string(opened) != "hcloud-token" {
-		t.Errorf("opened %q, %v", opened, err)
+	decrypted, err := key.Decrypt(encrypted)
+	if err != nil || string(decrypted) != "hcloud-token" {
+		t.Errorf("decrypted %q, %v", decrypted, err)
 	}
-	if _, err := newKey(t).Open(sealed); err == nil {
-		t.Error("another key opened the secret")
+	if _, err := newKey(t).Decrypt(encrypted); err == nil {
+		t.Error("another key decrypted the secret")
 	}
-	if _, err := key.Open(nil); err == nil {
-		t.Error("nothing sealed opened")
+	if _, err := key.Decrypt(nil); err == nil {
+		t.Error("nothing encrypted decrypted")
 	}
 }
 
-// The state works out a value's length from its sealed length without
-// importing age; this test, the one place that seals for real, holds the
+// The state works out a value's length from its encrypted length without
+// importing age; this test, the one place that encrypts for real, holds the
 // two together.
-func TestTheStateReadsHowLongASealedValueIsInClear(t *testing.T) {
+func TestTheStateReadsHowLongAnEncryptedValueIsInClear(t *testing.T) {
 	key := newKey(t)
 	for _, size := range []int{1, 100, 64<<10 - 1, 64 << 10, 64<<10 + 1, 200_000} {
-		sealed, err := key.Seal([]byte(strings.Repeat("x", size)))
+		encrypted, err := key.Encrypt([]byte(strings.Repeat("x", size)))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := state.ClearSize(sealed); got != size {
-			t.Errorf("%d bytes sealed: state.ClearSize says %d", size, got)
+		if got := state.ClearSize(encrypted); got != size {
+			t.Errorf("%d bytes encrypted: state.ClearSize says %d", size, got)
 		}
 	}
 }
@@ -93,12 +93,12 @@ func TestTheKeySurvivesItsFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealed, err := key.Seal([]byte("secret"))
+	encrypted, err := key.Encrypt([]byte("secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opened, err := loaded.Open(sealed); err != nil || string(opened) != "secret" {
-		t.Errorf("the loaded key opened %q, %v", opened, err)
+	if decrypted, err := loaded.Decrypt(encrypted); err != nil || string(decrypted) != "secret" {
+		t.Errorf("the loaded key decrypted %q, %v", decrypted, err)
 	}
 	if parsed, err := Parse(key.Text()); err != nil || parsed.Text() != key.Text() {
 		t.Errorf("the text form does not read back: %v", err)

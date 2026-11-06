@@ -197,42 +197,47 @@ on a host (`compose.Render`).
   `ErrContextTaken`) name no flag; the CLI says what to do about them.
 - The tests point `HOME` (and `USERPROFILE`) or `$CLOWDER_CONFIG` at a temporary directory.
 
-## Encrypted values (`internal/secretvalue`)
+## Secrets and sealed values (`internal/secretvalue`)
 
-A secret's value can be stored encrypted in a YAML file, tagged `!secret`: age's ASCII
-armor in a literal block scalar, for two recipients, the cluster's age key and the recovery
-key. A `Secret`'s values are stored this way, one per key in `spec.data`, and no other
-values are (`resource.ParseDocuments` refuses `!secret` anywhere else, and a value in clear
-text in `spec.data`). The CLI never decrypts a value. `clowder secret encrypt
-<namespace>/<name> --from-literal <key>=<value> --from-file <key>=<path|->` encrypts for the
-recipients that the cluster names and prints the Secret. The CLI asks for the recipients
-each time (`GET /v1/encryption`) and never keeps them in a file that someone could change.
-Only the cluster decrypts the values.
+A Secret's values come in one of two ways, as in Kubernetes with Bitnami's sealed secrets.
+Both end up as the same Secret in the state, so whatever names a Secret does not care how
+it came in.
+
+- **`Secret`** (`resource.SecretSpec`): the values in clear, `spec.data` in Base64 and
+  `spec.stringData` as text; for a key in both, `stringData` wins, as in Kubernetes. Unlike
+  in Kubernetes, both stand under `spec`, like every clowder resource's fields. The CLI sends
+  the values over its mTLS connection, and the cluster encrypts them with its data key. Such
+  a file does not belong in Git. `clowder create secret [<namespace>/]<name>
+  --from-literal <key>=<value> --from-file <key>=<path|->` sends one without a file, and,
+  like `kubectl create`, refuses a Secret that exists (`api.ApplyRequest.Create`,
+  `state.PutResource.Create`).
+- **`SealedSecret`** (`resource.SealedSecretSpec`): `spec.encryptedData` holds each value
+  sealed for the cluster's sealing key, one line of Base64 of age's ciphertext, as kubeseal
+  writes it. It goes into Git. The apply turns it into the Secret of the same namespace and
+  name (`resource.StoredKind`); `get`, `delete -f` and `diff -f` work on that Secret. Unlike
+  Bitnami's, it is not a resource of its own in the cluster, and it has no `template`.
+- **`clowder secret seal`** makes SealedSecrets, as kubeseal does: from the Secrets of a
+  file (`-f <file|->`), or from `--from-literal` and `--from-file` for one Secret. It seals
+  for the public sealing key that the cluster names (`GET /v1/sealing-key`), and the CLI
+  asks for it each time instead of keeping a copy that someone could change. With
+  `--cert <file>`, it seals offline for the public key that `clowderd sealing-key export
+  --public` wrote, like kubeseal's `--cert`.
+
+The rest of this section is about sealed values.
 
 - **The envelope.** What age encrypts is JSON:
-  `{"v":1,"for":"<place>","value":"<Base64>"}`. `for` is the Secret the value is for (its
+  `{"v":1,"for":"<secret ID>","value":"<Base64>"}`. `for` is the Secret the value is for (its
   ID, as Bitnami's sealed secrets bind a value to its namespace and name). So whoever
-  decrypts it can refuse a value copied to another Secret, such as the Hetzner token copied
+  opens it can refuse a value copied to another Secret, such as the Hetzner token copied
   into a stack's Secret. `Open` returns `for`, and the caller checks it (`OpenFor`). Within
   a Secret, a value may move between keys. The value is Base64, so it can hold any bytes
   and needs no escaping that would change its size. A higher `v` is refused, because a
   newer clowder wrote it.
-- **Before decoding.** yaml.v3 decodes an unknown tag as a string in some places, and
-  turning YAML into JSON drops the tag. So `Extract` reads the node tree first. It takes
-  each value out by its path (`internal/yamlpath`: `spec.data.password`,
-  `spec.data["tls.crt"]`; `resource.SecretValuePath`) and puts the path in its place as a
-  plain string, and then the caller decodes as before. `Extract` knows paths, not kinds of
-  files; the caller checks which paths may hold a value.
-- **Only `!secret |`** (also `|-`, `|+`), on one line, with the armor below. Quoted, plain,
-  folded and indentation-indicator forms are refused, and so are anchors and tags on keys,
-  mappings or lists. Only a block on lines of its own can be replaced in place.
-- **`Rewrite`** replaces the armor of each value with new armor and leaves the rest of the
-  file as it is (comments, indentation, other documents, CRLF line ends). yaml.v3 gives
-  only a node's first line, so `locate` finds the block's end by its indentation, as YAML
-  does. Before it cuts, it checks the lines it found against the value that YAML read.
-  Golden file: `testdata/rewrite.yaml`; update it with
-  `bin/dev test ./internal/secretvalue -update`.
-- `Block` writes a value as it belongs after its key: `!secret |` and the armor below,
-  indented. `secret encrypt` uses it.
+- **One line.** A sealed value is plain Base64 with no line breaks, so it needs no YAML tag
+  and no block. `secret rekey` (`cli/values.go` `fileValues`) first checks the file as
+  apply reads it, then takes the values from its YAML nodes, which give each value's line.
+  `replaceValues` puts the new value in
+  place of the old one on that line and leaves the rest of the file as it is (comments,
+  quotes, CRLF line ends). It refuses a value that YAML folded over several lines.
 - No error message contains a value: `Open` drops json's messages, because they quote the
   text they fail on.

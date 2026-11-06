@@ -44,7 +44,7 @@ func TestAStackWhoseSecretsDoNotOpenDoesNotComeUp(t *testing.T) {
 		lose func(runner *Runner, cluster *agenttest.Cluster)
 	}{
 		{"the data key does not open it", func(runner *Runner, _ *agenttest.Cluster) {
-			runner.open = func(state.Sealed) ([]byte, error) { return nil, errors.New("no identity matched") }
+			runner.open = func(state.Encrypted) ([]byte, error) { return nil, errors.New("no identity matched") }
 		}},
 		{"the state lost it", func(_ *Runner, cluster *agenttest.Cluster) {
 			// a bug, not a command: the state refuses to delete a secret a

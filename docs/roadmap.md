@@ -11,7 +11,7 @@ clowder is built in phases, and each phase ends with live tests on HLab
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
 | 2 | three hosts: replication, failover with fencing | done, passes the live tests |
-| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 and 2 done, step 3 next |
+| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 3 done, step 4 next |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -45,8 +45,8 @@ once it is complete.
   build must be set up anew.
 - Each step updates the documentation of what it changes: DEVELOPING.md (Words: actor,
   endpoint, sealed, voter, active and passive, and the three things `cli` names: a
-  certificate's role, the owner channel and the actor's prefix; Layers: `clusterdir` and
-  `secretvalue` go with their code), `docs/developing/`, the README, the README of
+  certificate's role, the owner channel and the actor's prefix; Layers: the entries of
+  `clusterdir` and `secretvalue` follow their code), `docs/developing/`, the README, the README of
   `examples/hetzner`, and in this file the Known gaps (each new limit below that says so)
   and Keys of a removed host (steps 3 and 6).
 - Two keys keep their names apart. The **data key** encrypts the secrets in the state
@@ -58,9 +58,7 @@ once it is complete.
 Done on `phase-2b` (lint and unit tests green, the full review loop over it; the live
 tests come after step 5). Beyond the plan, the step added `clowder config delete-context`,
 and `config import --as <name>` (not `--context`, which picks the context a command uses)
-with `--replace` for renewed credentials. A new cluster has no recovery key until the
-first `clowder recovery rotate`, and `GET /v1/encryption` answers 409 until then.
-`test/live` already follows, as lint builds it. Step 2 starts from here.
+with `--replace` for renewed credentials. `test/live` already follows, as lint builds it.
 
 What changed, for the operator: there is no bootstrap key any more, and the first
 credentials come over SSH, as kubeadm's `admin.conf` does (`ssh root@<host> clowderd
@@ -101,33 +99,40 @@ applied, the configuration can be changed but not deleted. The details are in
 
 ### Step 3: Secret and SealedSecret
 
-- **Two ways in,** as in Kubernetes with Bitnami's sealed secrets.
-  - A `Secret` carries its value in clear (`stringData`, `data`), or comes from
-    `clowder create secret <namespace>/<name> --from-literal|--from-file`. The CLI sends it
-    over mTLS, and the cluster encrypts it with the data key. A `Secret` does not belong in
-    Git.
-  - A `SealedSecret` carries its value encrypted for the sealing key and for its own
-    namespace and name (today's `!secret` value). `clowder secret seal` makes one, as
-    `kubeseal` does: with the public half of the sealing key from the cluster
-    (`GET /v1/encryption`), or offline from a file (`--cert`, as in kubeseal) that
-    `clowderd sealing-key export --public` writes. A `SealedSecret` goes into Git.
-  - Both end up as the same secret in the state. A stack, a namespace or the
-    configuration names a Secret and does not care how it came in. `!secret` goes.
-- **The same value applied again changes nothing,** as now: the state compares the value's
-  digest, not the ciphertext, which differs at each seal. `get` and `diff` show a secret's
-  digest, never its value.
-- **No recovery key.** As with sealed secrets, the sealing key is exported and kept
-  offline: `clowderd sealing-key export`, run as root on a host (a control-plane host from
-  step 4 on) right after `init`. `secret decrypt --identity` takes the sealing key in
-  place of the recovery key. `secret rekey --identity` seals the values in files anew for
-  the cluster of the current context (or for `--cert`) when the old cluster is lost; with
-  one recipient, that is all that is left of rekey. The recovery key, `recovery rotate`,
-  `/v1/recovery/rotate` and the second recipient of every value go. Phase 3 decides
-  whether backups also keep the sealing key.
+Done on `phase-2b` (lint and unit tests green, the full review loop over it; the live
+tests come after step 5). A value comes in one of two ways, as in Kubernetes with
+Bitnami's sealed secrets, and both end up as the same Secret in the state:
 
-For the operator: `!secret` values become `SealedSecret`s (`clowder secret seal`), or
-`Secret`s that stay out of Git. The sealing key takes the place of the recovery key and is
-exported right after `init`.
+- A `Secret` holds its values in clear (`spec.data` in Base64, `spec.stringData` as
+  text). The CLI sends it over mTLS, and the cluster encrypts it with the data key. It
+  does not belong in Git. `clowder create secret` sends one without a file and, like
+  `kubectl create`, refuses one that exists.
+- A `SealedSecret` holds each value in `spec.encryptedData`, sealed for the sealing key and
+  bound to its namespace and name, as one line of Base64 as kubeseal writes it. It goes into
+  Git. `clowder secret seal` makes one from the Secrets of a file or from
+  `--from-literal`/`--from-file`, with the public sealing key from the cluster or offline
+  from `--cert`. The apply stores it as the Secret of the same name; `get`, `delete -f` and
+  `diff -f` work on that Secret.
+
+Deviations from Kubernetes, each for a reason: `data` and `stringData` stand under `spec`,
+like every clowder resource's fields; a SealedSecret is no resource of its own in the
+cluster and has no `template`, because it is only a way in; the values are sealed with age,
+which the cluster already uses, instead of RSA.
+
+As decided with the operator, the same value applied again changes nothing (the state
+compares digests), and there is no recovery key: `clowderd sealing-key export [--public]`
+prints the sealing key for keeping offline. `secret decrypt --identity` and
+`secret rekey --identity` take it; rekey always opens the values itself and seals them for
+the cluster of the context or for `--cert`. Phase 3 decides whether backups also keep the
+sealing key. Step 4 starts from here.
+
+What changed, for the operator: `!secret` values and `secret encrypt` are gone; files hold
+`SealedSecret`s (`clowder secret seal`), or `Secret`s that stay out of Git.
+`recovery rotate` is gone: export the sealing key right after `init`
+(`ssh root@<host> clowderd sealing-key export`) and keep it offline. The state and the
+API change, so a cluster of an earlier build must be set up anew. The details are in
+[specs.md](developing/specs.md) (Secrets and sealed values) and
+[cluster.md](developing/cluster.md) (Secret values).
 
 ### Step 4: host roles
 
@@ -412,14 +417,16 @@ Not live-tested, as the lab cannot produce it:
 A cluster has no users: whoever holds the CLI's credentials controls it, as with kubeadm's
 `admin.conf`. The open point is what a removed host keeps.
 
-- A removed host keeps the data key, and with it the CA's key and every `!secret` value.
-  A host that kept its disk can still issue certificates that the revocations do not name:
-  host certificates, and CLI certificates after the cutoff. Rotating the data key, the CA
-  and the cluster's age key (`cluster rotate-keys`, planned for phase 4) closes this. Until
-  then, wipe a removed host's disk.
+- A removed host keeps the data key, and with it the CA's key, the sealing key and so
+  every SealedSecret's value. A host that kept its disk can still issue certificates that
+  the revocations do not name: host certificates, and CLI certificates after the cutoff.
+  Rotating the data key, the CA and the sealing key (`cluster rotate-keys`, planned for
+  phase 4) closes this; a new sealing key then needs every file sealed anew with
+  `secret rekey`. Until then, wipe a removed host's disk.
 - The CLI checks an agent's certificate against the CA, not against the revocations, as
-  kubectl does. So a removed host could answer the CLI as the cluster, with recipients of
-  its own for `secret encrypt`. The agents refuse such a host, but only the endpoints of
+  kubectl does. So a removed host could answer the CLI as the cluster, with a sealing key
+  of its own for `secret seal`, or take the values of `create secret` and of a `Secret`
+  in clear. The agents refuse such a host, but only the endpoints of
   the CLI's context keep the CLI from asking it, so remove a host's address from them when
   the host goes. With the CA's key on such a host, no list the CLI pinned would help;
   `cluster rotate-keys` closes this too.

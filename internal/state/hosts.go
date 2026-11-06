@@ -28,7 +28,7 @@ func applyBootstrap(s *State, _ Command, payload Bootstrap) (func(), error) {
 	switch {
 	case s.Keys != nil:
 		return nil, errors.New("the cluster is bootstrapped already")
-	case len(payload.Keys.CACertificate) == 0 || len(payload.Keys.CAKey) == 0 || len(payload.Keys.AgeIdentity) == 0:
+	case len(payload.Keys.CACertificate) == 0 || len(payload.Keys.CAKey) == 0 || len(payload.Keys.SealingKey) == 0:
 		return nil, errors.New("the keys are incomplete")
 	case !names.Valid(payload.ClusterName):
 		return nil, fmt.Errorf("cluster name %q: %s", payload.ClusterName, names.Rule)

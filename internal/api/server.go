@@ -30,12 +30,14 @@ const waitTimeout = 10 * time.Second
 // MaxRequestBytes bounds every request body. The largest body is an apply
 // of a directory: every resource of every namespace in one request, and
 // with them every secret of the cluster, at most
-// resource.MaxClusterSecretBytes (4 MiB) in clear. Encrypted for the
-// cluster (internal/secretvalue), a value grows to 1.84 times its size plus
-// less than 1 KiB. So all secrets together take 4 MiB × 1.84 +
-// resource.MaxClusterSecrets × 1 KiB, about 8.4 MiB, and the rest is for
-// stacks and volumes. Clients that send more values (a rekey) split them
-// to stay within this limit.
+// resource.MaxClusterSecretBytes (4 MiB) in clear. Sealed for the cluster
+// (internal/secretvalue), a value grows to 1.8 times its size plus less
+// than 1 KiB; in a Secret's data, to 1.34 times. So all secrets together
+// take about 4 MiB × 1.8 + resource.MaxClusterSecrets × 1 KiB, about
+// 8.2 MiB, and the rest is for stacks and volumes. Text in a Secret's
+// stringData that JSON escapes (<, >, &, control characters) takes up to
+// six times its size; a request of such values may hit the limit, and
+// data or a SealedSecret carries them instead.
 const MaxRequestBytes = 16 << 20
 
 // Cluster is what the server needs from the agent's Raft member.
@@ -72,7 +74,7 @@ type ServerConfig struct {
 	Certificate tls.Certificate
 	// APIAddress gives a host's API address (its node address and Port).
 	APIAddress func(id state.HostID) string
-	// Keys seals secrets for the state and decrypts them (the data key).
+	// Keys encrypts secrets for the state and decrypts them (the data key).
 	Keys Keys
 	// HostID is this agent's host; Containers answers for its stacks.
 	HostID     state.HostID
@@ -113,8 +115,8 @@ type Alerts interface {
 
 // Keys is the cluster's data key as the server uses it.
 type Keys interface {
-	Seal(plaintext []byte) (state.Sealed, error)
-	Open(sealed state.Sealed) ([]byte, error)
+	Encrypt(plaintext []byte) (state.Encrypted, error)
+	Decrypt(encrypted state.Encrypted) ([]byte, error)
 	// Derive gives a key of its own for one purpose (the secrets' digests).
 	Derive(purpose string) ([]byte, error)
 }
@@ -153,9 +155,7 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("POST /v1/hosts/{id}/{action}", pki.RoleCLI, server.hostAction)
 	server.handle("POST /v1/join-tokens", pki.RoleCLI, server.newJoinToken)
 	server.handle("GET /v1/audit", pki.RoleCLI, server.audit)
-	server.handle("GET /v1/encryption", pki.RoleCLI, server.encryption)
-	server.handle("POST /v1/encryption/rekey", pki.RoleCLI, server.rekey)
-	server.handle("POST /v1/recovery/rotate", pki.RoleCLI, server.rotateRecovery)
+	server.handle("GET /v1/sealing-key", pki.RoleCLI, server.publicSealingKey)
 	server.handle("POST /v1/apply", pki.RoleCLI, server.applyResources)
 	server.handle("POST /v1/delete", pki.RoleCLI, server.deleteResources)
 	server.handle("GET /v1/resources/{kind}", pki.RoleCLI, server.listResources)
@@ -175,6 +175,7 @@ func NewServer(config ServerConfig) *Server {
 	server.handle("POST /v1/internal/join", pki.RoleHost, server.internalJoin)
 	server.handle("POST /v1/internal/hand-over", pki.RoleHost, server.internalHandOver)
 	server.handle("POST /v1/internal/credentials", pki.RoleHost, server.internalCredentials)
+	server.handle("GET /v1/internal/sealing-key", pki.RoleHost, server.internalSealingKey)
 	server.handle("GET /v1/internal/stacks/{project}/ps", pki.RoleHost, server.localPs)
 	server.handle("GET /v1/internal/stacks/{project}/logs", pki.RoleHost, server.localLogs)
 	server.handle("GET /v1/internal/volumes/progress", pki.RoleHost, server.localProgress)
@@ -606,8 +607,7 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 // when its route is added.
 var cliKinds = map[string]bool{
 	state.KindSetHostPhase: true, state.KindRestartStack: true, state.KindRequestMove: true,
-	state.KindSetRecoveryRecipient: true,
-	state.KindAddJoinToken:         true,
+	state.KindAddJoinToken: true,
 }
 
 // hostKinds are the commands that a host commits as itself: what it

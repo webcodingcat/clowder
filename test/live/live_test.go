@@ -269,7 +269,7 @@ func TestStacks(t *testing.T) {
 		{"the same files again change nothing", func(t *testing.T) { applyAgainChangesNothing(t, server) }},
 		{"a dry run makes nothing", func(t *testing.T) { dryRunMakesNothing(t, server) }},
 		{"lost credentials come back from root on the host", func(t *testing.T) { recoverAccess(t, server) }},
-		{"the recovery key changes", func(t *testing.T) { rotateRecoveryKey(t, server) }},
+		{"the sealing key seals offline and rekeys", func(t *testing.T) { sealOfflineAndRekey(t, server) }},
 		{"a restart recreates the stack, and the watch sees it", func(t *testing.T) {
 			restartRecreatesAndTheWatchSeesIt(t, server)
 		}},
@@ -318,17 +318,15 @@ func waitForSetup(t *testing.T, server host) {
 }
 
 // setUpCluster gives the test the CLI's first credentials from root on the
-// first host, as over SSH, and the recovery key in a file; then it writes
-// the configuration's directory, the ClusterConfiguration filled in from
-// the module's outputs and the Secret of the Hetzner token, and the
-// namespace default with the registry's login, and applies it.
+// first host, as over SSH, and the cluster's sealing key in a file; then it
+// writes the configuration's directory, the ClusterConfiguration filled in
+// from the module's outputs and the sealed Secret of the Hetzner token, and
+// the namespace default with the registry's sealed login, and applies it.
 func setUpCluster(t *testing.T, server host, tofu outputs) {
 	// gone before, so a step run again starts as the first time: import
-	// refuses a context that is there, --recovery-out a file
-	for _, path := range []string{credentialsFile(), filepath.Join(workDir, "recovery-key")} {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			t.Fatal(err)
-		}
+	// refuses a context that is there
+	if err := os.Remove(credentialsFile()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
 	}
 	if err := os.MkdirAll(configDir(), 0o755); err != nil {
 		t.Fatal(err)
@@ -338,19 +336,28 @@ func setUpCluster(t *testing.T, server host, tofu outputs) {
 	if _, err := clowderWithInput(strings.NewReader(issued), "config", "import", "-"); err != nil {
 		t.Fatal(err)
 	}
-	mustClowder(t, "recovery", "rotate", "--recovery-out", filepath.Join(workDir, "recovery-key"))
+	// the private key opens the sealed files in an emergency, the public
+	// one seals without the cluster; stdout alone, as above
+	sealingKey := server.must(t, "clowderd sealing-key export 2>/dev/null")
+	if err := os.WriteFile(sealingKeyFile(), []byte(sealingKey+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sealingCert := server.must(t, "clowderd sealing-key export --public 2>/dev/null")
+	if err := os.WriteFile(sealingCertFile(), []byte(sealingCert+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if status := mustClowder(t, "cluster", "status"); !strings.Contains(status, "no configuration") {
 		t.Errorf("a new cluster has a configuration:\n%s", status)
 	}
 
 	config := tofu.moduleConfig(t)
 	config.Hetzner = clusterspec.Hetzner{
-		TokenSecretRef: setSystemSecret(t, "hetzner", "token", os.Getenv("HCLOUD_TOKEN")),
+		TokenSecretRef: sealSystemSecret(t, "hetzner", "token", os.Getenv("HCLOUD_TOKEN")),
 		API:            os.Getenv("HCLOUD_ENDPOINT"),
 	}
 	writeConfig(t, config)
 	password := pushPrivateImage(t, server)
-	writeRegistryLogin(t, password)
+	sealRegistryLogin(t, password)
 	checkNothingPersonal(t, os.Getenv("HCLOUD_TOKEN"), password)
 
 	// HLab's API is plain http: the CLI warns about it, on stderr before the
@@ -360,10 +367,10 @@ func setUpCluster(t *testing.T, server host, tofu outputs) {
 	diff, err := clowder("diff", "-f", configDir())
 	if exitCode(err) != 1 || !strings.HasPrefix(diff, httpWarning) ||
 		!strings.Contains(diff, "The new Hetzner token sees the servers of 1 of 1 hosts.\n") ||
-		!strings.Contains(diff, "Secret clowder-system/hetzner: new\n") ||
+		!strings.Contains(diff, "SealedSecret clowder-system/hetzner: new\n") ||
 		!strings.Contains(diff, "ClusterConfiguration cluster: new\n") ||
 		!strings.Contains(diff, "Namespace default: differs in spec.imagePullSecrets\n") ||
-		!strings.Contains(diff, "Secret default/"+registrySecret+": new\n") {
+		!strings.Contains(diff, "SealedSecret default/"+registrySecret+": new\n") {
 		t.Errorf("diff before the first apply: %v\n%s", err, diff)
 	}
 	// a new token is asked for; without a terminal only --yes applies it
@@ -377,17 +384,18 @@ func setUpCluster(t *testing.T, server host, tofu outputs) {
 
 	// another token: the Secret differs in its value, which the diff never
 	// shows, and the new token sees none of the hosts' servers
-	setSystemSecret(t, "hetzner", "token", "another token")
+	sealSystemSecret(t, "hetzner", "token", "another token")
 	diff, err = clowder("diff", "-f", configDir())
-	if exitCode(err) != 1 || !strings.Contains(diff, "Secret clowder-system/hetzner: differs in data.token\n") ||
+	if exitCode(err) != 1 || !strings.Contains(diff, "SealedSecret clowder-system/hetzner: differs in data.token\n") ||
 		!strings.Contains(diff, "The new Hetzner token ") || strings.Contains(diff, "sees the servers of 1 of 1 hosts") ||
 		strings.Contains(diff, "ClusterConfiguration cluster:") || strings.Contains(diff, "another token") {
 		t.Errorf("diff after the token changed: %v\n%s", err, diff)
 	}
-	// encrypted anew, the same token is no change
-	setSystemSecret(t, "hetzner", "token", os.Getenv("HCLOUD_TOKEN"))
+	// sealed anew, the same token is no change: the cluster compares the
+	// values' digests, not the sealed text
+	sealSystemSecret(t, "hetzner", "token", os.Getenv("HCLOUD_TOKEN"))
 	if diff, err := clowder("diff", "-f", configDir()); err != nil || !strings.Contains(diff, "nothing would change") {
-		t.Errorf("diff after the token was encrypted anew: %v\n%s", err, diff)
+		t.Errorf("diff after the token was sealed anew: %v\n%s", err, diff)
 	}
 	status := mustClowder(t, "cluster", "status")
 	if strings.Contains(status, "leader none") || !strings.Contains(status, "configuration generation 1") {
@@ -431,7 +439,7 @@ func checkNothingPersonal(t *testing.T, values ...string) {
 // pushPrivateImage makes the host trust the registry (Docker's trust per
 // registry; daemon.json stays as it is) and puts the test's image there.
 // Then it logs out and removes the image, so only the login of the
-// namespace default (writeRegistryLogin), which the agent hands Docker for
+// namespace default (sealRegistryLogin), which the agent hands Docker for
 // the namespace's stacks, can pull it. It returns the password.
 func pushPrivateImage(t *testing.T, server host) string {
 	server.upload(t, filepath.Join(workDir, registryCAFile), "/etc/docker/certs.d/"+registry+"/ca.crt")
@@ -453,13 +461,13 @@ func pushPrivateImage(t *testing.T, server host) string {
 // the private registry.
 const registrySecret = "registry"
 
-// writeRegistryLogin writes the namespace default to the configuration's
+// sealRegistryLogin writes the namespace default to the configuration's
 // directory, naming the registry's login in imagePullSecrets, and the
-// login below it: the server and the user in clear, the password from
-// stdin.
-func writeRegistryLogin(t *testing.T, password string) {
+// login below it as a SealedSecret: the server and the user from flags,
+// the password from stdin.
+func sealRegistryLogin(t *testing.T, password string) {
 	t.Helper()
-	login, err := clowderWithInput(strings.NewReader(password), "secret", "encrypt", registrySecret,
+	login, err := clowderWithInput(strings.NewReader(password), "secret", "seal", registrySecret,
 		"--from-literal", resource.RegistryServerKey+"="+registry,
 		"--from-literal", resource.RegistryUsernameKey+"="+registryUser,
 		"--from-file", resource.RegistryPasswordKey+"=-")
@@ -479,10 +487,11 @@ var (
 	secondSecrets = map[string]string{"password": "second pa$$word", "api-token": "tok$en 'two'"}
 )
 
-// applyShop writes the stack's resources and secrets and applies them, each
-// secret encrypted anew (secret encrypt): password in the stack's file,
-// api-token on stdin. Then it waits until the stack's generation runs with
-// these secrets.
+// applyShop writes the stack's resources and secrets and applies them, both
+// ways a secret comes in: password sealed anew (secret seal) in the stack's
+// file, as it would go into Git, and api-token as a Secret in clear on
+// stdin. Then it waits until the stack's generation runs with these
+// secrets.
 func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 	t.Helper()
 	if err := os.MkdirAll(stackDir("shop"), 0o755); err != nil {
@@ -491,14 +500,17 @@ func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 	before := stackInfo(t, "shop").generation // 0 before the first apply
 	digestsBefore := secretDigests(t)
 	// the file starts with the stack and its volumes; the password after
-	// them is encrypted anew each time
+	// them is sealed anew each time
 	previous, _ := os.ReadFile(stackFile("shop"))
 	specChanged := before == 0 || !strings.HasPrefix(string(previous), shopStack(greeting))
-	password := encryptSecret(t, "password", secrets["password"])
+	password := sealSecret(t, "password", secrets["password"])
 	if err := os.WriteFile(stackFile("shop"), []byte(shopStack(greeting)+"---\n"+password), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	token := encryptSecret(t, "api-token", secrets["api-token"])
+	// the value has $ and ': Go's quoting is a YAML double-quoted string
+	// for it
+	token := document(resource.KindSecret, "api-token",
+		"stringData: {"+stackSecretKey+": "+strconv.Quote(secrets["api-token"])+"}")
 	output, err := clowderWithInput(strings.NewReader(token), "apply", "-f", "-")
 	if err != nil {
 		t.Fatal(err)
@@ -546,11 +558,14 @@ func applyShop(t *testing.T, greeting string, secrets map[string]string) {
 }
 
 // appliedSecrets are the secrets that an apply's output names as applied,
-// changed or new; an unchanged one keeps its digest.
+// changed or new, whether they came as a Secret or a SealedSecret; an
+// unchanged one keeps its digest.
 func appliedSecrets(output string) []string {
 	var names []string
 	for _, line := range strings.Split(output, "\n") {
-		if name, ok := strings.CutPrefix(strings.TrimSpace(line), "Secret default/"); ok {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "Sealed")
+		if name, ok := strings.CutPrefix(line, "Secret default/"); ok {
 			if name, ok = strings.CutSuffix(name, ": applied"); ok {
 				names = append(names, name)
 			}
@@ -563,6 +578,7 @@ func appliedSecrets(output string) []string {
 // private registry, its secrets, its volume, both pools.
 func runStack(t *testing.T, server host) {
 	refuseSecretsOutOfPlace(t)
+	createSecretOnce(t)
 	applyShop(t, "", firstSecrets)
 	mustClowder(t, "stack", "ps", "shop")
 
@@ -579,64 +595,90 @@ func runStack(t *testing.T, server host) {
 	server.must(t, "lvs --noheadings -o lv_name vg-fast | grep -qw "+data)
 	server.must(t, "lvs --noheadings -o lv_name vg-bulk | grep -qw "+scratch)
 	server.must(t, "drbdsetup status | grep -qw "+data)
-	rekeyAndDecrypt(t, server, filepath.Join(workDir, "recovery-key"))
 }
 
-// rekeyAndDecrypt encrypts the values of the stack's files and of the
-// configuration's directory anew through the cluster, which changes
-// nothing the cluster keeps and recreates no container, and reads a value
-// back with the recovery key, as in an emergency.
-func rekeyAndDecrypt(t *testing.T, server host, recoveryKey string) {
+// sealOfflineAndRekey seals a value for the public sealing key alone, as
+// a user does without access to the cluster, and applies it twice: sealed
+// anew, the same value changes nothing. Then it seals the stack's files and
+// the configuration's directory anew and reads a value back with the
+// private sealing key, as in an emergency.
+func sealOfflineAndRekey(t *testing.T, server host) {
+	const name, value = "offline", "sealed off$line"
+	for _, want := range []string{"applied", "unchanged"} {
+		sealed := mustClowder(t, "secret", "seal", names.ID(names.Default, name),
+			"--from-literal", stackSecretKey+"="+value, "--cert", sealingCertFile())
+		output, err := clowderWithInput(strings.NewReader(sealed), "apply", "-f", "-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if line := "SealedSecret default/" + name + ": " + want; !strings.Contains(output, line) {
+			t.Errorf("apply of a value sealed offline: want %q\n%s", line, output)
+		}
+	}
+	if secrets := mustClowder(t, "get", "secrets"); !strings.Contains(secrets, name) {
+		t.Errorf("get secrets does not show the applied SealedSecret:\n%s", secrets)
+	}
+	mustClowder(t, "delete", "secret", name)
+	rekeyAndDecrypt(t, server, sealingKeyFile())
+}
+
+// rekeyAndDecrypt seals the values of the stack's files and of the
+// configuration's directory anew for the cluster, opening them with
+// sealingKey, which changes nothing the cluster keeps and recreates no
+// container, and reads a value back with sealingKey.
+func rekeyAndDecrypt(t *testing.T, server host, sealingKey string) {
 	t.Helper()
 	before := shopContainers(t, server)
-	mustClowder(t, "secret", "rekey", "-f", stackDir("shop"))
-	mustClowder(t, "secret", "rekey", "-f", configDir())
+	mustClowder(t, "secret", "rekey", "--identity", sealingKey, "-f", stackDir("shop"))
+	mustClowder(t, "secret", "rekey", "--identity", sealingKey, "-f", configDir())
 	if diff, err := clowder("diff", "-f", configDir()); err != nil {
-		t.Errorf("the configuration's directory encrypted anew: %v\n%s", err, diff)
+		t.Errorf("the configuration's directory sealed anew: %v\n%s", err, diff)
 	}
-	if out := mustClowder(t, "apply", "-f", stackDir("shop")); !strings.Contains(out, "Secret default/password: unchanged") {
-		t.Errorf("the stack's files encrypted anew:\n%s", out)
+	if out := mustClowder(t, "apply", "-f", stackDir("shop")); !strings.Contains(out, "SealedSecret default/password: unchanged") {
+		t.Errorf("the stack's files sealed anew:\n%s", out)
 	}
 	checkUnchanged(t, before, shopContainers(t, server))
-	out := mustClowder(t, "secret", "decrypt", "--identity", recoveryKey, "-f", stackFile("shop"))
+	out := mustClowder(t, "secret", "decrypt", "--identity", sealingKey, "-f", stackFile("shop"))
 	if want := "default/password[" + stackSecretKey + "]\t" + firstSecrets["password"] + "\n"; out != want {
 		t.Errorf("decrypt: %q, want %q", out, want)
 	}
 }
 
-// refuseSecretsOutOfPlace applies what the cluster must refuse: a Secret in
-// clear, in a file and on stdin, and a value of a Secret of clowder-system
-// (the Hetzner token) copied into a Secret of default, which a container
-// would then read.
+// refuseSecretsOutOfPlace applies what the cluster must refuse: a value
+// sealed for a Secret of clowder-system (the Hetzner token), copied into a
+// SealedSecret of default, which a container would then read. Each value
+// is sealed for its own namespace and name.
 func refuseSecretsOutOfPlace(t *testing.T) {
 	t.Helper()
-	clear := "apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: copied}\nspec: {data: {value: s3cret}}\n"
-	clearFile := filepath.Join(workDir, "clear.yaml")
-	if err := os.WriteFile(clearFile, []byte(clear), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := clowder("apply", "-f", clearFile); err == nil || !strings.Contains(err.Error(), "encrypted, tagged !secret") {
-		t.Errorf("a Secret in clear in a file: %v", err)
-	}
-	if _, err := clowderWithInput(strings.NewReader(clear), "apply", "-f", "-"); err == nil ||
-		!strings.Contains(err.Error(), "encrypted, tagged !secret") {
-		t.Errorf("a Secret in clear on stdin: %v", err)
-	}
 	system := names.ID(names.System, "hetzner")
-	secret, err := clowderWithInput(strings.NewReader("the Hetzner token"), "secret", "encrypt", system,
+	sealed, err := clowderWithInput(strings.NewReader("the Hetzner token"), "secret", "seal", system,
 		"--from-file", "token=-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	copied := strings.Replace(secret, "metadata: {namespace: "+names.System+", name: hetzner}",
+	copied := strings.Replace(sealed, "metadata: {namespace: "+names.System+", name: hetzner}",
 		"metadata: {namespace: "+names.Default+", name: copied}", 1)
-	if copied == secret {
-		t.Fatalf("secret encrypt printed metadata the test does not know:\n%s", secret)
+	if copied == sealed {
+		t.Fatalf("secret seal printed metadata the test does not know:\n%s", sealed)
 	}
 	if output, err := clowderWithInput(strings.NewReader(copied), "apply", "-f", "-"); err == nil ||
-		!strings.Contains(output, "the value is for "+system+", not for default/copied") {
-		t.Errorf("a value of clowder-system as a Secret of default: %v\n%s", err, output)
+		!strings.Contains(output, "not for default/copied") {
+		t.Errorf("a value of clowder-system as a SealedSecret of default: %v\n%s", err, output)
 	}
+}
+
+// createSecretOnce makes a Secret with create secret, which refuses one
+// that exists: a change goes through apply. The Secret goes again after,
+// so the steps that follow see the namespace as before.
+func createSecretOnce(t *testing.T) {
+	t.Helper()
+	id := names.ID(names.Default, "created")
+	mustClowder(t, "create", "secret", id, "--from-literal", stackSecretKey+"=x")
+	if output, err := clowder("create", "secret", id, "--from-literal", stackSecretKey+"=y"); err == nil ||
+		!strings.Contains(output, "already exists") {
+		t.Errorf("a second create of %s: %v\n%s", id, err, output)
+	}
+	mustClowder(t, "delete", "secret", id)
 }
 
 func checkSecrets(t *testing.T, server host, want map[string]string) {

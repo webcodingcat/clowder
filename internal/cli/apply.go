@@ -29,11 +29,12 @@ func newApplyResources(g *globals) *cobra.Command {
 			"the order in which they appear: each file from top to bottom, and a directory's files in\n" +
 			"order of their names. The cluster checks each resource against the resources before it,\n" +
 			"so put a Secret before what names it, and a namespace before what it holds. The cluster\n" +
-			"applies all resources or none. A Secret's values are encrypted in spec.data and tagged\n" +
-			"!secret (clowder secret encrypt writes the Secret). Applying a resource that has not\n" +
-			"changed changes nothing. If an apply changes the Hetzner token (the ClusterConfiguration,\n" +
-			"or the Secret it names), it first shows what the new token sees and asks for\n" +
-			"confirmation; --yes applies it without asking.",
+			"applies all resources or none. A Secret holds its values in clear (spec.data in Base64,\n" +
+			"spec.stringData as text) and stays out of Git; a SealedSecret holds them sealed for the\n" +
+			"cluster (clowder secret seal writes it) and becomes the Secret of its name. Applying a\n" +
+			"resource that has not changed changes nothing. If an apply changes the Hetzner token (the\n" +
+			"ClusterConfiguration, or the Secret it names), it first shows what the new token sees and\n" +
+			"asks for confirmation; --yes applies it without asking.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if from == "" {
@@ -80,12 +81,12 @@ func applyRequest(ctx context.Context, client *api.Client, request api.ApplyRequ
 }
 
 // mayChangeToken tells whether an apply may change the Hetzner token,
-// because it holds the configuration or a Secret of names.System. Only then
-// does the CLI ask the cluster first.
+// because it holds the configuration or a Secret of names.System (also as
+// a SealedSecret). Only then does the CLI ask the cluster first.
 func mayChangeToken(objects []resource.Object) bool {
 	return slices.ContainsFunc(objects, func(object resource.Object) bool {
 		return object.Kind == resource.KindClusterConfiguration ||
-			object.Kind == resource.KindSecret && object.Metadata.Namespace == names.System
+			resource.StoredKind(object.Kind) == resource.KindSecret && object.Metadata.Namespace == names.System
 	})
 }
 

@@ -71,7 +71,7 @@ func newCredentials() *cobra.Command {
 // printCredentials makes the CLI's key on this host and has the host's own
 // agent issue its certificate. Root on a host can read every key of the
 // cluster anyway, as with kubeadm's admin.conf. The agent only saves root
-// from handling the CA's key, which is sealed in the state.
+// from handling the CA's key, which is encrypted in the state.
 func printCredentials(ctx context.Context, out io.Writer, files Files, options CredentialsOptions) error {
 	host, err := files.readHost()
 	if err != nil {

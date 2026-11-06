@@ -19,14 +19,14 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// encrypt encrypts a value for a Secret, as clowder secret encrypt does.
-func encrypt(t *testing.T, recipients []age.Recipient, secretID, value string) string {
+// seal seals a value for a Secret, as clowder secret seal does.
+func seal(t *testing.T, recipient age.Recipient, secretID, value string) string {
 	t.Helper()
-	armored, err := secretvalue.Encrypt(secretvalue.Value{For: secretID, Bytes: []byte(value)}, recipients...)
+	sealed, err := secretvalue.Seal(secretvalue.Value{For: secretID, Bytes: []byte(value)}, recipient)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return armored
+	return sealed
 }
 
 // testConfig is a configuration that names the Hetzner token in the Secret
@@ -71,20 +71,89 @@ func (c *testCluster) dryRunWith(servers func(ctx context.Context, api, token st
 	server.config.HetznerServers = servers
 	batch := changeBatch{DryRun: true, Actor: state.CLIActor("admin")}
 	for _, object := range objects {
-		put, err := server.putChange(object)
+		put, err := server.putChange(object, false)
 		batch.add(object.Ref(), state.ResourceChange{Put: &put}, err)
 	}
 	return server.runChanges(context.Background(), batch)
 }
 
-func TestTheEncryptionNamesTheClustersKeyAndTheRecoveryKey(t *testing.T) {
+func TestTheCLIGetsThePublicSealingKey(t *testing.T) {
 	cluster := newTestCluster(t)
 	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
-	var encryption Encryption
-	if err := client.Get(context.Background(), "/v1/encryption", &encryption); err != nil ||
-		encryption.Cluster != cluster.recipients[0].(*age.X25519Recipient).String() ||
-		encryption.Recovery != cluster.recipients[1].(*age.X25519Recipient).String() {
-		t.Errorf("encryption %+v, %v", encryption, err)
+	var public PublicSealingKey
+	if err := client.Get(context.Background(), "/v1/sealing-key", &public); err != nil ||
+		public.Recipient != cluster.sealing.(*age.X25519Recipient).String() {
+		t.Errorf("public sealing key %+v, %v", public, err)
+	}
+}
+
+func TestOnlyAHostGetsTheSealingKey(t *testing.T) {
+	cluster := newTestCluster(t)
+	var answer SealingKeyAnswer
+	host := cluster.client(cluster.hostCertificate(1), testVersion, 0)
+	if err := host.Get(context.Background(), "/v1/internal/sealing-key", &answer); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := age.ParseX25519Identity(answer.Identity)
+	if err != nil || identity.Recipient().String() != cluster.sealing.(*age.X25519Recipient).String() {
+		t.Errorf("the sealing key %v does not belong to the cluster's public key", err)
+	}
+	cli := cluster.client(cluster.cliCertificate(), testVersion, 0)
+	if err := cli.Get(context.Background(), "/v1/internal/sealing-key", &answer); statusOf(err) != http.StatusForbidden {
+		t.Errorf("the CLI asked for the sealing key: %v", err)
+	}
+}
+
+func TestASecretAndASealedSecretOfTheSameValuesAreTheSame(t *testing.T) {
+	cluster := newTestCluster(t)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
+	ctx := context.Background()
+	values := map[string]string{"password": "s3cret", "user": "shop"}
+	for _, test := range []struct {
+		secret resource.Object
+		want   string
+	}{
+		{cluster.secretObject("default", "db", values), Applied},
+		{cluster.sealedSecretObject("default", "db", values), Unchanged},
+		{cluster.sealedSecretObject("default", "db", map[string]string{"password": "other", "user": "shop"}), Applied},
+	} {
+		result, err := client.ApplyResources(ctx, ApplyRequest{Resources: []resource.Object{test.secret}}, false)
+		if err != nil || result.Results[0].Outcome != test.want || result.Results[0].Kind != test.secret.Kind {
+			t.Errorf("%s: %+v, %v", test.secret.Kind, result, err)
+		}
+	}
+	// delete -f of the SealedSecret's file deletes the Secret
+	sealed := cluster.sealedSecretObject("default", "db", values)
+	result, err := client.DeleteResources(ctx, DeleteRequest{Resources: []resource.Ref{sealed.Ref()}}, false)
+	if err != nil || result.Results[0].Outcome != Deleted {
+		t.Errorf("delete of the SealedSecret: %+v, %v", result, err)
+	}
+}
+
+func TestAnApplyRefusesASecretNamedTwice(t *testing.T) {
+	cluster := newTestCluster(t)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
+	values := map[string]string{"password": "s3cret"}
+	request := ApplyRequest{Resources: []resource.Object{
+		cluster.secretObject(names.System, "alerts", values), cluster.sealedSecretObject(names.System, "alerts", values),
+	}}
+	result, err := client.ApplyResources(context.Background(), request, false)
+	if err != nil || result.Results[0].Outcome != NotApplied || result.Results[1].Outcome != Refused ||
+		!strings.Contains(result.Results[1].Message, "the request names Secret clowder-system/alerts twice (first as a Secret)") {
+		t.Errorf("a Secret and a SealedSecret of one name: %+v, %v", result, err)
+	}
+}
+
+func TestACreateRefusesASecretThatExists(t *testing.T) {
+	cluster := newTestCluster(t)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
+	request := ApplyRequest{Resources: []resource.Object{cluster.secretObject("default", "db", map[string]string{"a": "b"})}, Create: true}
+	if result, err := client.ApplyResources(context.Background(), request, false); err != nil || result.Results[0].Outcome != Applied {
+		t.Fatalf("the first create: %+v, %v", result, err)
+	}
+	result, err := client.ApplyResources(context.Background(), request, false)
+	if err != nil || result.Results[0].Outcome != Refused || !strings.Contains(result.Results[0].Message, "already exists") {
+		t.Errorf("the second create: %+v, %v", result, err)
 	}
 }
 
@@ -101,12 +170,12 @@ func TestTheConfigurationGoesInWithTheSecretItNames(t *testing.T) {
 	if err != nil || !slices.Equal(outcomes(result), []string{Applied, Applied}) || result.Index == 0 {
 		t.Fatalf("apply: %+v, %v", result, err)
 	}
-	var token state.Sealed
+	var token state.Encrypted
 	cluster.clusters[0].Read(func(current *state.State) { token, err = current.HetznerToken() })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opened, err := cluster.apis[0].config.Keys.Open(token); err != nil || string(opened) != "the token" {
+	if opened, err := cluster.apis[0].config.Keys.Decrypt(token); err != nil || string(opened) != "the token" {
 		t.Errorf("token %q, %v", opened, err)
 	}
 	if err := client.Get(ctx, path, &shown); err != nil {
@@ -336,54 +405,5 @@ func TestADryRunThatKeepsTheHetznerTokenAsksNothing(t *testing.T) {
 	result := cluster.dryRunWith(servers, cluster.configuration("a new token", testConfig())[:1])
 	if result.HetznerToken == nil || *result.HetznerToken != (TokenCheck{Hosts: 2, Seen: 2}) || asked != 1 {
 		t.Errorf("a new token: %+v, asked %d times", result.HetznerToken, asked)
-	}
-}
-
-func TestRekeyKeepsEachValueAndItsPlace(t *testing.T) {
-	cluster := newTestCluster(t)
-	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
-	values := []PlacedValue{
-		{For: "shop/token", Encrypted: encrypt(t, cluster.recipients, "shop/token", "s3cret")},
-		{For: "clowder-system/hetzner", Encrypted: encrypt(t, cluster.recipients, "clowder-system/hetzner", "the Hetzner token")},
-	}
-	rekeyed, err := client.Rekey(context.Background(), values)
-	if err != nil {
-		t.Fatal(err)
-	}
-	identity, err := cluster.apis[0].clusterIdentity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for index, want := range []string{"s3cret", "the Hetzner token"} {
-		if rekeyed[index] == values[index].Encrypted {
-			t.Errorf("value %d is not encrypted anew", index+1)
-		}
-		for _, key := range []age.Identity{identity, cluster.recovery} {
-			opened, err := secretvalue.OpenFor(rekeyed[index], values[index].For, key)
-			if err != nil {
-				t.Errorf("value %d: %v", index+1, err)
-			} else if string(opened.Bytes) != want {
-				t.Errorf("value %d is %q, want %q", index+1, opened.Bytes, want)
-			}
-		}
-	}
-	stranger, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	other := PlacedValue{For: "shop/token", Encrypted: encrypt(t, []age.Recipient{stranger.Recipient()}, "shop/token", "s3cret")}
-	_, err = client.Rekey(context.Background(), []PlacedValue{values[0], other})
-	if statusOf(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "value 2") {
-		t.Errorf("a value of another cluster: %v", err)
-	}
-	if err != nil && strings.Contains(err.Error(), "s3cret") {
-		t.Errorf("the error shows the value: %v", err)
-	}
-	// the Hetzner token copied into another Secret is not encrypted anew for it
-	moved := PlacedValue{For: "shop/token", Encrypted: values[1].Encrypted}
-	_, err = client.Rekey(context.Background(), []PlacedValue{moved})
-	if statusOf(err) != http.StatusBadRequest ||
-		!strings.Contains(err.Error(), "the value is for clowder-system/hetzner, not for shop/token") {
-		t.Errorf("a value out of place: %v", err)
 	}
 }

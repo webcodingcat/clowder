@@ -92,10 +92,9 @@ func skipped(report io.Writer, path, why string) {
 	_, _ = fmt.Fprintf(report, "skipped %s: %s\n", path, why) // a report only
 }
 
-// readFile reads the resources of one file, in which a Secret's values are
-// encrypted (resource.ParseDocuments). The CLI never sees a value in clear,
-// not even on stdin. A file without resources is allowed unless required
-// is set (a directory skips such a file); otherwise it is an error.
+// readFile reads the resources of one file (resource.ParseDocuments). A
+// file without resources is allowed unless required is set (a directory
+// skips such a file); otherwise it is an error.
 func readFile(name string, data []byte, required bool) ([]resource.Object, error) {
 	objects, err := resource.ParseDocuments(data)
 	switch {
@@ -104,11 +103,19 @@ func readFile(name string, data []byte, required bool) ([]resource.Object, error
 	case required && len(objects) == 0:
 		return nil, fmt.Errorf("%s holds no resource of clowder's (apiVersion %s)", name, resource.APIVersion)
 	}
-	// a resource without a namespace is in default, as on the command line
 	for index := range objects {
-		if resource.Namespaced(objects[index].Kind) && objects[index].Metadata.Namespace == "" {
-			objects[index].Metadata.Namespace = names.Default
+		if resource.Namespaced(objects[index].Kind) {
+			objects[index].Metadata.Namespace = namespaceOrDefault(objects[index].Metadata.Namespace)
 		}
 	}
 	return objects, nil
+}
+
+// namespaceOrDefault returns the namespace that a file gives, or default
+// if it gives none, as on the command line.
+func namespaceOrDefault(namespace string) string {
+	if namespace == "" {
+		return names.Default
+	}
+	return namespace
 }

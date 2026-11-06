@@ -2,7 +2,7 @@
 // change it. Every agent holds the same State and applies the same commands
 // in the same order (Raft's log), so Apply must be deterministic: it does no
 // I/O, never reads the clock (commands carry their time) and never uses
-// randomness. Secrets arrive sealed; this package never sees them in clear.
+// randomness. Secrets arrive encrypted; this package never sees them in clear.
 package state
 
 import (
@@ -26,8 +26,8 @@ const MaxHosts = 32
 // HostID is a host's number, 0 to MaxHosts-1.
 type HostID int
 
-// Sealed is a secret encrypted with age for the cluster's data key.
-type Sealed []byte
+// Encrypted is a secret encrypted with age for the cluster's data key.
+type Encrypted []byte
 
 // State is everything the cluster agrees on. The zero value is an empty
 // cluster that only accepts the bootstrap command.
@@ -46,11 +46,7 @@ type State struct {
 	// JoinTokens are the tokens that a host may join with, by ID. Each
 	// stays until a host joins with it or it expires.
 	JoinTokens map[string]JoinToken `json:"join_tokens,omitempty"`
-	// RecoveryRecipient is the public half of the recovery key. Every
-	// encrypted value is also encrypted for it, so its holder can read the
-	// values when the cluster is lost.
-	RecoveryRecipient string           `json:"recovery_recipient,omitempty"`
-	Hosts             map[HostID]*Host `json:"hosts,omitempty"`
+	Hosts      map[HostID]*Host     `json:"hosts,omitempty"`
 	// HA is set once MinHAHosts hosts ran stacks at the same time. From
 	// then on, the cluster stays highly available (checkRemoval).
 	HA bool `json:"ha,omitempty"`
@@ -107,13 +103,14 @@ type State struct {
 	changes []Change
 }
 
-// ClusterKeys are the keys that init creates. The CA certificate is public.
-// The CA's key and the cluster's age identity (which every value tagged
-// !secret is encrypted for) are sealed.
+// ClusterKeys are the keys that init creates. The CA certificate is public;
+// the CA's key is encrypted with the data key.
 type ClusterKeys struct {
-	CACertificate []byte `json:"ca_certificate"`
-	CAKey         Sealed `json:"ca_key"`
-	AgeIdentity   Sealed `json:"age_identity"`
+	CACertificate []byte    `json:"ca_certificate"`
+	CAKey         Encrypted `json:"ca_key"`
+	// SealingKey is the cluster's sealing key, the age identity that
+	// SealedSecrets are sealed for, stored encrypted with the data key.
+	SealingKey Encrypted `json:"sealing_key"`
 }
 
 // ClusterConfig is the applied ClusterConfiguration, with the defaults
@@ -248,15 +245,15 @@ type Namespace struct {
 // Secret is a secret of a namespace, by names.ID in State.Secrets.
 type Secret struct {
 	Meta
-	Spec SealedSecret `json:"spec"`
+	Spec EncryptedSecret `json:"spec"`
 }
 
-// SealedSecret is a secret's spec as the state keeps it. Its values are
-// sealed, by key, so the state never sees them in clear. Its digest tells
-// an apply of the same values apart from a change, because sealing the
-// same value twice gives two different results.
-type SealedSecret struct {
-	Data map[string]Sealed `json:"data"`
+// EncryptedSecret is a secret's spec as the state keeps it. Its values are
+// encrypted with the data key, by key, so the state never sees them in
+// clear. Its digest tells an apply of the same values apart from a change,
+// because encrypting the same value twice gives two different results.
+type EncryptedSecret struct {
+	Data map[string]Encrypted `json:"data"`
 	// Digest is an HMAC over the secret's ID and its keys and values, which
 	// the API computes with a key derived from the data key.
 	Digest string `json:"digest"`
@@ -266,7 +263,7 @@ type SealedSecret struct {
 }
 
 // Keys are the secret's keys, sorted.
-func (s SealedSecret) Keys() []string {
+func (s EncryptedSecret) Keys() []string {
 	return slices.Sorted(maps.Keys(s.Data))
 }
 

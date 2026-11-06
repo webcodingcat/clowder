@@ -137,11 +137,9 @@ type testCluster struct {
 	clusters []*fakeCluster
 	servers  []*httptest.Server
 	apis     []*Server
-	// recipients are the cluster's age key and a recovery key: what
-	// the Secrets' values are encrypted for
-	recipients []age.Recipient
-	// recovery is the recovery key, which opens every value
-	recovery *age.X25519Identity
+	// sealing is the public half of the cluster's sealing key: what the
+	// values of SealedSecrets are sealed for
+	sealing age.Recipient
 	// joins answers the joins on every server; only the leader's is asked
 	joins *fakeJoins
 	// healths are the servers' beats, by host
@@ -168,31 +166,25 @@ func newCatchingUpCluster(t *testing.T) *testCluster {
 		t.Fatal(err)
 	}
 	c := &testCluster{t: t, ca: ca, joins: &fakeJoins{}, caughtUp: make(chan struct{})}
-	// a real data key: the state reads the sealed length of secrets
+	// a real data key: the state reads the encrypted length of secrets
 	keys, err := datakey.New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// and a real age key of the cluster's, sealed in the state as init does
+	// and a real sealing key, encrypted in the state as init does
 	clusterIdentity, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	recovery, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.recipients = []age.Recipient{clusterIdentity.Recipient(), recovery.Recipient()}
-	c.recovery = recovery
-	sealedIdentity, err := keys.Seal([]byte(clusterIdentity.String()))
+	c.sealing = clusterIdentity.Recipient()
+	sealingKey, err := keys.Encrypt([]byte(clusterIdentity.String()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	addresses := map[state.HostID]string{}
 	for id := range state.HostID(2) {
 		cluster := newFakeCluster(t, id == 0)
-		cluster.state.Keys.AgeIdentity = sealedIdentity
-		cluster.state.RecoveryRecipient = recovery.Recipient().String()
+		cluster.state.Keys.SealingKey = sealingKey
 		health := &fakeHealth{beats: map[state.HostID]int{}}
 		c.healths = append(c.healths, health)
 		volumes := &fakeVolumes{}
@@ -234,7 +226,7 @@ func bootstrappedState(t *testing.T) *state.State {
 		}
 	}
 	apply(1, state.KindBootstrap, state.Bootstrap{
-		Keys:        state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
+		Keys:        state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Encrypted("key"), SealingKey: state.Encrypted("age")},
 		ClusterName: "prod",
 		Host: state.Host{
 			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
@@ -248,7 +240,6 @@ func bootstrappedState(t *testing.T) *state.State {
 		PublicAddress: netip.MustParseAddr("203.0.113.3"), WGPublicKey: "wg", CertificateSerial: "s1",
 		CertificateNotAfter: notAfter, Phase: state.Joining,
 	}
-	apply(2, state.KindSetRecoveryRecipient, state.SetRecoveryRecipient{Recipient: "age1recovery"})
 	return current
 }
 
@@ -462,13 +453,13 @@ func TestHostsProposeOnlyWhatTheyMay(t *testing.T) {
 			false,
 		},
 		{
-			"a command as the leader", state.KindSetRecoveryRecipient, state.LeaderActor,
-			state.SetRecoveryRecipient{Recipient: "age1mallory"},
+			"a command as the leader", state.KindAddJoinToken, state.LeaderActor,
+			state.AddJoinToken{},
 			false,
 		},
 		{
-			"the CLI's write as itself", state.KindSetRecoveryRecipient, state.HostActor(1),
-			state.SetRecoveryRecipient{Recipient: "age1mallory"},
+			"the CLI's write as itself", state.KindAddJoinToken, state.HostActor(1),
+			state.AddJoinToken{},
 			false,
 		},
 		{

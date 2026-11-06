@@ -41,7 +41,6 @@ const (
 	KindPutCertificate       = "put-certificate"
 	KindDeleteCertificate    = "delete-certificate"
 	KindSetCLICutoff         = "set-cli-cutoff"
-	KindSetRecoveryRecipient = "set-recovery-recipient"
 	KindChangeResources      = "change-resources"
 	KindRestartStack         = "restart-stack"
 	KindSetStackStatus       = "set-stack-status"
@@ -121,7 +120,6 @@ var commandKinds = map[string]commandKind{
 	KindPutCertificate:       {"0.1.0", decoded(applyPutCertificate)},
 	KindDeleteCertificate:    {"0.1.0", decoded(applyDeleteCertificate)},
 	KindSetCLICutoff:         {"0.2.0", decoded(applySetCLICutoff)},
-	KindSetRecoveryRecipient: {"0.1.0", decoded(applySetRecoveryRecipient)},
 	KindChangeResources:      {"0.2.0", decoded(applyChangeResources)},
 	KindRestartStack:         {"0.1.0", decoded(applyRestartStack)},
 	KindSetStackStatus:       {"0.1.0", decoded(applySetStackStatus)},

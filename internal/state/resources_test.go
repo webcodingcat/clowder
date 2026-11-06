@@ -12,17 +12,17 @@ import (
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
-// sealedOf stands in for a value of size bytes sealed by datakey: only its
-// length counts for the state.
-func sealedOf(size int) Sealed {
-	chunks := max(1, (size+sealedChunk-1)/sealedChunk)
-	return make(Sealed, sealedHeader+size+chunks*sealedTag)
+// encryptedOf stands in for a value of size bytes encrypted by datakey: only
+// its length counts for the state.
+func encryptedOf(size int) Encrypted {
+	chunks := max(1, (size+encryptedChunk-1)/encryptedChunk)
+	return make(Encrypted, encryptedHeader+size+chunks*encryptedTag)
 }
 
 func TestABatchGoesInWholeOrNotAtAll(t *testing.T) {
 	accepted := []ResourceChange{
 		putChange(resource.KindNamespace, "", "shop", nil),
-		putChange(resource.KindSecret, "shop", "token", sealedValue(sealedOf(5), "d")),
+		putChange(resource.KindSecret, "shop", "token", encryptedValue(encryptedOf(5), "d")),
 		putChange(resource.KindStack, "shop", "web", shopSpec()),
 	}
 	refused := deleteChange(resource.KindNamespace, "", names.Default)
@@ -142,11 +142,11 @@ func TestAResourceBelongsToTheChannelThatAppliedIt(t *testing.T) {
 	deleteByGitops.Delete.Owner = gitops
 	c.refuseChange(deleteByGitops, "belongs to cli")
 	// the namespace's owner owns only the namespace
-	secret := putChange(resource.KindSecret, "shop", "token", sealedValue(sealedOf(5), "d1"))
+	secret := putChange(resource.KindSecret, "shop", "token", encryptedValue(encryptedOf(5), "d1"))
 	secret.Put.Owner = gitops
 	c.mustApply(KindChangeResources, cliActor, batch(secret))
 	// default belongs to no channel
-	c.put(resource.KindSecret, "default", "token", sealedValue(sealedOf(5), "d2"))
+	c.put(resource.KindSecret, "default", "token", encryptedValue(encryptedOf(5), "d2"))
 	c.refuseChange(putChange(resource.KindVolume, "nowhere", "data", testVolumeSpec()), `no namespace "nowhere"`)
 	c.refuseChange(putChange("Pod", "shop", "web", nil), `no kind of resource "Pod"`)
 }
@@ -157,7 +157,7 @@ func TestANamespaceGoesOnlyEmptyAndDefaultStays(t *testing.T) {
 	c.refuseChange(putChange(resource.KindNamespace, "", "clowder-apps", nil), "do not start with clowder-")
 	c.refuseChange(putChange(resource.KindNamespace, "shop", "inner", nil), "lives in no namespace")
 	c.put(resource.KindNamespace, "", "blog", map[string]int{})
-	c.put(resource.KindSecret, "shop", "token", sealedValue(sealedOf(5), "d"))
+	c.put(resource.KindSecret, "shop", "token", encryptedValue(encryptedOf(5), "d"))
 	shop := deleteChange(resource.KindNamespace, "", "shop")
 	c.refuseChange(shop, "still holds Secret shop/token")
 	c.del(resource.KindSecret, "shop", "token")
@@ -297,10 +297,10 @@ func TestTheConfigurationKeepsTheClassACopyIsIn(t *testing.T) {
 func TestSecretsChangeByDigestWithinTheirLimits(t *testing.T) {
 	c := newCluster(t)
 	secret := func(name string, size int, digest string) ResourceChange {
-		return putChange(resource.KindSecret, "default", name, sealedValue(sealedOf(size), digest))
+		return putChange(resource.KindSecret, "default", name, encryptedValue(encryptedOf(size), digest))
 	}
 	c.mustApply(KindChangeResources, cliActor, batch(secret("token", 10, "d1")))
-	// sealed anew, the same value has the same digest
+	// encrypted anew, the same value has the same digest
 	if changes, err := c.changes(KindChangeResources, cliActor, batch(secret("token", 10, "d1"))); err != nil || len(changes) != 0 {
 		t.Errorf("the same value: changes %v, %v", changes, err)
 	}
@@ -316,11 +316,11 @@ func TestSecretsChangeByDigestWithinTheirLimits(t *testing.T) {
 		{"too large", secret("big", resource.MaxSecretBytes+1, "d"), "larger than 65536 bytes"},
 		{"empty", secret("empty", 0, "d"), "the value of value is empty"},
 		{"no digest", secret("plain", 10, ""), "no digest"},
-		{"not sealed", putChange(resource.KindSecret, "default", "short", sealedValue(Sealed("x"), "d")), "the value of value is not sealed"},
-		{"no keys", putChange(resource.KindSecret, "default", "none", SealedSecret{Digest: "d"}), "has no keys"},
+		{"not encrypted", putChange(resource.KindSecret, "default", "short", encryptedValue(Encrypted("x"), "d")), "the value of value is not encrypted"},
+		{"no keys", putChange(resource.KindSecret, "default", "none", EncryptedSecret{Digest: "d"}), "has no keys"},
 		{
 			"a key that is no file name",
-			putChange(resource.KindSecret, "default", "odd", SealedSecret{Data: map[string]Sealed{"a/b": sealedOf(5)}, Digest: "d"}),
+			putChange(resource.KindSecret, "default", "odd", EncryptedSecret{Data: map[string]Encrypted{"a/b": encryptedOf(5)}, Digest: "d"}),
 			`key "a/b"`,
 		},
 	}
@@ -334,6 +334,19 @@ func TestSecretsChangeByDigestWithinTheirLimits(t *testing.T) {
 		"the secrets of namespace default would be larger than 262144 bytes")
 }
 
+func TestACreateRefusesAResourceThatExists(t *testing.T) {
+	c := newCluster(t)
+	create := putChange(resource.KindSecret, "default", "token", encryptedValue(encryptedOf(10), "d1"))
+	create.Put.Create = true
+	c.mustApply(KindChangeResources, cliActor, batch(create))
+	c.refuseChange(create, "Secret default/token already exists")
+	// the same value without Create changes nothing, as apply does
+	create.Put.Create = false
+	if changes, err := c.changes(KindChangeResources, cliActor, batch(create)); err != nil || len(changes) != 0 {
+		t.Errorf("an apply of the same value: changes %v, %v", changes, err)
+	}
+}
+
 func TestTheCountOfSecretsHoldsForClowderSystemToo(t *testing.T) {
 	c := newCluster(t)
 	c.configure(testConfig())
@@ -341,11 +354,11 @@ func TestTheCountOfSecretsHoldsForClowderSystemToo(t *testing.T) {
 	var secrets []ResourceChange
 	for index := range resource.MaxClusterSecrets - 1 {
 		name := fmt.Sprintf("s%d", index)
-		secrets = append(secrets, putChange(resource.KindSecret, "default", name, sealedValue(sealedOf(1), name)))
+		secrets = append(secrets, putChange(resource.KindSecret, "default", name, encryptedValue(encryptedOf(1), name)))
 	}
 	c.mustApply(KindChangeResources, cliActor, batch(secrets...))
 	for _, namespace := range []string{names.Default, names.System} {
-		c.refuseChange(putChange(resource.KindSecret, namespace, "one-more", sealedValue(sealedOf(1), "d")),
+		c.refuseChange(putChange(resource.KindSecret, namespace, "one-more", encryptedValue(encryptedOf(1), "d")),
 			"the cluster would have 1001 secrets, more than 1000")
 	}
 }
@@ -365,22 +378,22 @@ func TestTheSecretsOfTheClusterHaveALimitInAll(t *testing.T) {
 		for index := range 4 {
 			name := fmt.Sprintf("s%d", index)
 			full = append(full, putChange(resource.KindSecret, namespace, name,
-				sealedValue(sealedOf(resource.MaxSecretBytes), namespace+"/"+name)))
+				encryptedValue(encryptedOf(resource.MaxSecretBytes), namespace+"/"+name)))
 		}
 	}
 	c.mustApply(KindChangeResources, cliActor, batch(full...))
 	c.mustApply(KindChangeResources, cliActor, batch(putChange(resource.KindNamespace, "", "more", nil)))
-	c.refuseChange(putChange(resource.KindSecret, "more", "token", sealedValue(sealedOf(1), "d")),
+	c.refuseChange(putChange(resource.KindSecret, "more", "token", encryptedValue(encryptedOf(1), "d")),
 		"secret more/token: the secrets of the cluster would be larger than 4194304 bytes")
 }
 
-func TestClearSizeUndoesWhatSealingAdds(t *testing.T) {
-	for _, size := range []int{0, 1, sealedChunk - 1, sealedChunk, sealedChunk + 1, 3*sealedChunk + 7} {
-		if got := ClearSize(sealedOf(size)); got != size {
+func TestClearSizeUndoesWhatEncryptionAdds(t *testing.T) {
+	for _, size := range []int{0, 1, encryptedChunk - 1, encryptedChunk, encryptedChunk + 1, 3*encryptedChunk + 7} {
+		if got := ClearSize(encryptedOf(size)); got != size {
 			t.Errorf("%d bytes in clear: ClearSize %d", size, got)
 		}
 	}
-	if got := ClearSize(Sealed("short")); got != -1 {
+	if got := ClearSize(Encrypted("short")); got != -1 {
 		t.Errorf("too short: %d", got)
 	}
 }

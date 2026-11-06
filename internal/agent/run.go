@@ -239,13 +239,13 @@ func newDaemon(base shared) (*daemon, error) {
 
 	reconciler := newVolumeReconciler(base, volumesSignal, stacksSignal, proposer.propose)
 	// the runner and the prefetcher write the namespaces' Docker configs
-	registries := stacks.NewRegistryConfigs(base.files.stackFiles(), base.credentials.dataKey.Open)
+	registries := stacks.NewRegistryConfigs(base.files.stackFiles(), base.credentials.dataKey.Decrypt)
 	runner, err := newStackRunner(base, watcher, stacksSignal, volumesSignal, registries, reconciler, proposer.propose)
 	if err != nil {
 		return nil, err
 	}
 	conditions := controller.NewConditions()
-	alerts := controller.NewAlerts(base.node, proposer.propose, base.credentials.dataKey.Open, conditions, base.logger)
+	alerts := controller.NewAlerts(base.node, proposer.propose, base.credentials.dataKey.Decrypt, conditions, base.logger)
 	joins := &joiner{cluster: base.node, propose: proposer.propose, dataKey: base.credentials.dataKey}
 	heard := controller.NewHeard()
 	caughtUp := make(chan struct{})
@@ -312,7 +312,7 @@ func newStackRunner(base shared, watcher loop.Pauser, signal, volumesSignal *loo
 		Cluster:         base.node,
 		Docker:          base.parts.Docker,
 		Volumes:         volumes,
-		Open:            base.credentials.dataKey.Open,
+		Open:            base.credentials.dataKey.Decrypt,
 		DigestKey:       digestKey,
 		Supervisor:      watcher,
 		Signal:          signal,
@@ -330,7 +330,7 @@ func newTraefikRunner(base shared, watcher loop.Pauser, signal *loop.Signal) *tr
 		host:       base.host,
 		cluster:    base.node,
 		docker:     base.parts.Docker,
-		open:       base.credentials.dataKey.Open,
+		open:       base.credentials.dataKey.Decrypt,
 		logger:     base.logger,
 		supervisor: watcher,
 		signal:     signal,
@@ -400,12 +400,12 @@ func (d *daemon) startLoops(ctx context.Context, loops *sync.WaitGroup) {
 	loops.Go(func() { controller.RunPlacement(ctx, node, propose, d.conditions, logger) })
 	loops.Go(func() { controller.RunMoves(ctx, node, propose, d.server.Progress, logger) })
 	loops.Go(func() {
-		controller.RunFloatingIP(ctx, node, propose, d.credentials.dataKey.Open, d.conditions, logger)
+		controller.RunFloatingIP(ctx, node, propose, d.credentials.dataKey.Decrypt, d.conditions, logger)
 	})
 	loops.Go(func() { controller.RunACME(ctx, node, propose, d.credentials.dataKey, logger) })
 	loops.Go(func() {
 		controller.RunFencing(ctx, controller.FenceParts{
-			Cluster: node, Propose: propose, Open: d.credentials.dataKey.Open,
+			Cluster: node, Propose: propose, Open: d.credentials.dataKey.Decrypt,
 			Heard: d.heard, Ask: d.server.AskSilence, Self: d.host.ID, Conditions: d.conditions, Logger: logger,
 		})
 	})

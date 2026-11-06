@@ -1,5 +1,5 @@
 // Package datakey is the cluster's data key: an age identity that every
-// host keeps (only root may read it). Secrets are sealed with it before
+// host keeps (only root may read it). Secrets are encrypted with it before
 // they go into the cluster state, so a Raft snapshot or backup that ends up
 // in the wrong hands holds no secret in plain text. A joining host gets the
 // key in the answer to its join; the Raft backup carries it as well.
@@ -67,34 +67,34 @@ func (k *Key) Save(path string) error {
 	return nil
 }
 
-// Seal encrypts a secret for the cluster state.
-func (k *Key) Seal(plaintext []byte) (state.Sealed, error) {
-	var sealed bytes.Buffer
-	writer, err := age.Encrypt(&sealed, k.identity.Recipient())
+// Encrypt encrypts a secret for the cluster state.
+func (k *Key) Encrypt(plaintext []byte) (state.Encrypted, error) {
+	var encrypted bytes.Buffer
+	writer, err := age.Encrypt(&encrypted, k.identity.Recipient())
 	if err != nil {
-		return nil, fmt.Errorf("seal: %w", err)
+		return nil, fmt.Errorf("encrypt: %w", err)
 	}
 	if _, err := writer.Write(plaintext); err != nil {
-		return nil, fmt.Errorf("seal: %w", err)
+		return nil, fmt.Errorf("encrypt: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("seal: %w", err)
+		return nil, fmt.Errorf("encrypt: %w", err)
 	}
-	return sealed.Bytes(), nil
+	return encrypted.Bytes(), nil
 }
 
-// Open decrypts a sealed secret.
-func (k *Key) Open(sealed state.Sealed) ([]byte, error) {
-	if len(sealed) == 0 {
-		return nil, errors.New("open: nothing sealed")
+// Decrypt decrypts a secret encrypted with the data key.
+func (k *Key) Decrypt(encrypted state.Encrypted) ([]byte, error) {
+	if len(encrypted) == 0 {
+		return nil, errors.New("decrypt: nothing encrypted")
 	}
-	reader, err := age.Decrypt(bytes.NewReader(sealed), k.identity)
+	reader, err := age.Decrypt(bytes.NewReader(encrypted), k.identity)
 	if err != nil {
-		return nil, fmt.Errorf("open (sealed with another data key?): %w", err)
+		return nil, fmt.Errorf("decrypt (encrypted with another data key?): %w", err)
 	}
 	plaintext, err := io.ReadAll(reader)
 	if err != nil {
-		return nil, fmt.Errorf("open: %w", err)
+		return nil, fmt.Errorf("decrypt: %w", err)
 	}
 	return plaintext, nil
 }

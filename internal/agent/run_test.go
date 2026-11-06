@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"filippo.io/age"
+
 	"github.com/webcodingcat/clowder/internal/agent/agenttest"
 	"github.com/webcodingcat/clowder/internal/cli"
 	"github.com/webcodingcat/clowder/internal/clientconfig"
@@ -377,20 +379,19 @@ func TestAFirstHostAndItsCLI(t *testing.T) {
 	if _, err := clowder(t, "host", "list"); err != nil {
 		t.Errorf("the first credentials: %v", err)
 	}
-	// a new cluster has no recovery key: encrypting waits for the first
-	if _, err := clowder(t, "secret", "encrypt", "clowder-system/hetzner", "--from-literal", "token=x"); err == nil ||
-		!strings.Contains(err.Error(), "recovery rotate") {
-		t.Errorf("encrypt without a recovery key: %v", err)
+	// root on the host exports the sealing key, whose public half the
+	// cluster names for secret seal
+	var sealingKey, publicKey bytes.Buffer
+	if err := printSealingKey(context.Background(), &sealingKey, files, false); err != nil ||
+		!strings.HasPrefix(sealingKey.String(), "AGE-SECRET-KEY-1") {
+		t.Errorf("the sealing key: %q, %v", sealingKey.String(), err)
 	}
-	recoveryFile := filepath.Join(t.TempDir(), "recovery-key")
-	if _, err := clowder(t, "recovery", "rotate"); err == nil || !strings.Contains(err.Error(), "--recovery-out") {
-		t.Errorf("no terminal and no --recovery-out: %v", err)
-	}
-	if _, err := clowder(t, "recovery", "rotate", "--recovery-out", recoveryFile); err != nil {
+	if err := printSealingKey(context.Background(), &publicKey, files, true); err != nil {
 		t.Fatal(err)
 	}
-	if recovery, err := os.ReadFile(recoveryFile); err != nil || !strings.HasPrefix(string(recovery), "AGE-SECRET-KEY-1") {
-		t.Errorf("the recovery key: %q, %v", recovery, err)
+	identity, err := age.ParseX25519Identity(strings.TrimSpace(sealingKey.String()))
+	if err != nil || strings.TrimSpace(publicKey.String()) != identity.Recipient().String() {
+		t.Errorf("the public sealing key %q does not belong to the sealing key: %v", publicKey.String(), err)
 	}
 
 	// root on the host hands out new credentials and, with --revoke-older,
@@ -417,12 +418,12 @@ func TestAFirstHostAndItsCLI(t *testing.T) {
 	}
 
 	// the configuration from scratch, after the Secret with the Hetzner
-	// token, encrypted for the cluster; the hosts' private network is the
+	// token, sealed for the cluster; the hosts' private network is the
 	// loopback's
 	config := filepath.Join(dir, "configuration.yaml")
 	finish := func(token string, privateNetwork string) {
 		t.Helper()
-		secret, err := clowder(t, "secret", "encrypt", "clowder-system/hetzner", "--from-literal", "token="+token)
+		secret, err := clowder(t, "secret", "seal", "clowder-system/hetzner", "--from-literal", "token="+token)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -437,7 +438,7 @@ func TestAFirstHostAndItsCLI(t *testing.T) {
 	finish("CHANGE-ME", "127.0.0.0/8")
 	// differences end diff with exit code 1 and no message (cli.Silent)
 	if out, err := clowder(t, "diff", "-f", config); !cli.Silent(err) ||
-		!strings.Contains(out, "ClusterConfiguration cluster: new") || !strings.Contains(out, "Secret clowder-system/hetzner: new") {
+		!strings.Contains(out, "ClusterConfiguration cluster: new") || !strings.Contains(out, "SealedSecret clowder-system/hetzner: new") {
 		t.Errorf("diff before the first apply: %q, %v", out, err)
 	}
 	// a new Hetzner token: without a terminal, only with --yes

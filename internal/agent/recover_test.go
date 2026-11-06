@@ -77,7 +77,7 @@ func lostCluster(t *testing.T) (Files, *hetznertest.API) {
 	if err := node.CatchUp(ctx); err != nil {
 		t.Fatal(err)
 	}
-	token, err := credentials.dataKey.Seal([]byte("hetzner-token"))
+	token, err := credentials.dataKey.Encrypt([]byte("hetzner-token"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func lostCluster(t *testing.T) (Files, *hetznertest.API) {
 		}
 		return encoded
 	}
-	secret := encode(state.SealedSecret{Data: map[string]state.Sealed{"token": token}, Digest: "d"})
+	secret := encode(state.EncryptedSecret{Data: map[string]state.Encrypted{"token": token}, Digest: "d"})
 	config := encode(clusterspec.Config{
 		Hetzner: clusterspec.Hetzner{
 			TokenSecretRef: names.SecretKeyRef{Name: "hetzner", Key: "token"}, API: project.URL,

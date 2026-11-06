@@ -70,7 +70,7 @@ func TestTheConfigurationIsNamedClusterAndNamesSecretsOfClowderSystem(t *testing
 			c.mustApply(KindChangeResources, cliActor, batch(
 				hetznerSecret(),
 				putChange(resource.KindSecret, names.Default, "hcloud",
-					SealedSecret{Data: map[string]Sealed{"token": sealedOf(5)}, Digest: "d"}),
+					EncryptedSecret{Data: map[string]Encrypted{"token": encryptedOf(5)}, Digest: "d"}),
 			))
 			c.refuseChange(test.change, test.wantError)
 			if c.state.Configured() {
@@ -93,11 +93,11 @@ func TestASecretTheConfigurationNamesKeepsTheKey(t *testing.T) {
 	c := newCluster(t)
 	c.configure(testConfig())
 	hetzner := func(digest string, keys ...string) ResourceChange {
-		data := map[string]Sealed{}
+		data := map[string]Encrypted{}
 		for _, key := range keys {
-			data[key] = sealedOf(5)
+			data[key] = encryptedOf(5)
 		}
-		return putChange(resource.KindSecret, names.System, "hetzner", SealedSecret{Data: data, Digest: digest})
+		return putChange(resource.KindSecret, names.System, "hetzner", EncryptedSecret{Data: data, Digest: digest})
 	}
 	c.refuseChange(deleteChange(resource.KindSecret, names.System, "hetzner"),
 		"secret clowder-system/hetzner is named by hetzner.tokenSecretRef of the configuration")
@@ -108,7 +108,7 @@ func TestASecretTheConfigurationNamesKeepsTheKey(t *testing.T) {
 	// once the configuration names another Secret, the old one may go
 	c.mustApply(KindChangeResources, cliActor, batch(
 		putChange(resource.KindSecret, names.System, "hcloud",
-			SealedSecret{Data: map[string]Sealed{"token": sealedOf(5)}, Digest: "d5"}),
+			EncryptedSecret{Data: map[string]Encrypted{"token": encryptedOf(5)}, Digest: "d5"}),
 		configChange(withToken("hcloud", "token")),
 		deleteChange(resource.KindSecret, names.System, "hetzner"),
 	))
@@ -122,11 +122,11 @@ func TestASecretTheConfigurationNamesKeepsTheKey(t *testing.T) {
 
 // registryLogin puts a Secret of default with the keys of a registry login.
 func registryLogin(name string, keys ...string) ResourceChange {
-	data := map[string]Sealed{}
+	data := map[string]Encrypted{}
 	for _, key := range keys {
-		data[key] = sealedOf(len(name + key))
+		data[key] = encryptedOf(len(name + key))
 	}
-	return putChange(resource.KindSecret, names.Default, name, SealedSecret{Data: data, Digest: "d-" + name})
+	return putChange(resource.KindSecret, names.Default, name, EncryptedSecret{Data: data, Digest: "d-" + name})
 }
 
 // pullingWith puts namespace default with the image pull secrets.

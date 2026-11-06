@@ -63,7 +63,7 @@ func checkHostName(name string) error {
 const leaderTimeout = 30 * time.Second
 
 // Init makes this host the first of a new cluster: it creates the CA, the
-// data key and the cluster's age key, the host's certificate and WireGuard
+// data key and the cluster's sealing key, the host's certificate and WireGuard
 // key, and a Raft group with this host as its only voter. It refuses a host
 // that has a cluster already.
 func Init(ctx context.Context, files Files, options InitOptions, hostNetwork HostNetwork, logger *slog.Logger) error {
@@ -127,9 +127,9 @@ func createKeys(files Files, clusterName string, host Host) (state.ClusterKeys, 
 	if err != nil {
 		return keys, state.Host{}, err
 	}
-	ageIdentity, err := age.GenerateX25519Identity()
+	sealingKey, err := age.GenerateX25519Identity()
 	if err != nil {
-		return keys, state.Host{}, fmt.Errorf("make the cluster's age key: %w", err)
+		return keys, state.Host{}, fmt.Errorf("make the cluster's sealing key: %w", err)
 	}
 	hostKey, err := pki.NewKey()
 	if err != nil {
@@ -162,10 +162,10 @@ func createKeys(files Files, clusterName string, host Host) (state.ClusterKeys, 
 	}
 
 	keys.CACertificate = ca.CertificatePEM()
-	if keys.CAKey, err = dataKey.Seal(caKeyPEM); err != nil {
+	if keys.CAKey, err = dataKey.Encrypt(caKeyPEM); err != nil {
 		return keys, state.Host{}, err
 	}
-	if keys.AgeIdentity, err = dataKey.Seal([]byte(ageIdentity.String())); err != nil {
+	if keys.SealingKey, err = dataKey.Encrypt([]byte(sealingKey.String())); err != nil {
 		return keys, state.Host{}, err
 	}
 	entry := state.Host{

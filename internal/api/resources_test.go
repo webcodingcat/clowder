@@ -28,26 +28,37 @@ func object(kind, namespace, name, spec string) resource.Object {
 	return written
 }
 
-// secretObject is a Secret as the CLI sends it: each value by its key,
-// encrypted for the cluster and for this Secret.
+// secretObject is a Secret as the CLI sends it: each value by its key, in
+// clear in stringData.
 func (c *testCluster) secretObject(namespace, name string, data map[string]string) resource.Object {
 	c.t.Helper()
-	spec := resource.SecretSpec{Encrypted: map[string]string{}}
-	for key, value := range data {
-		spec.Encrypted[key] = encrypt(c.t, c.recipients, names.ID(namespace, name), value)
+	encoded, err := json.Marshal(resource.SecretSpec{StringData: data})
+	if err != nil {
+		c.t.Fatal(err)
 	}
-	return secretWithSpec(c.t, namespace, name, spec)
+	return object(resource.KindSecret, namespace, name, string(encoded))
 }
 
-// secretWithSpec is a Secret of a spec made by hand, for the tests of
-// values encrypted for another place.
-func secretWithSpec(t *testing.T, namespace, name string, spec resource.SecretSpec) resource.Object {
+// sealedSecretObject is a SealedSecret as clowder secret seal writes it:
+// each value by its key, sealed for the cluster and for this Secret.
+func (c *testCluster) sealedSecretObject(namespace, name string, data map[string]string) resource.Object {
+	c.t.Helper()
+	sealed := map[string]string{}
+	for key, value := range data {
+		sealed[key] = seal(c.t, c.sealing, names.ID(namespace, name), value)
+	}
+	return sealedSecretWithData(c.t, namespace, name, sealed)
+}
+
+// sealedSecretWithData is a SealedSecret of values sealed by hand, for the
+// tests of values sealed for another Secret.
+func sealedSecretWithData(t *testing.T, namespace, name string, sealed map[string]string) resource.Object {
 	t.Helper()
-	encoded, err := json.Marshal(spec)
+	encoded, err := json.Marshal(resource.SealedSecretSpec{EncryptedData: sealed})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return object(resource.KindSecret, namespace, name, string(encoded))
+	return object(resource.KindSealedSecret, namespace, name, string(encoded))
 }
 
 // withStorageClass gives every agent's state the storage class fast.
@@ -158,7 +169,7 @@ func TestASpecIsReadStrictly(t *testing.T) {
 	}
 }
 
-func TestASecretTakesOnlyAValueEncryptedForIt(t *testing.T) {
+func TestASealedSecretTakesOnlyAValueSealedForIt(t *testing.T) {
 	cluster := newTestCluster(t)
 	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	stranger, err := age.GenerateX25519Identity()
@@ -170,19 +181,19 @@ func TestASecretTakesOnlyAValueEncryptedForIt(t *testing.T) {
 	}{
 		// the Hetzner token, copied
 		{
-			"the Hetzner token", encrypt(t, cluster.recipients, "clowder-system/hetzner", "s3cret"),
-			"the value is for clowder-system/hetzner, not for default/token",
+			"the Hetzner token", seal(t, cluster.sealing, "clowder-system/hetzner", "s3cret"),
+			"the value is sealed for clowder-system/hetzner, not for default/token",
 		},
 		{
-			"another Secret", encrypt(t, cluster.recipients, "shop/token", "s3cret"),
-			"the value is for shop/token, not for default/token",
+			"another Secret", seal(t, cluster.sealing, "shop/token", "s3cret"),
+			"the value is sealed for shop/token, not for default/token",
 		},
 		{
-			"another cluster", encrypt(t, []age.Recipient{stranger.Recipient()}, "default/token", "s3cret"),
+			"another cluster", seal(t, stranger.Recipient(), "default/token", "s3cret"),
 			"another cluster",
 		},
 	} {
-		secret := secretWithSpec(t, "default", "token", resource.SecretSpec{Encrypted: map[string]string{"value": test.value}})
+		secret := sealedSecretWithData(t, "default", "token", map[string]string{"value": test.value})
 		result, err := client.ApplyResources(context.Background(), ApplyRequest{Resources: []resource.Object{secret}}, false)
 		if err != nil || result.Results[0].Outcome != Refused || !strings.Contains(result.Results[0].Message, test.want) ||
 			strings.Contains(result.Results[0].Message, "s3cret") {

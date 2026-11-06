@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,7 +77,7 @@ func TestAWrongCallEndsWithTwoAndARefusalWithOne(t *testing.T) {
 }
 
 // writeFiles writes the files of a directory of resources: plain YAML, a
-// Secret as secret encrypt writes it for the cluster, and files apply
+// SealedSecret as secret seal writes it for the cluster, and files apply
 // skips.
 func writeFiles(t *testing.T) string {
 	t.Helper()
@@ -101,12 +100,12 @@ spec: {class: fast, size: 1024M, replicas: 1}
 	write("compose.yaml", "services: {web: {image: nginx}}\n")
 	write(".hidden.yaml", "apiVersion: clowder/v1\nkind: Namespace\nmetadata: {name: hidden}\n")
 	write("notes.txt", "not YAML\n")
-	token, err := runWithInput(t, "s3cret\n", "secret", "encrypt", "shop/token", "--from-file", "value=-")
+	token, err := runWithInput(t, "s3cret\n", "secret", "seal", "shop/token", "--from-file", "value=-")
 	if err != nil {
-		t.Fatalf("secret encrypt: %v\n%s", err, token)
+		t.Fatalf("secret seal: %v\n%s", err, token)
 	}
 	if strings.Contains(token, "s3cret") || !strings.Contains(token, "metadata: {namespace: shop, name: token}") {
-		t.Fatalf("secret encrypt wrote:\n%s", token)
+		t.Fatalf("secret seal wrote:\n%s", token)
 	}
 	write("token.yaml", token)
 	return dir
@@ -258,25 +257,9 @@ spec: {services: {app: {image: example/app}}}
 	}
 }
 
-func TestASecretInClearIsRefusedFromFilesAndStdin(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "token.yaml")
-	secret := "apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: token}\nspec: {data: {password: s3cret}}\n"
-	if err := os.WriteFile(path, []byte(secret), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, from := range []string{dir, path, "-"} {
-		_, err := readResourceFiles(from, strings.NewReader(secret), io.Discard)
-		if err == nil || !strings.Contains(err.Error(), "secret token: write the value of password encrypted") ||
-			strings.Contains(err.Error(), "s3cret") {
-			t.Errorf("%s: %v", from, err)
-		}
-	}
-}
-
-func TestAValueEncryptedForAnotherSecretIsRefused(t *testing.T) {
+func TestAValueSealedForAnotherSecretIsRefused(t *testing.T) {
 	startCluster(t)
-	token, err := run(t, "secret", "encrypt", "shop/token", "--from-literal", "value=s3cret")
+	token, err := run(t, "secret", "seal", "shop/token", "--from-literal", "value=s3cret")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +267,7 @@ func TestAValueEncryptedForAnotherSecretIsRefused(t *testing.T) {
 	renamed := strings.Replace(token, "name: token", "name: copied", 1)
 	out, err := runWithInput(t, "apiVersion: clowder/v1\nkind: Namespace\nmetadata: {name: shop}\n---\n"+renamed,
 		"apply", "-f", "-")
-	if ExitCode(err) != 1 || !strings.Contains(out, "the value is for shop/token, not for shop/copied") {
+	if ExitCode(err) != 1 || !strings.Contains(out, "the value is sealed for shop/token, not for shop/copied") {
 		t.Errorf("exit code %d (%v)\n%s", ExitCode(err), err, out)
 	}
 }

@@ -156,18 +156,19 @@ it compares within a single step.
 2. The test takes the first credentials from root on that host over SSH
    (`clowderd credentials`, `clowder config import -`). They go to `/work/clowder-config`
    through `$CLOWDER_CONFIG`, with mode 600, not to the developer's `~/.clowder/config`.
-   The test makes the recovery key (`recovery rotate`) and writes the cluster's resources
-   into `/work/configuration`, in the order in which they apply: the Secret
-   `clowder-system/hetzner` with the token, the ClusterConfiguration from the module's
-   outputs (`cluster_configuration`), and the namespace `default` with the registry's login
-   as an image pull secret. Each value is encrypted (`secret encrypt`), and none is in
-   clear text. `clowder diff -f` warns about HLab's `http` API, shows what the new token
-   sees and exits with 1. `apply` without `--yes` asks for confirmation and applies
-   nothing; with `--yes`, it applies. A changed token shows up as a changed value of the
-   Secret, and the same token encrypted anew as no change (exit 0). The recovery key goes
-   to `/work/recovery-key`. The host trusts the registry's CA (`/etc/docker/certs.d`). The
-   test pushes its image there and then logs out, so only the namespace's login can pull
-   the image.
+   The test exports the cluster's sealing key (`clowderd sealing-key export`) to
+   `/work/sealing-key`, and its public half (`--public`) to `/work/sealing-key.pub`. It
+   writes the cluster's resources into `/work/configuration`, in the order in which they
+   apply: the SealedSecret `clowder-system/hetzner` with the token, the
+   ClusterConfiguration from the module's outputs (`cluster_configuration`), and the
+   namespace `default` with the registry's login as an image pull secret. Each value is
+   sealed (`secret seal`), and none is in clear text in the directory. `clowder diff -f`
+   warns about HLab's `http` API, shows what the new token sees and exits with 1.
+   `apply` without `--yes` asks for confirmation and applies nothing; with `--yes`, it
+   applies. A changed token shows up as a changed value of the SealedSecret, and the same
+   token sealed anew as no change (exit 0). The host trusts the registry's CA
+   (`/etc/docker/certs.d`). The test pushes its image there and then logs out, so only
+   the namespace's login can pull the image.
 3. Two hosts join, `clowder1` and `clowder2`, each with a token from `host join-token`.
    The test writes the tokens into `/work/hosts.tfvars` and runs OpenTofu itself (the
    binary that `up` copies to `/work/bin`). The first joined host waits as `passive`
@@ -228,21 +229,23 @@ the last, with a copy on `clowder2`, the host that is replaced.
 The stack `shop` exists from the first step to the last.
 
 1. A stack runs from the private registry with a replicated and a plain volume, a secret
-   file and a secret variable, applied as resources (`clowder apply -f`). Each secret is
-   encrypted with `secret encrypt`: the password in the stack's file, the token on stdin.
-   A Secret in clear text, in a file and on stdin, and the Hetzner token as a Secret are
-   refused. `secret rekey` of the stack's files and of the cluster's resources changes
-   nothing that the cluster keeps (`unchanged`, no container recreated), and
-   `secret decrypt` reads a value back with the recovery key.
+   file and a secret variable, applied as resources (`clowder apply -f`). The secrets come
+   in both ways: the password as a SealedSecret in the stack's file (`secret seal`), and
+   the token as a Secret with `stringData` on stdin. A value sealed for
+   `clowder-system/hetzner` and pasted into a SealedSecret of `default` is refused.
+   `create secret` makes a Secret and refuses to make it a second time.
 2. Applying the same files again answers `unchanged` and recreates nothing.
 3. A dry run of a new namespace with its stack answers like a real apply and creates
    nothing.
 4. Regaining access: with the credentials deleted, the CLI reaches nothing.
    `clowderd credentials --revoke-older` on the host gives new credentials, and the old
    certificate is refused from then on.
-5. `recovery rotate` makes a new recovery key. After `secret rekey`, the stack's file
-   decrypts with the new key and no longer with the old one, and the cluster keeps what it
-   had. The new key replaces `/work/recovery-key`.
+5. The sealing key seals offline and rekeys. A value sealed with `secret seal --cert`
+   (the public half, without asking the cluster) applies as `SealedSecret ...: applied`,
+   and sealed anew as `unchanged`. `get secrets` shows it as a Secret. `secret rekey
+   --identity` of the stack's files and of the cluster's resources changes nothing that
+   the cluster keeps (`unchanged`, no container recreated), and `secret decrypt` reads
+   the password back with the sealing key.
 6. `stack restart` recreates the unchanged stack's container, and `get stacks --watch`,
    running meanwhile, shows it `starting`, then `running`.
 7. Namespaces: a stack `shop` in the namespace `other` shares no project, container,

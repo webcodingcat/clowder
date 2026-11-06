@@ -6,14 +6,13 @@
 package resource
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 
 	"github.com/webcodingcat/clowder/internal/names"
-	"github.com/webcodingcat/clowder/internal/secretvalue"
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
@@ -23,6 +22,12 @@ const (
 	KindNamespace = "Namespace"
 	KindVolume    = "Volume"
 	KindSecret    = "Secret"
+	// KindSealedSecret is the way of a Secret into Git: its values are
+	// sealed for the cluster's sealing key, as Bitnami's sealed secrets
+	// are. It is only a way in: the cluster stores it as the Secret of the
+	// same namespace and name (StoredKind), and get, delete and diff work
+	// on that Secret.
+	KindSealedSecret = "SealedSecret"
 	// KindStack's spec is a stackspec.Spec.
 	KindStack = "Stack"
 	// KindClusterConfiguration's spec is a clusterspec.Config. There is
@@ -34,6 +39,15 @@ const (
 // ClusterConfigurationName is the name of the one ClusterConfiguration, as
 // OpenShift names its configuration resources "cluster".
 const ClusterConfigurationName = "cluster"
+
+// StoredKind returns the kind that the cluster stores a resource of kind
+// as: a SealedSecret becomes a Secret, every other kind stays itself.
+func StoredKind(kind string) string {
+	if kind == KindSealedSecret {
+		return KindSecret
+	}
+	return kind
+}
 
 // Namespaced tells whether the resources of a kind live in a namespace.
 func Namespaced(kind string) bool {
@@ -130,29 +144,68 @@ const (
 	MaxClusterSecrets       = 1000
 )
 
-// SecretSpec is a secret as it travels to the cluster: its values by key,
-// each still encrypted (secretvalue's armor, for the secret's ID), as the
-// user's file has them tagged !secret in spec.data. In the file the field
-// is called data, because that is what it holds there; on the wire it is
-// called encrypted, because that is what it carries. The cluster decrypts
-// each value, checks what it is for and seals it. The state enforces the
-// limits on the size of the values in clear.
+// SecretSpec is a Secret as users write it, with its values in clear, as
+// in Kubernetes: data holds each value in Base64, stringData as text, and
+// for a key in both, stringData wins. Unlike in Kubernetes, both stand in
+// spec, as every clowder resource keeps what it wants there. The values
+// travel to the cluster over mTLS, and the cluster encrypts them with its
+// data key. The state enforces the limits on the size of the values.
 type SecretSpec struct {
-	Encrypted map[string]string `json:"encrypted"`
+	Data       map[string]string `json:"data,omitempty"`
+	StringData map[string]string `json:"stringData,omitempty"`
+}
+
+// Values returns the Secret's values by key, or what is wrong with the
+// spec. No error names a value.
+func (s SecretSpec) Values() (map[string][]byte, error) {
+	values := map[string][]byte{}
+	var problems []error
+	for _, key := range slices.Sorted(maps.Keys(s.Data)) {
+		if _, wins := s.StringData[key]; wins {
+			continue
+		}
+		// base64's errors name only an offset, never the text
+		value, err := base64.StdEncoding.DecodeString(s.Data[key])
+		if err != nil {
+			problems = append(problems, fmt.Errorf("data: key %s: the value is not Base64 (or use stringData): %w", key, err))
+			continue
+		}
+		values[key] = value
+	}
+	for _, key := range slices.Sorted(maps.Keys(s.StringData)) {
+		values[key] = []byte(s.StringData[key])
+	}
+	if len(values) == 0 && len(problems) == 0 {
+		return nil, errors.New("a secret needs at least one key in data or stringData")
+	}
+	problems = append(problems, checkSecretKeys(slices.Collect(maps.Keys(values))))
+	if err := errors.Join(problems...); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+// SealedSecretSpec is a SealedSecret as users write it: each value sealed
+// for the cluster's sealing key and for the Secret's ID (secretvalue), as
+// clowder secret seal writes it. Only the cluster opens the values.
+type SealedSecretSpec struct {
+	EncryptedData map[string]string `json:"encryptedData"`
 }
 
 // Check tells what is wrong with the spec on its own.
-func (s SecretSpec) Check() error {
-	if len(s.Encrypted) == 0 {
-		return errors.New("a secret needs at least one key in data")
+func (s SealedSecretSpec) Check() error {
+	if len(s.EncryptedData) == 0 {
+		return errors.New("a sealed secret needs at least one key in encryptedData")
 	}
+	return checkSecretKeys(slices.Collect(maps.Keys(s.EncryptedData)))
+}
+
+// checkSecretKeys tells which keys of a Secret break names.SecretKeyRule.
+func checkSecretKeys(keys []string) error {
 	var problems []error
-	for _, key := range slices.Sorted(maps.Keys(s.Encrypted)) {
-		switch {
-		case !names.ValidSecretKey(key):
+	for _, key := range slices.Sorted(slices.Values(keys)) {
+		if !names.ValidSecretKey(key) {
 			problems = append(problems, fmt.Errorf("key %q: %s", key, names.SecretKeyRule))
-		case !strings.HasPrefix(s.Encrypted[key], secretvalue.ArmorHeader):
-			problems = append(problems, fmt.Errorf("key %s: the value is not encrypted (clowder secret encrypt)", key))
 		}
 	}
 	return errors.Join(problems...)

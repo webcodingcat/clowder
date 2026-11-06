@@ -33,13 +33,13 @@ func (f Files) registryConfigDir(namespace string) string {
 // allows only one writer of a path at a time.
 type RegistryConfigs struct {
 	files Files
-	open  func(state.Sealed) ([]byte, error)
+	open  func(state.Encrypted) ([]byte, error)
 	mu    sync.Mutex
 }
 
 // NewRegistryConfigs keeps the configs below files.SecretsDir and opens the
 // logins with open.
-func NewRegistryConfigs(files Files, open func(state.Sealed) ([]byte, error)) *RegistryConfigs {
+func NewRegistryConfigs(files Files, open func(state.Encrypted) ([]byte, error)) *RegistryConfigs {
 	return &RegistryConfigs{files: files, open: open}
 }
 
@@ -64,8 +64,8 @@ func (r *RegistryConfigs) Write(current *state.State, namespace string) (dir str
 	config := dockerConfig{Auths: map[string]dockerAuth{}}
 	for _, login := range logins {
 		var parts [3][]byte
-		for index, sealed := range []state.Sealed{login.Server, login.Username, login.Password} {
-			if parts[index], err = r.open(sealed); err != nil {
+		for index, encrypted := range []state.Encrypted{login.Server, login.Username, login.Password} {
+			if parts[index], err = r.open(encrypted); err != nil {
 				return "", nil, fmt.Errorf("open the image pull secret %s of namespace %s: %w", login.Secret, namespace, err)
 			}
 		}

@@ -9,7 +9,7 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   `stacks/`, `storage/`, `volume-records/` and `volumes/`. init and join write `host.json`
   last, so a host that has it has everything else.
 - **`clowderd init`** (run from cloud-init) creates the first host. It creates the CA, the
-  data key, the cluster's age key, the host's certificate and WireGuard key, and a Raft
+  data key, the cluster's sealing key, the host's certificate and WireGuard key, and a Raft
   group with this host as its only voter and the bootstrap command. The bootstrap command
   carries the cluster's name (`--cluster-name`, or `DefaultClusterName` without the flag;
   it must pass `names.Valid`), and the CA is named after it. Then init enables and starts
@@ -225,7 +225,7 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   `names.ReservedPrefix`, so the clean-up of the stacks' secrets (`removeSecretsOfOthers`)
   leaves it alone.
 
-  At every pass the runner opens the sealed values and writes what is new or changed, by
+  At every pass the runner decrypts the values and writes what is new or changed, by
   rename, so a running container keeps the old file until it is recreated. Unchanged files
   and directories get their owner and mode reset (`atomicfile.EnsureDir`,
   `atomicfile.WriteChanged`), so rights changed by hand or left over from before do not

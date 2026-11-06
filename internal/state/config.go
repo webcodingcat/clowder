@@ -17,9 +17,9 @@ func (s *State) Configured() bool {
 	return s.Config.Generation > 0
 }
 
-// SystemSecret returns the sealed value that a reference names in
+// SystemSecret returns the encrypted value that a reference names in
 // names.System, or false if there is none.
-func (s *State) SystemSecret(ref names.SecretKeyRef) (Sealed, bool) {
+func (s *State) SystemSecret(ref names.SecretKeyRef) (Encrypted, bool) {
 	secret, ok := s.Secrets[names.ID(names.System, ref.Name)]
 	if !ok {
 		return nil, false
@@ -32,8 +32,8 @@ func (s *State) SystemSecret(ref names.SecretKeyRef) (Sealed, bool) {
 // a configuration.
 var ErrNotConfigured = errors.New("the cluster has no ClusterConfiguration yet")
 
-// HetznerToken is the sealed token the configuration names.
-func (s *State) HetznerToken() (Sealed, error) {
+// HetznerToken is the encrypted token the configuration names.
+func (s *State) HetznerToken() (Encrypted, error) {
 	if !s.Configured() {
 		return nil, ErrNotConfigured
 	}
@@ -47,10 +47,10 @@ func (s *State) HetznerToken() (Sealed, error) {
 }
 
 // RegistryLogin is the login for one private image registry. Each part is
-// sealed, as its Secret holds it.
+// encrypted, as its Secret holds it.
 type RegistryLogin struct {
 	Secret                     string
-	Server, Username, Password Sealed
+	Server, Username, Password Encrypted
 }
 
 // RegistryLogins returns the logins that a namespace's stacks pull their
@@ -71,7 +71,7 @@ func (s *State) RegistryLogins(namespace string) (logins []RegistryLogin, missin
 				namespace, ref.Name))
 			continue
 		}
-		var parts [3]Sealed
+		var parts [3]Encrypted
 		lacks := slices.IndexFunc(resource.RegistryLoginKeys, func(key string) bool {
 			_, has := secret.Spec.Data[key]
 			return !has
@@ -172,7 +172,7 @@ func removeConfig(*State, string) (func(), error) {
 // key of the Secret name in names.System that the Secret would no longer
 // have (keep holds the keys it keeps; nil keeps none). It returns false if
 // there is no such field.
-func (s *State) configNaming(name string, keep map[string]Sealed) (clusterspec.SecretPlace, bool) {
+func (s *State) configNaming(name string, keep map[string]Encrypted) (clusterspec.SecretPlace, bool) {
 	if !s.Configured() {
 		return clusterspec.SecretPlace{}, false
 	}

@@ -216,9 +216,9 @@ start elsewhere. Until then it is the only host that runs them, and it may still
 
 - `controller.RunACME` acts only on the leader and uses `golang.org/x/crypto/acme`. It runs
   at each change of the state and every 30 s. It keeps one certificate per domain of an
-  HTTP route (`State.Certificates`, with the key sealed) and deletes the certificates of
+  HTTP route (`State.Certificates`, with the key encrypted) and deletes the certificates of
   domains that no stack names.
-- The account (`State.ACMEAccount`, with the key sealed) is created at the first order and
+- The account (`State.ACMEAccount`, with the key encrypted) is created at the first order and
   belongs to its directory, so a new `acme.directory` gets a new account. `acme.ca` is
   trusted in addition to the system's CAs, for a test CA such as Pebble. It is a PEM
   certificate in the configuration, like Kubernetes' `caBundle`, and at most

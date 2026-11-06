@@ -33,7 +33,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   |---|---|
   | `clowderd init` | `bootstrap` (the keys, the cluster's name, the first host) |
   | `clowderd recover` | `recover-remap` |
-  | the CLI | `set-recovery-recipient`, `set-host-phase` (host actions), `add-join-token`, `change-resources` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack`, `request-move` |
+  | the CLI | `set-host-phase` (host actions), `add-join-token`, `change-resources` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack`, `request-move` |
   | root on a host | `set-cli-cutoff` (`clowderd credentials --revoke-older`, as that host) |
   | the leader, for a joining host | `add-host` |
   | the members loop | `set-host-phase` (joining, passive, active; removed for a host that left), `set-host-voter` |
@@ -120,13 +120,13 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
     hash). `put-volume` changes a volume's copies and status, never its `Meta` or spec. A
     volume serves one stack. A volume that a stack names cannot be deleted, and a deleted
     stack leaves its volumes, with their data, for the next stack that names them.
-  - A secret's values are sealed, one per key (`SealedSecret.Data`, with keys as
-    `names.ValidSecretKey` allows). The API computes one digest over all of them and one
-    per key (`KeyDigests`), so a diff can tell which value changed. The limits apply to the
-    values in clear (`resource.MaxSecretBytes` per secret, per namespace and in the
-    cluster). The state derives the clear size from the sealed length (`ClearSize`: age adds
-    a header of fixed length and a tag per 64 KiB), and a test in `datakey` checks that
-    against real sealing. The cluster also holds at most `resource.MaxClusterSecrets`. One
+  - A secret's values are encrypted with the data key, one per key (`EncryptedSecret.Data`,
+    with keys as `names.ValidSecretKey` allows). The API computes one digest over all of
+    them and one per key (`KeyDigests`), so a diff can tell which value changed. The limits
+    apply to the values in clear (`resource.MaxSecretBytes` per secret, per namespace and in
+    the cluster). The state derives the clear size from the encrypted length (`ClearSize`:
+    age adds a header of fixed length and a tag per 64 KiB), and a test in `datakey` checks
+    that against real encryption. The cluster also holds at most `resource.MaxClusterSecrets`. One
     function checks all the limits (`checkSecretLimits`), and `putSecret` calls it. A
     secret that a stack or the configuration names cannot be deleted. A put that drops a
     key that a stack's `secretEnv` or the configuration names is refused (`checkKeysKept`),
@@ -393,18 +393,19 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   --revoke-older`) refuses every CLI certificate that starts before it. It only moves
   forward, so a revoked laptop never gets back in. A host sets it, because root on that
   host issued the new certificate.
-- **Secrets** arrive sealed (`Sealed`, age for the data key); `state` never sees them in
-  clear. A `Secret` holds them by key, with a digest (`SealedSecret`). The cluster's own
+- **Secrets** arrive encrypted with the data key (`Encrypted`), so `state` never sees them
+  in clear. A `Secret` holds them by key, with a digest (`EncryptedSecret`). The cluster's
+  sealing key is in the state as well, encrypted with the data key
+  (`ClusterKeys.SealingKey`). The cluster's own
   secrets (the Hetzner token, the alert channels' URLs and passwords, the heartbeat's URL)
   are Secrets of `clowder-system`, which the configuration names by `{name, key}`
   (`names.SecretKeyRef`; `clusterspec.SecretPlaces` lists the fields that do). Readers
   find a value through such a reference or a spec, never by taking a name apart:
   `SystemSecret(ref)`, `HetznerToken` (the token the configuration names), and
-  `RegistryLogins(namespace)` (the sealed `server`, `username` and `password` of each of
-  the namespace's image pull secrets). Until the first configuration, the loops that need
-  the Hetzner token or a Floating IP find none (`ErrNotConfigured`) and wait. Until the
-  first `set-recovery-recipient` there is no `RecoveryRecipient`, and nothing can be
-  encrypted for the cluster (`GET /v1/encryption` says so). A stack names at most
+  `RegistryLogins(namespace)` (the encrypted `server`, `username` and `password` of each
+  of the namespace's image pull secrets). Until the first configuration, the loops that
+  need the Hetzner token or a Floating IP find none (`ErrNotConfigured`) and wait. A stack
+  names at most
   `MaxStackSecrets`. Who can read a secret is described under API, below.
 - **The cluster's name** (`ClusterName`) comes from `clowderd init --cluster-name`, like
   kubeadm's `clusterName`, and must pass `names.Valid`. `cluster status`, the alerts and
@@ -510,8 +511,8 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   seconds with two voters, during which the loss of either one stops the cluster until it
   is back. The leader handles one join at a time (`joiner.mu`), so two hosts never get the
   same ID.
-- The data key is an age identity in a file that only root can read. `Seal` and `Open` turn
-  secrets into `state.Sealed` and back. Joining hosts receive the key with their join
+- The data key is an age identity in a file that only root can read. `Encrypt` and
+  `Decrypt` turn secrets into `state.Encrypted` and back. Joining hosts receive the key with their join
   answer.
 - `ReadState` reads the state from the log on disk without Raft (the last snapshot, then
   the commands after it). `Recover` makes the member its cluster's only voter
@@ -655,11 +656,13 @@ or delete them.
 - The agent that took the request turns each resource into its put (`putChange`). It reads
   the spec strictly (`resource.DecodeClusterConfiguration`, `DecodeNamespaceSpec`,
   `DecodeVolumeSpec`, `stackspec.Decode`): a field that the kind does not have is an error,
-  and `replicas` has no default. It seals a secret's values and computes its digest
-  (`sealSecret`: `digest.HMAC` over the ID and every key and value, with a key that
+  and `replicas` has no default. It opens a SealedSecret's values (`unsealSecret`), then
+  encrypts a secret's values with the data key and computes its digest
+  (`encryptSecret`: `digest.HMAC` over the ID and every key and value, with a key that
   `Keys.Derive` gives for "clowder secret resource digest", separate from the containers'
   labels). A spec that cannot be read is refused at its resource, before the leader sees
-  the request.
+  the request. So is a resource that the request already named, such as a Secret and a
+  SealedSecret of the same name: the state would keep only the second without a word.
 - **The leader decides** (`runOnLeader`). A follower hands the changes on as a batch
   (`changeBatch`) to `/v1/internal/changes`, because its own state may be behind and would
   answer `unchanged` or `refused` for what has changed since. `runChanges` first applies
@@ -777,13 +780,13 @@ or delete them.
   it reads the YAML files in it by name, but not those in subdirectories. Hidden files,
   other files and files of other documents are skipped and named on stderr.
 
-  A `Secret`'s values are stored encrypted in `spec.data`, one per key, tagged `!secret`.
-  `resource.ParseDocuments` takes them out before it turns YAML into JSON, and refuses
-  `!secret` anywhere else. The CLI sends them as they are (`SecretSpec.Encrypted`). A
-  `Secret` in clear is refused, both in a file and on stdin, because the CLI never handles
-  a value in clear. `secret encrypt [<namespace>/]<name> (--from-literal <key>=<value> |
-  --from-file <key>=<path|->)...` writes a Secret, with each value encrypted for the
-  recipients that the cluster names and for the Secret's ID.
+  The CLI sends a `Secret` (values in clear) and a `SealedSecret` (values sealed for the
+  sealing key) as they are, over its mTLS connection. specs.md (Secrets and sealed values)
+  describes both kinds. **`create secret [<namespace>/]<name> (--from-literal
+  <key>=<value> | --from-file <key>=<path|->)...`** (`create.go`) sends one Secret without
+  a file. Like `kubectl create`, it refuses a Secret that exists (`ApplyRequest.Create`,
+  then `state.PutResource.Create`: "Secret <namespace>/<name> already exists"); a change
+  goes through `apply`.
 
   A resource without a namespace is in `default`. The resources are sent in the order of
   the files, as kubectl applies them: each file from top to bottom, a directory's files by
@@ -833,12 +836,19 @@ or delete them.
 
 ### Secret values
 
-- **A Secret's values** are opened by the agent that takes the request, with the cluster's
-  age key (`sealSecret`, `secretvalue.OpenFor`; the key comes from `clusterIdentity` and is
-  sealed in the state). The agent refuses a value that is not encrypted for the Secret's
-  ID. So a value copied from another Secret, such as the Hetzner token of
-  `clowder-system`, which a container would then read, does not pass. Then the agent seals
-  each value and computes the digest.
+- **Two ways in, one Secret.** The agent that takes the request encrypts a `Secret`'s
+  values with the data key and computes the digest (`api/changes.go` `encryptSecret`). A
+  `SealedSecret`'s values it first opens with the sealing key (`unsealSecret`,
+  `secretvalue.OpenFor`; `sealingKey` decrypts the key from the state). It refuses a value
+  that is not sealed for the Secret's ID. So a value copied from another Secret, such as
+  the Hetzner token of `clowder-system`, which a container would then read, does not pass.
+  Then the values go through `encryptSecret`, as a Secret's do.
+- **A SealedSecret is not a resource of its own,** unlike Bitnami's. The apply stores it
+  as the Secret of the same namespace and name (`resource.StoredKind`), and a Secret of
+  the same name is the same resource. The results keep the kind that was sent
+  ("SealedSecret shop/db: applied"). `delete -f` of a SealedSecret deletes the Secret, and
+  `get` shows Secrets only. There is no `template`. Values are sealed with age (X25519),
+  not with RSA as in kubeseal.
 - **The cluster's own values** are Secrets of `clowder-system` and come in like every
   other Secret, with `apply`. The configuration names them by `{name, key}`
   (`hetzner.tokenSecretRef`, the channels' `webhookSecretRef`, `urlSecretRef` and
@@ -847,31 +857,38 @@ or delete them.
   them. These open them: the leader's loops (`controller.OpenHetzner`, `notify.New` with
   `notify.Secrets`), the join, `clowderd recover` and the agent's start (`checkRetired`).
 - **Who can read a secret:**
-  - whoever holds the recovery key, because every value in the files is also encrypted for
+  - whoever holds the sealing key, because every SealedSecret in the files is sealed for
     it;
   - every host, because a stack must be able to start anywhere;
   - whoever holds the CLI's credentials, through a stack that names the secret, or through
     a stack in `stacks.privileged`, whose containers reach the secrets and the data key on
     their host.
-- **`GET /v1/encryption`** names the recipients that every value is encrypted for: the
-  cluster's age key and the recovery key (`State.RecoveryRecipient`).
-- **`secret rekey -f <file|directory>`** (`cli/rekey.go`) re-encrypts every value of the
-  files for these recipients. A value made by hand with `age` may lack the recovery key,
-  and after a new recovery key every value lacks it. `fileValues` (`cli/values.go`) reads
-  the values, and what each one must be for, the same way apply reads the file: a value
-  appears only in a Secret's `spec.data` and is for the Secret's ID. The cluster encrypts
-  them anew (`POST /v1/encryption/rekey`, in requests below `MaxRequestBytes`). It refuses
-  a value meant for another place, as an apply would (`secretvalue.OpenFor`), answers only
-  with ciphertext, and logs who asked; nothing goes into the state. `secretvalue.Rewrite`
-  puts the new armor in place and writes the file all or nothing. With `--identity`, the
-  CLI opens the values itself with the recovery key, makes the same checks, and encrypts
-  them for the cluster it talks to. This is the way to a new cluster when the old one is
-  lost. A refused file stops the run; the files reported before it are done.
+- **`GET /v1/sealing-key`** names the public half of the sealing key
+  (`{"recipient":"age1..."}`, `api/cluster.go`). **`secret seal`** (`cli/secret.go`) asks
+  for it each time, unless `--cert <file>` gives it, and seals each value for the ID of
+  its Secret (`secretvalue.Seal`). It writes each value on one line, as kubeseal does.
+- **`clowderd sealing-key export [--public]`** (`agent/sealingkey.go`) asks the host's
+  own agent, with the host's certificate, for the sealing key (`GET
+  /v1/internal/sealing-key`, host role only), as `clowderd credentials` does for a
+  certificate. The agent logs a warning ("the sealing key was exported"). The command
+  prints the key (`AGE-SECRET-KEY-1...`), or with `--public` only its public half
+  (`age1...`), which `secret seal --cert` takes. The help of `clowderd init` says to
+  export the key right after init and keep it offline.
+- **`secret rekey -f <file|directory> --identity <file|-> [--cert <file>]`**
+  (`cli/rekey.go`) opens every sealed value of the files with the old sealing key and
+  seals it again for the cluster of the context, or for `--cert`. This is the way to a new
+  cluster when the old one is lost. `--identity` is required, and no cluster opens a value
+  for the CLI. `fileValues` (`cli/values.go`) refuses a file that apply would refuse, then
+  reads the values of its SealedSecrets and the Secret each one must be for. The CLI refuses a value meant for
+  another Secret, as an apply would (`secretvalue.OpenFor`). `replaceValues` puts each new
+  value in place of the old one on its line, and the file is written all or nothing. A
+  refused file stops the run; the files reported before it are done.
 - **`secret decrypt --identity <file|-> -f <file>`** (`cli/decrypt.go`) is for emergencies
-  and needs no cluster. It prints one line per value: where it is (the Secret's ID and the
-  key, `shop/db[password]`), a tab, and the value. A value that is not printable text, has
-  a space at either end, or starts like a marker is shown as `base64:`. A value that does
-  not open, or is meant for another place, is shown as `error:` with the reason, and the
+  and needs no cluster. It opens the SealedSecrets of a file with the sealing key and
+  prints one line per value: where it is (the Secret's ID and the key,
+  `shop/db[password]`), a tab, and the value. A value that is not printable text, has a
+  space at either end, or starts like a marker is shown as `base64:`. A value that does
+  not open, or is meant for another Secret, is shown as `error:` with the reason, and the
   command fails after printing every line.
 
 ### Joining hosts
@@ -935,21 +952,14 @@ or delete them.
   leader. The certificate is returned only once the cutoff is committed and the host's own
   agent has applied it; the other agents follow within moments. Certificate times count in
   seconds, so a certificate issued in the same second as the new one stays valid.
-- **`recovery rotate`** creates a recovery key with the CLI's credentials alone, because
-  they control the cluster anyway. A new cluster has no recovery key, so this also creates
-  the first one. The CLI creates the key and hands it over (`handOverRecoveryKey`: shown
-  once, with its last 8 characters typed back, or written to a new file with
-  `--recovery-out`, for scripts). Up to this point nothing has reached the cluster. Then
-  `POST /v1/recovery/rotate` commits `set-recovery-recipient`. Values encrypted afterwards
-  are for the new key, and `secret rekey` brings the files to it. Old ciphertext, for
-  example in the Git history, stays readable with the old key.
 
 ### Tests
 
 - The tests run real HTTPS servers: a follower forwarding to the leader, refused callers,
   and the CLI against an agent with a credentials file in a temporary home.
   `agent/run_test.go` runs the whole way: init, the first credentials printed and
-  imported, the recovery key, new credentials with `--revoke-older`, apply and diff.
+  imported, the sealing key exported, new credentials with `--revoke-older`, apply and
+  diff.
 
 ## Placement (`internal/scheduler`, `internal/controller`)
 

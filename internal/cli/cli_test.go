@@ -77,10 +77,16 @@ func (h *oneHost) VerifyLeader(context.Context) error          { return nil }
 func (h *oneHost) CommitIndex() uint64                         { return 0 }
 func (h *oneHost) WaitCommitted(context.Context, uint64) error { return nil }
 
-// recoveryKeyFile is where startCluster puts the cluster's recovery key, in
+// sealingKeyFile is where startCluster puts the cluster's sealing key, in
 // the test's home.
-func recoveryKeyFile() string {
-	return filepath.Join(os.Getenv("HOME"), "recovery-key")
+func sealingKeyFile() string {
+	return filepath.Join(os.Getenv("HOME"), "sealing-key")
+}
+
+// publicSealingKeyFile is where startCluster puts the public half of the
+// sealing key, for --cert.
+func publicSealingKeyFile() string {
+	return filepath.Join(os.Getenv("HOME"), "sealing-key.pub")
 }
 
 // testServers are the servers the fake Hetzner token of startCluster sees:
@@ -113,7 +119,7 @@ func startCluster(t *testing.T) {
 
 	current := &state.State{}
 	cmd, err := state.NewCommand(state.KindBootstrap, time.Now(), state.LeaderActor, state.Bootstrap{
-		Keys:        state.ClusterKeys{CACertificate: ca.CertificatePEM(), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
+		Keys:        state.ClusterKeys{CACertificate: ca.CertificatePEM(), CAKey: state.Encrypted("key"), SealingKey: state.Encrypted("age")},
 		ClusterName: "test",
 		Host: state.Host{
 			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
@@ -140,13 +146,13 @@ func startCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// the cluster's own age key, sealed as init does, and a recovery key:
-	// what secret encrypt encrypts for and the agent opens with
-	clusterKey, err := age.GenerateX25519Identity()
+	// the cluster's sealing key, encrypted with the data key as init does:
+	// what secret seal seals for and the agent opens with
+	sealingKey, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.Keys.AgeIdentity, err = (ageKeys{dataKey}).Seal([]byte(clusterKey.String())); err != nil {
+	if current.Keys.SealingKey, err = (ageKeys{dataKey}).Encrypt([]byte(sealingKey.String())); err != nil {
 		t.Fatal(err)
 	}
 	// and the CA's key, with which the agent issues a recovered user's certificate
@@ -154,11 +160,7 @@ func startCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.Keys.CAKey, err = (ageKeys{dataKey}).Seal(caKey); err != nil {
-		t.Fatal(err)
-	}
-	recovery, err := age.GenerateX25519Identity()
-	if err != nil {
+	if current.Keys.CAKey, err = (ageKeys{dataKey}).Encrypt(caKey); err != nil {
 		t.Fatal(err)
 	}
 	host := &oneHost{state: current, changed: make(chan struct{})}
@@ -179,19 +181,15 @@ func startCluster(t *testing.T) {
 	cliCertificate, cliKey := issue(func(public ed25519.PublicKey) ([]byte, error) {
 		return ca.IssueCLI(public, "alice", time.Now())
 	})
-	rotate, err := state.NewCommand(state.KindSetRecoveryRecipient, time.Now(), state.CLIActor("alice"),
-		state.SetRecoveryRecipient{Recipient: recovery.Recipient().String()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := host.Propose(context.Background(), rotate); err != nil {
-		t.Fatal(err)
-	}
 	home := t.TempDir() // no credentials of the developer join in
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home) // the home on Windows
 	t.Setenv(clientconfig.EnvVar, "")
-	if err := os.WriteFile(recoveryKeyFile(), []byte(recovery.String()+"\n"), 0o600); err != nil {
+	// as clowderd sealing-key export and export --public write them
+	if err := os.WriteFile(sealingKeyFile(), []byte(sealingKey.String()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(publicSealingKeyFile(), []byte(sealingKey.Recipient().String()+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var credentials clientconfig.Config
@@ -207,13 +205,13 @@ func startCluster(t *testing.T) {
 	}
 }
 
-// ageKeys seal as the agent's data key does (the CLI may not import
-// datakey): the state reads the length of what age seals.
+// ageKeys encrypt as the agent's data key does (the CLI may not import
+// datakey): the state reads the length of what age encrypts.
 type ageKeys struct{ identity *age.X25519Identity }
 
-func (k ageKeys) Seal(plaintext []byte) (state.Sealed, error) {
-	var sealed bytes.Buffer
-	writer, err := age.Encrypt(&sealed, k.identity.Recipient())
+func (k ageKeys) Encrypt(plaintext []byte) (state.Encrypted, error) {
+	var encrypted bytes.Buffer
+	writer, err := age.Encrypt(&encrypted, k.identity.Recipient())
 	if err != nil {
 		return nil, err
 	}
@@ -223,11 +221,11 @@ func (k ageKeys) Seal(plaintext []byte) (state.Sealed, error) {
 	if err := writer.Close(); err != nil {
 		return nil, err
 	}
-	return sealed.Bytes(), nil
+	return encrypted.Bytes(), nil
 }
 
-func (k ageKeys) Open(sealed state.Sealed) ([]byte, error) {
-	reader, err := age.Decrypt(bytes.NewReader(sealed), k.identity)
+func (k ageKeys) Decrypt(encrypted state.Encrypted) ([]byte, error) {
+	reader, err := age.Decrypt(bytes.NewReader(encrypted), k.identity)
 	if err != nil {
 		return nil, err
 	}

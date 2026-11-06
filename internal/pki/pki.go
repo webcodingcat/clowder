@@ -111,7 +111,7 @@ func (ca *CA) CertificatePEM() []byte {
 	return encodeCertificate(ca.Certificate.Raw)
 }
 
-// KeyPEM returns the CA's private key. The cluster keeps it sealed.
+// KeyPEM returns the CA's private key. The cluster keeps it encrypted.
 func (ca *CA) KeyPEM() ([]byte, error) {
 	return EncodeKey(ca.key)
 }

@@ -407,7 +407,7 @@ type Cluster struct {
 	sync.Mutex
 	t     *testing.T
 	State *state.State
-	// Keys seal the cluster's secrets
+	// Keys encrypt the cluster's secrets
 	Keys *datakey.Key
 }
 
@@ -422,7 +422,7 @@ func NewCluster(t *testing.T) *Cluster {
 	}
 	cluster := &Cluster{t: t, State: &state.State{}, Keys: keys}
 	cluster.Apply(state.KindBootstrap, state.LeaderActor, state.Bootstrap{
-		Keys:        state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
+		Keys:        state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Encrypted("k"), SealingKey: state.Encrypted("a")},
 		ClusterName: "prod",
 		Host: state.Host{
 			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), PublicAddress: netip.MustParseAddr("198.51.100.2"),
@@ -527,30 +527,30 @@ func (c *Cluster) Remove(kind, name string) {
 }
 
 // PutSecret applies a secret of the namespace default with the one key
-// value, sealed with the cluster's data key.
+// value, encrypted with the cluster's data key.
 func (c *Cluster) PutSecret(name, value string) {
 	c.t.Helper()
 	c.PutSecretIn(names.Default, name, map[string]string{"value": value})
 }
 
 // PutSecretIn applies a secret of a namespace with its keys and values,
-// sealed with the cluster's data key.
+// encrypted with the cluster's data key.
 func (c *Cluster) PutSecretIn(namespace, name string, values map[string]string) {
 	c.t.Helper()
-	c.PutIn(namespace, resource.KindSecret, name, c.sealed(values))
+	c.PutIn(namespace, resource.KindSecret, name, c.encrypted(values))
 }
 
-// sealed seals a secret's values with the cluster's data key; its digest
-// stands for one the API computes.
-func (c *Cluster) sealed(values map[string]string) state.SealedSecret {
+// encrypted encrypts a secret's values with the cluster's data key; its
+// digest stands for one the API computes.
+func (c *Cluster) encrypted(values map[string]string) state.EncryptedSecret {
 	c.t.Helper()
-	secret := state.SealedSecret{Data: map[string]state.Sealed{}, Digest: "digest of"}
+	secret := state.EncryptedSecret{Data: map[string]state.Encrypted{}, Digest: "digest of"}
 	for _, key := range slices.Sorted(maps.Keys(values)) {
-		sealed, err := c.Keys.Seal([]byte(values[key]))
+		encrypted, err := c.Keys.Encrypt([]byte(values[key]))
 		if err != nil {
 			c.t.Fatal(err)
 		}
-		secret.Data[key] = sealed
+		secret.Data[key] = encrypted
 		secret.Digest += " " + key + "=" + values[key]
 	}
 	return secret

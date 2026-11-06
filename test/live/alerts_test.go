@@ -45,9 +45,9 @@ const heartbeatInterval = 10 * time.Second
 // agent is stopped, and a pool that fills raises its alert and the all-clear.
 func alertsReachTheChannels(t *testing.T, server host) {
 	received := startReceiver(t)
-	discord := setSystemSecret(t, "alert-discord", "url", received.url("/discord"))
-	webhook := setSystemSecret(t, "alert-webhook", "url", received.url("/webhook"))
-	heartbeatURL := setSystemSecret(t, "alert-heartbeat", "url", received.url("/heartbeat"))
+	discord := sealSystemSecret(t, "alert-discord", "url", received.url("/discord"))
+	webhook := sealSystemSecret(t, "alert-webhook", "url", received.url("/webhook"))
+	heartbeatURL := sealSystemSecret(t, "alert-heartbeat", "url", received.url("/heartbeat"))
 	email := emailChannel(t)
 	changeConfig(t, func(config *clusterspec.Config) {
 		config.Alerts = &clusterspec.Alerts{
@@ -85,7 +85,7 @@ func emailChannel(t *testing.T) clusterspec.AlertChannel {
 	if err != nil {
 		t.Fatal(err)
 	}
-	password := setSystemSecret(t, "alert-smtp", "password", "any")
+	password := sealSystemSecret(t, "alert-smtp", "password", "any")
 	return clusterspec.AlertChannel{
 		Type: "email", From: "clowder@" + zone, To: []string{"ops@" + zone},
 		SMTP: &clusterspec.SMTP{

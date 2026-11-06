@@ -106,7 +106,7 @@ func command(t *testing.T, kind string, payload any) state.Command {
 
 func bootstrapCommand(t *testing.T) state.Command {
 	return command(t, state.KindBootstrap, state.Bootstrap{
-		Keys:        state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("key"), AgeIdentity: state.Sealed("age")},
+		Keys:        state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Encrypted("key"), SealingKey: state.Encrypted("age")},
 		ClusterName: "prod",
 		Host: state.Host{
 			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
@@ -116,17 +116,27 @@ func bootstrapCommand(t *testing.T) state.Command {
 	})
 }
 
-// setRecovery is a command after the bootstrap that leaves a trace in the
-// state: the recovery recipient.
-func setRecovery(t *testing.T) state.Command {
-	return command(t, state.KindSetRecoveryRecipient, state.SetRecoveryRecipient{Recipient: "age1recovery"})
+// traceCutoff is the CLI's cutoff that setCutoff leaves in the state.
+var traceCutoff = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+// setCutoff is a command after the bootstrap that leaves a trace in the
+// state: the CLI's cutoff. The state refuses it a second time, as a cutoff
+// never moves back.
+func setCutoff(t *testing.T) state.Command {
+	t.Helper()
+	cmd, err := state.NewCommand(state.KindSetCLICutoff, time.Now(), state.HostActor(0),
+		state.SetCLICutoff{Cutoff: traceCutoff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cmd
 }
 
-// recoveryRecipient is what setRecovery left in the node's state.
-func recoveryRecipient(node *Node) string {
-	var recipient string
-	node.Read(func(current *state.State) { recipient = current.RecoveryRecipient })
-	return recipient
+// cutoffSet tells whether setCutoff left its trace in the node's state.
+func cutoffSet(node *Node) bool {
+	var cutoff time.Time
+	node.Read(func(current *state.State) { cutoff = current.CLICutoff })
+	return cutoff.Equal(traceCutoff)
 }
 
 func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
@@ -145,16 +155,15 @@ func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
 	if err := node.raft.Snapshot().Error(); err != nil {
 		t.Fatal(err)
 	}
-	index, err := node.Propose(ctx, setRecovery(t))
+	index, err := node.Propose(ctx, setCutoff(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// a refused command comes back as the state's error
-	_, err = node.Propose(ctx, command(t, state.KindSetRecoveryRecipient,
-		state.SetRecoveryRecipient{Recipient: "no age key"}))
+	_, err = node.Propose(ctx, setCutoff(t))
 	var refused *state.Refused
 	if !errors.As(err, &refused) {
-		t.Errorf("want a refusal for a recipient that is no age key, got %v", err)
+		t.Errorf("want a refusal for a cutoff that is not later, got %v", err)
 	}
 	if err := node.Close(); err != nil {
 		t.Fatal(err)
@@ -171,8 +180,8 @@ func TestASingleHostKeepsItsStateAcrossARestart(t *testing.T) {
 	if err := reopened.WaitIndex(waitCtx, index); err != nil {
 		t.Fatal(err)
 	}
-	if got := recoveryRecipient(reopened); got != "age1recovery" {
-		t.Errorf("recovery recipient after the restart: %q", got)
+	if !cutoffSet(reopened) {
+		t.Error("the cutoff is gone after the restart")
 	}
 }
 
@@ -283,7 +292,7 @@ func TestThreeHostsReplicateOverMutualTLS(t *testing.T) {
 	if _, err := nodes[0].Propose(ctx, bootstrapCommand(t)); err != nil {
 		t.Fatal(err)
 	}
-	index, err := nodes[0].Propose(ctx, setRecovery(t))
+	index, err := nodes[0].Propose(ctx, setCutoff(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,14 +302,14 @@ func TestThreeHostsReplicateOverMutualTLS(t *testing.T) {
 		if err := node.WaitIndex(waitCtx, index); err != nil {
 			t.Fatalf("host %d: %v", id, err)
 		}
-		if got := recoveryRecipient(node); got != "age1recovery" {
-			t.Errorf("host %d has the recovery recipient %q", id, got)
+		if !cutoffSet(node) {
+			t.Errorf("host %d lacks the cutoff", id)
 		}
 	}
 	if id, ok := nodes[2].Leader(); !ok || id != 0 {
 		t.Errorf("host 2 sees leader %d (%v)", id, ok)
 	}
-	if _, err := nodes[1].Propose(ctx, setRecovery(t)); err == nil {
+	if _, err := nodes[1].Propose(ctx, setCutoff(t)); err == nil {
 		t.Error("a follower committed a command")
 	}
 	if err := nodes[0].VerifyLeader(waitCtx); err != nil {

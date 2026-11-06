@@ -128,9 +128,9 @@ func download(t *testing.T, url string) []byte {
 }
 
 // The configuration's directory holds the cluster's own resources, as a
-// user keeps them in a repository: the Secrets of clowder-system, the
-// ClusterConfiguration that names them, and the namespace default with its
-// registry login. An apply takes a directory's files by name, so the
+// user keeps them in a repository: the Secrets of clowder-system, sealed,
+// the ClusterConfiguration that names them, and the namespace default with
+// its registry login. An apply takes a directory's files by name, so the
 // numbers in front put each Secret of clowder-system above the
 // configuration that names it.
 const (
@@ -141,7 +141,7 @@ const (
 // configDir is the configuration's directory.
 func configDir() string { return filepath.Join(workDir, "configuration") }
 
-// systemSecretFile is the file of a Secret of clowder-system in the
+// systemSecretFile is the file of a SealedSecret of clowder-system in the
 // configuration's directory.
 func systemSecretFile(name string) string {
 	return filepath.Join(configDir(), "1-secret-"+name+".yaml")
@@ -184,7 +184,7 @@ func readConfig(t *testing.T) clusterspec.Config {
 
 // clusterConfigJSON is the spec of the test's ClusterConfiguration as JSON;
 // it names its Secrets, so it stays the same when their values are
-// encrypted anew.
+// sealed anew.
 func clusterConfigJSON(t *testing.T) []byte {
 	t.Helper()
 	content, err := json.MarshalIndent(readConfig(t), "", "  ")
@@ -217,13 +217,13 @@ func writeConfig(t *testing.T, config clusterspec.Config) {
 	}
 }
 
-// setSystemSecret writes a Secret of clowder-system with one key to the
-// configuration's directory, its value encrypted from stdin as clowder
-// secret encrypt does; the next apply of the directory takes it. It
+// sealSystemSecret writes a SealedSecret of clowder-system with one key to
+// the configuration's directory, its value read from stdin and sealed as
+// clowder secret seal does; the next apply of the directory takes it. It
 // returns the reference the configuration names the value by.
-func setSystemSecret(t *testing.T, name, key, value string) names.SecretKeyRef {
+func sealSystemSecret(t *testing.T, name, key, value string) names.SecretKeyRef {
 	t.Helper()
-	secret, err := clowderWithInput(strings.NewReader(value), "secret", "encrypt", names.ID(names.System, name),
+	secret, err := clowderWithInput(strings.NewReader(value), "secret", "seal", names.ID(names.System, name),
 		"--from-file", key+"=-")
 	if err != nil {
 		t.Fatal(err)

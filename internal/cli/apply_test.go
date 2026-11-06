@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -22,15 +23,12 @@ spec:
 `
 }
 
-// writeConfiguration writes a file of the Secret of the Hetzner token and
-// the configuration below it, as secret encrypt writes the Secret, and
-// returns it.
+// writeConfiguration writes a file of the Secret of the Hetzner token, in
+// clear, and the configuration below it, and returns it.
 func writeConfiguration(t *testing.T, token, floatingIP string) string {
 	t.Helper()
-	secret, err := run(t, "secret", "encrypt", "clowder-system/hetzner", "--from-literal", "token="+token)
-	if err != nil {
-		t.Fatalf("secret encrypt: %v\n%s", err, secret)
-	}
+	secret := "apiVersion: clowder/v1\nkind: Secret\nmetadata: {namespace: clowder-system, name: hetzner}\n" +
+		"spec: {stringData: {token: " + strconv.Quote(token) + "}}\n"
 	path := filepath.Join(t.TempDir(), "configuration.yaml")
 	if err := os.WriteFile(path, []byte(secret+"---\n"+configurationYAML(floatingIP)), 0o600); err != nil {
 		t.Fatal(err)

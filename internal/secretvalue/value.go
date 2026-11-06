@@ -1,42 +1,29 @@
-// Package secretvalue is clowder's encrypted value: a YAML scalar tagged
-// !secret that holds age's ASCII armor. What age encrypts is an envelope
+// Package secretvalue is a value of a SealedSecret: age's ciphertext for
+// the cluster's sealing key, written as one line of Base64, as kubeseal
+// writes a value of spec.encryptedData. What age encrypts is an envelope
 // that binds the value to the Secret it is for (its ID), so a value copied
-// to another Secret is refused when it is decrypted.
-//
-// The package also takes the values out of a YAML file before the file is
-// decoded (Extract), and puts new armor in their place without touching
-// the rest of the file (Rewrite). It knows YAML paths, not the kinds of
-// files: the caller checks which places may hold a secret.
+// to another Secret is refused when it is opened.
 //
 // No error contains a value: a file may be read with a wrong key or be
 // broken, and the message goes to a terminal or a log.
-//
-// Every value of a Secret is such a value.
 package secretvalue
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 
 	"filippo.io/age"
-	"filippo.io/age/armor"
 )
-
-// Tag is the YAML tag of an encrypted value.
-const Tag = "!secret"
-
-// ArmorHeader is the first line of every value's armor.
-const ArmorHeader = armor.Header
 
 // version is the envelope's format. A newer clowder may write a higher
 // version.
 const version = 1
 
-// Value is a value in clear and the place it is for.
+// Value is a value in clear and the Secret it is for.
 type Value struct {
 	For   string
 	Bytes []byte
@@ -51,55 +38,56 @@ type envelope struct {
 	Value   []byte `json:"value"`
 }
 
-// Encrypt encrypts value for the recipients and returns age's armor, in
-// the form that goes into a file after the tag.
-func Encrypt(value Value, recipients ...age.Recipient) (string, error) {
+// Seal encrypts value for the sealing key's recipient and returns one line
+// of Base64.
+func Seal(value Value, recipient age.Recipient) (string, error) {
 	if value.For == "" {
-		return "", errors.New("encrypt a secret value: it is for no place")
+		return "", errors.New("seal a secret value: it is for no Secret")
 	}
 	plaintext, err := json.Marshal(envelope{Version: version, For: value.For, Value: value.Bytes})
 	if err != nil {
-		return "", fmt.Errorf("encrypt a secret value: %w", err)
+		return "", fmt.Errorf("seal a secret value: %w", err)
 	}
-	var armored bytes.Buffer
-	armorWriter := armor.NewWriter(&armored)
-	writer, err := age.Encrypt(armorWriter, recipients...)
+	var ciphertext bytes.Buffer
+	writer, err := age.Encrypt(&ciphertext, recipient)
 	if err != nil {
-		return "", fmt.Errorf("encrypt a secret value: %w", err)
+		return "", fmt.Errorf("seal a secret value: %w", err)
 	}
 	if _, err := writer.Write(plaintext); err != nil {
-		return "", fmt.Errorf("encrypt a secret value: %w", err)
+		return "", fmt.Errorf("seal a secret value: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return "", fmt.Errorf("encrypt a secret value: %w", err)
+		return "", fmt.Errorf("seal a secret value: %w", err)
 	}
-	if err := armorWriter.Close(); err != nil {
-		return "", fmt.Errorf("encrypt a secret value: %w", err)
-	}
-	return strings.TrimRight(armored.String(), "\n") + "\n", nil
+	return base64.StdEncoding.EncodeToString(ciphertext.Bytes()), nil
 }
 
-// OpenFor decrypts the value found in a Secret whose ID is want. It
+// OpenFor decrypts a value found in the Secret whose ID is want. It
 // refuses a value meant for another Secret, such as the Hetzner token of
 // clowder-system copied into a stack's Secret.
-func OpenFor(armored, want string, identities ...age.Identity) (Value, error) {
-	opened, err := Open(armored, identities...)
+func OpenFor(sealed, want string, identities ...age.Identity) (Value, error) {
+	opened, err := Open(sealed, identities...)
 	if err != nil {
 		return Value{}, err
 	}
 	if opened.For != want {
-		return Value{}, fmt.Errorf("the value is for %s, not for %s", opened.For, want)
+		return Value{}, fmt.Errorf("the value is sealed for %s, not for %s", opened.For, want)
 	}
 	return opened, nil
 }
 
-// Open decrypts armor with one of the identities. The caller checks
-// whether the value is meant for the place where it was found (Value.For),
-// or uses OpenFor, which does that check.
-func Open(armored string, identities ...age.Identity) (Value, error) {
-	reader, err := age.Decrypt(armor.NewReader(strings.NewReader(armored)), identities...)
+// Open decrypts a sealed value with one of the identities. The caller
+// checks whether the value is meant for the Secret where it was found
+// (Value.For), or uses OpenFor, which does that check.
+func Open(sealed string, identities ...age.Identity) (Value, error) {
+	// base64's errors name only an offset, never the text
+	ciphertext, err := base64.StdEncoding.DecodeString(sealed)
 	if err != nil {
-		return Value{}, fmt.Errorf("open a secret value (encrypted for another cluster or key?): %w", err)
+		return Value{}, fmt.Errorf("open a secret value: it is not Base64 on one line: %w", err)
+	}
+	reader, err := age.Decrypt(bytes.NewReader(ciphertext), identities...)
+	if err != nil {
+		return Value{}, fmt.Errorf("open a secret value (sealed for another cluster or key?): %w", err)
 	}
 	plaintext, err := io.ReadAll(reader)
 	if err != nil {

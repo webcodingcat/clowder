@@ -46,11 +46,11 @@ func newJoinTest(t *testing.T) *joinTest {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealed, err := cluster.Keys.Seal(keyPEM)
+	encrypted, err := cluster.Keys.Encrypt(keyPEM)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cluster.State.Keys.CACertificate, cluster.State.Keys.CAKey = ca.CertificatePEM(), sealed
+	cluster.State.Keys.CACertificate, cluster.State.Keys.CAKey = ca.CertificatePEM(), encrypted
 	setHetznerToken(t, cluster, "the Hetzner token")
 	project := hetznertest.New(t, "the Hetzner token")
 	project.AddServer(40, netip.MustParseAddr("10.0.0.2"), netip.MustParseAddr("198.51.100.2"))

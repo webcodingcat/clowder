@@ -58,8 +58,8 @@ func withHetzner(t *testing.T, l *leader, token string) *hetznertest.API {
 // holdOnce runs one pass against the fake; the token must arrive opened.
 func holdOnce(t *testing.T, l *leader) {
 	t.Helper()
-	open := func(sealed state.Sealed) ([]byte, error) {
-		opened, err := openPadded(sealed)
+	open := func(encrypted state.Encrypted) ([]byte, error) {
+		opened, err := openPadded(encrypted)
 		return append([]byte("opened-"), opened...), err
 	}
 	asked, err := holdFloatingIP(context.Background(), l, l.propose, open, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -185,7 +185,7 @@ func TestARefusedHetznerTokenRaisesItsAlertUntilHetznerTakesItAgain(t *testing.T
 	l := newLeader(t, 100<<30)
 	withHetzner(t, l, "t") // the token of the Secret hetzner
 	conditions := NewConditions()
-	wrongToken := func(state.Sealed) ([]byte, error) { return []byte("another project's"), nil }
+	wrongToken := func(state.Encrypted) ([]byte, error) { return []byte("another project's"), nil }
 	refused := func() bool {
 		_, holds := conditions.Since(hetznerTokenRefused)
 		return holds

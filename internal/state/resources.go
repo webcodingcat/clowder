@@ -70,8 +70,13 @@ type PutResource struct {
 	Name      string `json:"name"`
 	Owner     string `json:"owner"` // the channel: OwnerCLI so far
 	// Spec is the kind's spec: none for a namespace, otherwise
-	// resource.VolumeSpec, SealedSecret or stackspec.Spec.
+	// resource.VolumeSpec, EncryptedSecret or stackspec.Spec.
 	Spec json.RawMessage `json:"spec,omitempty"`
+	// Create refuses a resource that exists, as kubectl create does
+	// (clowder create secret). It needs no gate of its own in CheckKnown:
+	// change-resources itself comes with 0.2.0, so every agent that reads
+	// the command reads this field too.
+	Create bool `json:"create,omitempty"`
 }
 
 // DeleteResource removes a resource that nothing uses.
@@ -202,7 +207,11 @@ func applyPutResource(s *State, payload PutResource) (func(), error) {
 	if payload.Namespace == names.System && (payload.Kind == resource.KindStack || payload.Kind == resource.KindVolume) {
 		return nil, fmt.Errorf("namespace %s holds the cluster's Secrets only, no %ss", names.System, payload.Kind)
 	}
-	if err := checkOwner(kind.find(s, id), payload.Kind, id, payload.Owner); err != nil {
+	stored := kind.find(s, id)
+	if payload.Create && stored != nil {
+		return nil, fmt.Errorf("%s %s already exists", payload.Kind, id)
+	}
+	if err := checkOwner(stored, payload.Kind, id, payload.Owner); err != nil {
 		return nil, err
 	}
 	store, err := kind.put(s, id, payload)

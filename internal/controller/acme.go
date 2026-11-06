@@ -30,10 +30,10 @@ import (
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// Keys seals and opens the state's secrets (datakey.Key).
+// Keys encrypts and decrypts the state's secrets (datakey.Key).
 type Keys interface {
-	Seal(plaintext []byte) (state.Sealed, error)
-	Open(sealed state.Sealed) ([]byte, error)
+	Encrypt(plaintext []byte) (state.Encrypted, error)
+	Decrypt(encrypted state.Encrypted) ([]byte, error)
 }
 
 const (
@@ -282,7 +282,7 @@ func (r *acmeRunner) connect(ctx context.Context, copied *state.State) (*acme.Cl
 	}
 	client := &acme.Client{DirectoryURL: config.DirectoryURL(), HTTPClient: httpClient, UserAgent: "clowder"}
 	if account := copied.ACMEAccount; account != nil && account.Directory == client.DirectoryURL {
-		der, err := r.keys.Open(account.Key)
+		der, err := r.keys.Decrypt(account.Key)
 		if err != nil {
 			return nil, fmt.Errorf("open the ACME account's key: %w", err)
 		}
@@ -318,12 +318,12 @@ func (r *acmeRunner) connect(ctx context.Context, copied *state.State) (*acme.Cl
 	if err != nil {
 		return nil, err
 	}
-	sealed, err := r.keys.Seal(der)
+	encrypted, err := r.keys.Encrypt(der)
 	if err != nil {
 		return nil, err
 	}
 	_, err = commit(ctx, r.propose, state.KindPutACMEAccount, state.PutACMEAccount{Account: state.ACMEAccount{
-		Directory: client.DirectoryURL, URL: account.URI, Key: sealed,
+		Directory: client.DirectoryURL, URL: account.URI, Key: encrypted,
 	}})
 	if err != nil {
 		return nil, fmt.Errorf("record the ACME account: %w", err)
@@ -387,7 +387,7 @@ func (r *acmeRunner) order(ctx context.Context, client *acme.Client, domain stri
 	if err != nil {
 		return err
 	}
-	sealed, err := r.keys.Seal(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+	encrypted, err := r.keys.Encrypt(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
 	if err != nil {
 		return err
 	}
@@ -396,7 +396,7 @@ func (r *acmeRunner) order(ctx context.Context, client *acme.Client, domain stri
 		chainPEM = append(chainPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
 	}
 	_, err = commit(ctx, r.propose, state.KindPutCertificate, state.PutCertificate{Certificate: state.Certificate{
-		Domain: domain, Key: sealed, Chain: chainPEM, NotBefore: leaf.NotBefore, NotAfter: leaf.NotAfter,
+		Domain: domain, Key: encrypted, Chain: chainPEM, NotBefore: leaf.NotBefore, NotAfter: leaf.NotAfter,
 	}})
 	return err
 }

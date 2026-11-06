@@ -34,8 +34,8 @@ type Object struct {
 	APIVersion string   `json:"apiVersion"`
 	Kind       string   `json:"kind"`
 	Metadata   Metadata `json:"metadata"`
-	// Spec is the kind's spec (VolumeSpec, SecretSpec, stackspec.Spec; a
-	// namespace has none).
+	// Spec is the kind's spec (VolumeSpec, SecretSpec, SealedSecretSpec,
+	// stackspec.Spec; a namespace may have none).
 	Spec json.RawMessage `json:"spec,omitempty"`
 	// Status is what the cluster reports about the resource. An apply
 	// ignores it.
@@ -129,11 +129,22 @@ func DecodeVolumeSpec(raw json.RawMessage) (VolumeSpec, error) {
 	return spec, spec.Check()
 }
 
-// DecodeSecretSpec reads and checks a secret's spec as users write it.
-func DecodeSecretSpec(raw json.RawMessage) (SecretSpec, error) {
+// DecodeSecretSpec reads a Secret's spec as users write it and returns its
+// values by key.
+func DecodeSecretSpec(raw json.RawMessage) (map[string][]byte, error) {
 	var spec SecretSpec
 	if err := decodeStrict(raw, &spec); err != nil {
-		return SecretSpec{}, err
+		return nil, err
+	}
+	return spec.Values()
+}
+
+// DecodeSealedSecretSpec reads and checks a SealedSecret's spec as users
+// write it.
+func DecodeSealedSecretSpec(raw json.RawMessage) (SealedSecretSpec, error) {
+	var spec SealedSecretSpec
+	if err := decodeStrict(raw, &spec); err != nil {
+		return SealedSecretSpec{}, err
 	}
 	return spec, spec.Check()
 }

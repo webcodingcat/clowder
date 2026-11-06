@@ -145,11 +145,11 @@ func TestTheConfigurationKeepsTheCategoriesStacksName(t *testing.T) {
 func TestAStackNamesOnlyKeysItsSecretsHave(t *testing.T) {
 	c := newCluster(t)
 	db := func(digest string, keys ...string) ResourceChange {
-		data := map[string]Sealed{}
+		data := map[string]Encrypted{}
 		for _, key := range keys {
-			data[key] = sealedOf(5)
+			data[key] = encryptedOf(5)
 		}
-		return putChange(resource.KindSecret, "default", "db", SealedSecret{Data: data, Digest: digest})
+		return putChange(resource.KindSecret, "default", "db", EncryptedSecret{Data: data, Digest: digest})
 	}
 	uses := shopSpec()
 	uses.Services["app"] = stackspec.Service{
@@ -198,7 +198,7 @@ func TestAStackNamesVolumesAndSecretsOfItsNamespace(t *testing.T) {
 	c.refuseChange(putChange(resource.KindStack, "default", "shop", uses), "namespace default has no volume data")
 	c.put(resource.KindVolume, "default", "data", testVolumeSpec())
 	c.refuseChange(putChange(resource.KindStack, "default", "shop", uses), "namespace default has no secret token")
-	c.put(resource.KindSecret, "default", "token", sealedValue(sealedOf(5), "d"))
+	c.put(resource.KindSecret, "default", "token", encryptedValue(encryptedOf(5), "d"))
 	c.putShop(uses)
 
 	// one stack per volume; a secret may serve several

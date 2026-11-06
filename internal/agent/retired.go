@@ -46,7 +46,7 @@ func checkRetired(ctx context.Context, files Files, host Host, credentials crede
 	if !current.Configured() {
 		return nil
 	}
-	client, err := controller.OpenHetzner(current, credentials.dataKey.Open)
+	client, err := controller.OpenHetzner(current, credentials.dataKey.Decrypt)
 	if err != nil {
 		logger.Warn("start without asking Hetzner whether this host is retired", "error", err)
 		return nil

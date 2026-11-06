@@ -41,7 +41,7 @@ func newTestMetrics(t *testing.T, leads bool) *metricsSource {
 		RootUsedPercent: 31,
 	})
 	cluster.Apply(state.KindPutCertificate, state.LeaderActor, state.PutCertificate{Certificate: state.Certificate{
-		Domain: "shop.example.com", Key: state.Sealed("k"), Chain: []byte("c"),
+		Domain: "shop.example.com", Key: state.Encrypted("k"), Chain: []byte("c"),
 		NotBefore: time.Unix(1_790_000_000, 0), NotAfter: time.Unix(1_797_776_000, 0),
 	}})
 	cluster.Apply(state.KindPutAlert, state.LeaderActor, state.PutAlert{

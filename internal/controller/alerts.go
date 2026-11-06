@@ -377,11 +377,11 @@ func (a *Alerts) send(ctx context.Context, copied *state.State, notifiers map[in
 // secrets opens the values the configuration names from the state.
 func (a *Alerts) secrets(copied *state.State) notify.Secrets {
 	return func(ref names.SecretKeyRef) (string, error) {
-		sealed, ok := copied.SystemSecret(ref)
+		encrypted, ok := copied.SystemSecret(ref)
 		if !ok {
 			return "", fmt.Errorf("%s has no Secret %s with the key %s", names.System, ref.Name, ref.Key)
 		}
-		opened, err := a.open(sealed)
+		opened, err := a.open(encrypted)
 		return string(opened), err
 	}
 }

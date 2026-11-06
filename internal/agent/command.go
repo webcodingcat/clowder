@@ -1,5 +1,6 @@
 // Package agent is the clowderd process: the daemon (run) and the commands
-// that run on a host (check, init, join, credentials, recover).
+// that run on a host (check, init, join, credentials, sealing-key,
+// recover).
 // Only clowderd imports it.
 package agent
 
@@ -31,7 +32,8 @@ func NewRoot() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newVersion(), newCheck(), newInit(), newJoin(), newRun(), newCredentials(), newRecover())
+	root.AddCommand(newVersion(), newCheck(), newInit(), newJoin(), newRun(), newCredentials(), newSealingKey(),
+		newRecover())
 	return root
 }
 
@@ -87,7 +89,8 @@ func newInit() *cobra.Command {
 		Use:   "init",
 		Short: "Make this host the first of a new cluster (from cloud-init)",
 		Long: "Makes this host the first of a new cluster. The first credentials come from root on it\n" +
-			"afterwards: ssh root@<host> clowderd credentials | clowder config import -",
+			"afterwards: ssh root@<host> clowderd credentials | clowder config import -\n" +
+			"Then export the cluster's sealing key and keep it offline: clowderd sealing-key export",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			options := InitOptions{ServerID: flags.serverID, ClusterName: clusterName}

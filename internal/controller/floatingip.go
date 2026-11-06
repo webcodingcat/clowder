@@ -160,11 +160,11 @@ func confirmServer(ctx context.Context, client *hetzner.Client, propose Propose,
 // configuration names, read from its Secret in clowder-system. The leader's
 // loops, the join, recover and the agent's start use it.
 func OpenHetzner(current *state.State, open Open) (*hetzner.Client, error) {
-	sealed, err := current.HetznerToken()
+	encrypted, err := current.HetznerToken()
 	if err != nil {
 		return nil, err
 	}
-	token, err := open(sealed)
+	token, err := open(encrypted)
 	if err != nil {
 		return nil, fmt.Errorf("open the Hetzner token: %w", err)
 	}

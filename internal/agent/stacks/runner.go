@@ -136,8 +136,8 @@ type Parts struct {
 	Cluster     loop.Cluster
 	Docker      Docker
 	Volumes     Volumes
-	// Open unseals the secrets' values (datakey.Key.Open)
-	Open func(sealed state.Sealed) ([]byte, error)
+	// Open decrypts the secrets' values (datakey.Key.Decrypt)
+	Open func(encrypted state.Encrypted) ([]byte, error)
 	// DigestKey keys the labels of secret files, derived from the data key
 	// for SecretLabelPurpose
 	DigestKey []byte
@@ -169,7 +169,7 @@ type Runner struct {
 	cluster     loop.Cluster
 	docker      Docker
 	volumes     Volumes
-	open        func(sealed state.Sealed) ([]byte, error)
+	open        func(encrypted state.Encrypted) ([]byte, error)
 	digestKey   []byte
 	supervisor  loop.Pauser
 	signal      *loop.Signal

@@ -10,13 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"filippo.io/age"
-
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// withRealCA puts the test's CA with its sealed key into every host's
+// withRealCA puts the test's CA with its encrypted key into every host's
 // state, so the agents can issue certificates.
 func (c *testCluster) withRealCA() {
 	c.t.Helper()
@@ -24,13 +22,13 @@ func (c *testCluster) withRealCA() {
 	if err != nil {
 		c.t.Fatal(err)
 	}
-	sealed, err := c.apis[0].config.Keys.Seal(keyPEM)
+	encrypted, err := c.apis[0].config.Keys.Encrypt(keyPEM)
 	if err != nil {
 		c.t.Fatal(err)
 	}
 	for _, cluster := range c.clusters {
 		cluster.state.Keys.CACertificate = c.ca.CertificatePEM()
-		cluster.state.Keys.CAKey = sealed
+		cluster.state.Keys.CAKey = encrypted
 	}
 }
 
@@ -150,30 +148,6 @@ func TestOnlyAHostAsksForCredentials(t *testing.T) {
 		CredentialsRequest{PublicKey: key.Public().(ed25519.PublicKey)}, &CredentialsAnswer{})
 	if statusOf(err) != http.StatusForbidden {
 		t.Errorf("the CLI asked for credentials: want 403, got %v", err)
-	}
-}
-
-func TestTheCLIRotatesTheRecoveryKey(t *testing.T) {
-	cluster := newTestCluster(t)
-	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
-	identity, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	recipient := identity.Recipient().String()
-	_, err = client.Post(context.Background(), "/v1/recovery/rotate", RotateRequest{Recipient: "age1-no-key"})
-	if statusOf(err) != http.StatusBadRequest {
-		t.Errorf("no age key: want 400, got %v", err)
-	}
-	if _, err := client.Post(context.Background(), "/v1/recovery/rotate", RotateRequest{Recipient: recipient}); err != nil {
-		t.Fatal(err)
-	}
-	var encryption Encryption
-	if err := client.Get(context.Background(), "/v1/encryption", &encryption); err != nil {
-		t.Fatal(err)
-	}
-	if encryption.Recovery != recipient {
-		t.Errorf("recovery %s, want %s", encryption.Recovery, recipient)
 	}
 }
 

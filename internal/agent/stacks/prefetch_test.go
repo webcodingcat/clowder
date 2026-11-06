@@ -20,7 +20,7 @@ import (
 // in a directory of the test.
 func newTestPrefetcher(t *testing.T, cluster *agenttest.Cluster, docker *agenttest.Docker) *Prefetcher {
 	t.Helper()
-	registries := NewRegistryConfigs(Files{SecretsDir: t.TempDir()}, cluster.Keys.Open)
+	registries := NewRegistryConfigs(Files{SecretsDir: t.TempDir()}, cluster.Keys.Decrypt)
 	return NewPrefetcher(1, cluster, docker, registries, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
@@ -81,7 +81,7 @@ func TestAHostPullsWithoutAPullSecretThatIsMissing(t *testing.T) {
 func TestTheLoginsOfANamespaceWithoutStacksHereGo(t *testing.T) {
 	cluster := blogWithCopyOn(t, 1)
 	files := Files{SecretsDir: t.TempDir()}
-	registries := NewRegistryConfigs(files, cluster.Keys.Open)
+	registries := NewRegistryConfigs(files, cluster.Keys.Decrypt)
 	var current *state.State
 	cluster.Read(func(read *state.State) { current = read })
 	for _, namespace := range []string{names.Default, "gone"} {

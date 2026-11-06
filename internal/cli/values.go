@@ -1,102 +1,109 @@
 package cli
 
 import (
-	"encoding/json"
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
-	"slices"
+	"strings"
 
 	"filippo.io/age"
+	"go.yaml.in/yaml/v3"
 
-	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
-	"github.com/webcodingcat/clowder/internal/secretvalue"
 )
 
-// valuePlace is where a value is in its file: the document, counted from 0
-// as secretvalue.Rewrite counts, and the path in that document.
-type valuePlace struct {
-	document int
-	path     string
-}
-
-// fileValue is a value of a file: where it is, the key in its Secret, and
-// the Secret it must be for.
+// fileValue is a sealed value of a file, for secret rekey and decrypt: the
+// YAML node that holds it, its key, and the Secret it must be for.
 type fileValue struct {
-	place valuePlace
-	key   string
-	api.PlacedValue
+	node   *yaml.Node
+	key    string
+	secret string // the Secret's ID
+	sealed string
 }
 
 // label names the value for people: "shop/db[password]".
 func (v fileValue) label() string {
-	return v.For + "[" + v.key + "]"
+	return v.secret + "[" + v.key + "]"
 }
 
-// fileValues reads the values of a file (path names it in errors) for
-// secret rekey and decrypt, the same way apply reads them: a value may only
-// be in a Secret's spec.data, and it is for the Secret's ID.
+// fileValues reads the values of the SealedSecrets in a file (path names it
+// in errors) from its YAML nodes, because rekey needs the line of each
+// value. A file that apply would refuse is refused here too, so the nodes
+// that are read are those of valid SealedSecrets.
 func fileValues(path string, content []byte) ([]fileValue, error) {
-	documents, err := secretvalue.Extract(content)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	if _, err := readFile(path, content, false); err != nil {
+		return nil, err
 	}
-	var secrets []resource.Object
-	if slices.ContainsFunc(documents, func(d secretvalue.Document) bool { return len(d.Secrets) > 0 }) {
-		objects, err := readFile(path, content, false)
-		if err != nil {
-			return nil, err
-		}
-		for _, object := range objects {
-			if object.Kind == resource.KindSecret {
-				secrets = append(secrets, object)
-			}
-		}
-	}
-	// apply takes values only from the Secrets (readFile refused any other
-	// place), so the documents with values are the Secrets, in their order;
-	// the values that apply took confirm each pair
-	next := 0 // the Secret that the next document with values must be
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
 	var values []fileValue
-	for index, document := range documents {
-		if len(document.Secrets) == 0 {
+	for {
+		var document yaml.Node
+		err := decoder.Decode(&document)
+		if errors.Is(err, io.EOF) {
+			return values, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		if len(document.Content) == 0 {
 			continue
 		}
-		if next == len(secrets) {
-			return nil, fmt.Errorf("%s: document %d: a value tagged !secret stands only in a Secret's %s",
-				path, index+1, resource.SecretDataPath)
+		top := document.Content[0]
+		if text(field(top, "apiVersion")) != resource.APIVersion || text(field(top, "kind")) != resource.KindSealedSecret {
+			continue
 		}
-		secret := secrets[next]
-		next++
-		var spec resource.SecretSpec
-		if err := json.Unmarshal(secret.Spec, &spec); err != nil {
-			return nil, fmt.Errorf("%s: document %d: %w", path, index+1, err)
-		}
-		keyOf := map[string]string{}
-		for key := range spec.Encrypted {
-			keyOf[resource.SecretValuePath(key)] = key
-		}
-		for _, valuePath := range slices.Sorted(maps.Keys(document.Secrets)) {
-			key, ok := keyOf[valuePath]
-			if !ok || spec.Encrypted[key] != document.Secrets[valuePath] {
-				return nil, fmt.Errorf("%s: document %d: its value at %s is not one apply takes for secret %s",
-					path, index+1, valuePath, secret.Metadata.Name)
-			}
-			values = append(values, fileValue{
-				place: valuePlace{index, valuePath}, key: key,
-				PlacedValue: api.PlacedValue{
-					For: names.ID(secret.Metadata.Namespace, secret.Metadata.Name), Encrypted: document.Secrets[valuePath],
-				},
-			})
+		metadata := field(top, "metadata")
+		id := names.ID(namespaceOrDefault(text(field(metadata, "namespace"))), text(field(metadata, "name")))
+		data := field(field(top, "spec"), "encryptedData")
+		for index := 0; data != nil && index+1 < len(data.Content); index += 2 { // key, value, key, value, ...
+			key, value := data.Content[index], data.Content[index+1]
+			values = append(values, fileValue{node: value, key: key.Value, secret: id, sealed: value.Value})
 		}
 	}
-	return values, nil
 }
 
-// readIdentities reads age identities, such as the recovery key, from a
+// field returns the value of key in a mapping node, or nil for anything
+// else, so that a chain of calls ends in nil where a field is missing.
+func field(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Value == key {
+			return mapping.Content[index+1]
+		}
+	}
+	return nil
+}
+
+// text returns the text of a scalar node, or "" for nil.
+func text(node *yaml.Node) string {
+	if node == nil {
+		return ""
+	}
+	return node.Value
+}
+
+// replaceValues puts each value's new text in place of the old, on the
+// value's line, and leaves the rest of the file as it is (comments, quotes,
+// line ends). It refuses a value that does not stand on one line, as
+// clowder secret seal writes it.
+func replaceValues(content []byte, values []fileValue, replacements []string) ([]byte, error) {
+	lines := strings.SplitAfter(string(content), "\n")
+	for index, value := range values {
+		line := value.node.Line - 1
+		if line < 0 || line >= len(lines) || strings.Count(lines[line], value.sealed) != 1 {
+			return nil, fmt.Errorf("%s: write the value on one line, as clowder secret seal does", value.label())
+		}
+		lines[line] = strings.Replace(lines[line], value.sealed, replacements[index], 1)
+	}
+	return []byte(strings.Join(lines, "")), nil
+}
+
+// readIdentities reads age identities, such as the sealing key, from a
 // file or from stdin ("-"). Stdin lets them come from a password manager,
 // without a file on disk.
 func readIdentities(from string, stdin io.Reader) ([]age.Identity, error) {

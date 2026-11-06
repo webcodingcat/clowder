@@ -132,23 +132,6 @@ func (c *Client) change(ctx context.Context, path string, request any, dryRun bo
 	return result, nil
 }
 
-// Rekey has the cluster encrypt values again for its current recipients
-// (POST /v1/encryption/rekey).
-func (c *Client) Rekey(ctx context.Context, values []PlacedValue) ([]string, error) {
-	encoded, err := json.Marshal(RekeyRequest{Values: values})
-	if err != nil {
-		return nil, fmt.Errorf("encode the request: %w", err)
-	}
-	var answer RekeyAnswer
-	if err := c.do(ctx, http.MethodPost, "/v1/encryption/rekey", encoded, &answer); err != nil {
-		return nil, err
-	}
-	if len(answer.Values) != len(values) {
-		return nil, fmt.Errorf("the cluster answered %d values for %d", len(answer.Values), len(values))
-	}
-	return answer.Values, nil
-}
-
 // Stream copies the answer of path to out as it arrives (logs that
 // follow). It has no timeout of its own; ctx ends it.
 func (c *Client) Stream(ctx context.Context, path string, out io.Writer) error {

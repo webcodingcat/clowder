@@ -32,7 +32,7 @@ func TestTheStateIsReadOnlyWhileTheAgentIsStopped(t *testing.T) {
 	if err := node.raft.Snapshot().Error(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := node.Propose(ctx, setRecovery(t)); err != nil {
+	if _, err := node.Propose(ctx, setCutoff(t)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ReadState(dir); err == nil || !strings.Contains(err.Error(), "stop clowderd.service first") {
@@ -45,8 +45,8 @@ func TestTheStateIsReadOnlyWhileTheAgentIsStopped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.RecoveryRecipient != "age1recovery" || current.Hosts[0] == nil {
-		t.Errorf("recovery recipient %q, hosts %v", current.RecoveryRecipient, current.Hosts)
+	if !current.CLICutoff.Equal(traceCutoff) || current.Hosts[0] == nil {
+		t.Errorf("cutoff %v, hosts %v", current.CLICutoff, current.Hosts)
 	}
 }
 
@@ -71,7 +71,7 @@ func TestARecoveredMemberLeadsAloneWithItsState(t *testing.T) {
 	if _, err := nodes[0].Propose(ctx, bootstrapCommand(t)); err != nil {
 		t.Fatal(err)
 	}
-	index, err := nodes[0].Propose(ctx, setRecovery(t))
+	index, err := nodes[0].Propose(ctx, setCutoff(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,8 +93,8 @@ func TestARecoveredMemberLeadsAloneWithItsState(t *testing.T) {
 	recovered := cluster.open(2, dirs[2], addresses[2])
 	defer func() { _ = recovered.Close() }()
 	waitForLeader(t, recovered)
-	if got := recoveryRecipient(recovered); got != "age1recovery" {
-		t.Errorf("recovery recipient after the recover: %q", got)
+	if !cutoffSet(recovered) {
+		t.Error("the cutoff is gone after the recover")
 	}
 	members, err := recovered.Members()
 	if err != nil || len(members) != 1 || !members[2] {

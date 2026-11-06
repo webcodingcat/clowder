@@ -269,18 +269,24 @@ func volumeDocument(name, class, size string, replicas int) string {
 // stackSecretKey is the one key of each Secret of the test's stacks.
 const stackSecretKey = "value"
 
-// encryptSecret is a Secret of the namespace default with its value
-// under stackSecretKey, encrypted for it from stdin, as clowder secret
-// encrypt writes it.
-func encryptSecret(t *testing.T, name, value string) string {
+// sealSecret is a SealedSecret of the namespace default with its value
+// under stackSecretKey, read from stdin and sealed for the cluster, as
+// clowder secret seal writes it.
+func sealSecret(t *testing.T, name, value string) string {
 	t.Helper()
-	secret, err := clowderWithInput(strings.NewReader(value), "secret", "encrypt", name,
+	sealed, err := clowderWithInput(strings.NewReader(value), "secret", "seal", name,
 		"--from-file", stackSecretKey+"=-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return secret
+	return sealed
 }
+
+// sealingKeyFile holds the cluster's private sealing key, as the user
+// keeps it apart for an emergency; sealingCertFile holds its public half,
+// which seals without asking the cluster.
+func sealingKeyFile() string  { return filepath.Join(workDir, "sealing-key") }
+func sealingCertFile() string { return filepath.Join(workDir, "sealing-key.pub") }
 
 // createAndApply writes a stack's resources (the stack and its volumes) to
 // its file and applies them.

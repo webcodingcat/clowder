@@ -160,7 +160,7 @@ func (j *joiner) issue(current *state.State, request api.JoinRequest, id state.H
 	if current.Keys == nil {
 		return nil, nil, state.ErrNotBootstrapped
 	}
-	caKeyPEM, err := j.dataKey.Open(current.Keys.CAKey)
+	caKeyPEM, err := j.dataKey.Decrypt(current.Keys.CAKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open the CA key: %w", err)
 	}
@@ -184,7 +184,7 @@ func (j *joiner) issue(current *state.State, request api.JoinRequest, id state.H
 // (hetzner.Client.CheckServer). A server that belongs to someone else is a
 // refusal; an API that does not answer is not.
 func (j *joiner) checkServer(ctx context.Context, current *state.State, host state.Host) error {
-	client, err := controller.OpenHetzner(current, j.dataKey.Open)
+	client, err := controller.OpenHetzner(current, j.dataKey.Decrypt)
 	if err != nil {
 		return fmt.Errorf("check the server of %s: %w", host.Name, err)
 	}

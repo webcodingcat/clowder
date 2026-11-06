@@ -16,12 +16,12 @@ func findSecret(s *State, id string) *Meta {
 	return nil
 }
 
-// putSecret stores a secret's sealed values, within the limits of
+// putSecret stores a secret's encrypted values, within the limits of
 // checkSecretLimits. It keeps every key that a stack of its namespace or
 // the configuration names, because whatever names a key would fail without
 // it.
 func putSecret(s *State, id string, payload PutResource) (func() *Meta, error) {
-	spec, err := decodeSpec[SealedSecret](payload.Kind, id, payload.Spec)
+	spec, err := decodeSpec[EncryptedSecret](payload.Kind, id, payload.Spec)
 	if err != nil {
 		return nil, err
 	}
@@ -40,7 +40,7 @@ func putSecret(s *State, id string, payload PutResource) (func() *Meta, error) {
 		case !names.ValidSecretKey(key):
 			return nil, fmt.Errorf("secret %s: key %q: %s", id, key, names.SecretKeyRule)
 		case size < 0:
-			return nil, fmt.Errorf("secret %s: the value of %s is not sealed", id, key)
+			return nil, fmt.Errorf("secret %s: the value of %s is not encrypted", id, key)
 		case size == 0:
 			return nil, fmt.Errorf("secret %s: the value of %s is empty", id, key)
 		}
@@ -66,7 +66,7 @@ func putSecret(s *State, id string, payload PutResource) (func() *Meta, error) {
 // checkKeysKept refuses a secret that would lack a key that a stack of its
 // namespace or the configuration names. A nil keep means that the secret is
 // deleted.
-func (s *State) checkKeysKept(namespace, name string, keep map[string]Sealed) error {
+func (s *State) checkKeysKept(namespace, name string, keep map[string]Encrypted) error {
 	id := names.ID(namespace, name)
 	if namespace == names.System {
 		if place, named := s.configNaming(name, keep); named {
@@ -109,7 +109,7 @@ func checkSecretLimits(secrets map[string]*Secret) error {
 		secret := secrets[id]
 		size := 0
 		for _, value := range secret.Spec.Data {
-			// what is too short to be sealed counts as nothing: putSecret
+			// what is too short to be encrypted counts as nothing: putSecret
 			// refuses such a resource
 			size += max(ClearSize(value), 0)
 		}
@@ -142,28 +142,28 @@ func removeSecret(s *State, id string) (func(), error) {
 	return func() { delete(s.Secrets, id) }, nil
 }
 
-// The length of what age adds when it seals for the cluster's one X25519
-// recipient (datakey.Key.Seal).
+// The length of what age adds when it encrypts for the cluster's one X25519
+// recipient (datakey.Key.Encrypt).
 const (
-	// sealedHeader is the header ("age-encryption.org/v1", one recipient
+	// encryptedHeader is the header ("age-encryption.org/v1", one recipient
 	// stanza, the MAC) and the payload's nonce.
-	sealedHeader = 168 + 16
-	// sealedChunk is how much clear text age seals at a time; each chunk
-	// gets a tag of sealedTag bytes.
-	sealedChunk = 64 << 10
-	sealedTag   = 16
+	encryptedHeader = 168 + 16
+	// encryptedChunk is how much clear text age encrypts at a time; each
+	// chunk gets a tag of encryptedTag bytes.
+	encryptedChunk = 64 << 10
+	encryptedTag   = 16
 )
 
-// ClearSize returns the clear length of a sealed value, worked out from the
-// sealed length, so the state can enforce the limits without opening the
-// value. It returns -1 for what is too short to be sealed. A test in
-// datakey compares it with real sealing, so a change in age's format fails
-// there.
-func ClearSize(sealed Sealed) int {
-	body := len(sealed) - sealedHeader
-	if body < sealedTag {
+// ClearSize returns the clear length of an encrypted value, worked out from
+// the encrypted length, so the state can enforce the limits without
+// decrypting the value. It returns -1 for what is too short to be
+// encrypted. A test in datakey compares it with real encryption, so a
+// change in age's format fails there.
+func ClearSize(encrypted Encrypted) int {
+	body := len(encrypted) - encryptedHeader
+	if body < encryptedTag {
 		return -1
 	}
-	chunks := (body + sealedChunk + sealedTag - 1) / (sealedChunk + sealedTag)
-	return body - chunks*sealedTag
+	chunks := (body + encryptedChunk + encryptedTag - 1) / (encryptedChunk + encryptedTag)
+	return body - chunks*encryptedTag
 }

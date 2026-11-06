@@ -17,19 +17,9 @@ func TestAVolumeNeedsAClassASizeAndReplicasFromZeroToThree(t *testing.T) {
 	}
 }
 
-func TestASecretTravelsEncryptedByValidKeys(t *testing.T) {
-	if err := (SecretSpec{Encrypted: map[string]string{"password": testArmor, "tls.crt": testArmor}}).Check(); err != nil {
-		t.Error(err)
-	}
-	for name, refused := range map[string]map[string]string{
-		"no keys":  {},
-		"in clear": {"password": "s3cret"},
-		"bad key":  {"a/b": testArmor},
-		"dot dot":  {"..": testArmor},
-	} {
-		if err := (SecretSpec{Encrypted: refused}).Check(); err == nil || strings.Contains(err.Error(), "s3cret") {
-			t.Errorf("%s: %v", name, err)
-		}
+func TestASealedSecretIsStoredAsASecret(t *testing.T) {
+	if StoredKind(KindSealedSecret) != KindSecret || StoredKind(KindVolume) != KindVolume {
+		t.Error("wrong stored kinds")
 	}
 }
 

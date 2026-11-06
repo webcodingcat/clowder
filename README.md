@@ -15,7 +15,8 @@ Until `v1.0.0`, a new release may need a cluster set up anew.
 - **Resources as with kubectl:** the cluster's configuration, namespaces, stacks, volumes
   and secrets, with `clowder apply -f` (also `--dry-run`), `diff -f`, `get` (also
   `--watch`) and `delete`. An apply goes in whole or not at all.
-- **Secrets in your files, encrypted:** only the cluster can decrypt them. A stack gets
+- **Secrets as in Kubernetes with sealed secrets:** a `Secret` in clear, or a
+  `SealedSecret` that only the cluster can open and that can go into Git. A stack gets
   them as files or variables; registry logins belong to a namespace.
 - **Placement by priority:** every service reserves memory and CPUs. A new stack goes
   where its data is. On full hosts, stacks of lower priority move to make room, or a new
@@ -53,7 +54,7 @@ tofu init
 tofu apply -var 'ssh_public_key=ssh-ed25519 AAAA...' -var 'admin_cidrs=["203.0.113.7/32"]'
 ssh "root@$(tofu output -raw public_address)" clowderd credentials | clowder config import -
 clowder cluster status
-clowder recovery rotate        # the cluster's first recovery key, shown once
+ssh "root@$(tofu output -raw public_address)" clowderd sealing-key export > sealing-key
 ```
 
 **Credentials** come over SSH from root on a host, as kubeadm's `admin.conf` does, so
@@ -64,26 +65,25 @@ A CLI certificate lasts a year; run `clowderd credentials` again and import it w
 `--replace`. `clowderd credentials --revoke-older` locks out every CLI certificate issued
 before the new one.
 
-The **recovery key** from `clowder recovery rotate` is shown once: keep it offline. If the
-cluster is lost, it still decrypts the values in your files (`secret decrypt`) and moves
-them to a new cluster (`secret rekey --identity`).
+Every SealedSecret is sealed for the cluster's **sealing key**. Export it right after
+setup, as above, and keep it offline: whoever holds it can read every SealedSecret. If the
+cluster is lost, it still opens the values in your files (`secret decrypt`) and moves them
+to a new cluster (`secret rekey`). `clowderd sealing-key export --public` prints the
+public half, with which `clowder secret seal --cert` seals without a cluster.
 
 The cluster's settings are one resource, the **`ClusterConfiguration`** named `cluster`.
 Its secrets are Secrets in the namespace `clowder-system`. `tofu output
-cluster_configuration` gives the fields that come from the module. Encrypt the Hetzner
-project's API token with `clowder secret encrypt clowder-system/hetzner --from-file
-token=-` (it asks for the token), and put the Secret above the configuration in one file:
+cluster_configuration` gives the fields that come from the module. Seal the Hetzner
+project's API token with `clowder secret seal clowder-system/hetzner --from-file token=-`
+(it asks for the token), and put the SealedSecret above the configuration in one file:
 
 ```yaml
 apiVersion: clowder/v1
-kind: Secret
+kind: SealedSecret
 metadata: {namespace: clowder-system, name: hetzner}
 spec:
-  data:
-    token: !secret |
-      -----BEGIN AGE ENCRYPTED FILE-----
-      ...
-      -----END AGE ENCRYPTED FILE-----
+  encryptedData:
+    token: YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSAu...
 ---
 apiVersion: clowder/v1
 kind: ClusterConfiguration
@@ -98,8 +98,8 @@ spec:
     bulk: {pool: vg-bulk/thin}
 ```
 
-Then run `clowder apply -f system.yaml`. The file holds no key, so it can live in a
-repository; keep it apart from the module's directory, whose OpenTofu state holds the join
+Then run `clowder apply -f system.yaml`. The file holds no value in clear, so it can live
+in a repository; keep it apart from the module's directory, whose OpenTofu state holds the join
 tokens. An apply that brings a new Hetzner token first says how many of the hosts' servers
 the token sees and asks (`--yes` skips the question).
 [docs/developing/specs.md](docs/developing/specs.md) explains the configuration.
@@ -156,10 +156,13 @@ spec:
       http: {host: shop.example.com, port: 8080}
 ```
 
-`clowder secret encrypt shop/db --from-file password=-` asks for the password and writes
-the Secret `db`; `--from-literal <key>=<value>` and `--from-file <key>=<path>` add more
-keys. The registry login is a Secret too: `clowder secret encrypt shop/registry
---from-literal server=registry.example.com --from-literal username=shop --from-file
+`clowder secret seal shop/db --from-file password=-` asks for the password and prints the
+SealedSecret `db` for your files. `--from-literal <key>=<value>` and `--from-file
+<key>=<path>` add more keys, and `secret seal -f <file>` seals the Secrets of a file. The
+registry login is a Secret too: `clowder secret seal shop/registry --from-literal
+server=registry.example.com --from-literal username=shop --from-file password=-`. A Secret
+that stays out of Git can go in clear instead: in a file (`spec.data` in Base64,
+`spec.stringData` as text), or with `clowder create secret shop/db --from-file
 password=-`.
 
 Put the files in a directory and run `clowder apply -f shop/`. clowder reads the files in
@@ -178,8 +181,8 @@ described in [docs/developing/specs.md](docs/developing/specs.md).
 | `clowder delete -f shop/ --with-data` | deletes the resources from the bottom up; a volume only with `--with-data` |
 | `clowder cluster status` | the configuration's generation, the hosts, the leader and the open alerts |
 | `clowder host list\|drain\|undrain\|remove` | the hosts; `drain` moves a host's stacks away for maintenance |
-| `clowder secret rekey -f shop/` | encrypts the values in files again, for the cluster's current keys |
-| `clowder secret decrypt --identity <key> -f <file>` | in an emergency, reads the values with the recovery key |
+| `clowder secret rekey -f shop/ --identity sealing-key` | seals the values in files again, for the cluster of the context (`--cert`: for a public sealing key) |
+| `clowder secret decrypt --identity sealing-key -f <file>` | in an emergency, reads the values of SealedSecrets with the sealing key |
 
 Applying the same files again changes nothing, and a field that clowder does not know is
 an error. Backups come with phase 3; until then, a volume's data is only on its hosts'

@@ -232,17 +232,17 @@ func writeAs(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// prefixKeys "seals" by prefixing, so a test sees what was sealed.
+// prefixKeys "encrypts" by prefixing, so a test sees what was encrypted.
 type prefixKeys struct{}
 
-func (prefixKeys) Seal(plaintext []byte) (state.Sealed, error) {
-	return append(state.Sealed("sealed:"), plaintext...), nil
+func (prefixKeys) Encrypt(plaintext []byte) (state.Encrypted, error) {
+	return append(state.Encrypted("encrypted:"), plaintext...), nil
 }
 
-func (prefixKeys) Open(sealed state.Sealed) ([]byte, error) {
-	plaintext, ok := bytes.CutPrefix(sealed, []byte("sealed:"))
+func (prefixKeys) Decrypt(encrypted state.Encrypted) ([]byte, error) {
+	plaintext, ok := bytes.CutPrefix(encrypted, []byte("encrypted:"))
 	if !ok {
-		return nil, errors.New("not sealed")
+		return nil, errors.New("not encrypted")
 	}
 	return plaintext, nil
 }
@@ -255,7 +255,7 @@ func newACMERunner(t *testing.T, ca *fakeCA) (*acmeRunner, *leader) {
 	t.Helper()
 	l := &leader{t: t, state: &state.State{}, changed: make(chan struct{})}
 	l.apply(state.KindBootstrap, state.LeaderActor, state.Bootstrap{
-		Keys:        state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Sealed("k"), AgeIdentity: state.Sealed("a")},
+		Keys:        state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Encrypted("k"), SealingKey: state.Encrypted("a")},
 		ClusterName: "prod",
 		Host: state.Host{
 			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
@@ -326,7 +326,7 @@ func TestACertificateIsOrderedThroughTheChallengeTheAgentsServe(t *testing.T) {
 	if certificate.Lifetime() != fakeLifetime || !bytes.Equal(certificate.Chain, calls.chain) {
 		t.Errorf("certificate %+v", certificate)
 	}
-	key, err := prefixKeys{}.Open(certificate.Key)
+	key, err := prefixKeys{}.Decrypt(certificate.Key)
 	if block, _ := pem.Decode(key); err != nil || block == nil || block.Type != "PRIVATE KEY" {
 		t.Errorf("the certificate's key: %q, %v", key, err)
 	}

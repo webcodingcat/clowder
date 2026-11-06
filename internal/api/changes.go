@@ -26,6 +26,9 @@ import (
 // in which they are applied, as the files have them.
 type ApplyRequest struct {
 	Resources []resource.Object `json:"resources"`
+	// Create refuses every resource that exists, as kubectl create does
+	// (clowder create secret).
+	Create bool `json:"create,omitempty"`
 }
 
 // DeleteRequest is the body of POST /v1/delete: the resources in the order
@@ -134,8 +137,20 @@ func (s *Server) applyResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	batch := changeBatch{DryRun: r.URL.Query().Get("dryRun") == "true", Actor: actorOf(identityOf(r))}
+	// a resource named twice, such as a Secret and a SealedSecret of the
+	// same name, would leave only the second, without a word
+	sentAs := map[resource.Ref]string{}
 	for _, object := range request.Resources {
-		put, err := s.putChange(object)
+		stored := resource.Ref{
+			Kind: resource.StoredKind(object.Kind), Namespace: object.Metadata.Namespace, Name: object.Metadata.Name,
+		}
+		if kind, twice := sentAs[stored]; twice {
+			batch.add(object.Ref(), state.ResourceChange{},
+				fmt.Errorf("the request names %s twice (first as a %s)", stored, kind))
+			continue
+		}
+		sentAs[stored] = object.Kind
+		put, err := s.putChange(object, request.Create)
 		batch.add(object.Ref(), state.ResourceChange{Put: &put}, err)
 	}
 	s.runOnLeader(w, r, batch)
@@ -160,8 +175,9 @@ func (s *Server) deleteResources(w http.ResponseWriter, r *http.Request) {
 	}
 	batch := changeBatch{DryRun: r.URL.Query().Get("dryRun") == "true", Actor: actorOf(identityOf(r))}
 	for _, ref := range request.Resources {
+		// delete -f of a SealedSecret deletes the Secret it became
 		change := state.ResourceChange{Delete: &state.DeleteResource{
-			Kind: ref.Kind, Namespace: ref.Namespace, Name: ref.Name, Owner: state.OwnerCLI,
+			Kind: resource.StoredKind(ref.Kind), Namespace: ref.Namespace, Name: ref.Name, Owner: state.OwnerCLI,
 		}}
 		batch.add(ref, change, nil)
 	}
@@ -177,16 +193,20 @@ func (b *changeBatch) add(ref resource.Ref, change state.ResourceChange, err err
 }
 
 // putChange turns a resource as the user wrote it into its put. It reads
-// the spec strictly and checks it, and for a secret it seals the values and
-// computes the digest. Every change of a user comes from the CLI, so its
-// owner is the channel cli (state.OwnerCLI).
-func (s *Server) putChange(object resource.Object) (state.PutResource, error) {
+// the spec strictly and checks it. For a Secret it encrypts the values and
+// computes the digest; a SealedSecret becomes a Secret the same way, once
+// its values are opened. Every change of a user comes from the CLI, so its
+// owner is the channel cli (state.OwnerCLI). With create, the put refuses a
+// resource that exists.
+func (s *Server) putChange(object resource.Object, create bool) (state.PutResource, error) {
 	if object.APIVersion != resource.APIVersion {
 		return state.PutResource{}, fmt.Errorf("apiVersion %q is not %s", object.APIVersion, resource.APIVersion)
 	}
 	put := state.PutResource{
-		Kind: object.Kind, Namespace: object.Metadata.Namespace, Name: object.Metadata.Name, Owner: state.OwnerCLI,
+		Kind: resource.StoredKind(object.Kind), Namespace: object.Metadata.Namespace, Name: object.Metadata.Name,
+		Owner: state.OwnerCLI, Create: create,
 	}
+	id := names.ID(put.Namespace, put.Name)
 	var spec any
 	var err error
 	switch object.Kind {
@@ -201,7 +221,15 @@ func (s *Server) putChange(object resource.Object) (state.PutResource, error) {
 		// stackspec.Check runs in the state
 		spec, err = stackspec.Decode(object.Spec)
 	case resource.KindSecret:
-		spec, err = s.sealSecret(names.ID(put.Namespace, put.Name), object.Spec)
+		var values map[string][]byte
+		if values, err = resource.DecodeSecretSpec(object.Spec); err == nil {
+			spec, err = s.encryptSecret(id, values)
+		}
+	case resource.KindSealedSecret:
+		var values map[string][]byte
+		if values, err = s.unsealSecret(id, object.Spec); err == nil {
+			spec, err = s.encryptSecret(id, values)
+		}
 	default:
 		err = fmt.Errorf("no kind of resource %q", object.Kind)
 	}
@@ -214,43 +242,51 @@ func (s *Server) putChange(object resource.Object) (state.PutResource, error) {
 	return put, nil
 }
 
-// sealSecret decrypts a secret's values, each of which must be encrypted
-// for this Secret, seals them and computes the digest. The digest is an
-// HMAC over the secret's ID and its keys and values, with a key derived
-// from the data key. A plain hash would give away a short password. With
-// the ID included, two secrets with the same values have different
-// digests.
-func (s *Server) sealSecret(id string, raw json.RawMessage) (state.SealedSecret, error) {
-	written, err := resource.DecodeSecretSpec(raw)
+// unsealSecret opens the values of a SealedSecret with the sealing key.
+// Each value must be sealed for this Secret: one copied from another, such
+// as the Hetzner token of clowder-system, would otherwise reach a
+// container.
+func (s *Server) unsealSecret(id string, raw json.RawMessage) (map[string][]byte, error) {
+	written, err := resource.DecodeSealedSecretSpec(raw)
 	if err != nil {
-		return state.SealedSecret{}, err
+		return nil, err
 	}
-	identity, err := s.clusterIdentity()
+	identity, err := s.sealingKey()
 	if err != nil {
-		return state.SealedSecret{}, err
+		return nil, err
 	}
+	values := map[string][]byte{}
+	for _, key := range slices.Sorted(maps.Keys(written.EncryptedData)) {
+		value, err := secretvalue.OpenFor(written.EncryptedData[key], id, identity)
+		if err != nil {
+			return nil, fmt.Errorf("sealed secret %s, key %s: %w", id, key, err)
+		}
+		values[key] = value.Bytes
+	}
+	return values, nil
+}
+
+// encryptSecret encrypts a Secret's values with the data key and computes
+// the digest, however the values came in. The digest is an HMAC over the
+// secret's ID and its keys and values, with a key derived from the data
+// key. A plain hash would give away a short password. With the ID
+// included, two secrets with the same values have different digests.
+func (s *Server) encryptSecret(id string, values map[string][]byte) (state.EncryptedSecret, error) {
 	digestKey, err := s.config.Keys.Derive(secretResourcePurpose)
 	if err != nil {
-		return state.SealedSecret{}, fmt.Errorf("derive the digest key: %w", err)
+		return state.EncryptedSecret{}, fmt.Errorf("derive the digest key: %w", err)
 	}
-	sealed := state.SealedSecret{Data: map[string]state.Sealed{}, KeyDigests: map[string]string{}}
+	encrypted := state.EncryptedSecret{Data: map[string]state.Encrypted{}, KeyDigests: map[string]string{}}
 	parts := [][]byte{[]byte(id)}
-	for _, key := range slices.Sorted(maps.Keys(written.Encrypted)) {
-		// the value must be encrypted for this Secret: one copied from
-		// another, such as the Hetzner token of clowder-system, would
-		// otherwise reach a container
-		value, err := secretvalue.OpenFor(written.Encrypted[key], id, identity)
-		if err != nil {
-			return state.SealedSecret{}, fmt.Errorf("secret %s, key %s: %w", id, key, err)
+	for _, key := range slices.Sorted(maps.Keys(values)) {
+		if encrypted.Data[key], err = s.config.Keys.Encrypt(values[key]); err != nil {
+			return state.EncryptedSecret{}, fmt.Errorf("encrypt secret %s: %w", id, err)
 		}
-		if sealed.Data[key], err = s.config.Keys.Seal(value.Bytes); err != nil {
-			return state.SealedSecret{}, fmt.Errorf("seal secret %s: %w", id, err)
-		}
-		parts = append(parts, []byte(key), value.Bytes)
-		sealed.KeyDigests[key] = digest.HMAC(digestKey, []byte(id), []byte(key), value.Bytes)
+		parts = append(parts, []byte(key), values[key])
+		encrypted.KeyDigests[key] = digest.HMAC(digestKey, []byte(id), []byte(key), values[key])
 	}
-	sealed.Digest = digest.HMAC(digestKey, parts...)
-	return sealed, nil
+	encrypted.Digest = digest.HMAC(digestKey, parts...)
+	return encrypted, nil
 }
 
 // runOnLeader has the leader run a batch: here if this agent leads, or else
@@ -397,6 +433,13 @@ func (s *Server) runChanges(ctx context.Context, batch changeBatch) ChangeResult
 	return answer
 }
 
+// storedRef names the resource that the result's resource is stored as:
+// the result keeps the kind the user sent (a SealedSecret), the state the
+// stored one (a Secret).
+func (r ResourceResult) storedRef() resource.Ref {
+	return resource.Ref{Kind: resource.StoredKind(r.Kind), Namespace: r.Namespace, Name: r.Name}
+}
+
 // outcomes sets the outcome of each resource from what the batch changed.
 // A resource that the batch did not change is unchanged.
 func (a *ChangeResult) outcomes(changes []state.Change) {
@@ -406,7 +449,7 @@ func (a *ChangeResult) outcomes(changes []state.Change) {
 	}
 	for index := range a.Results {
 		result := &a.Results[index]
-		switch ref := (resource.Ref{Kind: result.Kind, Namespace: result.Namespace, Name: result.Name}); {
+		switch ref := result.storedRef(); {
 		case !changed[ref]:
 			result.Outcome = Unchanged
 		case slices.ContainsFunc(changes, func(change state.Change) bool {
@@ -465,7 +508,7 @@ func (s *Server) describe(ctx context.Context, answer *ChangeResult, changes []s
 		if result.Outcome != Applied {
 			continue
 		}
-		ref := resource.Ref{Kind: result.Kind, Namespace: result.Namespace, Name: result.Name}
+		ref := result.storedRef()
 		old, existed := objectOf(before, ref)
 		updated, _ := objectOf(after, ref)
 		result.Created = !existed
@@ -484,8 +527,9 @@ func (s *Server) describe(ctx context.Context, answer *ChangeResult, changes []s
 
 // secretDifferences lists the keys of a Secret that were added, removed or
 // whose value changed. It compares the digests of the values and never
-// shows a value.
-func secretDifferences(was, is state.SealedSecret) []string {
+// shows a value. It names the keys as the stored Secret has them (data.),
+// also for a SealedSecret, whose encryptedData became that Secret.
+func secretDifferences(was, is state.EncryptedSecret) []string {
 	var differs []string
 	for _, key := range is.Keys() {
 		switch old, ok := was.KeyDigests[key]; {
@@ -532,16 +576,16 @@ func differences(old, updated resource.Object) []string {
 // never refuses, because a token may be changed on purpose before its
 // project is.
 func (s *Server) checkNewToken(ctx context.Context, before, after *state.State) *TokenCheck {
-	newSealed, err := after.HetznerToken()
+	newEncrypted, err := after.HetznerToken()
 	if err != nil {
 		return nil
 	}
-	newToken, err := s.config.Keys.Open(newSealed)
+	newToken, err := s.config.Keys.Decrypt(newEncrypted)
 	if err != nil {
-		return &TokenCheck{Error: fmt.Sprintf("open the new token: %v", err)}
+		return &TokenCheck{Error: fmt.Sprintf("decrypt the new token: %v", err)}
 	}
-	if oldSealed, err := before.HetznerToken(); err == nil {
-		if oldToken, err := s.config.Keys.Open(oldSealed); err == nil && bytes.Equal(oldToken, newToken) {
+	if oldEncrypted, err := before.HetznerToken(); err == nil {
+		if oldToken, err := s.config.Keys.Decrypt(oldEncrypted); err == nil && bytes.Equal(oldToken, newToken) {
 			return nil
 		}
 	}

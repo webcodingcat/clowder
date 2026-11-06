@@ -50,7 +50,7 @@ func newTestTraefik(t *testing.T) (*traefikRunner, *agenttest.Cluster, *agenttes
 	traefik := &traefikRunner{
 		files: Files{Dir: t.TempDir(), SecretsDir: t.TempDir()},
 		host:  Host{ID: 0, Name: "node0", NodeAddress: netip.MustParseAddr("10.77.0.1")}, cluster: cluster,
-		docker: fake, open: cluster.Keys.Open, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		docker: fake, open: cluster.Keys.Decrypt, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		supervisor: noPause{}, signal: loop.NewSignal(), unopened: map[string]bool{},
 	}
 	return traefik, cluster, fake
@@ -156,7 +156,7 @@ func waitForRoutes(t *testing.T, traefik *traefikRunner, want func(routes string
 func TestACertificateBringsHTTPSAndARenewalComesUnderNewNames(t *testing.T) {
 	traefik, cluster, _ := newTestTraefik(t)
 	put := func(chain string) {
-		key, err := cluster.Keys.Seal([]byte("key of " + chain))
+		key, err := cluster.Keys.Encrypt([]byte("key of " + chain))
 		if err != nil {
 			t.Fatal(err)
 		}

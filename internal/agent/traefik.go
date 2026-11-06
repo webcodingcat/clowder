@@ -37,8 +37,8 @@ type traefikRunner struct {
 	host    Host
 	cluster loop.Cluster
 	docker  Docker
-	// open unseals the certificates' keys (datakey.Key.Open)
-	open   func(sealed state.Sealed) ([]byte, error)
+	// open decrypts the certificates' keys (datakey.Key.Decrypt)
+	open   func(encrypted state.Encrypted) ([]byte, error)
 	logger *slog.Logger
 	// supervisor is paused while compose up recreates Traefik
 	supervisor loop.Pauser
@@ -52,7 +52,7 @@ type traefikRunner struct {
 	// cameUp is what Traefik last came up with. It is zero after the agent
 	// starts, so Traefik comes up again (restart: "no")
 	cameUp loop.BroughtUp
-	// unopened are the sealed keys that did not open; each is logged once
+	// unopened are the encrypted keys that did not open; each is logged once
 	unopened map[string]bool
 }
 

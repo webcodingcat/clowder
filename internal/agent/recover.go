@@ -309,7 +309,7 @@ func (r recovery) describe(current *state.State, gone []*state.Host, notReached 
 
 // retire labels each host's server clowder-retired and powers it off.
 func (r recovery) retire(ctx context.Context, current *state.State, gone []*state.Host) error {
-	client, err := controller.OpenHetzner(current, r.credentials.dataKey.Open)
+	client, err := controller.OpenHetzner(current, r.credentials.dataKey.Decrypt)
 	if err != nil {
 		return err
 	}

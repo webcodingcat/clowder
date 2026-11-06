@@ -45,22 +45,6 @@ func applySetCLICutoff(s *State, cmd Command, payload SetCLICutoff) (func(), err
 	return func() { s.CLICutoff = payload.Cutoff }, nil
 }
 
-// SetRecoveryRecipient puts a new recovery key in place of the old one
-// (clowder recovery rotate): values encrypted from now on are for it.
-type SetRecoveryRecipient struct {
-	Recipient string `json:"recipient"`
-}
-
-func applySetRecoveryRecipient(s *State, _ Command, payload SetRecoveryRecipient) (func(), error) {
-	switch {
-	case !strings.HasPrefix(payload.Recipient, "age1"):
-		return nil, errors.New("the recovery key's recipient is no age key (age1...)")
-	case payload.Recipient == s.RecoveryRecipient:
-		return nil, errUnchanged
-	}
-	return func() { s.RecoveryRecipient = payload.Recipient }, nil
-}
-
 // serialInUse tells whether a serial belongs to a host, or was revoked.
 func (s *State) serialInUse(serial string) bool {
 	if _, revoked := s.Revoked[serial]; revoked {

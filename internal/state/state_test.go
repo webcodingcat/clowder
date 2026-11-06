@@ -41,7 +41,7 @@ func newCluster(t *testing.T) *cluster {
 	t.Helper()
 	c := &cluster{t: t, state: &State{}}
 	c.mustApply(KindBootstrap, LeaderActor, Bootstrap{
-		Keys:        ClusterKeys{CACertificate: []byte("ca"), CAKey: Sealed("key"), AgeIdentity: Sealed("age")},
+		Keys:        ClusterKeys{CACertificate: []byte("ca"), CAKey: Encrypted("key"), SealingKey: Encrypted("age")},
 		ClusterName: "prod",
 		Host:        testHost(0),
 	})
@@ -185,9 +185,9 @@ func (c *cluster) refuseChange(change ResourceChange, wantError string) {
 	c.refuse(KindChangeResources, cliActor, batch(change), wantError)
 }
 
-// sealedValue is a secret of one key, "value".
-func sealedValue(sealed Sealed, digest string) SealedSecret {
-	return SealedSecret{Data: map[string]Sealed{"value": sealed}, Digest: digest}
+// encryptedValue is a secret of one key, "value".
+func encryptedValue(encrypted Encrypted, digest string) EncryptedSecret {
+	return EncryptedSecret{Data: map[string]Encrypted{"value": encrypted}, Digest: digest}
 }
 
 func TestBootstrapMakesHostZeroTheActiveVoter(t *testing.T) {
@@ -205,7 +205,7 @@ func TestBootstrapMakesHostZeroTheActiveVoter(t *testing.T) {
 func TestTheClusterNameIsADNSLabel(t *testing.T) {
 	c := &cluster{t: t, state: &State{}}
 	c.refuse(KindBootstrap, LeaderActor, Bootstrap{
-		Keys:        ClusterKeys{CACertificate: []byte("ca"), CAKey: Sealed("key"), AgeIdentity: Sealed("age")},
+		Keys:        ClusterKeys{CACertificate: []byte("ca"), CAKey: Encrypted("key"), SealingKey: Encrypted("age")},
 		ClusterName: "Prod Cluster",
 		Host:        testHost(0),
 	}, `cluster name "Prod Cluster"`)
@@ -224,7 +224,7 @@ func TestCLIActorsCarryTheirName(t *testing.T) {
 
 func TestNothingButTheBootstrapRunsOnAnEmptyState(t *testing.T) {
 	state := &State{}
-	cmd, err := NewCommand(KindSetRecoveryRecipient, testTime, cliActor, SetRecoveryRecipient{Recipient: "age1recovery"})
+	cmd, err := NewCommand(KindSetCLICutoff, testTime, HostActor(0), SetCLICutoff{Cutoff: testTime})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestAHostHasIPv4AddressesAndAServer(t *testing.T) {
 		host := testHost(0)
 		change(&host)
 		c.refuse(KindBootstrap, LeaderActor, Bootstrap{
-			Keys:        ClusterKeys{CACertificate: []byte("ca"), CAKey: Sealed("key"), AgeIdentity: Sealed("age")},
+			Keys:        ClusterKeys{CACertificate: []byte("ca"), CAKey: Encrypted("key"), SealingKey: Encrypted("age")},
 			ClusterName: "prod",
 			Host:        host,
 		}, name)
@@ -473,19 +473,6 @@ func TestARevocationGoesAWhileAfterItsCertificateExpired(t *testing.T) {
 	}
 }
 
-func TestANewRecoveryKeyReplacesTheOld(t *testing.T) {
-	c := newCluster(t)
-	if c.state.RecoveryRecipient != "" {
-		t.Errorf("a new cluster has the recovery recipient %q", c.state.RecoveryRecipient)
-	}
-	c.mustApply(KindSetRecoveryRecipient, cliActor, SetRecoveryRecipient{Recipient: "age1recovery"})
-	c.refuse(KindSetRecoveryRecipient, cliActor, SetRecoveryRecipient{Recipient: "AGE-SECRET-KEY-1X"}, "no age key")
-	c.mustApply(KindSetRecoveryRecipient, cliActor, SetRecoveryRecipient{Recipient: "age1second"})
-	if c.state.RecoveryRecipient != "age1second" {
-		t.Errorf("recovery recipient %q", c.state.RecoveryRecipient)
-	}
-}
-
 // hetznerToken is where testConfig finds the Hetzner token.
 var hetznerToken = names.SecretKeyRef{Name: "hetzner", Key: "token"}
 
@@ -506,7 +493,7 @@ func testVolumeSpec() resource.VolumeSpec {
 // hetznerSecret puts the Secret of names.System that testConfig names.
 func hetznerSecret() ResourceChange {
 	return putChange(resource.KindSecret, names.System, hetznerToken.Name,
-		SealedSecret{Data: map[string]Sealed{hetznerToken.Key: sealedOf(10)}, Digest: "d-token"})
+		EncryptedSecret{Data: map[string]Encrypted{hetznerToken.Key: encryptedOf(10)}, Digest: "d-token"})
 }
 
 // configChange puts the ClusterConfiguration.
@@ -525,7 +512,7 @@ func TestTheLeaderKeepsTheACMEAccountChallengesAndCertificates(t *testing.T) {
 	c := newCluster(t)
 	c.refuse(KindPutACMEAccount, LeaderActor, PutACMEAccount{Account: ACMEAccount{Directory: "https://acme"}},
 		"needs its directory, URL and key")
-	account := ACMEAccount{Directory: "https://acme", URL: "https://acme/acct/1", Key: Sealed("k")}
+	account := ACMEAccount{Directory: "https://acme", URL: "https://acme/acct/1", Key: Encrypted("k")}
 	c.mustApply(KindPutACMEAccount, LeaderActor, PutACMEAccount{Account: account})
 	if c.state.ACMEAccount == nil || c.state.ACMEAccount.URL != account.URL {
 		t.Errorf("account %+v", c.state.ACMEAccount)
@@ -550,7 +537,7 @@ func TestTheLeaderKeepsTheACMEAccountChallengesAndCertificates(t *testing.T) {
 	}
 
 	certificate := Certificate{
-		Domain: "shop.example.com", Key: Sealed("k"), Chain: []byte("chain"),
+		Domain: "shop.example.com", Key: Encrypted("k"), Chain: []byte("chain"),
 		NotBefore: testTime, NotAfter: testTime.Add(90 * 24 * time.Hour),
 	}
 	upper, backwards, empty := certificate, certificate, certificate
@@ -807,7 +794,6 @@ func TestTheAuditKeepsTheLastEntries(t *testing.T) {
 func TestSnapshotsGiveTheSameState(t *testing.T) {
 	c := newCluster(t)
 	c.addHost(testHost(1))
-	c.mustApply(KindSetRecoveryRecipient, cliActor, SetRecoveryRecipient{Recipient: "age1recovery"})
 	c.mustApply(KindSetCLICutoff, HostActor(0), SetCLICutoff{Cutoff: testTime})
 	c.putShop(shopSpec())
 
@@ -846,9 +832,8 @@ func TestTwoAgentsApplyingTheSameLogAgree(t *testing.T) {
 	for _, c := range []*cluster{first, second} {
 		c.addHost(testHost(1))
 		c.addHost(testHost(2))
-		c.mustApply(KindSetRecoveryRecipient, cliActor, SetRecoveryRecipient{Recipient: "age1recovery"})
 		c.mustApply(KindSetCLICutoff, HostActor(0), SetCLICutoff{Cutoff: testTime})
-		_ = c.apply(KindSetRecoveryRecipient, cliActor, SetRecoveryRecipient{Recipient: "no age key"}) // refused on both
+		_ = c.apply(KindSetCLICutoff, HostActor(0), SetCLICutoff{Cutoff: testTime}) // refused on both: not later
 	}
 	if first.encoded() != second.encoded() {
 		t.Errorf("the states differ:\n%s\n%s", first.encoded(), second.encoded())

@@ -15,7 +15,7 @@ files:
 
 | File | Sections |
 |---|---|
-| [What users write](docs/developing/specs.md) | namespaces and names, stack specs, rendering, the cluster's configuration, the CLI's credentials, encrypted values |
+| [What users write](docs/developing/specs.md) | namespaces and names, stack specs, rendering, the cluster's configuration, the CLI's credentials, Secrets and sealed values |
 | [The cluster](docs/developing/cluster.md) | cluster state, certificates, Raft and the data key, API and the CLI, placement |
 | [A host](docs/developing/host.md) | the agent, network, storage, containers, host check |
 | [Ingress, fencing, certificates, alerts and metrics](docs/developing/loops.md) | Traefik, Hetzner and ingress, fencing, certificates of the routes, alerts, metrics |
@@ -45,7 +45,7 @@ results of the phase 0 spike.
 ```
 user's machine                 any agent               leader                stack's host
 ──────────────                 ─────────               ──────                ────────────
-clowder apply -f    ──mTLS──▶  API: read, seal  ──▶  leader decides ──▶ Raft log ──▶ every agent's state
+clowder apply -f    ──mTLS──▶  API: read, encrypt ──▶ leader decides ──▶ Raft log ──▶ every agent's state
   (resources)                                            │
                                                          ▼
                                                    placement: host, volumes
@@ -66,12 +66,13 @@ the rules.
 
 1. **The CLI reads the files.** `cli/apply.go` `newApplyResources` calls
    `cli/files.go` `readResourceFiles`. It reads the YAML files of the directory in order of
-   their names, and the resources in each file from top to bottom. A secret's values are
-   encrypted in these files. `api.Client.ApplyResources` sends the resources in that order
-   in one request (`POST /v1/apply`).
+   their names, and the resources in each file from top to bottom. A secret's values are in
+   clear (a `Secret`) or sealed for the cluster (a `SealedSecret`). `api.Client.ApplyResources`
+   sends the resources in that order in one request (`POST /v1/apply`).
 2. **Any agent takes the request.** `api/changes.go` `applyResources` turns each resource
-   into a put (`putChange`). It reads the spec strictly, decrypts a secret's values with the
-   cluster's key and seals them.
+   into a put (`putChange`). It reads the spec strictly. It opens a SealedSecret's values
+   with the sealing key (`unsealSecret`), and it encrypts every secret's values with the
+   data key (`encryptSecret`).
 3. **The leader decides.** `api/changes.go` `runOnLeader` hands the batch to the leader
    (through `internalChanges` on a follower). `runChanges` turns the batch into one
    `change-resources` command, tries the command on a copy of the state, and proposes it
@@ -129,7 +130,9 @@ What follows from this:
 | active, passive | the two phases of a host: an active host runs stacks, a passive one waits |
 | actor | who sent a command: `leader`, `host/<id>` or `cli/<name>` |
 | channel, owner | the way a resource came in; a resource's owner is the channel that made it |
-| sealed | encrypted with the cluster's data key before it goes into the state |
+| data key | the age key that every host keeps; it encrypts secrets before they go into the state (`datakey`) |
+| sealing key | the cluster's age key that SealedSecrets are sealed for (`state.ClusterKeys.SealingKey`) |
+| sealed | sealed for the cluster's sealing key, as a SealedSecret's value is |
 | generation | of a resource: counts the changes of its spec |
 | data generation | of a volume: a number in its LV's name that grows with each new, empty LV |
 | pushed out, coming back | a service stopped to make room for one of higher priority, and back once there is room |
@@ -188,7 +191,7 @@ More on some of these words:
 | Binary | Package | Runs on | Does |
 |---|---|---|---|
 | `clowder` | `cmd/clowder`, `internal/cli` | Linux, macOS, Windows | the user's CLI: reads its credentials file and the resource files, talks to an agent over mTLS |
-| `clowderd` | `cmd/clowderd`, `internal/agent` | Linux | the agent (`run`, systemd service `clowderd`) and the host commands `check`, `init`, `join`, `credentials`, `recover` |
+| `clowderd` | `cmd/clowderd`, `internal/agent` | Linux | the agent (`run`, systemd service `clowderd`) and the host commands `check`, `init`, `join`, `credentials`, `sealing-key`, `recover` |
 
 `cmd/clowderd` has the build constraint `linux`. Both binaries get their version from
 `internal/buildinfo.Version`. `bin/dev build` sets it from the Git tag, or to
@@ -199,8 +202,8 @@ More on some of these words:
 The package layout is planned for all of v1; packages appear as the phases add them.
 
 - **Portable**: `cli`, `api`, `clusterspec` (the configuration's types and checks),
-  `clientconfig` (the CLI's credentials file and its contexts), `secretvalue` (values
-  tagged `!secret`), `yamlpath` (the names of places in YAML), `pki`, `jointoken` (the
+  `clientconfig` (the CLI's credentials file and its contexts), `secretvalue` (the
+  sealed values of SealedSecrets), `pki`, `jointoken` (the
   tokens that hosts join with), `compose`, `units`, `names` (the rules for the names that
   users give, and the names on the host that are built from them), `buildinfo`, `logging`, `atomicfile`
   (files written whole or not at all), `metrics` (Prometheus' text format), `stackspec` (a

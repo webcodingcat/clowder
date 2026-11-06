@@ -17,16 +17,16 @@ type ACMEAccount struct {
 	Directory string `json:"directory"`
 	// URL is the account's ID at the directory (its "kid").
 	URL string `json:"url"`
-	// Key is the account key, PKCS #8 DER, sealed.
-	Key Sealed `json:"key"`
+	// Key is the account key, PKCS #8 DER, encrypted with the data key.
+	Key Encrypted `json:"key"`
 }
 
 // Certificate is the certificate of one domain.
 type Certificate struct {
 	Domain string `json:"domain"`
-	// Key is the private key in PEM, sealed. It is PEM because Traefik
+	// Key is the private key in PEM, encrypted. It is PEM because Traefik
 	// reads it; the account key is not, as only the leader reads it.
-	Key Sealed `json:"key"`
+	Key Encrypted `json:"key"`
 	// Chain is the certificate and its intermediates, PEM.
 	Chain     []byte    `json:"chain"`
 	NotBefore time.Time `json:"not_before"`

@@ -50,47 +50,53 @@ func TestAFileOfOtherDocumentsHoldsNoResource(t *testing.T) {
 	}
 }
 
-const testArmor = "-----BEGIN AGE ENCRYPTED FILE-----\nYWJj\n-----END AGE ENCRYPTED FILE-----\n"
-
-func TestASecretsValuesComeEncryptedFromSpecData(t *testing.T) {
+func TestASecretsValuesComeFromDataAndStringData(t *testing.T) {
 	objects, err := ParseDocuments([]byte(`
 apiVersion: clowder/v1
 kind: Secret
 metadata: {namespace: shop, name: db}
 spec:
-  data:
-    password: !secret |
-      -----BEGIN AGE ENCRYPTED FILE-----
-      YWJj
-      -----END AGE ENCRYPTED FILE-----
-    tls.key: !secret |
-      -----BEGIN AGE ENCRYPTED FILE-----
-      YWJj
-      -----END AGE ENCRYPTED FILE-----
+  data: {password: "no Base64, but stringData wins", tls.key: AP8=}
+  stringData: {user: shop, password: plain}
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec, err := DecodeSecretSpec(objects[0].Spec)
-	if err != nil || len(spec.Encrypted) != 2 || spec.Encrypted["password"] != testArmor ||
-		spec.Encrypted["tls.key"] != testArmor {
-		t.Errorf("spec %+v, %v", spec, err)
+	values, err := DecodeSecretSpec(objects[0].Spec)
+	// stringData wins over data for the same key, as in Kubernetes
+	if err != nil || len(values) != 3 || string(values["password"]) != "plain" || string(values["user"]) != "shop" ||
+		string(values["tls.key"]) != "\x00\xff" {
+		t.Errorf("values %q, %v", values, err)
 	}
 }
 
-func TestASecretValueStandsOnlyEncryptedAndOnlyInASecret(t *testing.T) {
-	block := func(indent string) string {
-		return "!secret |\n" + indent + strings.ReplaceAll(strings.TrimSpace(testArmor), "\n", "\n"+indent) + "\n"
-	}
-	for text, want := range map[string]string{
-		"apiVersion: clowder/v1\nkind: Secret\nmetadata: {name: token}\nspec: {data: {token: s3cret}}":   "write the value of token encrypted",
-		"apiVersion: clowder/v1\nkind: Volume\nmetadata: {name: data}\nspec:\n  class: " + block("    "): "only in a Secret's spec.data",
-		"apiVersion: clowder/v1\nkind: Secret\nmetadata:\n  name: " + block("    ") +
-			"spec:\n  data:\n    token: " + block("      "): "only in spec.data",
+func TestASecretSpecIsRefusedWithoutNamingAValue(t *testing.T) {
+	for spec, want := range map[string]string{
+		`{}`:                                  "at least one key",
+		`{"data":{"password":"s3cret!"}}`:     "key password: the value is not Base64",
+		`{"stringData":{"a/b":"s3cret"}}`:     `key "a/b"`,
+		`{"data":{},"stringData":{"..":"x"}}`: `key ".."`,
+		`{"encrypted":{"password":"s3cret"}}`: "unknown field",
 	} {
-		_, err := ParseDocuments([]byte(text))
+		_, err := DecodeSecretSpec([]byte(spec))
 		if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "s3cret") {
-			t.Errorf("%q: want %q, got %v", text, want, err)
+			t.Errorf("%s: want %q, got %v", spec, want, err)
+		}
+	}
+}
+
+func TestASealedSecretNamesItsValuesByValidKeys(t *testing.T) {
+	if _, err := DecodeSealedSecretSpec([]byte(`{"encryptedData":{"password":"YWJj","tls.crt":"YWJj"}}`)); err != nil {
+		t.Error(err)
+	}
+	for spec, want := range map[string]string{
+		`{}`:                               "at least one key",
+		`{"encryptedData":{"a/b":"YWJj"}}`: `key "a/b"`,
+		`{"data":{"password":"YWJj"}}`:     "unknown field",
+		`{"encryptedData":{"password":"YWJj"},"template":{}}`: "unknown field",
+	} {
+		if _, err := DecodeSealedSecretSpec([]byte(spec)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: want %q, got %v", spec, want, err)
 		}
 	}
 }
