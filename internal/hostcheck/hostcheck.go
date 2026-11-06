@@ -1,8 +1,6 @@
 // Package hostcheck checks the operator base of a host: what the operator
 // sets up (with cloud-init, Ansible or by hand) and clowderd relies on. It
-// only reads and never changes the host. clowderd check runs it; later, init
-// and join will run it first, and the agent will report it with every
-// health message.
+// only reads and never changes the host. clowderd check runs it.
 package hostcheck
 
 import (
@@ -45,8 +43,8 @@ type Result struct {
 	Detail string
 }
 
-// Host is what the checks read; the real one reads files and runs commands,
-// tests use a fake.
+// Host is what the checks read. The real one (System) reads files and runs
+// commands. Tests use a fake.
 type Host interface {
 	ReadFile(path string) ([]byte, error)
 	// Run runs a command and returns its standard output.

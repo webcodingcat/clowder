@@ -15,16 +15,18 @@ import (
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// routePath is an absolute URL path made of the characters that RFC 3986
-// allows, because it goes into a Traefik rule between backticks.
+// routePath is an absolute URL path of only the characters that RFC 3986
+// allows. It goes into a Traefik rule between backticks, so it must not
+// hold a backtick.
 var routePath = regexp.MustCompile(`^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$`)
 
-// signal is a signal's name in the form Docker accepts.
+// signal is a signal's name in the form that Docker accepts.
 var signal = regexp.MustCompile(`^SIG[A-Z0-9]+$`)
 
-// Check lists what is wrong with a spec on its own. What only the cluster
-// knows (priority categories, privileges, volumes and secrets of the
-// namespace) is checked against the cluster.
+// Check lists what is wrong with a spec by itself. It does not check what
+// only the cluster knows: the priority categories, the privileges, and
+// the namespace's volumes and secrets. Those are checked against the
+// cluster.
 func Check(spec Spec) Problems {
 	var problems Problems
 	report := func(format string, args ...any) {
@@ -55,7 +57,7 @@ func checkService(name string, service Service, services map[string]Service) []s
 		problems = append(problems, fmt.Sprintf(format, args...))
 	}
 	if !names.Valid(name) {
-		// it ends up in container names, Traefik's names and the DNS
+		// it becomes part of container names, Traefik's names and DNS
 		report("the name is not a service name (%s)", names.Rule)
 	}
 	if strings.TrimSpace(service.Image) == "" {
@@ -109,8 +111,9 @@ func checkService(name string, service Service, services map[string]Service) []s
 	return problems
 }
 
-// checkEnv checks for valid variable names, each set once, and for
-// secrets with valid names, each file once.
+// checkEnv checks that the variable names are valid and that no variable
+// is in both env and secretEnv. It also checks that the secrets have valid
+// names and that no secret is named twice.
 func checkEnv(service Service) []string {
 	var problems []string
 	report := func(format string, args ...any) {
@@ -142,8 +145,8 @@ func checkEnv(service Service) []string {
 	return problems
 }
 
-// checkMounts checks for volumes with valid names at absolute paths, tmpfs
-// at absolute paths, and no path twice.
+// checkMounts checks that volumes have valid names, that volumes and tmpfs
+// have clean absolute paths, and that no path is mounted twice.
 func checkMounts(service Service) []string {
 	var problems []string
 	report := func(format string, args ...any) {
@@ -179,8 +182,8 @@ func checkMounts(service Service) []string {
 	return problems
 }
 
-// checkPort checks for a port, a published port that is not reserved, and
-// tcp or udp.
+// checkPort checks that the port is set, the published port is not
+// reserved, and the protocol is tcp or udp.
 func checkPort(port Port) string {
 	published := port.withDefaults().Published
 	switch {
@@ -195,8 +198,8 @@ func checkPort(port Port) string {
 	}
 }
 
-// checkHTTP checks for a domain name, a port and a URL path. The host and
-// the path go into a Traefik rule.
+// checkHTTP checks that the route has a domain name, a port and a valid
+// URL path. The host and the path go into a Traefik rule.
 func checkHTTP(route HTTP) []string {
 	var problems []string
 	if !names.ValidDomain(route.Host) {
@@ -212,7 +215,8 @@ func checkHTTP(route HTTP) []string {
 	return problems
 }
 
-// checkHealthcheck checks for a command and valid durations.
+// checkHealthcheck checks that the healthcheck has a command and valid
+// durations.
 func checkHealthcheck(check Healthcheck) []string {
 	var problems []string
 	if len(check.Command) == 0 {
@@ -236,7 +240,8 @@ func checkHealthcheck(check Healthcheck) []string {
 	return problems
 }
 
-// checkResources checks for valid sizes and a positive number of CPUs.
+// checkResources checks that the memory sizes are valid and that no
+// number of CPUs is negative.
 func checkResources(resources Resources) []string {
 	var problems []string
 	amounts := []struct {
@@ -261,7 +266,7 @@ func checkResources(resources Resources) []string {
 }
 
 // checkUnique checks that no two services publish the same port or take
-// the same HTTP route (the cluster checks the same between stacks).
+// the same HTTP route. The cluster checks the same between stacks.
 func checkUnique(services map[string]Service) Problems {
 	var problems Problems
 	owners := map[string]string{}
@@ -286,16 +291,16 @@ func checkUnique(services map[string]Service) Problems {
 
 // checkCycles refuses services that depend on each other in a circle,
 // because Compose could start none of them. It names one service of each
-// circle, not the services that only depend on a circle.
+// circle. It does not name the services that only depend on a circle.
 func checkCycles(services map[string]Service) Problems {
 	const (
 		visiting = 1 // on the path from where the search started
-		done     = 2 // in no circle, or in one already reported
+		done     = 2 // in no circle, or in a circle already reported
 	)
 	state := map[string]int{}
 	var problems Problems
-	// visit follows the dependencies of a service; it returns a service of
-	// a circle that it found, or "" if it found none
+	// visit follows the dependencies of a service. It returns a service of
+	// the circle that it found, or "" if it found none.
 	var visit func(name string) string
 	visit = func(name string) string {
 		switch state[name] {
@@ -322,8 +327,8 @@ func checkCycles(services map[string]Service) Problems {
 		}
 		if member := visit(name); member != "" {
 			problems = append(problems, fmt.Sprintf("service %s: dependsOn goes in a circle", member))
-			// one report per circle; the services still on the path are
-			// either in it or depend on it
+			// one report per circle: the services still on the path are
+			// either in the circle or depend on it
 			for other, seen := range state {
 				if seen == visiting {
 					state[other] = done
@@ -335,9 +340,9 @@ func checkCycles(services map[string]Service) Problems {
 }
 
 // ParsePriority reads a priority as written: a whole number from 0 to 1000,
-// or a category's name. An empty priority ("") is the zero Priority, which
-// means the cluster's default. Whether the category exists depends on the
-// cluster.
+// or a category's name. An empty priority ("") gives the zero Priority,
+// which means the cluster's default. It does not check that the category
+// exists, because that depends on the cluster.
 func ParsePriority(text string) (clusterspec.Priority, error) {
 	if text == "" {
 		return clusterspec.Priority{}, nil
@@ -372,8 +377,8 @@ func ValidRestart(restart string) bool {
 	}
 }
 
-// ReservedPort tells whether a port is used by the host or by clowder itself
-// and may not be published by a stack.
+// ReservedPort tells whether the host or clowder itself uses a port, so
+// that a stack may not publish it.
 func ReservedPort(port uint16) bool {
 	switch {
 	case port == 22, port == 53, port == 80, port == 443: // SSH, DNS, Traefik

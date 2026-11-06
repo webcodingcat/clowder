@@ -10,12 +10,12 @@ import (
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 )
 
-// trimInterval is how often the volumes give free blocks back.
+// trimInterval is how often the volumes give their free blocks back.
 const trimInterval = 7 * 24 * time.Hour
 
 // Trim gives the free blocks of this host's mounted copies back to their
 // pools once every trimInterval, until ctx ends. The time of the last trim
-// is kept in a file, so restarts of the agent do not delay it. Trim runs
+// is kept in a file, so that restarts of the agent do not delay it. Trim runs
 // next to the reconciler's loop and shares only the fields that mu guards.
 func (r *Reconciler) Trim(ctx context.Context) {
 	for {
@@ -33,18 +33,17 @@ func (r *Reconciler) Trim(ctx context.Context) {
 
 // trimNow trims the copies that the last pass saw mounted, and records the
 // time once all of them are trimmed. If there are none (also before the
-// first pass), it tries again in the next round. It does the same while a
-// copy was skipped or failed.
+// first pass), or if a copy was skipped or failed, it tries again in the
+// next round.
 //
-// fstrim writes to the volume (it discards blocks), so it is the one write
-// that the agent runs outside a job. A trim takes long and must not hold up
-// the copy's steps in the meantime. Only a copy whose DRBD has its quorum
-// is trimmed; a plain copy is always trimmed. Without quorum, fstrim would
-// hang in state D until the quorum is back; the timeout of internal/command
-// lets the agent go on, and the next copy waits. Each copy's volume is
-// claimed while fstrim runs, so that no job unmounts it in the meantime. A
-// busy volume is skipped, and the driver skips a copy that is no longer
-// mounted.
+// fstrim writes to the volume (it discards blocks). It is the one write
+// that the agent runs outside a job, because a trim takes long and must
+// not hold up the copy's steps. Only a copy whose DRBD has quorum is
+// trimmed (a plain copy always is), because without quorum fstrim hangs in
+// state D. If quorum is lost while fstrim runs, the timeout of
+// internal/command lets the agent go on. Each volume is claimed while
+// fstrim runs, so that no job unmounts it. A busy volume is skipped, and
+// the driver skips a copy that is no longer mounted.
 func (r *Reconciler) trimNow(ctx context.Context) {
 	r.mu.Lock()
 	mounted := slices.Clone(r.mounted)

@@ -23,21 +23,17 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// waitTimeout bounds how long a read waits for its minimum index and a write
-// for the leader.
+// waitTimeout limits how long a read waits for its minimum index, and how
+// long a write waits for the leader.
 const waitTimeout = 10 * time.Second
 
-// MaxRequestBytes bounds every request body. The largest body is an apply
-// of a directory: every resource of every namespace in one request, and
-// with them every secret of the cluster, at most
-// resource.MaxClusterSecretBytes (4 MiB) in clear. Sealed for the cluster
-// (internal/secretvalue), a value grows to 1.8 times its size plus less
-// than 1 KiB; in a Secret's data, to 1.34 times. So all secrets together
-// take about 4 MiB × 1.8 + resource.MaxClusterSecrets × 1 KiB, about
-// 8.2 MiB, and the rest is for stacks and volumes. Text in a Secret's
-// stringData that JSON escapes (<, >, &, control characters) takes up to
-// six times its size; a request of such values may hit the limit, and
-// data or a SealedSecret carries them instead.
+// MaxRequestBytes limits every request body. The largest body is an apply
+// of every resource, with every secret of the cluster
+// (resource.MaxClusterSecretBytes in clear). Sealed values grow to about
+// 1.8 times their size, so all secrets take about 8 MiB. The limit leaves
+// room for the rest. Text in stringData that JSON escapes (<, >, &,
+// control characters) can grow to six times its size. For such values,
+// use data or a SealedSecret instead.
 const MaxRequestBytes = 16 << 20
 
 // Cluster is what the server needs from the agent's Raft member.
@@ -45,19 +41,19 @@ type Cluster interface {
 	Propose(ctx context.Context, cmd state.Command) (uint64, error)
 	Read(use func(current *state.State))
 	WaitIndex(ctx context.Context, index uint64) error
-	// Changes returns what the log changed after an index, and the state's
-	// index. It returns state.ErrChangesGone if the member no longer keeps
-	// all of these changes.
+	// Changes returns the changes that the log made after an index, and
+	// the state's index. It returns state.ErrChangesGone if the member no
+	// longer keeps all of these changes.
 	Changes(since uint64) ([]state.Change, uint64, error)
 	// Changed closes when the next entry is applied.
 	Changed() <-chan struct{}
 	IsLeader() bool
 	// Leader returns the leading host; ok is false while there is none.
 	Leader() (id state.HostID, ok bool)
-	// TransferLeadership hands this member's lead to another voter.
+	// TransferLeadership hands the leadership to another voter.
 	TransferLeadership() error
 	// VerifyLeader makes sure that a majority still accepts this member as
-	// leader.
+	// the leader.
 	VerifyLeader(ctx context.Context) error
 	// CommitIndex is the last index that this member knows to be committed.
 	CommitIndex() uint64
@@ -69,51 +65,52 @@ type Cluster interface {
 type ServerConfig struct {
 	Cluster Cluster
 	CA      *x509.Certificate
-	// Certificate is the host's certificate. It serves TLS and forwards
-	// writes.
+	// Certificate is the host's certificate. The server uses it for TLS
+	// and to forward writes.
 	Certificate tls.Certificate
 	// Roles are the host's roles, as its certificate names them (the agent
-	// checks that at its start). A host without the control plane takes
+	// checks that at its start). A host without the control plane accepts
 	// only control-plane hosts (TLSConfig).
 	Roles hostrole.Set
-	// APIAddress gives a host's API address (its node address and Port).
+	// APIAddress gives a host's API address (its node address and the API
+	// port).
 	APIAddress func(id state.HostID) string
 	// Keys encrypts secrets for the state and decrypts them (the data key).
 	Keys Keys
-	// HostID is this agent's host; Containers answers for its stacks.
+	// HostID is this agent's host. Containers answers for its stacks.
 	HostID     state.HostID
 	Containers Containers
 	// Volumes tells how far this host's copies have synced. The volume
-	// reconciler implements it; it is nil on an agent without one.
+	// reconciler implements it. It is nil on an agent without one.
 	Volumes Volumes
 	// Alerts answers for the alert channels. The agent's alerts loop
 	// implements it.
 	Alerts Alerts
-	// Beats keeps the beats of the hosts (controller.Heard).
+	// Beats records the hosts' beats (controller.Heard).
 	Beats Beats
 	// Joins adds joining hosts while this agent leads.
 	Joins Joins
 	// HetznerServers lists the IDs of the servers that a Hetzner token
 	// sees, in one request to the API at api ("" for Hetzner's own). The
-	// dry run of an apply that changes the token reports what it finds. The
-	// agent passes in the function from hetzner, which the API, a portable
-	// package, may not import. If it is nil, the answer says that the token
-	// could not be checked.
+	// dry run of an apply that changes the token reports what it finds.
+	// The agent passes in the function from the hetzner package, because
+	// api is portable and may not import it. If HetznerServers is nil, the
+	// answer says that the token could not be checked.
 	HetznerServers func(ctx context.Context, api, token string) ([]int64, error)
 	// CaughtUp closes once this agent's state has caught up with the
-	// leader's after its start. Until then, the CLI's calls wait for it,
-	// because the state may still be empty. Nil means caught up (tests).
+	// leader's after its start. Until then, CLI calls wait, because the
+	// state may still be empty. Nil means caught up (tests).
 	CaughtUp <-chan struct{}
 	Version  string
 	Logger   *slog.Logger
 }
 
-// Alerts is what the API asks of the agent's alerts loop.
+// Alerts is what the API needs from the agent's alerts loop.
 type Alerts interface {
-	// Test sends a test alert to every channel from this agent.
+	// Test sends a test alert from this agent to every channel.
 	Test(ctx context.Context) ([]AlertTestResult, error)
-	// Failures are the messages that a channel has not accepted yet. Only
-	// the leader has any.
+	// Failures returns the messages that a channel has not accepted yet.
+	// Only the leader has any.
 	Failures() []AlertFailure
 }
 
@@ -121,7 +118,7 @@ type Alerts interface {
 type Keys interface {
 	Encrypt(plaintext []byte) (state.Encrypted, error)
 	Decrypt(encrypted state.Encrypted) ([]byte, error)
-	// Derive gives a key of its own for one purpose (the secrets' digests).
+	// Derive gives a separate key for one purpose (the secrets' digests).
 	Derive(purpose string) ([]byte, error)
 }
 
@@ -129,21 +126,20 @@ type Keys interface {
 type Server struct {
 	config ServerConfig
 	mux    *http.ServeMux
-	// forwarder carries writes to the leader. streamer relays answers of
+	// forwarder carries writes to the leader. streamer relays answers from
 	// other hosts that may take long (logs that follow), so it has no
 	// timeout.
 	forwarder *http.Client
 	streamer  *http.Client
-	// streams ends with EndStreams: answers that run until the client
+	// streams ends with EndStreams. Answers that run until the client
 	// stops (a watch, logs that follow) end with it, so that stopping the
-	// agent does not wait for them
+	// agent does not wait for them.
 	streams    context.Context
 	endStreams context.CancelFunc
-	// the join's routes come without a certificate, so they count their
-	// tries
+	// the join's routes have no certificate, so they count the tries
 	joins limiter
-	// warnedVersions are the callers' versions that checkVersion has
-	// warned about, so the log warns only once
+	// warnedVersions are the callers' versions that warnAboutDevelopment
+	// has warned about, so the log warns only once
 	warnedVersions sync.Map
 }
 
@@ -152,7 +148,7 @@ func NewServer(config ServerConfig) *Server {
 	server := &Server{config: config, mux: http.NewServeMux()}
 	server.streams, server.endStreams = context.WithCancel(context.Background())
 	// a host without the control plane calls only the control plane: the
-	// voters with its beats, the leader with its reports
+	// voters with its beats, and the leader with its reports
 	toHosts := pki.ClientTLSToHosts
 	if !config.Roles.Has(hostrole.ControlPlane) {
 		toHosts = pki.ClientTLSToControlPlane
@@ -175,7 +171,8 @@ type route struct {
 	handler http.HandlerFunc
 }
 
-// routes is the route table: who may call what (access.go).
+// routes returns the route table, which says who may call what
+// (access.go).
 func (s *Server) routes() []route {
 	return []route{
 		{"GET /v1/status", cliCaller, s.status},
@@ -201,13 +198,13 @@ func (s *Server) routes() []route {
 		// host forwards (mayPropose tells them apart)
 		{"POST /v1/internal/propose", anyHost, s.internalPropose},
 		// what every host needs to keep up with the cluster: its beats to
-		// the voters, the leader's commit index, the leader that clowderd
-		// recover asks for
+		// the voters, the leader's commit index, and the known leader that
+		// clowderd recover asks for
 		{"POST /v1/internal/beats", anyHost, s.localBeat},
 		{"GET /v1/internal/beats/{id}", anyHost, s.localSilence},
 		{"GET /v1/internal/commit-index", anyHost, s.localCommitIndex},
 		{"GET /v1/internal/leader", anyHost, s.knownLeader},
-		// what a control-plane host asks for the CLI or as the leader
+		// what a control-plane host asks for the CLI, or as the leader
 		{"POST /v1/internal/changes", controlPlaneHost, s.internalChanges},
 		{"POST /v1/internal/join", controlPlaneHost, s.internalJoin},
 		{"POST /v1/internal/hand-over", controlPlaneHost, s.internalHandOver},
@@ -216,14 +213,14 @@ func (s *Server) routes() []route {
 		{"GET /v1/internal/stacks/{project}/logs", controlPlaneHost, s.localLogs},
 		{"GET /v1/internal/volumes/progress", controlPlaneHost, s.localProgress},
 		{"POST /v1/internal/volumes/{namespace}/{name}/resolve-splitbrain", controlPlaneHost, s.localResolve},
-		// root on this host
+		// what root on this host asks for
 		{"POST /v1/internal/credentials", thisHost, s.internalCredentials},
 		{"GET /v1/internal/sealing-key", thisHost, s.internalSealingKey},
 	}
 }
 
-// EndStreams ends the answers that run until the client stops; otherwise
-// http.Server's Shutdown would wait for them. The agent calls it as it
+// EndStreams ends the answers that run until the client stops. Otherwise
+// http.Server's Shutdown would wait for them. The agent calls it when it
 // stops.
 func (s *Server) EndStreams() {
 	s.endStreams()
@@ -274,7 +271,7 @@ func (s *Server) alertTest(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, err)
 		return
-	case len(results) == 0: // the cluster's config is in the way, not the request
+	case len(results) == 0: // 409: the configuration is the problem, not the request
 		writeError(w, http.StatusConflict, errors.New("the configuration names no alert channel"))
 		return
 	}
@@ -319,9 +316,9 @@ func hostInfos(current *state.State) []HostInfo {
 	return hosts
 }
 
-// hostAction checks the phase that a user action starts from. The state
-// allows more moves (the leader's), so this is the narrower rule for
-// users.
+// hostAction checks the phase that a user's host action starts from. The
+// state allows more phase changes, because the leader makes them too. So
+// this is the narrower rule for users.
 func (s *Server) hostAction(w http.ResponseWriter, r *http.Request) {
 	index := slices.IndexFunc(HostActions, func(action HostAction) bool { return action.Name == r.PathValue("action") })
 	if index < 0 {
@@ -350,7 +347,7 @@ func (s *Server) hostAction(w http.ResponseWriter, r *http.Request) {
 			id, phase, action.Name, phaseList(action.From)))
 		return
 	}
-	// the phase checked here must still be the host's when it commits
+	// the commit fails if the host's phase changed since this check
 	move := state.SetHostPhase{Host: id, Phase: action.To, From: phase}
 	if action.To == state.Removed {
 		if leaves := s.leaves(id); leaves != nil {
@@ -372,14 +369,15 @@ func (s *Server) hostAction(w http.ResponseWriter, r *http.Request) {
 	s.commitRequest(w, r, state.KindSetHostPhase, move)
 }
 
-// leaderPoll is how often handOverLeadOf checks whether the lead has moved.
+// leaderPoll is how often handOverLeadOf and waitForLeader check the
+// leader.
 const leaderPoll = 50 * time.Millisecond
 
-// handOverLeadOf has a host that is to be removed hand over its lead
-// first, if it leads. Its certificate is revoked with the removal, and a
-// leader that the others no longer accept would end its lead abruptly. A
-// removal that the state would refuse moves no lead; its commit then says
-// why.
+// handOverLeadOf makes a host that is about to be removed hand over the
+// leadership first, if it leads. The removal revokes its certificate. A
+// leader that the others no longer accept would end its leadership
+// abruptly. If the state would refuse the removal, the leadership stays,
+// and the commit then says why.
 func (s *Server) handOverLeadOf(ctx context.Context, id state.HostID) error {
 	leader, ok := s.config.Cluster.Leader()
 	if !ok || leader != id {
@@ -415,7 +413,7 @@ func (s *Server) handOverLeadOf(ctx context.Context, id state.HostID) error {
 	}
 }
 
-// askLeaderToHandOver asks the leading host to hand its lead over.
+// askLeaderToHandOver asks the leading host to hand over the leadership.
 func (s *Server) askLeaderToHandOver(ctx context.Context, id state.HostID) error {
 	url := "https://" + s.config.APIAddress(id) + "/v1/internal/hand-over"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
@@ -429,9 +427,9 @@ func (s *Server) askLeaderToHandOver(ctx context.Context, id state.HostID) error
 	return nil
 }
 
-// internalHandOver is where a host asks the leader to hand over its lead
-// before a user removes it. Only a leader that the state would remove
-// hands over.
+// internalHandOver is where a host asks the leader to hand over the
+// leadership before a user removes the leader. The leader hands over only
+// if the state would allow its removal.
 func (s *Server) internalHandOver(w http.ResponseWriter, _ *http.Request) {
 	if !s.config.Cluster.IsLeader() {
 		writeJSON(w, http.StatusOK, Written{})
@@ -459,7 +457,7 @@ func phaseList(phases []state.HostPhase) string {
 	return strings.Join(names, " or ")
 }
 
-// audit returns the last entries, newest last. ?limit= says how many
+// audit returns the last entries, newest last. ?limit= sets how many
 // (default 50).
 func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 	limit := 50
@@ -481,11 +479,11 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 }
 
 // internalPropose is where a control-plane follower forwards the CLI's
-// writes, and where an agent proposes what it commits as itself
+// writes, and where an agent sends the commands it commits as itself
 // (mayPropose).
 func (s *Server) internalPropose(w http.ResponseWriter, r *http.Request) {
-	// not strict, unlike the CLI's requests: the agent that forwards may be
-	// of the next release, and a command may carry fields this one does not
+	// lenient, unlike the CLI's requests: the forwarding agent may run the
+	// next release, and a command may carry fields that this one does not
 	// know (State, Versions)
 	var cmd state.Command
 	if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
@@ -496,7 +494,7 @@ func (s *Server) internalPropose(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, fmt.Errorf("%s may not send %s as %s", actorOf(identity), cmd.Kind, cmd.Actor))
 		return
 	}
-	// no second hop: if the lead moved meanwhile, the caller asks again
+	// no second hop: if another agent leads by now, the caller asks again
 	if index, ok := s.commit(w, r, cmd, s.proposeHere); ok {
 		writeJSON(w, http.StatusOK, Written{Index: index})
 	}
@@ -504,7 +502,7 @@ func (s *Server) internalPropose(w http.ResponseWriter, r *http.Request) {
 
 // commitRequest turns a request into a command and commits it.
 func (s *Server) commitRequest(w http.ResponseWriter, r *http.Request, kind string, payload any) {
-	// no time here: the leader stamps its own (proposeHere)
+	// no time here: the leader stamps its own clock (proposeHere)
 	cmd, err := state.NewCommand(kind, time.Time{}, actorOf(identityOf(r)), payload)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -540,8 +538,9 @@ func (s *Server) commit(w http.ResponseWriter, r *http.Request, cmd state.Comman
 	return 0, false
 }
 
-// proposeHere commits a command on this agent, which must lead. The command
-// gets the leader's clock (Command.At), whichever agent took the request.
+// proposeHere commits a command on this agent, which must be the leader.
+// The command gets the leader's time (Command.At), whichever agent took
+// the request.
 func (s *Server) proposeHere(ctx context.Context, cmd state.Command) (uint64, error) {
 	if !s.config.Cluster.IsLeader() {
 		return 0, errors.New("not the leader; try again")
@@ -550,10 +549,10 @@ func (s *Server) proposeHere(ctx context.Context, cmd state.Command) (uint64, er
 	return s.config.Cluster.Propose(ctx, cmd)
 }
 
-// Propose commits a command: directly on the leader, or else by forwarding
-// it to the leader's internal endpoint. It is the one way to commit, for
-// the API's routes as well as for the agent's own reports and the leader's
-// controllers.
+// Propose commits a command. On the leader it commits directly; elsewhere
+// it forwards the command to the leader's internal endpoint. It is the
+// only way to commit, for the API's routes as well as for the agent's own
+// reports and the leader's controllers.
 func (s *Server) Propose(ctx context.Context, cmd state.Command) (uint64, error) {
 	id, here, err := s.waitForLeader(ctx)
 	switch {
@@ -574,7 +573,7 @@ func (s *Server) Propose(ctx context.Context, cmd state.Command) (uint64, error)
 	request.Header.Set(VersionHeader, s.config.Version)
 	var written Written
 	if err := send(s.forwarder, request, &written); err != nil {
-		// the leader's answer goes back as it is, a refusal as a refusal
+		// pass the leader's answer back unchanged; a 409 stays a refusal
 		var statusError *StatusError
 		switch {
 		case errors.As(err, &statusError) && statusError.Status == http.StatusConflict:
@@ -595,8 +594,9 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
-	// a body over MaxRequestBytes fails where it is read, wrapped as a bad
-	// request; this is the one place that reports it for every handler
+	// a body over MaxRequestBytes fails where a handler reads it, and the
+	// handler reports a bad request; this one place turns that into 413
+	// for every handler
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
 		status = http.StatusRequestEntityTooLarge
@@ -609,11 +609,11 @@ func writeError(w http.ResponseWriter, status int, err error) {
 // seconds, and a peer that restarts may lose its leader for a moment.
 const leaderWait = 10 * time.Second
 
-// waitForLeader returns where a write goes, as soon as it can go somewhere
-// and for at most leaderWait: here (this agent leads), or the leading
-// host. During an election, or while this agent has just become leader and
-// applies its log (raftnode.Node.IsLeader), a write waits a moment instead
-// of failing.
+// waitForLeader returns where a write goes: here (this agent leads), or
+// the leading host. It returns as soon as there is a leader, and waits at
+// most leaderWait. So during an election, or while this agent has just
+// become leader and still applies its log (raftnode.Node.IsLeader), a
+// write waits a moment instead of failing.
 func (s *Server) waitForLeader(ctx context.Context) (leader state.HostID, here bool, err error) {
 	deadline := time.Now().Add(leaderWait)
 	for {

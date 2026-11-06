@@ -17,7 +17,7 @@ restic, git) are added with those phases.
   dockerd. The package installs the unit without enabling it; `clowderd init` enables and
   starts it.
 - An agent that stopped at a Raft entry or snapshot it cannot read exits with status 3
-  ([Versions](cluster.md)). `RestartPreventExitStatus=3` keeps systemd from starting it
+  ([Versions](state.md#versions)). `RestartPreventExitStatus=3 4` keeps systemd from starting it
   again. A restarted agent would stop at the same entry, and a Raft member that comes and
   goes every few seconds would hide its failure from the other hosts. The unit stays
   `failed`, with the reason in the journal; nothing reboots the host. The same holds for
@@ -31,21 +31,12 @@ restic, git) are added with those phases.
 
 ## Updating a cluster
 
-- Update the followers first, one after another, and the leader last (`clowder cluster
-  status` names it). Move on to the next host only once the updated one is back; `clowder
-  host list` shows its version.
-- Before `v1.0.0`, only agents of the same minor version work together. So update host by
-  host only to a patch release of the same minor version (`0.2.0` to `0.2.3`). For a new
-  minor version:
-  1. Stop the agent on every host (`systemctl stop clowderd`; the containers keep
-     running).
-  2. Install the new package on every host. An upgrade does not start a stopped agent.
-  3. Start the agents again and update the CLI.
-- The order keeps the cluster working, and the version gate keeps it consistent. The
-  leader writes a new kind of command only once every agent can read it, and an agent that
-  meets an entry it cannot read stops instead of skipping it ([Versions](cluster.md)).
-  Before `v1.0.0` this catches only new kinds of commands, not a changed meaning of a
-  field, so it does not make mixing minor versions safe.
+[Updating a cluster](../operating.md#updating-a-cluster) gives the steps for users. The
+order keeps the cluster working, and the version gate keeps it consistent. The leader
+writes a new kind of command only once every agent can read it, and an agent that meets an
+entry it cannot read stops instead of skipping it ([Versions](state.md#versions)). Before
+`v1.0.0` this catches only new kinds of commands, not a changed meaning of a field, so it
+does not make mixing minor versions safe.
 
 ## CI
 

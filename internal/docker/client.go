@@ -1,7 +1,7 @@
-// Package docker is the agent's way to Docker: a small client of Docker's
-// API on its Unix socket (events, start, restart, list, inspect) and
-// docker compose for the stacks, run through internal/command like every
-// host tool.
+// Package docker is how the agent talks to Docker. It has a small client of
+// Docker's API on its Unix socket (events, start, restart, list, inspect).
+// For the stacks it runs docker compose, through internal/command like
+// every host tool.
 package docker
 
 import (
@@ -22,7 +22,7 @@ import (
 // Socket is where Docker's API listens.
 const Socket = "/var/run/docker.sock"
 
-// Labels Compose puts on a container.
+// Labels that Compose puts on a container.
 const (
 	ProjectLabel = "com.docker.compose.project"
 	ServiceLabel = "com.docker.compose.service"
@@ -60,7 +60,8 @@ type Event struct {
 }
 
 // Events streams the events of containers with a label until ctx ends or
-// the stream breaks; the error channel then gets why.
+// the stream breaks. When the stream breaks, the error channel gets the
+// reason.
 func (c *Client) Events(ctx context.Context, label string) (<-chan Event, <-chan error) {
 	events := make(chan Event)
 	failed := make(chan error, 1)
@@ -156,8 +157,8 @@ func (c *Client) Containers(ctx context.Context, label string) ([]Container, err
 // Details are what Inspect tells about a container.
 type Details struct {
 	Running bool
-	// Health is "healthy", "unhealthy" or "starting"; empty for a container
-	// without a health check.
+	// Health is "healthy", "unhealthy" or "starting". It is empty for a
+	// container without a health check.
 	Health string
 	// Addresses are the container's addresses by network.
 	Addresses map[string]netip.Addr
@@ -211,7 +212,7 @@ func (c *Client) Inspect(ctx context.Context, id string) (Details, error) {
 	return details, nil
 }
 
-// pingTimeout is how long Ping waits: a Docker that takes longer to answer
+// pingTimeout is how long Ping waits. A Docker that takes longer to answer
 // a ping counts as down.
 const pingTimeout = 10 * time.Second
 
@@ -231,7 +232,7 @@ func (c *Client) Ping(ctx context.Context) error {
 	if response.StatusCode != http.StatusOK {
 		return answerError("ping Docker", response)
 	}
-	_, _ = io.Copy(io.Discard, response.Body) // "OK"; read so the connection is used again
+	_, _ = io.Copy(io.Discard, response.Body) // "OK"; read it so the connection is reused
 	return nil
 }
 

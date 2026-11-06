@@ -15,9 +15,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// clowder's own address ranges. They are defined here, where the
-// configuration is checked against them; network and hostcheck use them
-// from here.
+// clowder's own address ranges. They are defined here because Check tests
+// the configuration against them. network and hostcheck use them too.
 var (
 	// Overlay holds the node addresses.
 	Overlay = netip.MustParsePrefix("10.77.0.0/24")
@@ -28,8 +27,8 @@ var (
 	ClowderRanges = []netip.Prefix{Overlay, ExportVIPs}
 )
 
-// MaxCASize bounds a CA in the configuration (acme.ca, smtp.ca), because
-// the configuration travels in the state, which every agent keeps in
+// MaxCASize limits a CA in the configuration (acme.ca, smtp.ca). The
+// configuration is part of the state, and every agent keeps the state in
 // memory.
 const MaxCASize = 64 << 10
 
@@ -40,8 +39,8 @@ func (p Problems) Error() string {
 	return "the configuration has problems:\n  - " + strings.Join(p, "\n  - ")
 }
 
-// Check returns what is wrong in the configuration on its own, or nothing.
-// The state checks whether the Secrets it names exist.
+// Check returns what is wrong in the configuration by itself, or nothing.
+// It does not check that the named Secrets exist; the state does that.
 func Check(config Config) Problems {
 	var problems Problems
 	report := func(format string, args ...any) {
@@ -97,14 +96,14 @@ func Check(config Config) Problems {
 }
 
 // fullURL tells whether text is a URL with the scheme http or https and a
-// host, because clowder sends tokens and keys there.
+// host. It must be one, because clowder sends tokens and keys there.
 func fullURL(text string) bool {
 	parsed, err := url.Parse(text)
 	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
-// checkCA checks that a CA, if there is one, is PEM with a certificate and
-// within MaxCASize.
+// checkCA checks that a CA, if there is one, holds a PEM certificate and
+// fits within MaxCASize.
 func checkCA(path, ca string) Problems {
 	switch {
 	case ca == "":
@@ -120,7 +119,7 @@ func checkCA(path, ca string) Problems {
 // ServiceURLWarnings warns about hetzner.api and acme.directory, the URLs
 // of the services that clowder talks to. When they are unset, clowder
 // talks to Hetzner's API and Let's Encrypt over https. When they are set,
-// they point clowder elsewhere, which is meant for test labs; over http,
+// they point clowder elsewhere, which is meant for test labs. Over http,
 // the Hetzner token and the ACME requests cross the network unencrypted.
 // An apply returns the warnings, and the leader logs them.
 func ServiceURLWarnings(config Config) []string {
@@ -136,8 +135,8 @@ func ServiceURLWarnings(config Config) []string {
 	return warnings
 }
 
-// serviceURLWarning says that a field points clowder elsewhere, and what
-// crosses the network in the clear when the URL is http.
+// serviceURLWarning says that a field points clowder elsewhere. For an
+// http URL, it also says what crosses the network unencrypted.
 func serviceURLWarning(field, address, insteadOf, secret string) string {
 	warning := fmt.Sprintf("%s is set: clowder uses %s %s, which is meant for test labs", field, address, insteadOf)
 	if strings.HasPrefix(address, "http://") {
@@ -146,8 +145,8 @@ func serviceURLWarning(field, address, insteadOf, secret string) string {
 	return warning
 }
 
-// checkACME checks for a full URL for the directory, a valid CA, an
-// address for the email and a positive duration for renewBefore.
+// checkACME checks that the directory is a full URL, the CA is valid, the
+// email is an address, and renewBefore is a positive duration.
 func checkACME(acme ACME) Problems {
 	var problems Problems
 	if acme.Directory != "" && !fullURL(acme.Directory) {
@@ -167,8 +166,8 @@ func checkACME(acme ACME) Problems {
 	return problems
 }
 
-// checkStorageClasses checks that a class has a pool or falls back to
-// other classes, which must have pools themselves.
+// checkStorageClasses checks that each class either has a pool or falls
+// back to other classes. Those other classes must have pools themselves.
 func checkStorageClasses(classes map[string]StorageClass) Problems {
 	var problems Problems
 	if len(classes) == 0 {
@@ -209,10 +208,10 @@ func validPercent(text string) bool {
 	return strings.HasSuffix(text, "%") && err == nil && number >= 0 && number <= 90
 }
 
-// checkPriorities checks for numbers from 0 to 1000, and that the default
-// is one of the categories. Without categories, the default categories
-// apply (withDefaults), so the default must be one of those. With its own
-// categories, the configuration must name the default.
+// checkPriorities checks that the numbers are from 0 to 1000 and that the
+// default is one of the categories. A configuration without categories
+// gets the default categories (withDefaults), so its default must be one
+// of those. A configuration with its own categories must name a default.
 func checkPriorities(priorities Priorities) Problems {
 	var problems Problems
 	for _, name := range slices.Sorted(maps.Keys(priorities.Categories)) {
@@ -231,7 +230,8 @@ func checkPriorities(priorities Priorities) Problems {
 	return problems
 }
 
-// checkResources checks for a memory size and a positive number of CPUs.
+// checkResources checks that memory is a size and CPUs is a positive
+// number.
 func checkResources(where string, resources Resources) Problems {
 	var problems Problems
 	if resources.Memory != "" {
@@ -247,8 +247,8 @@ func checkResources(where string, resources Resources) Problems {
 	return problems
 }
 
-// checkChannel checks that each type has its own fields and no other
-// type's secret.
+// checkChannel checks that a channel has the fields of its type, and no
+// other type's webhook or URL.
 func checkChannel(index int, channel AlertChannel) Problems {
 	var problems Problems
 	report := func(problem string) {

@@ -1,6 +1,6 @@
-// Package clusterspec is the spec of the ClusterConfiguration resource: its
-// types, their defaults and Check. It does no I/O, so the state reads and
-// checks the configuration itself.
+// Package clusterspec holds the spec of the ClusterConfiguration resource:
+// its types, their defaults and Check. It does no I/O, so the state can
+// read and check the configuration itself.
 package clusterspec
 
 import (
@@ -14,17 +14,17 @@ import (
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// Config is the spec of the cluster's one ClusterConfiguration: everything
-// cluster-wide, like kubeadm's ClusterConfiguration. It holds no secret.
-// Instead, it names Secrets of the namespace names.System (SecretKeyRef),
-// which the state keeps separately. Its json names are what users write
-// and what the state stores, so a Go field may be renamed, but its tags
-// never change.
+// Config is the spec of the cluster's one ClusterConfiguration. Like
+// kubeadm's ClusterConfiguration, it holds everything cluster-wide. It
+// holds no secret. Instead, it names Secrets in the namespace names.System
+// (SecretKeyRef), which the state keeps separately. Users write the json
+// names, and the state stores them. So a Go field may be renamed, but its
+// tags never change.
 type Config struct {
 	Hetzner Hetzner `json:"hetzner"`
 	// PrivateNetwork is the Hetzner private network that the hosts share,
-	// as a CIDR. Each host's underlay is in it. Containers may not reach
-	// it.
+	// as a CIDR. Each host's underlay address is in it. Containers may not
+	// reach it.
 	PrivateNetwork string                  `json:"privateNetwork"`
 	Ingress        Ingress                 `json:"ingress"`
 	StorageClasses map[string]StorageClass `json:"storageClasses"`
@@ -38,9 +38,9 @@ type Config struct {
 }
 
 // Priorities are the categories that a stack or service may name instead
-// of a number. Without the block, DefaultPriorities applies.
+// of a number. A configuration without this block gets DefaultPriorities.
 type Priorities struct {
-	// Default is the category of stacks that name none.
+	// Default is the category of a stack that names no priority.
 	Default string `json:"default,omitempty"`
 	// Categories map names to numbers from 0 to 1000.
 	Categories map[string]int `json:"categories,omitempty"`
@@ -48,15 +48,15 @@ type Priorities struct {
 
 // Priority is a priority as a stack or service writes it: a number from 0
 // to 1000 or the name of a category. The zero value means "the cluster's
-// default". The cluster's categories turn it into a number (Resolve).
+// default". Resolve turns it into a number with the cluster's categories.
 type Priority struct {
 	Value    *int   `json:"value,omitempty"`
 	Category string `json:"category,omitempty"`
 }
 
-// Resolve turns a priority into a number with the categories. A number
-// stays as it is, a category is looked up, and an empty priority becomes
-// the default.
+// Resolve turns a priority into a number. A number stays as it is. A
+// category is looked up in the categories. An empty priority gets the
+// default category.
 func (p Priorities) Resolve(priority Priority) (int, error) {
 	category := priority.Category
 	switch {
@@ -72,7 +72,8 @@ func (p Priorities) Resolve(priority Priority) (int, error) {
 	return value, nil
 }
 
-// DefaultPriorities are the categories when the configuration names none.
+// DefaultPriorities returns the categories for a configuration that names
+// none.
 func DefaultPriorities() Priorities {
 	return Priorities{
 		Default:    "normal",
@@ -80,8 +81,8 @@ func DefaultPriorities() Priorities {
 	}
 }
 
-// WithDefaults returns the config with the defaults filled in for what
-// users may leave out. The state calls it when it applies a configuration.
+// WithDefaults returns the config with defaults for the fields that users
+// may leave out. The state calls it when it applies a configuration.
 func (c Config) WithDefaults() Config {
 	c.Priorities = c.Priorities.withDefaults()
 	c.Defaults.Reservations = c.Defaults.Reservations.withDefaults(DefaultReservations)
@@ -92,19 +93,19 @@ func (c Config) WithDefaults() Config {
 	return c
 }
 
-// The resources the configuration may leave out: what a service reserves
-// without deploy.resources.reservations, and what a host keeps for itself
-// (the system, Docker, clowderd, Traefik).
+// The default resources. DefaultReservations is what a service reserves
+// without resources.reserve. DefaultSystemReserve is what a host keeps for
+// itself (the system, Docker, clowderd, Traefik).
 var (
 	DefaultReservations  = Resources{Memory: "128M", CPUs: "0.1"}
 	DefaultSystemReserve = Resources{Memory: "512M", CPUs: "0.25"}
 )
 
-// DefaultResyncRate is how fast a copy resyncs without
-// replication.resyncRate (bytes per second, per resync).
+// DefaultResyncRate is how fast a copy resyncs when the configuration has
+// no replication.resyncRate, in bytes per second for each resync.
 const DefaultResyncRate = "50M"
 
-// withDefaults fills in each field left out.
+// withDefaults fills in each field that is left out.
 func (r Resources) withDefaults(defaults Resources) Resources {
 	if r.Memory == "" {
 		r.Memory = defaults.Memory
@@ -115,9 +116,8 @@ func (r Resources) withDefaults(defaults Resources) Resources {
 	return r
 }
 
-// withDefaults fills in what the configuration leaves out: the default
-// categories if there are none, and their default unless another one is
-// named.
+// withDefaults fills in the default categories if there are none. It
+// keeps a default category that the configuration names.
 func (p Priorities) withDefaults() Priorities {
 	if len(p.Categories) > 0 {
 		return p
@@ -131,11 +131,11 @@ func (p Priorities) withDefaults() Priorities {
 
 // Hetzner is the Hetzner Cloud project the hosts run in.
 type Hetzner struct {
-	// TokenSecretRef names the project's API token, like the hcloud
-	// controller, which reads it from kube-system/hcloud.
+	// TokenSecretRef names the project's API token. Hetzner's cloud
+	// controller for Kubernetes reads it from kube-system/hcloud.
 	TokenSecretRef names.SecretKeyRef `json:"tokenSecretRef"`
-	// API is the full URL of Hetzner Cloud's API when it is not Hetzner's
-	// own (a test lab).
+	// API is the full URL of another Hetzner Cloud API than Hetzner's own,
+	// such as a test lab.
 	API string `json:"api,omitempty"`
 }
 
@@ -149,8 +149,8 @@ type Ingress struct {
 // fallback list of other classes.
 type StorageClass struct {
 	Pool string `json:"pool,omitempty"`
-	// Reserve is kept free in the pool for snapshots and metadata, e.g.
-	// "20%".
+	// Reserve is the part of the pool that stays free for snapshots and
+	// metadata, such as "20%".
 	Reserve  string   `json:"reserve,omitempty"`
 	Fallback []string `json:"fallback,omitempty"`
 }
@@ -158,8 +158,8 @@ type StorageClass struct {
 // DefaultReservePercent is a pool's reserve when its class names none.
 const DefaultReservePercent = 20
 
-// ReservePercent returns the class's reserve in percent of its pool. Check
-// has made sure that Reserve parses.
+// ReservePercent returns the class's reserve in percent of its pool. It
+// relies on Check to make sure that Reserve parses.
 func (c StorageClass) ReservePercent() int {
 	if number, err := strconv.Atoi(strings.TrimSuffix(c.Reserve, "%")); err == nil {
 		return number
@@ -167,19 +167,21 @@ func (c StorageClass) ReservePercent() int {
 	return DefaultReservePercent
 }
 
-// Replication limits DRBD's resync so it never crowds out the cluster's own
-// traffic.
+// Replication limits DRBD's resync, so that it never crowds out the
+// cluster's own traffic.
 type Replication struct {
-	// ResyncRate per host, e.g. "50M" (bytes per second).
+	// ResyncRate is the most that a resync of a volume copy sends per
+	// second, as a size such as "50M".
 	ResyncRate string `json:"resyncRate,omitempty"`
 }
 
-// Stacks holds what the cluster allows individual stacks beyond the rules
-// for all stacks.
+// Stacks holds what the cluster allows single stacks beyond the rules for
+// all stacks.
 type Stacks struct {
-	// Privileged stacks may use privileged, capabilities beyond the
-	// harmless ones, and securityOpt. They reach everything on their host,
-	// including the data and secrets of other stacks.
+	// Privileged names the stacks that may use privileged, capabilities
+	// beyond the harmless ones, and securityOpt. Such a stack can reach
+	// everything on its host, including the data and secrets of other
+	// stacks.
 	Privileged []string `json:"privileged,omitempty"`
 }
 
@@ -188,7 +190,7 @@ type Defaults struct {
 	Reservations Resources `json:"reservations,omitzero"`
 }
 
-// Resources are memory (e.g. "128M") and CPUs (e.g. "0.1").
+// Resources are memory (such as "128M") and CPUs (such as "0.1").
 type Resources struct {
 	Memory string `json:"memory,omitempty"`
 	CPUs   string `json:"cpus,omitempty"`
@@ -200,8 +202,8 @@ type Alerts struct {
 	Heartbeat *Heartbeat     `json:"heartbeat,omitempty"`
 }
 
-// AlertChannel is one notifier: discord, email or webhook. Its URL is a
-// secret, because whoever has a Discord webhook's URL can post to it.
+// AlertChannel is one notifier: discord, email or webhook. Its URL is kept
+// in a Secret, because anyone with a Discord webhook's URL can post to it.
 type AlertChannel struct {
 	Type        string `json:"type"`
 	MinSeverity string `json:"minSeverity,omitempty"`
@@ -214,7 +216,7 @@ type AlertChannel struct {
 	To           []string            `json:"to,omitempty"`
 }
 
-// The severities of an alert, which a channel's minSeverity names.
+// The severities of an alert. A channel's minSeverity names one of them.
 const (
 	SeverityInfo     = "info"
 	SeverityWarning  = "warning"
@@ -239,18 +241,19 @@ type SMTP struct {
 	Port              int                 `json:"port"`
 	User              string              `json:"user,omitempty"`
 	PasswordSecretRef *names.SecretKeyRef `json:"passwordSecretRef,omitempty"`
-	// CA is a PEM certificate that the leader trusts for the server in
-	// addition to the system's (a test CA), like Kubernetes' caBundle.
+	// CA is a PEM certificate that the leader trusts for the server, in
+	// addition to the system's CAs. It is meant for a test CA, like
+	// Kubernetes' caBundle.
 	CA string `json:"ca,omitempty"`
 }
 
-// Heartbeat is called by the leader at an interval. An external service
-// raises an alarm when the calls stop.
+// Heartbeat is a URL that the leader calls at an interval. An external
+// service raises an alarm when the calls stop.
 type Heartbeat struct {
-	// URLSecretRef names the URL, which is secret because whoever has it
-	// can fake the heartbeat.
+	// URLSecretRef names the URL. The URL is kept in a Secret, because
+	// anyone who has it can fake the heartbeat.
 	URLSecretRef names.SecretKeyRef `json:"urlSecretRef"`
-	// Interval is a duration like "1m" (the default).
+	// Interval is a duration such as "1m", which is the default.
 	Interval string `json:"interval,omitempty"`
 }
 
@@ -258,8 +261,8 @@ type Heartbeat struct {
 // configuration names no interval.
 const DefaultHeartbeatInterval = time.Minute
 
-// Every returns how often the heartbeat is called. Check has made sure
-// that Interval parses.
+// Every returns how often the heartbeat is called. It relies on Check to
+// make sure that Interval parses.
 func (h Heartbeat) Every() time.Duration {
 	if interval, err := units.ParseDuration(h.Interval); err == nil && interval > 0 {
 		return interval
@@ -267,25 +270,27 @@ func (h Heartbeat) Every() time.Duration {
 	return DefaultHeartbeatInterval
 }
 
-// ACME is where certificates come from; empty means Let's Encrypt.
+// ACME says where certificates come from. If it is empty, they come from
+// Let's Encrypt.
 type ACME struct {
 	// Directory is the full URL of the ACME directory.
 	Directory string `json:"directory,omitempty"`
-	// CA is a PEM certificate that the leader trusts for the directory in
-	// addition to the system's (a test CA), like Kubernetes' caBundle.
+	// CA is a PEM certificate that the leader trusts for the directory, in
+	// addition to the system's CAs. It is meant for a test CA, like
+	// Kubernetes' caBundle.
 	CA string `json:"ca,omitempty"`
 	// Email is the account's contact for the CA's notices.
 	Email string `json:"email,omitempty"`
-	// RenewBefore is how long before its end a certificate is renewed, e.g.
-	// "30d". By default, it is renewed when a third of its lifetime is
-	// left.
+	// RenewBefore is how long before it expires a certificate is renewed,
+	// such as "30d". By default, a certificate is renewed when a third of
+	// its lifetime is left.
 	RenewBefore string `json:"renewBefore,omitempty"`
 }
 
 // DefaultACMEDirectory is Let's Encrypt's directory.
 const DefaultACMEDirectory = "https://acme-v02.api.letsencrypt.org/directory"
 
-// DirectoryURL is the ACME directory to use.
+// DirectoryURL returns the URL of the ACME directory to use.
 func (a ACME) DirectoryURL() string {
 	if a.Directory == "" {
 		return DefaultACMEDirectory
@@ -294,17 +299,17 @@ func (a ACME) DirectoryURL() string {
 }
 
 // SecretPlace is a field of the configuration that names a value of a
-// Secret in names.System: its path, for messages, and the reference.
+// Secret in names.System. Path is the field's path for messages, and Ref
+// is the reference in it.
 type SecretPlace struct {
 	Path string
 	Ref  names.SecretKeyRef
 }
 
 // SecretPlaces lists the fields of config that name a value of a Secret,
-// in the order of the configuration; a field that is left out is not
-// listed. It is the only list of these fields: Check checks each against
-// the rules of a reference, and the state checks each against the Secrets
-// it has.
+// in the order of the configuration. It skips the fields that are left
+// out. It is the only list of these fields. Check checks each reference
+// against the naming rules, and the state checks that each Secret exists.
 func SecretPlaces(config Config) []SecretPlace {
 	places := []SecretPlace{{Path: "hetzner.tokenSecretRef", Ref: config.Hetzner.TokenSecretRef}}
 	if config.Alerts == nil {

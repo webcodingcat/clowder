@@ -26,9 +26,9 @@ func (d Driver) Mount(ctx context.Context, volume Volume, format bool) error {
 }
 
 // ensureFilesystem creates ext4 on a device that has no file system, and
-// only then. blkid must report this with its exit code, format must allow
-// it, and clowder must have created the LV below it. A foreign LV without a
-// file system may hold raw data.
+// only if three things hold: blkid reports "no file system" with its exit
+// code, format allows it, and clowder created the LV below it. A foreign LV
+// without a file system may hold raw data.
 func (d Driver) ensureFilesystem(ctx context.Context, volume Volume, format bool) error {
 	device := d.device(volume)
 	kind, err := d.Run(ctx, shortTimeout, "blkid", "--output", "value", "--match-tag", "TYPE", device)
@@ -77,7 +77,7 @@ func (d Driver) ensureMounted(ctx context.Context, volume Volume) error {
 		}
 	} else {
 		// the agent touches the mount point only while nothing is mounted
-		// there: a mounted volume's root could hang on suspended DRBD
+		// there, because a mounted volume's root could hang on suspended DRBD
 		if err := os.MkdirAll(mountPoint, 0o700); err != nil {
 			return fmt.Errorf("create the mount point of %s: %w", volume.ID, err)
 		}

@@ -22,7 +22,7 @@ const storeLockTimeout = 5 * time.Second
 
 // ReadState reads the state from this member's log on disk, without Raft:
 // the last snapshot, then every command after it. This includes commands
-// that the cluster may never have committed, because Recover takes them
+// that the cluster may never have committed, because Recover keeps them
 // too. The agent must not run, because it holds the store. A member that
 // never started has an empty state.
 func ReadState(dir string) (*state.State, error) {

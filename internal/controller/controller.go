@@ -1,6 +1,6 @@
-// Package controller holds the leader's loops: they read the state, decide
+// Package controller holds the leader's loops. They read the state, decide
 // (with internal/scheduler) and write commands. They never change the host;
-// the agents do what the commands say.
+// the agents carry out what the commands say.
 package controller
 
 import (
@@ -29,12 +29,13 @@ type Propose func(ctx context.Context, cmd state.Command) (uint64, error)
 // Open decrypts a secret of the state (datakey.Key.Decrypt).
 type Open func(encrypted state.Encrypted) ([]byte, error)
 
-// interval is how often the loops look while the state does not change.
+// interval is how often the loops run a pass while the state does not
+// change.
 const interval = 30 * time.Second
 
 // commit writes one command as the leader and returns its Raft index.
 func commit(ctx context.Context, propose Propose, kind string, payload any) (uint64, error) {
-	// the time comes from the leader as it commits
+	// the leader sets the time when it commits
 	cmd, err := state.NewCommand(kind, time.Time{}, state.LeaderActor, payload)
 	if err != nil {
 		return 0, err

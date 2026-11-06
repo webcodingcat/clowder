@@ -1,70 +1,78 @@
 # A cluster on Hetzner Cloud
 
-An OpenTofu module for a clowder cluster. It creates the first host (`name`), the hosts
-that join it (`hosts`), and the cluster's Floating IP. Each host is a server (Debian 13);
-a worker has one volume per storage class, and all hosts are in one private network behind one
-Cloud firewall. The module's cloud-init installs DRBD 9 from LINBIT and `clowderd` from
-clowder's APT repository, prepares the host, and checks it with `clowderd check`. It then
-runs `clowderd init` on the first host and `clowderd join` on the others. The main
-[README](../../README.md#getting-started-on-hetzner-cloud) explains how to use it.
+This OpenTofu module creates a clowder cluster: the first host (`name`), the hosts that
+join it (`hosts`), and the Floating IP. Each host is a Debian 13 server, and each worker
+gets one volume per storage class. All hosts share one private network behind one Cloud
+firewall. Cloud-init installs DRBD 9 from LINBIT and `clowderd` from clowder's APT
+repository, and checks the host with `clowderd check`. Then it runs `clowderd init` on the
+first host and `clowderd join` on the others. The main
+[README](../../README.md#getting-started-on-hetzner-cloud) shows how to use the module.
 
-- **One Hetzner project per cluster.** The Hetzner token (the Secret that the
-  `ClusterConfiguration`'s `hetzner.tokenSecretRef` names) can power off and on any server
-  of its project, and fencing does exactly that. Keep other servers out of the cluster's
-  project. A joining host names its own server. The leader checks with Hetzner that the
-  server's private and public addresses are the host's, and it never accepts the same
-  server twice.
-- **The Cloud firewall is the only filter** in front of SSH and clowder's API (port 7443).
-  `admin_cidrs` names who can reach them; it does not accept `0.0.0.0/0`. Only
-  control-plane hosts get the API's rule (a second firewall): a host without
-  `control-plane` serves only the control plane, over the private network. HTTP and HTTPS
-  are open to everyone (for Traefik and the ACME CA's checks). To open a port that your
-  stacks publish, add it to `published_ports` (`["udp/9987"]`).
-- **The first credentials** come over SSH from root on the first host, as kubeadm's
-  `admin.conf` does: `ssh root@<public_address> clowderd credentials | clowder config
-  import -`. You trust the cluster's CA because you trust SSH; the first host's user data
-  contains nothing secret. `cluster_name` names the cluster (`clowderd init
-  --cluster-name`), and with it the context of the credentials. `name` is the first host's
-  name and the prefix of the module's resources at Hetzner, which the cluster never sees.
-- **The user data** of a joining host contains its join token. Root can read it from
-  cloud-init's cache, and the metadata service hands it to any process that reaches the
-  service. Once `clowderd` runs, its rules close the service to the host and its
-  containers. The setup reads the service once and keeps what it needs in
-  `/var/lib/clowder-setup` (the private networks only once they list an address). It then
-  deletes its own copy of the token in `/etc/clowder`.
-- **More hosts** join with one token each. `clowder host join-token` prints a token; put it
-  into `join_tokens` under the host's name, and put the host's name into `hosts`. A token
-  works once and expires (after an hour by default, `--ttl` up to a day), so a host created
-  later needs a new token. Once a host has joined, you can remove its token. Joins need
-  the applied `ClusterConfiguration`, because the leader checks the server with its Hetzner
-  token. Its `privateNetwork`, `ingress.floatingIP` and `storageClasses` come from the
-  output `cluster_configuration`. A host that stays `joining` in `clowder host list` never
-  received the cluster's answer. Remove it with `clowder host remove`, put a new token into
-  its `/etc/clowder/join-token`, and reboot it.
-- **Roles.** Every host has all three roles (`control-plane`, `worker`, `ingress`) unless
-  `roles` names others for it, such as `{ node3 = "worker,ingress" }`. The first host needs
-  `control-plane`. A joining host's token must allow its roles, or the join is refused:
-  `clowder host join-token` allows `worker,ingress` by default, so a token for a host with
-  the module's default roles needs `--roles control-plane,worker,ingress`. The two
-  defaults differ on purpose: the module's keeps a cluster of three hosts highly
-  available, and the token's keeps a worker's token from making a control-plane host. A host without
-  `worker` gets no volumes. With every host's roles at their defaults, the second host runs
-  stacks but does not vote; once the third joins, all three vote. A host's roles are fixed
-  once it joins: to change them, remove the host and let it join anew.
+| Setting | Default | What it does |
+|---|---|---|
+| `ssh_public_key` | required | the key that root accepts on each host |
+| `admin_cidrs` | required | who reaches SSH (22) and clowder's API (7443); `0.0.0.0/0` and `::/0` are refused |
+| `name` | `clowder0` | the first host's name, and the prefix of the resources at Hetzner |
+| `cluster_name` | `clowder-cluster` | the cluster's name, and the context name of its credentials |
+| `hosts` | `[]` | the names of the hosts that join the first one |
+| `join_tokens` | `{}` | a join token for each host in `hosts` that has not joined yet |
+| `roles` | `{}` | the roles of a host, by name; a host not named has all three |
+| `published_ports` | `[]` | ports your stacks publish besides 80 and 443, open to everyone: `["udp/9987"]` |
+| `storage_classes` | `{ fast = 20, bulk = 20 }` | one volume per class (size in GB) with the thin pool `vg-<name>/thin` |
+| `location` | `nbg1` | `fsn1`, `nbg1` or `hel1` |
+| `server_type` | `cx23` | the Hetzner server type |
+| `network_ip_range` | `10.0.0.0/16` | the private network, in `10.0.0.0/8` but outside `10.77.0.0/16` and `10.78.0.0/16` |
+| `clowderd_version` | this module's release | the pinned `clowderd` version, so later hosts match the cluster; empty means newest |
+| `image` | `debian-13` | the hosts' image, or a prepared snapshot (below) |
+| `clowderd_package_url`, `clowderd_package_sha256` | empty | test hook: install this `.deb` instead of using the APT repository |
+
+The output `cluster_configuration` holds the ClusterConfiguration's `privateNetwork`,
+`ingress.floatingIP` and `storageClasses`.
+
+- **One Hetzner project per cluster.** Fencing powers servers off and on, and the Hetzner
+  token (the Secret named by `hetzner.tokenSecretRef`) can do that to any server of its
+  project. So keep other servers out of that project. A joining host names its own server.
+  The leader checks with Hetzner that the server's private and public addresses are the
+  host's, and never accepts the same server twice.
+- **The Cloud firewall is the only filter** in front of SSH and the API. Only
+  control-plane hosts get the API rule (a second firewall). Other hosts serve the API only
+  to the control plane, over the private network. HTTP and HTTPS are open to everyone, for
+  Traefik and the ACME CA's checks.
+- **The first credentials** come over SSH from root on the first host, like kubeadm's
+  `admin.conf`: `ssh root@<public_address> clowderd credentials | clowder config import -`.
+  You trust the cluster's CA because you trust SSH, so the first host's user data holds
+  nothing secret.
+- **A joining host's user data holds its join token.** Root can read it in cloud-init's
+  cache, and so can any process that reaches the metadata service. Once `clowderd` runs,
+  its rules close that service to the host and its containers. The setup reads the service
+  once, keeps what it needs in `/var/lib/clowder-setup`, and deletes its own copy of the
+  token in `/etc/clowder`.
+- **To add a host**, put a token from `clowder host join-token` into `join_tokens` under the
+  host's name, and the name into `hosts`. A token works once and expires after an hour by
+  default (`--ttl`, up to a day), so a host created later needs a new one. Once the host
+  has joined, you can remove its token. Joins need the applied ClusterConfiguration,
+  because the leader checks the server with its Hetzner token. A host that stays `joining`
+  in `clowder host list` never got the cluster's answer: remove it with
+  `clowder host remove`, put a new token into its `/etc/clowder/join-token`, and reboot it.
+- **Roles.** A host has `control-plane`, `worker` and `ingress` unless `roles` says
+  otherwise, such as `{ node3 = "worker,ingress" }`. The first host needs `control-plane`,
+  and a host without `worker` gets no volumes. The token must allow the host's roles. A
+  token from `clowder host join-token` allows only `worker,ingress` by default, so a host
+  with the module's default roles needs `--roles control-plane,worker,ingress`. This is on
+  purpose: the module's default keeps three hosts highly available, and the token's
+  default stops a worker's token from creating a control-plane host. With default roles,
+  the second host runs stacks but does not vote; once the third joins, all three vote.
+  Roles are fixed once a host joins: to change them, remove the host and join it again.
 - **To replace a host**, add the new one to `hosts` and wait until it is active. Then run
-  `clowder host remove` for the old one and take it out of `hosts`. A cluster that had
-  three control-plane hosts keeps three. The module joins every host through the first one (`name`), so
-  it cannot replace the first host yet, and no host can join while the first host is down.
-- `clowderd_version` pins the version from clowder's APT repository, so that a host created
-  later gets the cluster's version. Its default is the release that this module comes
-  with, so check out the module at that release's tag.
-- The module ignores later changes to a server's user data. So a storage class added to
-  `storage_classes` gets a volume, but no thin pool, on a host that already exists.
-- `clowderd_package_url` and `clowderd_package_sha256` are a test hook: they install a
-  `.deb` instead of using the APT repository.
-- `image` is the hosts' image: `debian-13` by default, or the ID of a snapshot that
-  `setup.sh` prepared with `PREPARE_ONLY=yes` in its settings (the headers, the DRBD
-  module, Docker and the rest of the dependencies of `clowderd`). On such a snapshot, the
-  setup skips what is already there and installs `clowderd`; clowder's live tests start
-  their hosts this way. A changed `image` applies only to hosts created later; it replaces
-  no server.
+  `clowder host remove` for the old one and take it out of `hosts`. A cluster with three
+  control-plane hosts keeps three. Every host joins through the first host, so the module
+  cannot replace the first host yet, and no host can join while it is down.
+- **`clowderd_version`** defaults to the release that this module belongs to, so check out
+  the module at that release's tag.
+- **Changes to a server's user data are ignored** after it is created. A storage class
+  added later gets a volume, but no thin pool, on an existing host.
+- **A prepared `image`** is a snapshot of a server where `setup.sh` ran with
+  `PREPARE_ONLY=yes`: it holds the kernel headers, the DRBD module, Docker and the other
+  dependencies of `clowderd`. On it, the setup skips what is there and only installs
+  `clowderd`. clowder's live tests start their hosts this way. A changed `image` applies
+  only to hosts created later and replaces no server.

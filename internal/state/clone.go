@@ -6,17 +6,16 @@ import (
 )
 
 // Clone returns a copy of the state without its audit. It is for work that
-// is too slow to do under the state's lock (such as parsing Compose files),
-// for work that keeps parts of the state, and for work that changes its
-// copy (change-resources, a dry run).
+// is too slow for the state's lock, that keeps parts of the state, or that
+// changes its copy (change-resources, a dry run).
 //
 // Clone copies what the handlers change in place: the maps, the resources
-// and their statuses. It shares what they only ever replace whole: every
-// spec (and a stack's Services, which are worked out from its spec), every
-// encrypted value, and the certificates' bytes. Copying those would cost as
-// much as the secrets of the whole cluster. A handler that changed such a
-// part in place would change every clone with it; the state's tests check
-// that none does (cluster.changes in state_test.go).
+// and their statuses. It shares what they only ever replace whole: the
+// specs (and a stack's Services), the encrypted values and the
+// certificates' bytes. Copying those would cost as much as all of the
+// cluster's secrets. A handler that changed such a part in place would
+// change every clone. The state's tests check that no handler does
+// (cluster.changes in state_test.go).
 //
 // The agent's loops share one clone per change (raftnode.Node.SharedCopy),
 // so none of them may change it.
@@ -94,8 +93,8 @@ func cloneOperation(operation *Operation) *Operation {
 	return &copied
 }
 
-// clonePointer copies the value a pointer points to, one level deep, or
-// returns nil.
+// clonePointer copies the value that a pointer points to, one level deep,
+// or returns nil.
 func clonePointer[Value any](pointer *Value) *Value {
 	if pointer == nil {
 		return nil
@@ -104,8 +103,8 @@ func clonePointer[Value any](pointer *Value) *Value {
 	return &copied
 }
 
-// cloneMap copies a map and each of its values, or returns nil for nil, so
-// a clone encodes as the state does.
+// cloneMap copies a map and each of its values. It returns nil for nil, so
+// a clone encodes the same way as the state.
 func cloneMap[Key comparable, Value any](original map[Key]Value, clone func(Value) Value) map[Key]Value {
 	if original == nil {
 		return nil

@@ -15,17 +15,17 @@ import (
 	"github.com/webcodingcat/clowder/internal/pki"
 )
 
-// renewWarning is how long before a CLI certificate ends every command
-// warns about it. This leaves time to fetch a new one from a host, because
-// nothing renews it.
+// renewWarning is how long before a CLI certificate expires every command
+// starts to warn about it. Nothing renews the certificate, so this leaves
+// time to get a new one from a host.
 const renewWarning = 30 * 24 * time.Hour
 
-// globals are the flags every command shares.
+// globals are the flags that every command shares.
 type globals struct {
 	config         string
 	context        string
 	connectTimeout time.Duration
-	// warnings is where connect writes its warnings: the command's stderr
+	// warnings is where connect writes its warnings (the command's stderr)
 	warnings io.Writer
 }
 
@@ -36,7 +36,8 @@ func (g *globals) register(root *cobra.Command) {
 		"the context of the credentials file to use (default: its current context)")
 	root.PersistentFlags().DurationVar(&g.connectTimeout, "connect-timeout", api.DefaultConnectTimeout,
 		"how long to wait for a host to take the connection before the next is tried")
-	// checked before any command runs: every command that asks a host uses it
+	// check before any command runs, because every command that asks a
+	// host uses the timeout
 	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
 		if g.connectTimeout <= 0 {
 			return usage("--connect-timeout %s: give a positive duration like 5s", g.connectTimeout)
@@ -56,9 +57,9 @@ func (g *globals) readConfig() (clientconfig.Config, string, error) {
 	return config, path, err
 }
 
-// connect reads the context that the flags pick and returns a client for
-// the cluster's agents at its endpoints. It warns about a certificate that
-// is close to its end.
+// connect reads the context that the flags pick. It returns a client for
+// the cluster's agents at the context's endpoints. It warns about a
+// certificate that expires soon.
 func (g *globals) connect() (*api.Client, error) {
 	config, _, err := g.readConfig()
 	if err != nil {
@@ -85,9 +86,9 @@ func (g *globals) connect() (*api.Client, error) {
 	return api.NewClient(cliContext.Endpoints, g.connectTimeout, certificate, ca, buildinfo.Version), nil
 }
 
-// warnBeforeTheEnd warns, from renewWarning before the end on, that the
-// certificate of a context is about to end; an agent refuses it once it
-// has ended. A warning that cannot be written stops no command.
+// warnBeforeTheEnd warns that a context's certificate is about to expire,
+// starting renewWarning before it does. An agent refuses the certificate
+// once it has expired. A warning that cannot be written stops no command.
 func warnBeforeTheEnd(out io.Writer, contextName string, notAfter, now time.Time) {
 	left := notAfter.Sub(now)
 	if left > renewWarning {

@@ -27,7 +27,7 @@ var (
 	quoted = regexp.MustCompile(`"([^"]*)"`)
 )
 
-// checks in the order they are printed.
+// checks are all checks, in the order of the output.
 var checks = []check{
 	{"ip forwarding", sysctl("/proc/sys/net/ipv4/ip_forward", "1",
 		"forwarded traffic (published ports, exports) needs net.ipv4.ip_forward = 1")},
@@ -97,7 +97,7 @@ func checkWireGuard(ctx context.Context, host Host, _ Options) (Status, string) 
 	return OK, ""
 }
 
-// checkDRBDModule: DRBD 9, built (by DKMS) for the running kernel.
+// checkDRBDModule checks for DRBD 9, built by DKMS for the running kernel.
 func checkDRBDModule(ctx context.Context, host Host, _ Options) (Status, string) {
 	version, err := host.Run(ctx, "modinfo", "-F", "version", "drbd")
 	if err != nil {
@@ -139,9 +139,10 @@ func checkDRBDUtils(ctx context.Context, host Host, _ Options) (Status, string) 
 	return OK, fmt.Sprintf("drbd-utils %d.%d", major, minor)
 }
 
-// checkDRBDService: only the agent brings resources up.
+// checkDRBDService checks that drbd.service is not enabled, because only
+// the agent brings resources up.
 func checkDRBDService(ctx context.Context, host Host, _ Options) (Status, string) {
-	// is-enabled exits non-zero for a disabled or missing unit; only its
+	// is-enabled exits non-zero for a disabled or missing unit, so only its
 	// output matters
 	state, _ := host.Run(ctx, "systemctl", "is-enabled", "drbd.service")
 	if strings.TrimSpace(state) == "enabled" {
@@ -150,7 +151,8 @@ func checkDRBDService(ctx context.Context, host Host, _ Options) (Status, string
 	return OK, ""
 }
 
-// checkUsageCount: drbdadm reports to LINBIT's usage survey unless told not to.
+// checkUsageCount checks that usage-count is off. Otherwise drbdadm reports
+// to LINBIT's usage survey.
 func checkUsageCount(_ context.Context, host Host, _ Options) (Status, string) {
 	content, err := host.ReadFile("/etc/drbd.d/global_common.conf")
 	if err != nil {
@@ -162,8 +164,8 @@ func checkUsageCount(_ context.Context, host Host, _ Options) (Status, string) {
 	return OK, ""
 }
 
-// checkLVMFilter: LVM must not scan DRBD devices (it would see the volume
-// groups inside volumes twice).
+// checkLVMFilter checks that LVM does not scan DRBD devices. Otherwise LVM
+// would see the volume groups inside volumes twice.
 func checkLVMFilter(ctx context.Context, host Host, _ Options) (Status, string) {
 	filter, err := host.Run(ctx, "lvmconfig", "devices/global_filter")
 	if err != nil || !rejectsDRBD.MatchString(filter) {
@@ -189,7 +191,8 @@ func checkPools(ctx context.Context, host Host, options Options) (Status, string
 	return OK, strings.Join(options.Pools, ", ")
 }
 
-// dockerDaemon is the part of /etc/docker/daemon.json clowder relies on.
+// dockerDaemon is the part of /etc/docker/daemon.json that clowder relies
+// on.
 type dockerDaemon struct {
 	LiveRestore   *bool `json:"live-restore"`
 	UserlandProxy *bool `json:"userland-proxy"`
@@ -248,8 +251,9 @@ func checkCompose(ctx context.Context, host Host, _ Options) (Status, string) {
 	return OK, "docker compose " + strings.TrimSpace(version)
 }
 
-// checkUnattendedUpgrades: the kernel, Docker, DRBD and clowder are only
-// updated by hand, in a maintenance window.
+// checkUnattendedUpgrades checks that unattended-upgrades holds back the
+// kernel, Docker, DRBD and clowder. They are updated only by hand, in a
+// maintenance window.
 func checkUnattendedUpgrades(ctx context.Context, host Host, _ Options) (Status, string) {
 	// dpkg also lists a removed package whose configuration is left, so
 	// check its status, not only whether dpkg knows it
@@ -262,9 +266,9 @@ func checkUnattendedUpgrades(ctx context.Context, host Host, _ Options) (Status,
 		return Fail, fmt.Sprintf("apt-config: %v", err)
 	}
 	// unattended-upgrades matches each entry against the start of a package
-	// name, so these four entries hold back every kernel, Docker, DRBD and
-	// clowder package; a longer entry such as linux-firmware would hold back
-	// only that one
+	// name. So these four entries hold back every kernel, Docker, DRBD and
+	// clowder package. A longer entry such as linux-firmware would hold back
+	// only that one package.
 	entries := map[string]bool{}
 	for _, match := range quoted.FindAllStringSubmatch(dump, -1) {
 		entries[match[1]] = true

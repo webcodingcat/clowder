@@ -9,9 +9,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 )
 
-// Alert is an open alert: a condition the leader saw that someone should
-// look at. The state holds only open alerts. Whether and when the leader
-// told the channels, it keeps in its memory.
+// Alert is an open alert: a condition that the leader saw and that someone
+// should look at. The state holds only open alerts. The leader keeps in its
+// memory whether and when it told the channels.
 type Alert struct {
 	// Key is the alert's kind and subject ("pool-use/node0/vg/thin/data").
 	// A condition has one key, so it never has two open alerts.

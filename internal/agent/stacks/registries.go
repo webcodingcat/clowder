@@ -17,11 +17,11 @@ import (
 // registriesDir holds one Docker config directory per namespace, on the
 // secrets' tmpfs. Its config.json has the namespace's registry logins in
 // plain text. The name starts with names.ReservedPrefix, so the clean-up of
-// the stacks' secrets leaves it alone; RegistryConfigs cleans it up.
+// the stacks' secrets leaves it alone. RegistryConfigs cleans it up instead.
 const registriesDir = names.ReservedPrefix + "registries"
 
-// registryConfigDir is the Docker config directory that a namespace's
-// images are pulled with (docker --config).
+// registryConfigDir is the Docker config directory with which a namespace's
+// images are pulled (docker --config).
 func (f Files) registryConfigDir(namespace string) string {
 	return filepath.Join(f.SecretsDir, registriesDir, namespace)
 }
@@ -37,8 +37,8 @@ type RegistryConfigs struct {
 	mu    sync.Mutex
 }
 
-// NewRegistryConfigs keeps the configs below files.SecretsDir and opens the
-// logins with open.
+// NewRegistryConfigs returns a RegistryConfigs that keeps the configs below
+// files.SecretsDir and decrypts the logins with open.
 func NewRegistryConfigs(files Files, open func(state.Encrypted) ([]byte, error)) *RegistryConfigs {
 	return &RegistryConfigs{files: files, open: open}
 }
@@ -52,13 +52,13 @@ type dockerAuth struct {
 	Auth string `json:"auth"` // base64 of "username:password", as docker login writes it
 }
 
-// Write opens a namespace's registry logins (state.RegistryLogins), writes
-// them into its Docker config and returns the config's directory. A
-// namespace without logins gets an empty config, so that no stack pulls
-// with the logins of root's own config. missing names the image pull
-// secrets that Write left out; like the kubelet, it goes on without them,
-// and a pull that fails says why. The file is replaced by a rename, so a
-// pull reads either the old logins or the new ones.
+// Write decrypts a namespace's registry logins (state.RegistryLogins),
+// writes them into the namespace's Docker config and returns the config's
+// directory. A namespace without logins gets an empty config, so that no
+// stack pulls with the logins of root's own config. missing names the image
+// pull secrets that Write left out. Like the kubelet, Write goes on without
+// them, and a pull that fails says why. The file is replaced by a rename,
+// so a pull reads either the old logins or the new ones.
 func (r *RegistryConfigs) Write(current *state.State, namespace string) (dir string, missing, err error) {
 	logins, missing := current.RegistryLogins(namespace)
 	config := dockerConfig{Auths: map[string]dockerAuth{}}

@@ -29,9 +29,9 @@ resource "hcloud_network_subnet" "hosts" {
   ip_range     = var.network_ip_range
 }
 
-# The firewall also covers the Floating IP, where stacks publish their ports
-# (phase 1b). WireGuard runs over the private network, which Cloud firewalls do
-# not filter.
+# The firewall also covers the Floating IP, where stacks publish their ports.
+# WireGuard runs over the private network, which Cloud firewalls do not
+# filter.
 resource "hcloud_firewall" "host" {
   name = var.name
 

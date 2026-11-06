@@ -10,10 +10,10 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Beats keeps the hosts' beats on this agent (controller.Heard is the real
-// implementation). Every agent sends beats to every voter, and the leader
-// asks the voters how long they have not heard from a host before it
-// treats the host as failed.
+// Beats records the beats that this agent receives from hosts
+// (controller.Heard is the real implementation). Every agent sends beats to
+// every voter. Before the leader treats a host as failed, it asks the
+// voters how long they have not heard from that host.
 type Beats interface {
 	Beat(host state.HostID)
 	Silence(host state.HostID) time.Duration
@@ -25,7 +25,7 @@ type Silence struct {
 	SilentFor time.Duration `json:"silent_for"`
 }
 
-// localBeat records the caller's beat, for the host that its certificate
+// localBeat records a beat for the host that the caller's certificate
 // names.
 func (s *Server) localBeat(w http.ResponseWriter, r *http.Request) {
 	s.config.Beats.Beat(state.HostID(identityOf(r).HostID))
@@ -42,7 +42,7 @@ func (s *Server) localSilence(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, Silence{SilentFor: s.config.Beats.Silence(state.HostID(number))})
 }
 
-// Beat tells a voter that this host is alive (the agent's beats).
+// Beat tells a voter that this host is alive.
 func (s *Server) Beat(ctx context.Context, voter state.HostID) error {
 	url := "https://" + s.config.APIAddress(voter) + "/v1/internal/beats"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)

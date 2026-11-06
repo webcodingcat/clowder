@@ -29,7 +29,7 @@ import (
 
 const (
 	// snapshotThreshold is how many entries Raft writes before it takes a
-	// snapshot; the log before the snapshot is then cut.
+	// snapshot. Raft then cuts the log before the snapshot.
 	snapshotThreshold = 8192
 	// keptSnapshots is how many snapshots stay on disk.
 	keptSnapshots = 2
@@ -45,11 +45,11 @@ type Config struct {
 	Dir string
 	// ID is the host's ID, which is also its Raft ID.
 	ID state.HostID
-	// Bind is the address to listen on; Advertise is the address where
+	// Bind is the address to listen on. Advertise is the address where
 	// peers reach this host (the node address and port 7400).
 	Bind      string
 	Advertise string
-	// Certificate is the host's certificate with its key; CA checks the
+	// Certificate is the host's certificate with its key. CA checks the
 	// peers' certificates.
 	Certificate tls.Certificate
 	CA          *x509.Certificate
@@ -64,8 +64,8 @@ type Node struct {
 	store     *raftboltdb.BoltStore
 	id        raft.ServerID
 	// leads is set once this member leads and has applied every entry from
-	// before its lead (followLead). Only then may the leader's loops act on
-	// the state.
+	// before it became leader (followLead). Only then may the leader's loops
+	// act on the state.
 	leads atomic.Bool
 	// closed ends followLead
 	closed chan struct{}
@@ -111,8 +111,8 @@ func Open(cfg Config) (*Node, error) {
 	if err != nil {
 		_ = transport.Close()
 		_ = store.Close()
-		// Raft only says that it found no snapshot it could restore; the
-		// fsm knows that the state could not read one
+		// Raft only says that it found no snapshot it could restore. The fsm
+		// knows the reason: the state could not read the snapshot.
 		return nil, fmt.Errorf("start Raft: %w", cmp.Or(machine.haltError(), err))
 	}
 	node := &Node{
@@ -127,11 +127,10 @@ func Open(cfg Config) (*Node, error) {
 // a follower checks how far Raft has applied the log.
 const leadPoll = 50 * time.Millisecond
 
-// followLead sets leads while this member leads, starting when it has
+// followLead sets leads while this member leads, starting once it has
 // applied every entry of the log. A new leader may not yet have applied
-// what its predecessor committed, and its loops and the API would then
-// decide on an old state. Raft's barrier waits until every entry is
-// applied.
+// what its predecessor committed. Its loops and the API would then decide on
+// an old state. Raft's barrier waits until every entry is applied.
 func (n *Node) followLead() {
 	for {
 		select {
@@ -209,9 +208,9 @@ func (n *Node) Propose(ctx context.Context, cmd state.Command) (uint64, error) {
 // CatchUp waits until the state holds what the log holds, because after a
 // restart Raft replays the log in the background. It waits for a leader.
 // On the leader, it also waits until the barrier has made sure that every
-// entry is applied (followLead). A follower is only as far as its leader
-// has told it. So before it acts on the state, it asks for the leader's
-// commit index and waits for it (WaitCommitted).
+// entry is applied (followLead). A follower knows only what its leader has
+// sent it so far. So before a follower acts on the state, it asks for the
+// leader's commit index and waits for it (WaitCommitted).
 func (n *Node) CatchUp(ctx context.Context) error {
 	for {
 		_, known := n.Leader()
@@ -235,10 +234,10 @@ func (n *Node) CommitIndex() uint64 {
 }
 
 // WaitCommitted returns once the state holds every entry up to index, the
-// leader's commit index. The state counts only commands (State.Index), and
+// leader's commit index. The state counts only commands (State.Index).
 // Raft's own entries (a new leader's first entry, a change of members)
-// never reach it. So it waits for Raft to apply index, and then for the
-// state to hold the last command up to index.
+// never reach it. So WaitCommitted waits for Raft to apply index, and then
+// for the state to hold the last command up to index.
 func (n *Node) WaitCommitted(ctx context.Context, index uint64) error {
 	for n.raft.AppliedIndex() < index {
 		select {
@@ -275,9 +274,9 @@ func (n *Node) lastCommandUpTo(index uint64) (uint64, error) {
 }
 
 // VerifyLeader makes sure that this member still leads: a majority of the
-// voters must answer it as their leader. A leader that is cut off from the
-// others believes that it leads until its lease runs out. So it asks before
-// it powers off a server or moves the Floating IP.
+// voters must confirm it as their leader. A leader that is cut off from the
+// others believes that it leads until its lease runs out. So the leader
+// calls VerifyLeader before it powers off a server or moves the Floating IP.
 func (n *Node) VerifyLeader(ctx context.Context) error {
 	future := n.raft.VerifyLeader()
 	answered := make(chan error, 1)
@@ -300,8 +299,8 @@ func (n *Node) Read(use func(current *state.State)) {
 }
 
 // SharedCopy returns a copy of the state to read outside the lock. Every
-// caller gets the same copy until the next change. No caller may change it;
-// a caller that needs to change it makes its own (State.Clone under Read).
+// caller gets the same copy until the next change. No caller may change it.
+// A caller that needs to change it makes its own (State.Clone under Read).
 // The tests of the loops check this (statetest.ReadOnlyCopy).
 func (n *Node) SharedCopy() *state.State {
 	return n.fsm.sharedCopy()
@@ -342,12 +341,12 @@ func (n *Node) HaltError() error {
 }
 
 // IsLeader tells whether this member leads and has applied the log from
-// before its lead (followLead).
+// before it became leader (followLead).
 func (n *Node) IsLeader() bool {
 	return n.raft.State() == raft.Leader && n.leads.Load()
 }
 
-// Leader returns the leading host; ok is false while there is none.
+// Leader returns the leading host. ok is false while there is none.
 func (n *Node) Leader() (id state.HostID, ok bool) {
 	_, raftID := n.raft.LeaderWithID()
 	number, err := strconv.Atoi(string(raftID))
@@ -357,7 +356,7 @@ func (n *Node) Leader() (id state.HostID, ok bool) {
 	return state.HostID(number), true
 }
 
-// Close stops the member; the log and snapshots stay on disk.
+// Close stops the member. The log and snapshots stay on disk.
 func (n *Node) Close() error {
 	close(n.closed)
 	shutdownErr := n.raft.Shutdown().Error()

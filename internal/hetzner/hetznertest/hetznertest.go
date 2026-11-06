@@ -31,10 +31,10 @@ type API struct {
 	mu          sync.Mutex
 	servers     map[int64]*server
 	floatingIPs map[netip.Addr]int64 // the server each is routed to, 0 for none
-	// changes are what the requests changed, in order: "poweroff 41",
+	// changes holds what the requests changed, in order: "poweroff 41",
 	// "poweron 41", "assign 203.0.113.10 41", "label 41 clowder-retired=s1"
 	changes []string
-	// failing counts, per server, the actions that will still end in an
+	// failing counts, per server, how many more actions will end in an
 	// error
 	failing map[int64]int
 }
@@ -44,7 +44,7 @@ type server struct {
 	labels          map[string]string
 }
 
-// New starts the fake for the test; each request must carry the token.
+// New starts the fake for the test. Each request must carry the token.
 func New(t testing.TB, token string) *API {
 	api := &API{token: token, servers: map[int64]*server{}, floatingIPs: map[netip.Addr]int64{}, failing: map[int64]int{}}
 	httpServer := httptest.NewServer(http.HandlerFunc(api.serve))
@@ -78,8 +78,8 @@ func (a *API) FloatingIPTarget(ip netip.Addr) int64 {
 }
 
 // FailActions makes the next count actions on the server end in an error,
-// like an action that Hetzner could not carry out. The client does not send
-// such an action again.
+// as when Hetzner cannot carry out an action. The client does not send such
+// an action again.
 func (a *API) FailActions(serverID int64, count int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -224,7 +224,7 @@ func (a *API) serveServer(w http.ResponseWriter, r *http.Request, parts []string
 	}
 }
 
-// actionFails tells whether the next action on the server fails, and
+// actionFails reports whether the next action on the server fails, and
 // counts the failure.
 func (a *API) actionFails(serverID int64) bool {
 	if a.failing[serverID] <= 0 {

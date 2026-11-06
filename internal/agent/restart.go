@@ -9,16 +9,16 @@ import (
 	"github.com/webcodingcat/clowder/internal/supervisor"
 )
 
-// restartRules tell the supervisor the restart rules of this host's
+// restartRules gives the supervisor the restart rules of this host's
 // services (restartRules.of is a supervisor.Rules).
 type restartRules struct {
 	cluster loop.Cluster
 	host    state.HostID
 }
 
-// of is a service's restart rule, taken from the stack as the state has it.
-// A pushed-out service never restarts. Clowder's own Traefik has its own
-// rule.
+// of returns a service's restart rule, taken from the stack in the state.
+// A pushed-out service never restarts. Clowder's own Traefik has a rule of
+// its own.
 func (r restartRules) of(project, service string) (supervisor.Rule, bool) {
 	if names.ClowdersOwn(project) {
 		return traefikRule, true

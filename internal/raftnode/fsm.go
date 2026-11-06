@@ -14,7 +14,7 @@ import (
 )
 
 // fsm hands Raft's log entries to the cluster state. Raft calls Apply,
-// Snapshot and Restore from one goroutine; all other callers read under the
+// Snapshot and Restore from one goroutine. All other callers read under the
 // lock.
 type fsm struct {
 	mu    sync.RWMutex
@@ -23,18 +23,18 @@ type fsm struct {
 	// the log fills it, so a dry run never adds to it.
 	changes state.ChangeRing
 	// changed is closed and replaced after every applied entry, to wake up
-	// those waiting for an index.
+	// the callers that wait for an index.
 	changed chan struct{}
 	// shared is a clone of the state for the loops to read. It is made once
-	// per change and dropped at the next one (sharedCopy). sharedMu guards
-	// it among the readers, who hold mu only for reading.
+	// per change and dropped at the next change (sharedCopy). sharedMu
+	// guards it among the readers, who hold mu only for reading.
 	sharedMu sync.Mutex
 	shared   *state.State
 	// halted closes when an entry or a snapshot could not be read
-	// (state.ErrUnreadable), and haltErr says which one. From then on the
-	// fsm applies, restores and snapshots nothing. Raft keeps handing it
-	// entries until the agent stops, and a snapshot would claim an index
-	// that the state never reached.
+	// (state.ErrUnreadable). haltErr says which one. From then on, the fsm
+	// applies, restores and snapshots nothing. Raft keeps handing it entries
+	// until the agent stops, and a snapshot would claim an index that the
+	// state never reached.
 	halted  chan struct{}
 	haltErr error
 }
@@ -44,12 +44,12 @@ func newFSM() *fsm {
 }
 
 // Apply applies one command. Its error goes back to the proposer as the
-// response. For Raft the entry is applied either way, even an entry that
-// the state could not read.
+// response. For Raft, the entry counts as applied either way, even an entry
+// that the state could not read.
 func (f *fsm) Apply(entry *raft.Log) any {
 	f.mu.Lock()
-	// defers run in reverse order: unlock first, then wake, which takes
-	// the lock again to swap the channel
+	// defers run in reverse order: unlock first, then wake. wake takes the
+	// lock again to swap the channel.
 	defer f.wake()
 	defer f.mu.Unlock()
 	if f.haltErr != nil {
@@ -65,7 +65,7 @@ func (f *fsm) Apply(entry *raft.Log) any {
 	return err
 }
 
-// halt stops the fsm for good; f.mu must be held.
+// halt stops the fsm for good. The caller must hold f.mu.
 func (f *fsm) halt(err error) {
 	f.haltErr = err
 	close(f.halted)
@@ -86,7 +86,7 @@ func (f *fsm) wake() {
 	f.mu.Unlock()
 }
 
-// Snapshot encodes the state at once, because Apply goes on while Raft
+// Snapshot encodes the state right away, because Apply goes on while Raft
 // persists the snapshot. The state is small enough to copy.
 func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.RLock()
@@ -143,9 +143,9 @@ func (f *fsm) read(use func(current *state.State)) {
 }
 
 // sharedCopy returns a clone of the state that every caller shares until
-// the next change. The loops that wake at a change each read the state
-// without the lock, and one clone serves them all. No caller may change it:
-// it shares the specs and encrypted values with the state itself
+// the next change. Each loop that wakes at a change reads the state without
+// the lock, and one clone serves them all. No caller may change the clone,
+// because it shares the specs and encrypted values with the state itself
 // (state.State.Clone).
 func (f *fsm) sharedCopy() *state.State {
 	f.mu.RLock()

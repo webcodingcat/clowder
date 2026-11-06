@@ -8,9 +8,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/agent/loop"
 )
 
-// stopLeavers stops the stacks that left this host. The files show how far
-// a leaver got, so the runner recovers from a crash at any point. Its
-// compose.yaml exists until compose down succeeds (stop). Then its
+// stopLeavers stops the stacks that left this host. A leaver's files show
+// how far it got, so the runner can recover from a crash at any point. Its
+// compose.yaml exists until compose down succeeds (stop). After that, its
 // directory is removed, and its secrets are removed once compose.yaml is
 // gone (removeSecretsOfOthers). Until then, the volume reconciler leaves
 // its volume copies alone (Files.HeldLVs). stopLeavers returns the volumes
@@ -30,8 +30,8 @@ func (r *Runner) stopLeavers(ctx context.Context, desired desiredState) volumesI
 			continue
 		}
 		if r.markStaleIfBusy(project) {
-			// its job may still be in compose up; the pass after the job
-			// stops the stack
+			// its job may still be running compose up. The pass after the
+			// job stops the stack.
 			r.markInUse(inUse, project)
 			continue
 		}
@@ -54,8 +54,8 @@ func (r *Runner) stopLeavers(ctx context.Context, desired desiredState) volumesI
 	return inUse
 }
 
-// stop runs compose down once for a stack that left this host, because it
-// removes the Compose file afterwards.
+// stop runs compose down for a stack that left this host. It does so only
+// once, because it removes the Compose file afterwards.
 func (r *Runner) stop(ctx context.Context, project string) error {
 	file := r.files.stackFile(project)
 	if _, err := os.Stat(file); errors.Is(err, os.ErrNotExist) {
@@ -69,18 +69,19 @@ func (r *Runner) stop(ctx context.Context, project string) error {
 	return os.Remove(file)
 }
 
-// volumesInUse maps the LVs that stacks which failed to stop may still use
-// to the stack's project; anyVolume stands for every LV.
+// volumesInUse maps each LV that a stack which failed to stop may still use
+// to that stack's project. anyVolume stands for every LV.
 type volumesInUse map[string]string
 
-// anyVolume is in use when the runner cannot tell a leaver's volumes.
+// anyVolume is in use when the runner cannot tell which volumes a leaver
+// uses.
 const anyVolume = "*"
 
 // errVolumeInUse is what apply returns for a stack that must wait, because
 // a stack that failed to stop may still use one of its volumes.
 var errVolumeInUse = errors.New("a stack that failed to stop may still use a volume")
 
-// user tells which stack may still use an LV.
+// user returns the stack that may still use an LV.
 func (u volumesInUse) user(lv string) (string, bool) {
 	if project, ok := u[lv]; ok {
 		return project, true
@@ -90,9 +91,10 @@ func (u volumesInUse) user(lv string) (string, bool) {
 }
 
 // markInUse adds the LVs that a leaver's containers may hold
-// (readMountedLVs), which the leaver may still use while they run. If the
-// LVs cannot be read, it marks every volume: starting a stack next to the
-// leaver by mistake could ruin a file system, and waiting costs only a pass.
+// (readMountedLVs). The leaver may still use them while its containers run.
+// If the LVs cannot be read, it marks every volume: starting a stack next
+// to the leaver by mistake could ruin a file system, and waiting costs only
+// a pass.
 func (r *Runner) markInUse(inUse volumesInUse, project string) {
 	if _, err := os.Stat(r.files.stackFile(project)); errors.Is(err, os.ErrNotExist) {
 		return // stopped after all

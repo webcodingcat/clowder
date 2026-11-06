@@ -24,12 +24,14 @@ type ContainerInfo struct {
 // project (names.Project). The agent implements it.
 type Containers interface {
 	Ps(ctx context.Context, project string) ([]ContainerInfo, error)
-	// Logs writes the stack's logs to out; with follow, until ctx ends.
+	// Logs writes the stack's logs to out. With follow, it keeps writing
+	// until ctx ends.
 	Logs(ctx context.Context, project string, follow bool, out io.Writer) error
 }
 
-// stackHost finds the host that a stack runs on, and its Compose project
-// there. ok is false (and the answer is written) when there is none.
+// stackHost finds the host that a stack runs on, and the stack's Compose
+// project there. If there is no such host, it writes the error answer and
+// returns false.
 func (s *Server) stackHost(w http.ResponseWriter, r *http.Request) (state.HostID, string, bool) {
 	namespace, name := r.PathValue("namespace"), r.PathValue("name")
 	id := names.ID(namespace, name)
@@ -51,7 +53,7 @@ func (s *Server) stackHost(w http.ResponseWriter, r *http.Request) (state.HostID
 	return *host, names.Project(namespace, name), true
 }
 
-// stackPs lists a stack's containers, asking its host.
+// stackPs lists a stack's containers by asking the stack's host.
 func (s *Server) stackPs(w http.ResponseWriter, r *http.Request) {
 	host, project, ok := s.stackHost(w, r)
 	if !ok {
@@ -64,7 +66,8 @@ func (s *Server) stackPs(w http.ResponseWriter, r *http.Request) {
 	s.ps(w, r, project)
 }
 
-// stackLogs writes a stack's logs, from its host; ?follow=true keeps going.
+// stackLogs writes a stack's logs, taken from the stack's host. With
+// ?follow=true, it keeps streaming.
 func (s *Server) stackLogs(w http.ResponseWriter, r *http.Request) {
 	host, project, ok := s.stackHost(w, r)
 	if !ok {
@@ -77,14 +80,14 @@ func (s *Server) stackLogs(w http.ResponseWriter, r *http.Request) {
 	s.logs(w, r, project)
 }
 
-// RestartRequest is the body of POST /v1/stacks/{namespace}/{name}/restart:
-// the services to restart, or none for all of them. The services that
-// depend on them are restarted too (state.RestartStack).
+// RestartRequest is the body of POST /v1/stacks/{namespace}/{name}/restart.
+// It names the services to restart, or none to restart all of them. The
+// services that depend on them are restarted too (state.RestartStack).
 type RestartRequest struct {
 	Services []string `json:"services,omitempty"`
 }
 
-// restartStack commits restart-stack; the state checks the stack and its
+// restartStack commits restart-stack. The state checks the stack and its
 // services.
 func (s *Server) restartStack(w http.ResponseWriter, r *http.Request) {
 	var request RestartRequest
@@ -97,9 +100,9 @@ func (s *Server) restartStack(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// localProject returns the Compose project of an internal route. Only hosts
-// call these routes, but the project becomes a path on this host, so it
-// must belong to a stack.
+// localProject returns the Compose project named in an internal route.
+// Only hosts call these routes. Still, the project becomes a path on this
+// host, so it must be a stack's project.
 func localProject(w http.ResponseWriter, r *http.Request) (string, bool) {
 	project := r.PathValue("project")
 	if _, _, ok := names.SplitProject(project); !ok {
@@ -148,7 +151,7 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request, project string) {
 	ctx, cancel := s.streamContext(r)
 	defer cancel()
 	if err := s.config.Containers.Logs(ctx, project, follow, writer); err != nil {
-		_, _ = fmt.Fprintf(writer, "\nclowder: the logs broke off: %v\n", err) // the status is sent already
+		_, _ = fmt.Fprintf(writer, "\nclowder: the logs broke off: %v\n", err) // the status was already sent
 	}
 }
 
@@ -165,9 +168,9 @@ func (f flushingWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
-// relay asks another host's internal endpoint with client and passes the
-// answer on as it streams. client is the forwarder for answers that must
-// come within its timeout, or the streamer for logs that follow.
+// relay asks another host's internal endpoint with client, and passes the
+// answer on as it streams in. client is the forwarder for answers that
+// must arrive within its timeout, or the streamer for logs that follow.
 func (s *Server) relay(w http.ResponseWriter, r *http.Request, client *http.Client, host state.HostID, path string) {
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
 		"https://"+s.config.APIAddress(host)+path, nil)

@@ -9,10 +9,11 @@ import (
 	"github.com/webcodingcat/clowder/internal/hostrole"
 )
 
-// A host joins with a one-time token (internal/jointoken). A user makes the
-// token (add-join-token), and the leader adds the host with it (add-host);
-// that command also uses the token up. The state keeps only the token's
-// hash, and the handlers check its expiry against the command's time.
+// A host joins with a one-time token (internal/jointoken). A user creates
+// the token (add-join-token). The leader adds the host with it (add-host),
+// and that command also uses the token up. The state keeps only the
+// token's hash, and the handlers check its expiry against the command's
+// time.
 
 // JoinToken is an open join token.
 type JoinToken struct {
@@ -20,16 +21,16 @@ type JoinToken struct {
 	Hash    string    `json:"hash"`
 	Expires time.Time `json:"expires"`
 	// Roles are the roles that a host may take when it joins with the
-	// token. A token opens only once, so whoever reads a worker's token
-	// cannot join as a control-plane host with it; kubeadm needs a second
+	// token. A token works only once, so whoever reads a worker's token
+	// cannot join as a control-plane host with it. kubeadm needs a second
 	// secret for that (--certificate-key).
 	Roles hostrole.Set `json:"roles"`
 }
 
 // The limits of join tokens. A token lives at least a minute, so that a
-// host that boots slowly still makes it in time, and at most a day, because
-// it sits in the user data and the OpenTofu state, where it must soon be
-// worthless.
+// host that boots slowly still joins in time. It lives at most a day,
+// because it sits in the user data and the OpenTofu state, where it must
+// soon be worthless.
 const (
 	MinJoinTokenTTL     = time.Minute
 	MaxJoinTokenTTL     = 24 * time.Hour
@@ -40,7 +41,7 @@ const (
 )
 
 // joinTokenKept is how long an expired token stays, so that a join with it
-// is told it expired rather than that it is unknown.
+// learns that the token expired, not that it is unknown.
 const joinTokenKept = time.Hour
 
 // AddJoinToken opens a join token for TTL from the command's time.
@@ -85,22 +86,22 @@ func applyAddJoinToken(s *State, cmd Command, payload AddJoinToken) (func(), err
 
 // dropExpiredTokens drops the tokens that expired more than joinTokenKept
 // before at. It uses the command's time, so every agent drops the same
-// tokens. The list changes only where this is called: with each
-// add-join-token and add-host.
+// tokens. Only add-join-token and add-host call it, so the list changes
+// only with those commands.
 func (s *State) dropExpiredTokens(at time.Time) {
 	maps.DeleteFunc(s.JoinTokens, func(_ string, token JoinToken) bool {
 		return at.Sub(token.Expires) > joinTokenKept
 	})
 }
 
-// ErrJoinTokenRefused is the answer to a token that does not open: unknown,
+// ErrJoinTokenRefused is the error for a token that does not work: unknown,
 // used or expired. Whoever asks with the token's ID is told which. The ID
-// alone opens nothing, and a guessed ID of 64 bits rarely names a token.
+// alone opens nothing, and a guessed 64-bit ID rarely names a token.
 var ErrJoinTokenRefused = errors.New("the join token does not open")
 
-// CheckJoinToken refuses a token that is unknown, used up or expired at at.
-// The leader checks the token's hash before it proposes the join; add-host
-// checks the rest again, at the command's time.
+// CheckJoinToken refuses a token that is unknown, used up, or expired at
+// the time at. The leader checks the token's hash before it proposes the
+// join. add-host checks the rest again, at the command's time.
 func (s *State) CheckJoinToken(id string, at time.Time) (JoinToken, error) {
 	token, ok := s.JoinTokens[id]
 	switch {
@@ -121,9 +122,9 @@ func (t JoinToken) CheckRoles(roles hostrole.Set) error {
 	return nil
 }
 
-// AddHost adds a host that joined with a token. The leader checked the
-// token's hash and the host's server with Hetzner, issued the
-// host's certificate and chose its ID (FreeHostID).
+// AddHost adds a host that joined with a token. The leader has already
+// checked the token's hash and the host's server with Hetzner, issued the
+// host's certificate and chosen its ID (FreeHostID).
 type AddHost struct {
 	// Token is the ID of the join token, which the command uses up.
 	Token string `json:"token"`
@@ -151,8 +152,8 @@ func applyAddHost(s *State, cmd Command, payload AddHost) (func(), error) {
 	if err := s.CheckJoiningHost(host); err != nil {
 		return nil, err
 	}
-	// the Floating IP and fencing act on the server, so a host without a
-	// checked one would be a host the cluster cannot fail over from
+	// the Floating IP and fencing act on the server, so the cluster could
+	// not fail over from a host without a checked one
 	if !host.ServerChecked {
 		return nil, fmt.Errorf("host %s has no checked server", host.Name)
 	}
@@ -189,12 +190,14 @@ func (s *State) FreeHostID() (HostID, bool) {
 	return 0, false
 }
 
-// CheckJoiningHost refuses a joining host that lacks what a host must
-// bring, whose underlay is outside the private network, whose
-// certificate's serial is in use, or whose name, underlay or server
-// another host has, unless that host is removed. Two hosts on one server
-// would fence each other's server. The leader asks before it asks Hetzner,
-// and add-host checks again.
+// CheckJoiningHost refuses a joining host:
+//   - that lacks a field that every host must have (checkNewHost);
+//   - whose underlay is outside the private network;
+//   - whose certificate serial is in use;
+//   - whose name, underlay or server another host has, unless that host is
+//     removed. Two hosts on one server would fence each other's server.
+//
+// The leader asks before it asks Hetzner, and add-host checks again.
 func (s *State) CheckJoiningHost(host Host) error {
 	if err := checkNewHost(host); err != nil {
 		return err
@@ -219,11 +222,11 @@ func (s *State) CheckJoiningHost(host Host) error {
 	return nil
 }
 
-// ConfirmServer records that Hetzner confirmed a host's server. This is for
-// the first host, whose server init took unchecked from the metadata
-// service; the leader confirms it once the configuration names the
-// project's token. ServerID is the server that the leader checked; it must
-// still be the host's.
+// ConfirmServer records that Hetzner confirmed a host's server. It is for
+// the first host: init took its server from the metadata service without a
+// check. The leader confirms the server once the configuration names the
+// project's token. ServerID is the server that the leader checked, and it
+// must still be the host's.
 type ConfirmServer struct {
 	Host     HostID `json:"host"`
 	ServerID int64  `json:"server_id"`

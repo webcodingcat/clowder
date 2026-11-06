@@ -17,9 +17,9 @@ func findSecret(s *State, id string) *Meta {
 }
 
 // putSecret stores a secret's encrypted values, within the limits of
-// checkSecretLimits. It keeps every key that a stack of its namespace or
-// the configuration names, because whatever names a key would fail without
-// it.
+// checkSecretLimits. It refuses to drop a key that a stack of its namespace
+// or the configuration names, because whatever names the key would fail
+// without it.
 func putSecret(s *State, id string, payload PutResource) (func() *Meta, error) {
 	spec, err := decodeSpec[EncryptedSecret](payload.Kind, id, payload.Spec)
 	if err != nil {
@@ -109,7 +109,7 @@ func checkSecretLimits(secrets map[string]*Secret) error {
 		secret := secrets[id]
 		size := 0
 		for _, value := range secret.Spec.Data {
-			// what is too short to be encrypted counts as nothing: putSecret
+			// a value too short to be encrypted counts as nothing: putSecret
 			// refuses such a resource
 			size += max(ClearSize(value), 0)
 		}
@@ -142,21 +142,21 @@ func removeSecret(s *State, id string) (func(), error) {
 	return func() { delete(s.Secrets, id) }, nil
 }
 
-// The length of what age adds when it encrypts for the cluster's one X25519
+// The lengths that age adds when it encrypts for the cluster's one X25519
 // recipient (datakey.Key.Encrypt).
 const (
 	// encryptedHeader is the header ("age-encryption.org/v1", one recipient
 	// stanza, the MAC) and the payload's nonce.
 	encryptedHeader = 168 + 16
-	// encryptedChunk is how much clear text age encrypts at a time; each
+	// encryptedChunk is how much clear text age encrypts at a time. Each
 	// chunk gets a tag of encryptedTag bytes.
 	encryptedChunk = 64 << 10
 	encryptedTag   = 16
 )
 
-// ClearSize returns the clear length of an encrypted value, worked out from
-// the encrypted length, so the state can enforce the limits without
-// decrypting the value. It returns -1 for what is too short to be
+// ClearSize returns the clear length of an encrypted value. It works the
+// length out from the encrypted length, so the state can enforce the limits
+// without decrypting the value. It returns -1 for a value too short to be
 // encrypted. A test in datakey compares it with real encryption, so a
 // change in age's format fails there.
 func ClearSize(encrypted Encrypted) int {

@@ -1,6 +1,6 @@
-// Package digest hashes lists of parts so that no two lists give a hash
-// the same input. It is the one way that clowder makes the digests of
-// secrets and of what an agent applied.
+// Package digest hashes lists of parts so that two different lists never
+// give the hash the same input. clowder uses it for every digest of a
+// secret and of what an agent applied.
 package digest
 
 import (
@@ -11,8 +11,9 @@ import (
 	"io"
 )
 
-// WriteParts writes each part to a hash after its length, so no two lists
-// of parts give the hash the same input ("ab", "c" and "a", "bc" differ).
+// WriteParts writes each part to hash, preceded by its length. So two
+// different lists never give the hash the same input: "ab", "c" and
+// "a", "bc" differ.
 func WriteParts(hash io.Writer, parts ...[]byte) {
 	for _, part := range parts {
 		_, _ = hash.Write(binary.BigEndian.AppendUint64(nil, uint64(len(part)))) // a hash never fails to write
@@ -20,8 +21,8 @@ func WriteParts(hash io.Writer, parts ...[]byte) {
 	}
 }
 
-// HMAC returns an HMAC-SHA256 over the parts with key, in hex. Such a
-// digest reveals nothing about a short secret to whoever lacks the key.
+// HMAC returns the HMAC-SHA256 of the parts under key, in hex. Without the
+// key, the digest reveals nothing about a secret, even a short one.
 func HMAC(key []byte, parts ...[]byte) string {
 	mac := hmac.New(sha256.New, key)
 	WriteParts(mac, parts...)

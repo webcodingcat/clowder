@@ -23,8 +23,8 @@ func (System) ReadFile(path string) ([]byte, error) {
 // while DRBD suspends I/O, and a check must never hang with them.
 const commandTimeout = 10 * time.Second
 
-// Run runs a command and returns its standard output; one that hangs is
-// left behind after commandTimeout.
+// Run runs a command and returns its standard output. A command that hangs
+// is left behind after commandTimeout.
 func (System) Run(ctx context.Context, name string, args ...string) (string, error) {
 	return command.Run(ctx, commandTimeout, name, args...)
 }

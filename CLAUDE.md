@@ -11,6 +11,10 @@ Everything in this repo is English. Read these before changing code:
   to the part of `docs/developing/` about the package you change.
 - @STYLE.md – the standards and the rules this project adds to them.
 
+A change that users see also updates their documentation: the README,
+[docs/operating.md](docs/operating.md) (with its Known limits) and
+[docs/resources.md](docs/resources.md).
+
 ## Commands
 
 All of them run through Docker (Linux, macOS; Git Bash or WSL on Windows). Go and the linters

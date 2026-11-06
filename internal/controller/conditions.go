@@ -6,26 +6,26 @@ import (
 	"time"
 )
 
-// Conditions are what the leader's loops see but the state does not show,
-// such as the Floating IP not being held, a host over capacity, or Docker
-// not answering for a while. Each has the time it began. They are kept in
-// memory only, so they start again after a change of leader. A new alert
-// then comes a little later rather than wrongly, and an open alert stays
-// open until the loop that observes its condition has looked.
+// Conditions holds what the leader's loops see but the state does not show,
+// such as a Floating IP that no host holds, a host over capacity, or Docker
+// that does not answer. Each condition has the time it began. Conditions
+// live in memory only, so they start again after a change of leader. A new
+// alert then comes a little later, but never wrongly. An open alert stays
+// open until the loop that observes its condition has looked at it.
 type Conditions struct {
 	mu    sync.Mutex
 	since map[string]time.Time
-	// seen are the conditions that a loop has looked at since this agent
+	// seen holds the conditions that a loop has looked at since this agent
 	// began to lead, whether they hold or not
 	seen map[string]bool
 }
 
-// NewConditions has no condition yet.
+// NewConditions returns a Conditions without any condition.
 func NewConditions() *Conditions {
 	return &Conditions{since: map[string]time.Time{}, seen: map[string]bool{}}
 }
 
-// Observe records whether a condition holds now. It tells whether the
+// Observe records whether a condition holds now. It reports whether the
 // condition began with this call, so that a loop logs a condition only once.
 func (c *Conditions) Observe(key string, holds bool) (began bool) {
 	c.mu.Lock()
@@ -42,7 +42,7 @@ func (c *Conditions) Observe(key string, holds bool) (began bool) {
 	return false
 }
 
-// Since tells whether a condition holds and since when.
+// Since reports whether a condition holds and since when.
 func (c *Conditions) Since(key string) (time.Time, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -50,7 +50,7 @@ func (c *Conditions) Since(key string) (time.Time, bool) {
 	return since, ok
 }
 
-// Seen tells whether a loop has looked at a condition since this agent
+// Seen reports whether a loop has looked at a condition since this agent
 // began to lead.
 func (c *Conditions) Seen(key string) bool {
 	c.mu.Lock()
@@ -58,9 +58,9 @@ func (c *Conditions) Seen(key string) bool {
 	return c.seen[key]
 }
 
-// Keep forgets every condition except those in keys. Otherwise the
-// conditions of stacks and hosts that are gone would stay in memory as long
-// as this agent leads.
+// Keep forgets every condition except those in keys. Without it, the
+// conditions of stacks and hosts that are gone would stay in memory for as
+// long as this agent leads.
 func (c *Conditions) Keep(keys map[string]bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -68,8 +68,8 @@ func (c *Conditions) Keep(keys map[string]bool) {
 	maps.DeleteFunc(c.seen, func(key string, _ bool) bool { return !keys[key] })
 }
 
-// Reset forgets every condition. Once this agent no longer leads, what it
-// saw is stale by the time it might lead again.
+// Reset forgets every condition. It is called when this agent stops
+// leading, because what it saw will be stale if it leads again later.
 func (c *Conditions) Reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

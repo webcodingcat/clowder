@@ -15,10 +15,11 @@ const (
 	RolePrimary   Role = "Primary"
 )
 
-// Promote makes the resource primary here. force makes a copy primary that
-// is not UpToDate: right only for a volume that never held data, whose
-// first copy has no UpToDate peer to become. On a volume that holds data,
-// it would make an outdated or empty copy the volume's truth.
+// Promote makes the resource primary here. force makes a copy primary even
+// if it is not UpToDate. That is right only for a volume that never held
+// data, because its first copy has no UpToDate peer to sync from. On a
+// volume that holds data, force would make an outdated or empty copy the
+// volume's truth.
 func (d Driver) Promote(ctx context.Context, volume Volume, force bool) error {
 	args := []string{"primary", volume.Resource.Name}
 	if force {

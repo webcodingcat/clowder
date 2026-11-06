@@ -98,7 +98,8 @@ func newDelete(g *globals) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				// from the bottom up: what uses a resource comes after it
+				// from the bottom up, because a resource that uses another
+				// comes after it in the files
 				for _, object := range slices.Backward(objects) {
 					refs = append(refs, object.Ref())
 				}
@@ -143,8 +144,9 @@ func (f *selectFlags) register(command *cobra.Command, lists bool) {
 	}
 }
 
-// selection is what a command names: a kind, a namespace (none for a
-// namespace or every namespace), and a name (none for a list).
+// selection is what a command names: a kind, a namespace (empty for a kind
+// without namespaces or for every namespace), and a name (empty for a
+// list).
 type selection struct {
 	kind      string
 	namespace string
@@ -154,7 +156,7 @@ type selection struct {
 
 // resolve reads a kind and a name as users type them, with -n and -A. The
 // namespace comes from -n or from the name (shop/data), or else it is
-// default. Where both name it, they must agree.
+// default. If both name a namespace, they must agree.
 func (f selectFlags) resolve(kindWord, name string) (selection, error) {
 	kind, err := kindOf(kindWord)
 	if err != nil {
@@ -205,7 +207,7 @@ func kindWords() string {
 	return strings.Join(words, ", ")
 }
 
-// listPath returns the API's path of the selection's list.
+// listPath returns the API path for the selection's list.
 func (s selection) listPath() string {
 	path := "/v1/resources/" + strings.ToLower(s.kind)
 	switch {
@@ -218,7 +220,7 @@ func (s selection) listPath() string {
 	}
 }
 
-// path returns the API's path of the one selected resource.
+// path returns the API path for the one selected resource.
 func (s selection) path() string {
 	if !resource.Namespaced(s.kind) {
 		return "/v1/resources/" + strings.ToLower(s.kind) + "/" + url.PathEscape(s.name)
@@ -227,7 +229,7 @@ func (s selection) path() string {
 }
 
 // printObjects prints resources as a table, as YAML documents (which apply
-// accepts again) or as JSON: one object, or a list of objects.
+// accepts again), or as JSON (one object, or a list of objects).
 func printObjects(out io.Writer, selected selection, objects []resource.Object, output string) error {
 	switch output {
 	case "json":
@@ -261,15 +263,14 @@ func printYAML(out io.Writer, objects []resource.Object) error {
 	return nil
 }
 
-// yamlOf writes a resource as YAML, with its fields in the order that the
-// API wrote them.
+// yamlOf encodes a resource as YAML, with its fields in the order in which
+// the API wrote them.
 func yamlOf(object resource.Object) ([]byte, error) {
 	encoded, err := json.Marshal(object)
 	if err != nil {
 		return nil, err
 	}
-	// JSON is valid YAML: read as a node tree, it keeps the order of the
-	// fields
+	// JSON is valid YAML; read as a node tree, it keeps the field order
 	var document yaml.Node
 	if err := yaml.Unmarshal(encoded, &document); err != nil {
 		return nil, err
@@ -278,8 +279,8 @@ func yamlOf(object resource.Object) ([]byte, error) {
 	return yaml.Marshal(&document)
 }
 
-// blockStyle drops the styles that JSON gave the nodes ({...}, "..."), so
-// YAML writes them as people do and quotes only where needed.
+// blockStyle drops the styles that JSON gave the nodes ({...}, "..."). So
+// the YAML looks as people write it, with quotes only where needed.
 func blockStyle(node *yaml.Node) {
 	node.Style = 0
 	for _, child := range node.Content {
@@ -287,12 +288,12 @@ func blockStyle(node *yaml.Node) {
 	}
 }
 
-// digestShown is how much of a secret's digest a table shows: enough to see
-// a change.
+// digestShown is how many characters of a secret's digest a table shows.
+// That is enough to see a change.
 const digestShown = 12
 
 // printTable prints resources as a table. The watch prints later rows
-// without repeating the header (withHeader).
+// without repeating the header (withHeader false).
 func printTable(out io.Writer, kind string, objects []resource.Object, withHeader bool) error {
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	// tabwriter reports errors on Flush
@@ -354,9 +355,9 @@ func printTable(out io.Writer, kind string, objects []resource.Object, withHeade
 				object.Metadata.Generation, strings.Join(status.Keys, ","), status.Digest[:min(len(status.Digest), digestShown)])
 		}
 	case resource.KindStack:
-		// the reason comes last: what the stack waits for or why it fails
-		// is long, and empty for most stacks; a running stack also waits
-		// when a volume it names finds no place
+		// the reason comes last, because it is long and empty for most
+		// stacks; a running stack also shows a wait reason when a volume
+		// it names finds no place
 		header("NAMESPACE\tNAME\tSTATUS\tHOST\tPRIORITY\tGENERATION\tPUSHED OUT\tREASON")
 		for _, object := range objects {
 			var status api.StackStatus
@@ -375,7 +376,7 @@ func printTable(out io.Writer, kind string, objects []resource.Object, withHeade
 	return table.Flush()
 }
 
-// decodeParts reads a resource's spec and status as the API wrote them.
+// decodeParts decodes a resource's spec and status as the API wrote them.
 // A nil target skips that part.
 func decodeParts(object resource.Object, spec, status any) error {
 	for _, part := range []struct {

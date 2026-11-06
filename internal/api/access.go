@@ -16,16 +16,16 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Who may call what. Like Kubernetes' node authorizer, every route names
-// the callers it takes (NewServer), and a host may act only for itself
-// (mayPropose, and the state's checks of each report). The checks read the
-// caller's certificate, which names a host's roles.
+// Access control: who may call what. As with Kubernetes' node authorizer,
+// every route names the callers it accepts (Server.routes). A host may act
+// only for itself (mayPropose, and the state's checks of each report). The
+// checks read the caller's certificate, which names the host's roles.
 //
-// A host without the control plane takes only control-plane hosts already
-// in the TLS handshake (TLSConfig): only the control plane calls it, so it
-// serves neither the CLI nor the join, and it listens only on the private
-// network. On a control-plane host, the routes below tell the callers
-// apart.
+// On a host without the control plane, the TLS handshake already refuses
+// every client certificate except a control-plane host's (TLSConfig). Only
+// the control plane calls such a host. So it serves neither the CLI nor the
+// join, and it does not listen on its public address. On a control-plane
+// host, the routes tell the callers apart.
 
 // caller says who may call a route.
 type caller int
@@ -37,8 +37,8 @@ const (
 	anyHost
 	// controlPlaneHost is a host with the role control-plane.
 	controlPlaneHost
-	// thisHost is this agent's own host certificate: root on the host asks
-	// its own agent (clowderd credentials, clowderd sealing-key).
+	// thisHost is this agent's own host certificate. Root on the host uses
+	// it to ask its own agent (clowderd credentials, clowderd sealing-key).
 	thisHost
 )
 
@@ -57,8 +57,8 @@ func (c caller) String() string {
 	}
 }
 
-// admits tells whether a verified caller may call a route of rule here. A
-// rule it does not know admits nobody.
+// admits tells whether a verified caller may call a route with this rule.
+// An unknown rule admits nobody.
 func (s *Server) admits(rule caller, identity pki.Identity) bool {
 	switch rule {
 	case cliCaller:
@@ -75,42 +75,43 @@ func (s *Server) admits(rule caller, identity pki.Identity) bool {
 }
 
 // cliKinds are the commands that a control-plane host may forward for the
-// CLI, whose certificate ended at that host: exactly those that the CLI's
-// routes make. A kind is added here when its route is added. The host names
-// the CLI's actor (cli/<name>) and could name another; the name grants
-// nothing.
+// CLI. The CLI's certificate ends at that host. The list holds exactly the
+// kinds that the CLI's routes make; add a kind here when you add its route.
+// The host names the CLI's actor (cli/<name>) and could name another one.
+// That is accepted, because the name grants nothing.
 var cliKinds = map[string]bool{
 	state.KindSetHostPhase: true, state.KindRestartStack: true, state.KindRequestMove: true,
 	state.KindAddJoinToken: true,
 }
 
-// hostKinds are what any host reports about itself, as itself. The state
-// checks that each report is about the actor's own host (its stacks, its
-// copies, the operation it owns), as Kubernetes' NodeRestriction does.
+// hostKinds are the reports that any host sends about itself, as itself.
+// The state checks that each report is about the actor's own host (its
+// stacks, its copies, the operation it owns), as Kubernetes'
+// NodeRestriction does.
 var hostKinds = map[string]bool{
 	state.KindReportHost:     true,
 	state.KindSetStackStatus: true, state.KindForgetCopy: true, state.KindSetVolumeInitialized: true,
 	state.KindReportPeerForgotten: true, state.KindSetCopySynced: true,
-	state.KindAdvanceOperation: true, // the step of an operation a host owns
+	state.KindAdvanceOperation: true, // a step of an operation the host owns
 	state.KindSetHostPhase:     true, // its own: recovering, then active (the state checks who)
 }
 
-// controlPlaneKinds are what a control-plane host does for the cluster, as
-// itself: the cutoff of the CLI certificates, which root on that host sets
-// (clowderd credentials --revoke-older).
+// controlPlaneKinds are the commands that a control-plane host sends for
+// the cluster, as itself. The only one is the cutoff for CLI certificates,
+// which root on that host sets (clowderd credentials --revoke-older).
 var controlPlaneKinds = map[string]bool{
 	state.KindSetCLICutoff: true,
 }
 
 // mayPropose tells whether a host may send a command to the leader
-// (internal/propose). Nothing else comes in from outside: the leader makes
-// its own commands (placements, the ingress) itself, and no host may speak
+// (internal/propose). No other command comes in from outside. The leader
+// makes its own commands (placements, the ingress), and no host may speak
 // for another host or for the leader.
 func mayPropose(identity pki.Identity, cmd state.Command) bool {
 	itself := cmd.Actor == actorOf(identity)
 	controlPlane := identity.HostRoles.Has(hostrole.ControlPlane)
-	// a kind may be in more than one set (set-host-phase: the CLI's, and a
-	// host's own); the actor decides which set applies
+	// a kind may be in more than one set (set-host-phase is the CLI's and
+	// a host's own); the actor decides which set applies
 	switch {
 	case state.IsCLIActor(cmd.Actor) && cliKinds[cmd.Kind]:
 		return controlPlane
@@ -122,10 +123,11 @@ func mayPropose(identity pki.Identity, cmd state.Command) bool {
 	return false
 }
 
-// TLSConfig is the server's side of mutual TLS. On a control-plane host, a
-// client certificate is checked when given, and the routes refuse calls
-// without one, except the routes of handleOpen. A host without the control
-// plane takes only control-plane hosts.
+// TLSConfig is the server's side of mutual TLS. On a control-plane host,
+// the handshake checks a client certificate if the client sends one. The
+// routes then refuse calls without a certificate, except the routes of
+// handleOpen. A host without the control plane accepts only control-plane
+// hosts.
 func (s *Server) TLSConfig() *tls.Config {
 	if !s.config.Roles.Has(hostrole.ControlPlane) {
 		return pki.ServerTLSForControlPlane(s.config.Certificate, s.config.CA, s.revoked)
@@ -144,8 +146,9 @@ func (s *Server) TLSConfig() *tls.Config {
 type identityKey struct{}
 
 // handle registers a route that only the callers of rule may use. Every
-// call is checked against the CA, the revocation list and the CLI's cutoff
-// in the state, so a revoked certificate is refused at once on every agent.
+// call is checked against the CA, and against the revocation list and the
+// CLI cutoff in the state. So every agent refuses a revoked certificate at
+// once.
 func (s *Server) handle(pattern string, rule caller, handler http.HandlerFunc) {
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
@@ -179,8 +182,8 @@ func (s *Server) handle(pattern string, rule caller, handler http.HandlerFunc) {
 			writeError(w, http.StatusGatewayTimeout, err)
 			return
 		}
-		// the audit: which CLI certificate asked for a change, on the agent it
-		// reached; the Raft command carries the same actor
+		// audit: log which CLI certificate asked for a change, on the agent
+		// it reached; the Raft command carries the same actor
 		if rule == cliCaller && r.Method != http.MethodGet {
 			s.config.Logger.Info("a CLI request", "actor", actorOf(identity), "method", r.Method, "path", r.URL.Path)
 		}
@@ -188,10 +191,10 @@ func (s *Server) handle(pattern string, rule caller, handler http.HandlerFunc) {
 	})
 }
 
-// handleOpen registers a route that callers reach without a certificate:
-// the join, which proves itself with a join token instead. Only a
-// control-plane host serves it, as only those let a caller without a
-// certificate through the handshake (TLSConfig).
+// handleOpen registers a route that callers reach without a certificate.
+// This is the join, which proves itself with a join token instead. Only a
+// control-plane host serves it, because only a control-plane host lets a
+// caller without a certificate through the handshake (TLSConfig).
 func (s *Server) handleOpen(pattern string, handler http.HandlerFunc) {
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		if s.checkVersion(w, r) {
@@ -200,8 +203,8 @@ func (s *Server) handleOpen(pattern string, handler http.HandlerFunc) {
 	})
 }
 
-// checkVersion refuses a caller too far from this agent's version
-// (buildinfo.Compatible).
+// checkVersion refuses a caller whose version is not compatible with this
+// agent's (buildinfo.Compatible).
 func (s *Server) checkVersion(w http.ResponseWriter, r *http.Request) bool {
 	callerVersion := r.Header.Get(VersionHeader)
 	if !buildinfo.Compatible(callerVersion, s.config.Version) {
@@ -214,9 +217,9 @@ func (s *Server) checkVersion(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // warnAboutDevelopment logs, once per version, that a development build
-// talks to another build, which Compatible lets through. Only callers with
-// a certificate reach it, because on the open routes anyone could fill the
-// log and the map with versions.
+// talks to another build. Compatible lets such a call through. Only callers
+// with a certificate reach this function. On the open routes, anyone could
+// fill the log and the map with versions.
 func (s *Server) warnAboutDevelopment(callerVersion string) {
 	development := buildinfo.IsDevelopment(callerVersion) || buildinfo.IsDevelopment(s.config.Version)
 	if callerVersion == "" || callerVersion == s.config.Version || !development {
@@ -236,10 +239,10 @@ func (s *Server) revoked(serial string) bool {
 	return revoked
 }
 
-// waitForCatchUp holds the CLI's request until this agent has caught up
-// after its start (ServerConfig.CaughtUp), for at most waitTimeout. Host
-// routes do not wait, because the catch-up itself, the beats and the joins
-// use them.
+// waitForCatchUp holds a CLI request until this agent has caught up after
+// its start (ServerConfig.CaughtUp), for at most waitTimeout. Host routes
+// do not wait, because the catch-up itself, the beats and the joins use
+// them.
 func (s *Server) waitForCatchUp(r *http.Request) bool {
 	if s.config.CaughtUp == nil {
 		return true

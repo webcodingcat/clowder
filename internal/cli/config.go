@@ -15,8 +15,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/pki"
 )
 
-// fromAHost says how a user gets credentials, for the messages that need
-// to say it.
+// fromAHost tells the user how to get credentials. Messages that need to
+// explain this use it.
 const fromAHost = "ssh root@<host> clowderd credentials | clowder config import -"
 
 func newConfig(g *globals) *cobra.Command {
@@ -28,7 +28,7 @@ func newConfig(g *globals) *cobra.Command {
 	return config
 }
 
-// withHint says what to do about an error of picking or adding a context.
+// withHint adds advice to an error from picking or adding a context.
 func withHint(err error) error {
 	switch {
 	case errors.Is(err, clientconfig.ErrNoCurrentContext):
@@ -57,7 +57,7 @@ func newGetContexts(g *globals) *cobra.Command {
 	}
 }
 
-// printContexts lists the contexts and when their certificates end.
+// printContexts lists the contexts and when their certificates expire.
 func printContexts(out io.Writer, config clientconfig.Config) error {
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(table, "CURRENT\tNAME\tENDPOINTS\tCERTIFICATE-ENDS") // tabwriter reports errors on Flush
@@ -140,14 +140,14 @@ func newImport(g *globals) *cobra.Command {
 			return g.changeConfig(cmd.OutOrStdout(), "imported context "+cliContext.Name, add)
 		},
 	}
-	// not --context, which picks the context a command uses
+	// not --context, which picks the context that a command uses
 	command.Flags().StringVar(&flags.as, "as", "", "the name of the new context (default: the cluster's)")
 	command.Flags().BoolVar(&flags.replace, "replace", false, "replace a context of the same name")
 	return command
 }
 
 // changeConfig reads the credentials file, changes it and writes it back.
-// Then it says what it did and which context is current.
+// Then it prints what it did and which context is current.
 func (g *globals) changeConfig(out io.Writer, done string, change func(config *clientconfig.Config) error) error {
 	config, path, err := g.readConfig()
 	if err != nil {

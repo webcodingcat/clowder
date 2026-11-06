@@ -9,8 +9,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Members are the hosts in Raft's latest configuration, committed or not.
-// Each says whether it votes.
+// Members returns the hosts in Raft's latest configuration, committed or
+// not. The value says whether the host votes.
 func (n *Node) Members() (map[state.HostID]bool, error) {
 	future := n.raft.GetConfiguration()
 	if err := future.Error(); err != nil {
@@ -56,7 +56,7 @@ func (n *Node) DemoteVoter(id state.HostID) error {
 }
 
 // RemoveMember takes a host out of Raft. A leader that removed itself would
-// end its lead abruptly. Instead, it hands over the lead first
+// end its lead abruptly. So a leader hands over the lead first
 // (TransferLeadership), and the next leader removes it.
 func (n *Node) RemoveMember(id state.HostID) error {
 	if err := n.raft.RemoveServer(serverID(id), 0, proposeTimeout).Error(); err != nil {
@@ -66,8 +66,9 @@ func (n *Node) RemoveMember(id state.HostID) error {
 }
 
 // TransferLeadership hands the lead to another voter. It returns once that
-// voter leads, or once the transfer failed. Removing the leading host this
-// way spares the cluster the election that follows a leader going silent.
+// voter leads, or once the transfer failed. When the leading host is
+// removed this way, the cluster needs no election after a timeout, as it
+// would if the leader just went silent.
 func (n *Node) TransferLeadership() error {
 	if err := n.raft.LeadershipTransfer().Error(); err != nil {
 		return fmt.Errorf("hand the Raft lead over: %w", err)

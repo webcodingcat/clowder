@@ -10,12 +10,13 @@ import (
 )
 
 // reportRecovery tells the cluster how far this host has come back after
-// it was fenced, until ctx ends. Once the host runs again, it is
+// it was fenced, until ctx ends. Once the host runs again, it becomes
 // recovering. Once its copies have caught up with their peers (the volume
-// reconciler reports each one synced), it is active and takes stacks. Only
-// the host can tell either step; the leader only knows that it powered the
-// server on. A step is reported only once the state has caught up, so the
-// host knows that its stacks moved before it says it is back.
+// reconciler reports each one synced), it becomes active and takes stacks.
+// Only the host can report either step. The leader only knows that it
+// powered the server on. A step is reported only after the state has
+// caught up, so the host knows that its stacks moved before it says it is
+// back.
 func reportRecovery(ctx context.Context, cluster loop.Cluster, self state.HostID, propose controller.Propose,
 	logger *slog.Logger,
 ) {

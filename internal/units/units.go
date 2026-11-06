@@ -1,5 +1,5 @@
-// Package units parses the sizes and durations used in the specs of the
-// resources, so every place reads "20G" and "30d" the same way.
+// Package units parses the sizes and durations in the resources' specs, so
+// that every place reads "20G" and "30d" the same way.
 package units
 
 import (
@@ -10,17 +10,17 @@ import (
 	"time"
 )
 
-// ParseDuration reads a duration in Go's format ("90s", "1h30m") that may
-// start with whole days ("30d", "1d12h"), because people think of
-// certificates and heartbeats in days, which Go's format lacks. Negative
-// durations are refused.
+// ParseDuration reads a duration in Go's format ("90s", "1h30m"). The
+// duration may start with whole days ("30d", "1d12h"): people think of
+// certificates and heartbeats in days, and Go's format has no days. It
+// refuses negative durations.
 func ParseDuration(text string) (time.Duration, error) {
 	text = strings.TrimSpace(text)
 	problem := fmt.Errorf("duration %q is not like 90s, 1h30m, 30d or 1d12h", text)
 	rest := text
 	var days time.Duration
 	if before, after, hasDays := strings.Cut(text, "d"); hasDays {
-		// 16 bits of days (179 years) cannot overflow a Duration
+		// a 16-bit count of days (179 years) cannot overflow a Duration
 		number, err := strconv.ParseUint(before, 10, 16)
 		if err != nil {
 			return 0, problem
@@ -41,8 +41,8 @@ func ParseDuration(text string) (time.Duration, error) {
 	return days + duration, nil
 }
 
-// ParseSize reads a size like "20G" or "512M": a positive whole number and
-// one of K, M, G, T (powers of 1024).
+// ParseSize reads a size like "20G" or "512M": a positive whole number,
+// followed by K, M, G or T (powers of 1024).
 func ParseSize(text string) (int64, error) {
 	multipliers := map[byte]int64{'K': 1 << 10, 'M': 1 << 20, 'G': 1 << 30, 'T': 1 << 40}
 	text = strings.TrimSpace(text)
@@ -64,8 +64,8 @@ func ParseSize(text string) (int64, error) {
 }
 
 // FormatSize writes a size in bytes for people, in the largest unit that
-// fits: "20G", "1.5G" (one decimal, rounded), "512M", and in bytes below
-// 1K ("100B"). ParseSize reads whole sizes back, but not the others.
+// fits: "20G", "1.5G" (rounded to one decimal), "512M", or "100B" below
+// 1K. ParseSize reads back "20G" and "512M", but not "1.5G" or "100B".
 func FormatSize(size int64) string {
 	for _, unit := range []struct {
 		letter string
@@ -81,16 +81,16 @@ func FormatSize(size int64) string {
 	return strconv.FormatInt(size, 10) + "B"
 }
 
-// Size is a size in bytes as a spec holds it. It is read with ParseSize
-// and written exactly, in the largest unit that holds it whole ("1G",
+// Size is a size in bytes as a spec holds it. It is read with ParseSize.
+// It is written exactly, in the largest unit that holds it whole ("1G",
 // "1536M"). So a size that the user wrote as 1024M reads back as 1G, and
-// every written size can be read back. A size of 0 (no size) is written as
-// "" and reads back as 0, which the spec's check refuses.
+// every written size can be read back. A size of 0 means no size: it is
+// written as "" and reads back as 0. The spec's check refuses it.
 type Size int64
 
-// MarshalText writes the size in the largest unit that holds it whole.
-// ParseSize reads only whole kibibytes and larger units, so no other value
-// is a Size.
+// MarshalText writes the size in the largest unit that holds it whole. It
+// refuses a negative size or one that is not whole kibibytes, because
+// ParseSize never returns such a size.
 func (s Size) MarshalText() ([]byte, error) {
 	switch {
 	case s == 0:

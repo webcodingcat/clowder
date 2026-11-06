@@ -11,14 +11,15 @@ import (
 // ring covers hours.
 const ChangeRingSize = 4096
 
-// ErrChangesGone is the answer to a watch from an index that the ring no
+// ErrChangesGone is the error for a watch from an index that the ring no
 // longer covers. The client then lists again and watches from the list's
 // index.
 var ErrChangesGone = errors.New("the changes since that index are gone; list afresh")
 
-// ChangeRing keeps the last changes the log made, oldest first, for the
-// watch. It holds every change after the index in from. Earlier changes
-// are in the snapshot the ring started from, or were dropped to make room.
+// ChangeRing keeps the last changes that the log made, oldest first, for
+// the watch. It holds every change after the index in from. Earlier
+// changes are in the snapshot that the ring started from, or were dropped
+// to make room.
 type ChangeRing struct {
 	changes []Change
 	from    uint64
@@ -31,8 +32,8 @@ func (r *ChangeRing) Reset(index uint64) {
 	r.changes, r.from = nil, index
 }
 
-// Add takes what one applied command changed, and drops the oldest changes
-// beyond ChangeRingSize.
+// Add takes the changes of one applied command and drops the oldest
+// changes beyond ChangeRingSize.
 func (r *ChangeRing) Add(changes []Change) {
 	r.changes = append(r.changes, changes...)
 	if over := len(r.changes) - ChangeRingSize; over > 0 {

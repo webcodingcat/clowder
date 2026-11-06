@@ -1,11 +1,11 @@
-// Package hetzner is the part of the Hetzner Cloud API that clowder uses.
-// For the leader, it routes the Floating IP to the ingress host, checks
-// which server a host runs on, and powers servers off (fencing) and on.
-// clowderd recover labels the servers that it takes out of the cluster, and
-// an agent reads the label when it starts. A server is named by its ID,
-// which the state keeps as the host's ServerID. The package is a small
-// client of its own, because the official SDK would bring Prometheus'
-// client and much more into clowderd.
+// Package hetzner is a client for the part of the Hetzner Cloud API that
+// clowder uses. For the leader, it routes the Floating IP to the ingress
+// host, checks which server a host runs on, and powers servers off
+// (fencing) and on. clowderd recover labels the servers that it takes out
+// of the cluster, and an agent reads the label when it starts. A server is
+// identified by its ID, which the state keeps as the host's ServerID. The
+// package is a small client of its own, because the official SDK would
+// bring Prometheus' client and much more into clowderd.
 package hetzner
 
 import (
@@ -35,16 +35,16 @@ type Client struct {
 	http  *http.Client
 	// poll is how often the client asks whether an action has finished.
 	poll time.Duration
-	// firstWait and lastWait bound the wait before a request is sent
-	// again (do); the wait doubles from firstWait up to lastWait.
+	// firstWait and lastWait limit the wait before a request is sent
+	// again (do). The wait doubles from firstWait up to lastWait.
 	firstWait, lastWait time.Duration
 }
 
-// attempts is the most times that do sends a request.
+// attempts is how many times do sends a request at most.
 const attempts = 5
 
-// maxErrorBody bounds how much of an answer is read: an error's body, or the
-// rest of an answer that nobody reads.
+// maxErrorBody limits how much of an answer is read: an error's body, or
+// the rest of an answer that nobody reads.
 const maxErrorBody = 64 << 10
 
 // New returns a client of the API at api (DefaultAPI when empty) that uses
@@ -97,9 +97,9 @@ func (c *Client) AssignFloatingIP(ctx context.Context, ip netip.Addr, serverID i
 		fmt.Sprintf("assign the Floating IP %s to server %d", ip, serverID))
 }
 
-// PowerOff cuts the server's power, as pulling the plug would, and waits
-// until Hetzner has done it, because fencing relies on this. A server that
-// is off stays off.
+// PowerOff cuts the server's power, like pulling the plug, and waits until
+// Hetzner has done it, because fencing relies on that. A server that is off
+// stays off.
 func (c *Client) PowerOff(ctx context.Context, serverID int64) error {
 	return c.power(ctx, serverID, "poweroff", "power server %d off")
 }
@@ -110,7 +110,7 @@ func (c *Client) PowerOn(ctx context.Context, serverID int64) error {
 	return c.power(ctx, serverID, "poweron", "power server %d on")
 }
 
-// power runs a power action on the server; what describes the action in
+// power runs a power action on the server; what describes the action for
 // the error.
 func (c *Client) power(ctx context.Context, serverID int64, action, what string) error {
 	if err := checkID(serverID); err != nil {
@@ -151,15 +151,16 @@ func (c *Client) readServer(ctx context.Context, serverID int64) (server, error)
 	return answer.Server, nil
 }
 
-// ErrOtherServer is CheckServer's answer for a server that is not the
+// ErrOtherServer is CheckServer's error for a server that is not the
 // host's.
 var ErrOtherServer = errors.New("it is another server")
 
-// CheckServer makes sure that the server is the host's server: the host's
-// underlay is one of the server's addresses in the project's private
-// networks, and the host's public address is the server's public IPv4. A
-// host names its server itself, and fencing powers off the server with that
-// ID, while the project's token may power off any server of the project.
+// CheckServer makes sure that the server is the host's server. The host's
+// underlay must be one of the server's addresses in the project's private
+// networks, and the host's public address must be the server's public IPv4.
+// The check matters because a host names its server itself, fencing powers
+// off the server with that ID, and the project's token may power off any
+// server of the project.
 func (c *Client) CheckServer(ctx context.Context, serverID int64, underlay, publicAddress netip.Addr) error {
 	found, err := c.readServer(ctx, serverID)
 	if errors.Is(err, ErrNoSuchServer) {
@@ -197,9 +198,9 @@ func (c *Client) CheckServer(ctx context.Context, serverID int64, underlay, publ
 // with another retired host it would still have the old cluster's majority.
 const RetiredLabel = "clowder-retired"
 
-// SetRetired labels the server RetiredLabel with the host's certificate
-// serial and keeps its other labels, because the API replaces all labels
-// at once.
+// SetRetired sets the server's label RetiredLabel to the host's certificate
+// serial. It keeps the server's other labels, because the API replaces all
+// labels at once.
 func (c *Client) SetRetired(ctx context.Context, serverID int64, serial string) error {
 	found, err := c.readServer(ctx, serverID)
 	if err != nil {
@@ -260,14 +261,14 @@ func (c *Client) findFloatingIP(ctx context.Context, ip netip.Addr) (floatingIP,
 	return floatingIP{}, fmt.Errorf("look up %s: %w", ip, ErrNoSuchFloatingIP)
 }
 
-// ErrNoSuchFloatingIP is the answer for a Floating IP that the project does
+// ErrNoSuchFloatingIP is the error for a Floating IP that the project does
 // not have.
 var ErrNoSuchFloatingIP = errors.New("the project has no such Floating IP")
 
-// TokenRefused tells whether Hetzner refused the token for a call. Either
+// TokenRefused reports whether Hetzner refused the token for a call. Either
 // the token is not valid or lacks the permission (401, 403), or its project
-// does not have the server or the Floating IP that the cluster names, as
-// happens with a token of another project.
+// does not have the server or the Floating IP that the cluster names. The
+// latter happens with a token of another project.
 func TokenRefused(err error) bool {
 	return errors.Is(err, statusCode(http.StatusUnauthorized)) || errors.Is(err, statusCode(http.StatusForbidden)) ||
 		errors.Is(err, ErrNoSuchServer) || errors.Is(err, ErrNoSuchFloatingIP)
@@ -278,8 +279,9 @@ func TokenRefused(err error) bool {
 const maxServersPage = 50
 
 // ServerIDs lists the IDs of the project's servers in one request, which is
-// what the check before a new token needs. A cluster has at most 32 hosts,
-// so a project with more servers than fit on one page is not checked.
+// what the check of a new token needs. A cluster has at most 32 hosts, so
+// ServerIDs returns an error for a project with more servers than fit on
+// one page.
 func (c *Client) ServerIDs(ctx context.Context) ([]int64, error) {
 	var answer struct {
 		Servers []struct {
@@ -345,13 +347,13 @@ func (c *Client) act(ctx context.Context, path string, body any, what string) er
 }
 
 // do sends a request with the token and reads the answer into out. After an
-// error that may be temporary (apiError.passes, or the network), it sends
-// the request again, up to attempts times. The leader fences through do,
-// and one busy moment of the API must not hold up a failover. Every request
-// that clowder sends is safe to send twice: reads, and actions that change
-// nothing the second time (an assignment to the same server, a power action
-// on a server already in that state). An error carries the API's message,
-// never the token.
+// error that may be temporary (apiError.passes, or a network error), it
+// sends the request again, up to attempts times. The leader fences through
+// do, and one busy moment of the API must not hold up a failover. Every
+// request that clowder sends is safe to send twice: reads, and changes that
+// do nothing the second time (an assignment to the same server, a power
+// action on a server already in that state, the same labels). An error
+// carries the API's message, never the token.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	var encoded []byte
 	if body != nil {
@@ -392,7 +394,7 @@ func jitter(wait time.Duration) time.Duration {
 	return wait/2 + rand.N(wait/2+1) //nolint:gosec // a wait, no secret
 }
 
-// send sends one request; encoded is the body, nil for none.
+// send sends one request. encoded is the body, or nil for none.
 func (c *Client) send(ctx context.Context, method, path string, encoded []byte, out any) error {
 	var reader io.Reader
 	if encoded != nil {
@@ -445,7 +447,7 @@ func (e *apiError) Error() string {
 
 func (e *apiError) Unwrap() error { return e.status }
 
-// passes tells whether the same request may succeed a little later: the
+// passes reports whether the same request may succeed a little later: the
 // project has used up its requests (429), the API has trouble (5xx), or
 // another action is running on the same server (locked).
 func (e *apiError) passes() bool {
@@ -478,7 +480,7 @@ func (s statusCode) Error() string { return fmt.Sprintf("HTTP %d", int(s)) }
 // errNotFound is the API's 404.
 var errNotFound error = statusCode(http.StatusNotFound)
 
-// ErrNoSuchServer is the answer for a server that the project does not
+// ErrNoSuchServer is the error for a server that the project does not
 // have, or for an ID that names no server.
 var ErrNoSuchServer = errors.New("the project has no such server")
 

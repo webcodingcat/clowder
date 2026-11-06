@@ -13,8 +13,8 @@ import (
 // upstreamTimeout bounds one question to an upstream resolver.
 const upstreamTimeout = 3 * time.Second
 
-// DNSResolver answers the containers on Resolver:53 over UDP and TCP. So
-// far it passes every question on to the host's resolvers; the names of
+// DNSResolver answers the containers on Resolver:53 over UDP and TCP. For
+// now it passes every question on to the host's resolvers. The names of
 // exported services (<service>.<stack>.clowder) come with exports.
 type DNSResolver struct {
 	upstreams []string
@@ -23,7 +23,8 @@ type DNSResolver struct {
 }
 
 // Upstreams reads the host's resolvers from resolv.conf. A local stub
-// (127.0.0.53) is fine: the resolver runs on the host, not in a container.
+// (127.0.0.53) works, because the resolver runs on the host, not in a
+// container.
 func Upstreams(resolvConf string) ([]string, error) {
 	config, err := dns.ClientConfigFromFile(resolvConf)
 	if err != nil {
@@ -61,9 +62,10 @@ func StartResolver(address string, upstreams []string, logger *slog.Logger) (*DN
 	return resolver, nil
 }
 
-// answer passes a question on to the first upstream that answers, over the
-// protocol it came in with (a large answer over UDP comes back truncated and
-// the container asks again over TCP, as with any resolver).
+// answer passes a question on to the first upstream that answers. It uses
+// the protocol that the question came in with. A large answer over UDP
+// comes back truncated, and the container asks again over TCP, as with any
+// resolver.
 func (r *DNSResolver) answer(w dns.ResponseWriter, question *dns.Msg) {
 	client := &dns.Client{Net: w.LocalAddr().Network(), Timeout: upstreamTimeout}
 	var lastErr error

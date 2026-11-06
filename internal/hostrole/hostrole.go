@@ -2,7 +2,7 @@
 // Kubernetes: control-plane, worker and ingress. A host gets its roles when
 // it joins (clowderd init and join --roles, within what its join token
 // allows), and they stay fixed until it is removed. Its certificate names
-// them, so that a host can tell another's roles without the state.
+// them, so that a host can read another host's roles without the state.
 package hostrole
 
 import (
@@ -29,15 +29,13 @@ const (
 var all = []Role{ControlPlane, Worker, Ingress}
 
 // Set is a host's roles: at least one, each once, in the order
-// control-plane, worker, ingress. Parse and New make one; the zero value is
+// control-plane, worker, ingress. Parse and New make one. The zero value is
 // empty and not valid.
 type Set []Role
 
-// The defaults. The first host has every role, so a cluster of hosts with
-// their defaults works as one where every host does everything. A host that
-// joins, and the token it joins with, are a worker with ingress unless the
-// user says otherwise, so that a token in a worker's user data cannot make
-// a control-plane host.
+// The defaults. The first host has every role. Unless the user says
+// otherwise, a joining host and its join token get worker and ingress. So a
+// token in a worker's user data cannot make a control-plane host.
 var (
 	DefaultInit = Set{ControlPlane, Worker, Ingress}
 	DefaultJoin = Set{Worker, Ingress}
@@ -75,8 +73,8 @@ func New(roles ...Role) (Set, error) {
 	return set, nil
 }
 
-// Check tells whether the set is one that New makes: the state takes only
-// such sets, so that two equal sets also look equal.
+// Check tells whether the set is one that New makes. The state accepts only
+// such sets, so that two equal sets also compare equal.
 func (s Set) Check() error {
 	made, err := New(s...)
 	if err != nil {
@@ -93,8 +91,8 @@ func (s Set) Has(role Role) bool {
 	return slices.Contains(s, role)
 }
 
-// Within tells whether every role of the set is in allowed, as a join's
-// roles must be in its token's.
+// Within tells whether every role of the set is in allowed. A join's roles
+// must be within its token's roles.
 func (s Set) Within(allowed Set) bool {
 	for _, role := range s {
 		if !allowed.Has(role) {

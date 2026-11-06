@@ -8,7 +8,7 @@ import (
 )
 
 // DiskUpToDate is DRBD's disk state of a copy that holds the volume's
-// current data; DiskDiskless is the disk state of a tiebreaker.
+// current data. DiskDiskless is the disk state of a tiebreaker.
 const (
 	DiskUpToDate = "UpToDate"
 	DiskDiskless = "Diskless"
@@ -54,7 +54,7 @@ func (r drbdResource) disk() string {
 
 // outOfSyncBytes is the part of this copy's resync that is left: how much
 // it differs from the peers that it resyncs from (SyncTarget, or paused).
-// The other peers do not count: a peer that is cut off, or the tiebreaker,
+// The other peers do not count. A peer that is cut off, or the tiebreaker,
 // would make a healthy resync look stuck.
 func (r drbdResource) outOfSyncBytes() int64 {
 	most := int64(0)
@@ -70,7 +70,7 @@ func (r drbdResource) outOfSyncBytes() int64 {
 }
 
 // resources reads the DRBD resources that are up on this host, keyed by
-// name; a resource that is down is missing from the map.
+// name. A resource that is down is missing from the map.
 func (d Driver) resources(ctx context.Context) (map[string]drbdResource, error) {
 	output, err := d.Run(ctx, statusTimeout, "drbdsetup", "status", "--json")
 	if err != nil {
@@ -97,8 +97,8 @@ func (r drbdResource) quorum() bool {
 
 // standAlonePeers are the node-ids of the peers that the resource on this
 // host no longer tries to connect to (StandAlone). This happens after a
-// split brain that DRBD could not resolve by its rules, or after another
-// refusal that needs a human.
+// split brain that DRBD's rules could not resolve, or after another refusal
+// that needs a human.
 func (r drbdResource) standAlonePeers() []int {
 	var peers []int
 	for _, connection := range r.Connections {

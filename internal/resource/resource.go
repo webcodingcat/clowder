@@ -1,6 +1,6 @@
-// Package resource is what users apply to the cluster: the kinds of
-// resources, their specs, and the rules that a spec must meet on its own.
-// A stack's spec has a package of its own (stackspec), and so does the
+// Package resource defines what users apply to the cluster: the kinds of
+// resources, their specs, and the rules that each spec must meet by
+// itself. A stack's spec has its own package (stackspec), and so does the
 // cluster's configuration (clusterspec). The package does no I/O, because
 // the CLI, the API and the state share it.
 package resource
@@ -16,32 +16,32 @@ import (
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// The kinds of resources. A namespace holds the other kinds, except the
-// configuration.
+// The kinds of resources. A namespace holds resources of every other
+// kind, except the configuration.
 const (
 	KindNamespace = "Namespace"
 	KindVolume    = "Volume"
 	KindSecret    = "Secret"
-	// KindSealedSecret is the way of a Secret into Git: its values are
-	// sealed for the cluster's sealing key, as Bitnami's sealed secrets
-	// are. It is only a way in: the cluster stores it as the Secret of the
-	// same namespace and name (StoredKind), and get, delete and diff work
-	// on that Secret.
+	// KindSealedSecret lets a Secret be kept in Git. Its values are sealed
+	// for the cluster's sealing key, as with Bitnami's sealed secrets. It
+	// exists only on the way in. The cluster stores it as the Secret of
+	// the same namespace and name (StoredKind), and get, delete and diff
+	// work on that Secret.
 	KindSealedSecret = "SealedSecret"
 	// KindStack's spec is a stackspec.Spec.
 	KindStack = "Stack"
-	// KindClusterConfiguration's spec is a clusterspec.Config. There is
-	// one per cluster, named ClusterConfigurationName, like kubeadm's
+	// KindClusterConfiguration's spec is a clusterspec.Config. A cluster
+	// has one, named ClusterConfigurationName, like kubeadm's
 	// ClusterConfiguration.
 	KindClusterConfiguration = "ClusterConfiguration"
 )
 
-// ClusterConfigurationName is the name of the one ClusterConfiguration, as
-// OpenShift names its configuration resources "cluster".
+// ClusterConfigurationName is the name of the one ClusterConfiguration.
+// OpenShift names its configuration resources "cluster" too.
 const ClusterConfigurationName = "cluster"
 
-// StoredKind returns the kind that the cluster stores a resource of kind
-// as: a SealedSecret becomes a Secret, every other kind stays itself.
+// StoredKind returns the kind under which the cluster stores a resource of
+// kind. A SealedSecret becomes a Secret; every other kind stays the same.
 func StoredKind(kind string) string {
 	if kind == KindSealedSecret {
 		return KindSecret
@@ -57,10 +57,11 @@ func Namespaced(kind string) bool {
 // NamespaceSpec is a namespace as the user asks for it.
 type NamespaceSpec struct {
 	// ImagePullSecrets name Secrets of the namespace that hold registry
-	// logins (the keys of RegistryLoginKeys). The stacks' images are pulled
-	// with them, as Kubernetes pulls with those of a namespace's default
-	// service account. They are not checked at apply, because the Secrets
-	// live in the namespace and so come after it.
+	// logins (with the keys of RegistryLoginKeys). The namespace's stacks
+	// pull their images with these logins. Kubernetes does the same with
+	// the image pull secrets of a namespace's default service account. An
+	// apply does not check that the Secrets exist, because they live in
+	// the namespace and so are applied after it.
 	ImagePullSecrets []LocalObjectReference `json:"imagePullSecrets,omitempty"`
 }
 
@@ -77,10 +78,10 @@ const (
 	RegistryPasswordKey = "password"
 )
 
-// RegistryLoginKeys are the keys that a Secret of imagePullSecrets has.
+// RegistryLoginKeys are the keys that a Secret in imagePullSecrets has.
 var RegistryLoginKeys = []string{RegistryServerKey, RegistryUsernameKey, RegistryPasswordKey}
 
-// Check tells what is wrong with the spec on its own.
+// Check tells what is wrong with the spec by itself.
 func (n NamespaceSpec) Check() error {
 	var problems []error
 	seen := map[string]bool{}
@@ -96,19 +97,20 @@ func (n NamespaceSpec) Check() error {
 	return errors.Join(problems...)
 }
 
-// VolumeSpec is a volume as the user asks for it. Nothing changes an
+// VolumeSpec is a volume as the user asks for it. clowder cannot change an
 // existing volume yet: its class, size and replicas stay as created.
 type VolumeSpec struct {
 	// Class is a storage class of the configuration.
 	Class string     `json:"class"`
 	Size  units.Size `json:"size"`
-	// Replicas are the copies that DRBD keeps in sync, 1 to 3. 0 is one
-	// plain LV without DRBD, whose data is not kept when its stack moves.
+	// Replicas is the number of copies that DRBD keeps in sync, 1 to 3.
+	// 0 means one plain LV without DRBD. Its data is lost when its stack
+	// moves.
 	Replicas int `json:"replicas"`
 }
 
-// Check tells what is wrong with the spec on its own. Whether the class
-// exists depends on the cluster.
+// Check tells what is wrong with the spec by itself. It does not check
+// that the class exists, because that depends on the cluster.
 func (v VolumeSpec) Check() error {
 	var problems []error
 	if v.Class == "" {
@@ -123,9 +125,9 @@ func (v VolumeSpec) Check() error {
 	return errors.Join(problems...)
 }
 
-// CheckUnchanged refuses another class, size or number of replicas for an
-// existing volume. Nothing can change an existing volume yet, so such an
-// apply would seem to work but do nothing.
+// CheckUnchanged refuses a new class, size or number of replicas for an
+// existing volume. clowder cannot change an existing volume yet, so such
+// an apply would seem to work but do nothing.
 func (v VolumeSpec) CheckUnchanged(wanted VolumeSpec) error {
 	if wanted == v {
 		return nil
@@ -134,9 +136,10 @@ func (v VolumeSpec) CheckUnchanged(wanted VolumeSpec) error {
 		v.Class, units.FormatSize(int64(v.Size)), v.Replicas)
 }
 
-// The limits of the secrets, counted by their values in clear. Every apply
-// writes them into the Raft log, and every snapshot holds them.
-// MaxSecretBytes limits all values of one Secret together.
+// The limits of the secrets, measured on their values in clear. They keep
+// the Raft log and the snapshots small, because every apply writes the
+// secrets into the log, and every snapshot holds them. MaxSecretBytes
+// limits all values of one Secret together.
 const (
 	MaxSecretBytes          = 64 << 10
 	MaxNamespaceSecretBytes = 256 << 10
@@ -144,19 +147,19 @@ const (
 	MaxClusterSecrets       = 1000
 )
 
-// SecretSpec is a Secret as users write it, with its values in clear, as
-// in Kubernetes: data holds each value in Base64, stringData as text, and
-// for a key in both, stringData wins. Unlike in Kubernetes, both stand in
-// spec, as every clowder resource keeps what it wants there. The values
-// travel to the cluster over mTLS, and the cluster encrypts them with its
-// data key. The state enforces the limits on the size of the values.
+// SecretSpec is a Secret as users write it, with its values in clear. As
+// in Kubernetes, data holds each value in Base64 and stringData holds it
+// as text. For a key in both, stringData wins. Unlike in Kubernetes, both
+// are fields of spec, because every clowder resource keeps what it wants
+// in spec. The values travel to the cluster over mTLS, and the cluster
+// encrypts them with its data key. The state enforces the size limits.
 type SecretSpec struct {
 	Data       map[string]string `json:"data,omitempty"`
 	StringData map[string]string `json:"stringData,omitempty"`
 }
 
 // Values returns the Secret's values by key, or what is wrong with the
-// spec. No error names a value.
+// spec. No error contains a value.
 func (s SecretSpec) Values() (map[string][]byte, error) {
 	values := map[string][]byte{}
 	var problems []error
@@ -185,14 +188,14 @@ func (s SecretSpec) Values() (map[string][]byte, error) {
 	return values, nil
 }
 
-// SealedSecretSpec is a SealedSecret as users write it: each value sealed
-// for the cluster's sealing key and for the Secret's ID (secretvalue), as
-// clowder secret seal writes it. Only the cluster opens the values.
+// SealedSecretSpec is a SealedSecret as users write it. `clowder secret
+// seal` seals each value for the cluster's sealing key and the Secret's ID
+// (secretvalue). Only the cluster can open the values.
 type SealedSecretSpec struct {
 	EncryptedData map[string]string `json:"encryptedData"`
 }
 
-// Check tells what is wrong with the spec on its own.
+// Check tells what is wrong with the spec by itself.
 func (s SealedSecretSpec) Check() error {
 	if len(s.EncryptedData) == 0 {
 		return errors.New("a sealed secret needs at least one key in encryptedData")

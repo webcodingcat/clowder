@@ -57,7 +57,7 @@ func newHost(g *globals) *cobra.Command {
 	return host
 }
 
-// newJoinToken makes the subcommand that makes a join token.
+// newJoinToken builds the subcommand that creates a join token.
 func newJoinToken(g *globals) *cobra.Command {
 	var ttl time.Duration
 	var roles string
@@ -86,7 +86,7 @@ func newJoinToken(g *globals) *cobra.Command {
 			if _, err := fmt.Fprintln(cmd.OutOrStdout(), answer.Token); err != nil {
 				return err
 			}
-			// on stderr, so the token alone goes into a file
+			// on stderr, so that stdout holds only the token
 			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "valid until %s, for one host with at most the roles %s\n",
 				answer.Expires.Local().Format(time.RFC3339), allowed)
 			return err
@@ -98,8 +98,8 @@ func newJoinToken(g *globals) *cobra.Command {
 	return command
 }
 
-// newHostAction makes the subcommand of one action. A final action asks
-// for confirmation first.
+// newHostAction builds the subcommand for one host action. A final action
+// asks for confirmation first.
 func newHostAction(g *globals, action api.HostAction) *cobra.Command {
 	var yes bool
 	command := &cobra.Command{
@@ -144,7 +144,7 @@ func newHostAction(g *globals, action api.HostAction) *cobra.Command {
 
 // confirmHost asks for the host's name before an action that cannot be
 // undone. Without a terminal, --yes is the only way to confirm. The
-// question goes to stderr, so it shows even when the output is redirected.
+// question goes to stderr, so it shows even when stdout is redirected.
 func confirmHost(cmd *cobra.Command, action, name string) error {
 	in, ok := cmd.InOrStdin().(*os.File)
 	if !ok || !term.IsTerminal(int(in.Fd())) {

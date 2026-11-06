@@ -2,9 +2,10 @@ package scheduler
 
 import "github.com/webcodingcat/clowder/internal/state"
 
-// MoveVolumes returns the records of a moving stack's volumes with a copy
-// on the host it moves to, for the first step of its move (the operation
-// that holds their locks). A reason says why they cannot go there.
+// MoveVolumes returns the records of a moving stack's volumes, each with a
+// copy on the host that the stack moves to. The first step of the move
+// writes them; the move's operation holds their locks. If the volumes
+// cannot go there, it returns the reason instead.
 func MoveVolumes(current *state.State, stackID string, to state.HostID) ([]state.Volume, string) {
 	stack, ok := current.Stacks[stackID]
 	if !ok {

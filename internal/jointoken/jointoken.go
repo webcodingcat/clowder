@@ -5,8 +5,8 @@
 // cannot join with it.
 //
 // The joining host trusts the cluster's CA because of a proof made with
-// the hash (pki.TrustProof), which only someone with the token or the
-// state can make. The host then sends the token itself, over TLS checked
+// the hash (pki.TrustProof). Only someone with the token or the state can
+// make that proof. The host then sends the token itself, over TLS checked
 // against that CA, and the leader compares its hash.
 package jointoken
 
@@ -21,8 +21,8 @@ import (
 )
 
 // idSize and secretSize are in bytes. The ID only names the token, so that
-// the agent sends the proof of one token, not of every open one. The
-// secret's 256 bits are what nobody can guess.
+// the agent sends the proof for one token, not for every open one. The
+// secret's 256 bits are the part that nobody can guess.
 const (
 	idSize     = 8
 	secretSize = 32
@@ -48,8 +48,8 @@ func New() (Token, error) {
 	return Token{ID: hex.EncodeToString(id), secret: secret}, nil
 }
 
-// String returns the token in the form the user copies: the ID, a dot,
-// and the secret.
+// String returns the token in the form that the user copies: the ID, a
+// dot, and the secret.
 func (t Token) String() string {
 	return t.ID + "." + base64.RawURLEncoding.EncodeToString(t.secret)
 }
@@ -79,9 +79,9 @@ func (t Token) Hash() string {
 
 // ProofKey returns the key of the trust proof for a token with this hash.
 // The agent has the hash, and the joining host computes it from the token.
-// It is a key, not a list of fields to MAC, and the hash always has 64
-// hexadecimal digits, so the line end needs no length before it
-// (digest.WriteParts).
+// The key is not a list of fields to MAC, and the hash always has 64
+// hexadecimal digits. So, unlike in digest.WriteParts, no part needs its
+// length in front of it.
 func ProofKey(hash string) []byte {
 	return []byte("clowder join\n" + hash)
 }

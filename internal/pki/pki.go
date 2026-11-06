@@ -1,17 +1,17 @@
 // Package pki is the cluster's certificate authority. Hosts and the CLI
-// authenticate with certificates that it issues (mTLS): hosts between
-// agents and for Raft, and the CLI towards the agents. Keys are Ed25519.
-// Hosts send only their public key. clowderd credentials makes the CLI's
-// key on a host and hands it over with the certificate, as kubeadm does
-// with admin.conf.
+// authenticate with certificates that it issues (mutual TLS). Hosts use them
+// between agents and for Raft, and the CLI uses them to call the agents.
+// Keys are Ed25519. Hosts send only their public key. clowderd credentials
+// makes the CLI's key on a host and hands it over with the certificate, as
+// kubeadm does with admin.conf.
 //
-// A host certificate ends by revocation, not by expiry: the cluster keeps
-// the revoked serials, and Verify takes them into account. Its long
-// lifetime spares a host that stays powered off for months a renewal that
-// it cannot do. A CLI certificate lasts a year (cliLifetime), kubeadm's
-// default for client certificates. It ends sooner only with the cluster's
-// cutoff (state.SetCLICutoff), which the API checks. The user then fetches
-// a new one from a host, because nothing renews it.
+// A host certificate ends by revocation, not by expiry. The cluster keeps
+// the revoked serials, and Verify checks them. The long lifetime spares a
+// host that stays powered off for months a renewal that it could not do.
+// A CLI certificate lasts a year (cliLifetime), kubeadm's default for client
+// certificates. It ends sooner only through the cluster's cutoff
+// (state.SetCLICutoff), which the API checks. Nothing renews a CLI
+// certificate, so the user then fetches a new one from a host.
 package pki
 
 import (
@@ -42,7 +42,7 @@ const (
 	leafLifetime = 10 * 365 * 24 * time.Hour
 	cliLifetime  = 365 * 24 * time.Hour
 	// clockSkew backdates certificates, so that a host whose clock runs a
-	// little behind accepts them at once.
+	// little behind accepts them right away.
 	clockSkew = time.Hour
 )
 
@@ -118,9 +118,9 @@ func (ca *CA) KeyPEM() ([]byte, error) {
 }
 
 // IssueHost issues the certificate of a host, for TLS both as server and
-// as client, valid for its addresses (underlay and node address). The
-// certificate names the host's roles as its organizations, so that another
-// host can tell them from the certificate alone.
+// as client. It is valid for the host's addresses (underlay and node
+// address). The certificate names the host's roles as its organizations, so
+// that another host can read them from the certificate alone.
 func (ca *CA) IssueHost(public crypto.PublicKey, id int, roles hostrole.Set, addresses []netip.Addr,
 	now time.Time,
 ) ([]byte, error) {
@@ -144,8 +144,8 @@ func (ca *CA) IssueHost(public crypto.PublicKey, id int, roles hostrole.Set, add
 	return ca.issue(template, public)
 }
 
-// DefaultCLIName names a CLI certificate whose holder gave no name, just
-// as kubeadm's admin.conf is always kubernetes-admin.
+// DefaultCLIName is the name of a CLI certificate when its holder gave no
+// name, like kubernetes-admin in kubeadm's admin.conf.
 const DefaultCLIName = "admin"
 
 // IssueCLI issues a certificate that the CLI presents. The name is only
@@ -199,9 +199,9 @@ type Identity struct {
 }
 
 // Verify checks a certificate that a peer presented (a CLI, or an agent
-// calling another): it must be issued by the CA, within its lifetime and
-// not revoked. Verify tells whose certificate it is. It needs only the CA
-// certificate, not the CA's key.
+// that calls another agent). The CA must have issued it, it must be within
+// its lifetime, and it must not be revoked. Verify returns whose certificate
+// it is. It needs only the CA certificate, not the CA's key.
 func Verify(caCertificate, certificate *x509.Certificate, revoked func(serial string) bool, now time.Time) (Identity, error) {
 	roots := x509.NewCertPool()
 	roots.AddCert(caCertificate)
@@ -243,11 +243,12 @@ func Verify(caCertificate, certificate *x509.Certificate, revoked func(serial st
 }
 
 // HostRoles reads the roles that a host certificate names, without
-// verifying the certificate. The agent compares them with its own files at
-// its start, when its certificate may have expired; Verify uses it too.
+// verifying the certificate. At its start, the agent compares them with its
+// own files, and its certificate may have expired by then. Verify uses
+// HostRoles too.
 func HostRoles(certificate *x509.Certificate) (hostrole.Set, error) {
-	// DER sorts a SET OF by its encoding, so the organizations come back in
-	// another order than IssueHost wrote them; New sorts them
+	// DER sorts a SET OF by its encoding, so the organizations may come back
+	// in a different order than IssueHost wrote them. New sorts them.
 	named := make([]hostrole.Role, 0, len(certificate.Subject.Organization))
 	for _, organization := range certificate.Subject.Organization {
 		named = append(named, hostrole.Role(organization))
@@ -259,8 +260,8 @@ func HostRoles(certificate *x509.Certificate) (hostrole.Set, error) {
 	return roles, nil
 }
 
-// Serial returns a certificate's serial number in the form the cluster
-// lists it.
+// Serial returns a certificate's serial number in the form that the
+// cluster lists it in.
 func Serial(certificate *x509.Certificate) string {
 	return certificate.SerialNumber.Text(16)
 }
@@ -314,10 +315,10 @@ func ParseCertificate(certificatePEM []byte) (*x509.Certificate, error) {
 }
 
 // TrustProof binds the CA certificate to a proof key that the agent and
-// the caller share (a join token's, jointoken.ProofKey). A joining host
-// has no CA to trust yet on first contact. The agent sends its CA
-// certificate with this proof, and only someone holding the proof key can
-// make it.
+// the caller share (the join token's, jointoken.ProofKey). On first
+// contact, a joining host has no CA to trust yet. So the agent sends its CA
+// certificate with this proof, and only someone who holds the proof key can
+// make the proof.
 func TrustProof(proofKey, caCertificatePEM []byte) []byte {
 	mac := hmac.New(sha256.New, proofKey)
 	mac.Write(caCertificatePEM)

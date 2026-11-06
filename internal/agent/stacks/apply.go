@@ -27,7 +27,7 @@ import (
 // apply runs one stack: it opens its secrets, finds its volume copies,
 // renders its Compose file, brings the stack up and reports it as running.
 // inUse holds the LVs that a stack which failed to stop (stopLeavers) may
-// still write to, so no other stack may take them yet.
+// still write to, so that no other stack takes them yet.
 func (r *Runner) apply(ctx context.Context, desired desiredState, stack *state.Stack, inUse volumesInUse) error {
 	secrets, err := r.openSecrets(desired, stack)
 	if err != nil {
@@ -47,7 +47,7 @@ func (r *Runner) apply(ctx context.Context, desired desiredState, stack *state.S
 	}
 	if err := r.up(ctx, config, stack, rendered, secrets, volumes); err != nil {
 		// like the kubelet, the runner goes on without the missing image
-		// pull secret; if the pull fails, get stacks says why
+		// pull secret. If the pull fails, get stacks says why.
 		if missing != nil {
 			return fmt.Errorf("%w; %w", missing, err) // the first line is what get stacks shows
 		}
@@ -76,8 +76,8 @@ func (r *Runner) stackVolumes(desired desiredState, stack *state.Stack, inUse vo
 	for _, name := range stack.Spec.VolumeNames() {
 		id := names.ID(stack.Namespace, name)
 		volume, ok := desired.volumes[id]
-		// the placement commits a stack's volumes before its host, so this
-		// is a bug in the placement, not something to wait for
+		// the placement commits a stack's volumes before its host, so a
+		// missing copy is a bug in the placement, not something to wait for
 		if !ok || !slices.ContainsFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host }) {
 			return nil, fmt.Errorf("volume %s has no copy on this host", name)
 		}
@@ -118,10 +118,10 @@ func (r *Runner) render(desired desiredState, stack *state.Stack, volumes map[st
 }
 
 // up writes a stack's files and runs compose up without the pushed-out
-// services, unless exactly this already came up before. First it pulls the
+// services, unless exactly this has already come up. First it pulls the
 // images of the services that a user restarted since their containers came
 // up. A failed pull or compose up is tried again at the next pass. Both
-// pull with the registry logins of the Docker config directory config.
+// use the registry logins in the Docker config directory config.
 func (r *Runner) up(ctx context.Context, config string, stack *state.Stack, rendered []byte, secrets stackSecrets,
 	volumes map[string]compose.MountedVolume,
 ) error {
@@ -199,7 +199,7 @@ func lvsOf(volumes map[string]compose.MountedVolume) []string {
 // hold. If the stack fails to stop after it left this host, no other stack
 // may take them (markInUse). The LVs listed before stay, because the
 // containers of the previous Compose file keep theirs until compose up
-// succeeds; up then lists only the new ones.
+// succeeds. After that, up lists only the new ones.
 //
 // If the list cannot be read, the outcome depends on the Compose file.
 // Without a Compose file, the stack has no containers yet, and the list
@@ -259,9 +259,10 @@ func (r *Runner) pullRestarted(ctx context.Context, config, project string, file
 	return nil
 }
 
-// restartedSinceUp returns, sorted, the services whose containers carry a
-// restart time other than the state's (compose.LabelRestarted), because a
-// user restarted them since. compose up recreates them for the new label.
+// restartedSinceUp returns the services, sorted, whose containers carry a
+// different restart time than the state (compose.LabelRestarted), because a
+// user restarted them since. compose up recreates them because of the new
+// label.
 // Their images are pulled first, because an image may have changed under
 // the same tag. Docker keeps the label, so nothing is pulled again after a
 // reboot or an agent restart. A service without a container gets its image
@@ -285,7 +286,7 @@ func (r *Runner) restartedSinceUp(ctx context.Context, project string, restarted
 	return slices.Compact(slices.Sorted(slices.Values(services))), nil
 }
 
-// upHash covers everything that compose up reads: the rendered file, the
+// upHash hashes everything that compose up reads: the rendered file, the
 // secret variables, the secret files and the services left out (the state
 // keeps them sorted).
 func upHash(rendered []byte, secrets stackSecrets, pushedOut []string) [32]byte {
@@ -321,7 +322,7 @@ func (r *Runner) reportRunning(ctx context.Context, stack *state.Stack, secrets 
 }
 
 // upErrorLength is how much of a failing stack's error the state keeps
-// (Stack.UpError): enough to tell the cause; the log has the rest.
+// (Stack.UpError): enough to show the cause. The log has the rest.
 const upErrorLength = 200
 
 // reportFailing reports a stack as failing with the first line of the

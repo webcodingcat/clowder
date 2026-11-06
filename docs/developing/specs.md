@@ -1,23 +1,28 @@
 # What users write
 
-Part of [DEVELOPING.md](../../DEVELOPING.md): the names, files and specs that users write,
-and how they become what runs.
+Part of [DEVELOPING.md](../../DEVELOPING.md): where the rules for what users write live in
+the code, and how their specs become what runs. The fields and rules as users see them are
+in [docs/resources.md](../resources.md); this file does not repeat them.
 
 ## Namespaces and names (`internal/names`)
 
-- **Namespaces** keep resources apart: two namespaces may each have a stack, a volume and a
-  secret called `shop`. The bootstrap creates `default` and `clowder-system`
-  (`names.System`). `clowder-system` holds the cluster's own Secrets, like `kube-system` in
-  Kubernetes; it cannot be deleted and holds no stacks or volumes. Users and the state name
-  a resource `<namespace>/<name>` (`names.ID`, the key of `State.Stacks`, `Volumes`,
-  `Secrets`). A namespace's spec names its registry logins (`imagePullSecrets`, below).
-- **One rule for every name** (`names.Valid`): a DNS label of at most `names.MaxLength`
-  characters, made of lowercase letters, digits and `-`. There is no `_`: on the host, `_`
-  joins a namespace and a stack, so it separates them unambiguously. Namespaces that users
-  create must not start with `clowder-`, the prefix of clowder's own projects (Traefik) and
-  of `clowder-system`. Stacks, services, volumes and secrets all follow this rule. A
-  secret's keys follow Kubernetes' rule (`names.ValidSecretKey`): letters, digits, `-`, `_`
-  and `.`, but not `.` or `..`, because each key is a file name in the container.
+- **Namespaces.** `names.Default` and `names.System` (`clowder-system`) are the two
+  namespaces that the bootstrap creates. `names.System` starts with `names.ReservedPrefix`,
+  so no namespace that users create (`names.ValidNamespace`) can take its name, and no
+  stack's Compose project can clash with clowder's own (Traefik, `names.ClowdersOwn`). The
+  state names a resource `<namespace>/<name>` (`names.ID`, the key of `State.Stacks`,
+  `Volumes`, `Secrets`); `names.SplitID` is the reverse. `state/resources.go`
+  `resourceID` refuses invalid names and unknown namespaces, `removeNamespace` refuses
+  the two built-in namespaces and a namespace that holds anything, and
+  `applyPutResource` keeps stacks and volumes out of `names.System`.
+- **One rule for every name** (`names.Valid`, `names.Rule` for messages): a DNS label of at
+  most `names.MaxLength` characters. There is no `_`, because on the host `_` joins a
+  namespace and a stack, so it separates them unambiguously. There is no `/`, which joins
+  them in an ID, and no `.`, because a secret's name is a file name on the host. A
+  secret's keys follow Kubernetes' rule (`names.ValidSecretKey`, `names.SecretKeyRule`),
+  but not `.` or `..`, because each key is a file name in the container.
+  `names.ValidVariable` and `names.ValidDomain` hold the rules for variable names and a
+  route's host.
 - **The names on the host are built here, and only here**, from the namespace and the
   stack, so two namespaces never share a name:
 
@@ -43,55 +48,93 @@ and how they become what runs.
   device-mapper (`TestVolumeNamesFitDeviceMapper`). The margin is small, so a longer part
   needs the arithmetic again.
 
+## Resource files (`internal/resource`)
+
+- **Reading files.** `resource.ParseDocuments` reads the YAML documents of a file as
+  `resource.Object`s, strictly. It skips a file without clowder's `apiVersion` and refuses
+  one that mixes them with other documents; `cli/files.go` `readResourceFiles` decides
+  which files of a directory it reads and fills in `names.Default` for a namespaced kind
+  (`resource.Namespaced`). Each kind's spec is decoded strictly by its `Decode...`
+  function (`decodeStrict`, `DisallowUnknownFields`); the state's `decodeSpec` is lenient
+  on purpose, because a command of the next release may carry fields this one does not
+  know.
+- **Numbers keep their text.** The CLI turns YAML into JSON with `jsonOf`, which keeps a
+  number as written, so a stack's `env` value `1.0` arrives as `"1.0"`. Only a number that
+  JSON cannot write as it stands arrives the way YAML reads it (`0x10` as `"16"`), and
+  `True` arrives as `"true"`. A JSON number cannot go into a Go `string`, though, so a
+  field that is a string in the spec (`clusterspec.Resources.CPUs`) must be written in
+  quotes.
+- **What an apply ignores.** The cluster sets `Metadata.Owner`, `Generation` and
+  `ResourceVersion`, and `Status` is the cluster's report. An apply ignores them, so what
+  the API answered can be applied again as it is.
+- **The specs' own checks** are on their types: `NamespaceSpec.Check`, `VolumeSpec.Check`,
+  `SecretSpec.Values`, `SealedSecretSpec.Check`. `DecodeVolumeSpec` reads `replicas` as
+  a pointer, so a missing value is told apart from 0. `VolumeSpec.CheckUnchanged` refuses a
+  changed volume, because nothing changes a volume yet, and such an apply would seem to
+  work but do nothing. The limits of the secrets (`resource.MaxSecretBytes` and the
+  others) are checked by the state (`state/secrets.go` `checkSecretLimits`), because every
+  apply writes the values into the Raft log and every snapshot holds them.
+- **Unchanged means no change** ([Resources](state.md#one-command-for-every-users-change)
+  in state.md). An unchanged resource passes even if the state has changed since in a way
+  that would make the same spec fail, because `applyPutResource` checks it first.
+
 ## Stack specs (`internal/stackspec`)
 
 A stack is a resource with clowder's own schema; Compose is only the way the agent runs it
-on a host (`compose.Render`).
+on a host (`compose.Render`). The fields are in [resources.md](../resources.md#stack).
 
 - **Only what clowder knows runs.** `Decode` reads YAML (and so JSON) strictly: a field
-  that the schema does not have is an error. `env` accepts any scalar and keeps its text as
-  written (`8080`, `1.0`, `yes`). The CLI keeps a number's text when it turns YAML into
-  JSON (`resource.ParseDocuments`), so `1.0` arrives as `"1.0"`. Only a number that JSON
-  cannot write as it stands arrives the way YAML reads it (`0x10` as `"16"`), and `True`
-  arrives as `"true"`.
+  that the schema does not have is an error. `Service.Env` takes any scalar and keeps its
+  text as written (see [Resource files](#resource-files-internalresource) for what the CLI
+  sends).
 - **What would break clowder's model has no field.** Nothing ties a container to one host
   (no bind mounts except `/etc/localtime` read-only, no devices), nothing shares the host's
   namespaces, and clowder sets the rest itself (names, networks, the restart policy). A
-  route's host must be a domain name and its path a URL path, because both go into a
-  Traefik rule.
+  route's host must be a domain name and its path a URL path (`routePath`,
+  `ValidRoutePath`), because both go into a Traefik rule.
 - **`Check`** lists every problem at once (`Problems`): names, image, mounts at clean
   absolute paths, ports that are not reserved (`ReservedPort`), two services with the same
-  published port or route, routes, dependencies that exist and form no cycle, durations,
-  sizes, restart rules. The state checks what only the cluster knows: priority categories,
-  privileges, the namespace's volumes and secrets, and other stacks' ports and routes.
+  published port or route (`checkUnique`), routes, dependencies that exist and form no
+  cycle (`checkCycles`), durations, sizes, restart rules (`ValidRestart`). The state
+  checks what only the cluster knows (`state/stacks.go` `checkStack` and `servicesOf`):
+  priority categories, privileges, the namespace's volumes and secrets
+  (`state.MaxStackSecrets`), one stack per volume, and other stacks' ports and routes.
+- **`ReservedPort`** names why each range is reserved. Two ranges follow other limits:
+  DRBD's ports are 10000 plus a minor (`state.MaxMinor`), and WireGuard's are 51800 plus
+  a host ID (`state.MaxHosts`).
 - **`Normalize`** fills in the schema's own defaults (`restart: always`,
   `restartUnhealthy`, a port's `published` and `protocol`, a route's path). It also writes
   in one form what may be written in several (sorted sets, a route's host in lower case,
-  capabilities without `CAP_`), so two specs that mean the same thing are equal. Defaults
-  of the configuration (reservations, priority) stay out: the scheduler applies them when it
-  places the stack, so a changed configuration changes no spec.
+  capabilities without `CAP_`, `CapabilityName`), so two specs that mean the same thing
+  are equal. The state stores the normalized spec (`putStack`). Defaults of the
+  configuration (reservations, priority) stay out: the scheduler applies them when it
+  places the stack (`scheduler/room.go` `reservation`), so a changed configuration changes
+  no spec. A reservation left out is kept as 0, so one written as 0 takes the default too.
+- **`ParsePriority`** reads a priority as a number or a category's name; the cluster's
+  categories turn it into a number (`clusterspec.Priorities.Resolve`).
 - **The cluster grants privileges.** `Service.Privileges` lists, per service, what reaches
   beyond the container: `privileged`, a capability outside `harmlessCapabilities`, and a
-  `securityOpt` other than `no-new-privileges`. Such a container can read the host's keys
-  and other stacks' volumes and secrets, and change the rules that keep containers apart.
-  So only stacks that the configuration names in `stacks.privileged` (as
-  `<namespace>/<stack>`) may have privileges. Otherwise the state refuses the stack, and it
-  also refuses a configuration that takes such a stack off the list.
-- **Secrets.** A service names secrets of its namespace either as files or as variables.
-  As files (`secrets: [db]`), each key is at `/run/secrets/db/<key>`, the way Kubernetes
-  mounts a secret, for images that read `*_FILE`. As a variable
-  (`secretEnv: {VARIABLE: {name: db, key: password}}`, like Kubernetes' `secretKeyRef`),
-  it gets one value. The state refuses a stack whose variable names a key that its secret
-  lacks, and a secret change that would remove such a key. A variable also ends up in
-  Docker's container configuration on the host's disk and in `docker inspect`; a file does
-  not.
+  `securityOpt` other than `no-new-privileges` (`HarmlessSecurityOpt`). Such a container
+  can read the host's keys and other stacks' volumes and secrets, and change the rules
+  that keep containers apart. So only stacks that the configuration names in
+  `stacks.privileged` may have privileges. Otherwise the state refuses the stack
+  (`checkStack`), and it also refuses a configuration that takes such a stack off the list
+  (`putConfig`).
+- **Secrets.** `Service.Secrets` mounts a secret as files, the way Kubernetes mounts a
+  secret, for images that read `*_FILE`. `Service.SecretEnv` sets a variable to one value,
+  like Kubernetes' `secretKeyRef`. `Spec.SecretNames` and `Spec.SecretKeyRefs` list what a
+  stack names. The state refuses a stack whose variable names a key that its secret lacks,
+  and a secret change that would remove such a key (`state/secrets.go` `checkKeysKept`).
+  A variable also ends up in Docker's container configuration on the host's disk and in
+  `docker inspect`; a file does not.
 - **No I/O, no clock.** The state reads specs, so depguard and forbidigo hold `stackspec`
   to the state's rules.
 - **Adding a field:** add its type with both tags (`yaml`, `json`) and a comment in
   `spec.go`, its check in `check.go`, its default or order in `Normalize` if it has one, its
   rendering in `internal/compose/render.go`, and the field in
   `internal/compose/testdata/spec/stack.yaml`. Then run
-  `bin/dev test ./internal/compose -update` and review the golden file's diff.
+  `bin/dev test ./internal/compose -update` and review the golden file's diff. Add the
+  field to [resources.md](../resources.md#services) too.
 
 ## Rendering (`internal/compose`)
 
@@ -106,6 +149,8 @@ on a host (`compose.Render`).
   - volumes bound to `<mount>/data` under the copy's LV name;
   - secrets as files in `Target.SecretsDir`: a Compose secret `<secret>_<key>` per key (no
     secret's name contains `_`), with the target `/run/secrets/<secret>/<key>`;
+  - a healthcheck as `CMD` and its command, with Docker's defaults for what the spec
+    leaves out;
   - a dependency on a service with a healthcheck waits until that service is healthy.
 
   HTTP routes are not in the file, because Traefik routes them. `RenderSecretEnv` writes the
@@ -132,49 +177,58 @@ on a host (`compose.Render`).
 
 ## The cluster's configuration (`internal/clusterspec`)
 
+The fields and their defaults are in
+[resources.md](../resources.md#clusterconfiguration).
+
 - **It is a resource** of the kind `ClusterConfiguration`, like kubeadm's: one per cluster,
   without a namespace, always named `cluster` (`resource.ClusterConfigurationName`), the
   way OpenShift names its configuration resources. It is applied with `clowder apply -f`
   together with the other resources and read strictly
   (`resource.DecodeClusterConfiguration`). Its fields are camelCase, like those of every
-  resource (`privateNetwork`, `ingress.floatingIP`, `storageClasses`). The cluster's name
-  and endpoints are not in it: the name comes from `clowderd init` and the endpoints from
-  the credentials, so nothing has two sources.
+  resource. Its json tags are what users write and what the state stores, so a Go field may
+  be renamed, but its tags never change. The cluster's name and endpoints are not in it:
+  the name comes from `clowderd init` and the endpoints from the credentials, so nothing
+  has two sources.
 - `clusterspec` holds the configuration's spec: the types (`Config`), their defaults
-  (`WithDefaults`) and `Check`, which lists every problem of the spec on its own. The state
-  reads it, so `clusterspec` does no I/O. The state runs `Check` and checks the rest
-  against the cluster (`state/config.go` `putConfig`): the storage classes of the volumes,
-  the priority categories and privileges of the stacks, the hosts' underlays, and the
-  Secrets it names. Once applied, the configuration can be changed but not deleted, because
+  (`WithDefaults`, `DefaultPriorities`, `DefaultReservations`, `DefaultSystemReserve`,
+  `DefaultResyncRate`, `DefaultReservePercent`, `DefaultHeartbeatInterval`,
+  `DefaultACMEDirectory`) and `Check`, which lists every problem of the spec on its own.
+  The state reads it, so `clusterspec` does no I/O. The state runs `Check` and checks the
+  rest against the cluster (`state/config.go` `putConfig`): the storage classes of the
+  volumes, the priority categories and privileges of the stacks, the hosts' underlays, and
+  the Secrets it names. The state stores the configuration with its defaults filled in.
+  Once applied, the configuration can be changed but not deleted (`removeConfig`), because
   fencing and the Floating IP need it. Before the first configuration, the cluster has no
   Hetzner token, no ACME and no alerts (`State.Configured`).
+- **clowder's own ranges** (`clusterspec.Overlay`, `ExportVIPs`, `ClowderRanges`) are
+  defined here, where `Check` holds the private network to them; `network` and
+  `hostcheck` use them from here.
 - **It contains no secrets.** It refers to values of Secrets in `clowder-system` by
   `{name, key}` (`names.SecretKeyRef`), as the hcloud controller reads
-  `kube-system/hcloud`: `hetzner.tokenSecretRef`; a channel's `webhookSecretRef`,
-  `urlSecretRef` and `smtp.passwordSecretRef`; and the heartbeat's `urlSecretRef`.
-  `clusterspec.SecretPlaces` is the one list of these references. `Check` holds each one to
-  the rules of a reference, and the state holds each one to the Secrets it has. The state
-  refuses a configuration that names a missing Secret or key. It also refuses deleting such
-  a Secret, and a Secret change that would remove such a key. In one apply, the Secret comes
-  before the configuration.
+  `kube-system/hcloud`. `clusterspec.SecretPlaces` is the one list of these references.
+  `Check` holds each one to the rules of a reference, and the state holds each one to the
+  Secrets it has. The state refuses a configuration that names a missing Secret or key. It
+  also refuses deleting such a Secret, and a Secret change that would remove such a key
+  (`checkKeysKept`). In one apply, the Secret comes before the configuration.
 - **No files next to it.** `acme.ca` and `smtp.ca` are in the configuration as PEM, like
-  Kubernetes' `caBundle`, within `clusterspec.MaxCASize`. `Check` requires a certificate in
-  each.
-- **`hetzner.api` and `acme.directory`** are for test labs. When they are unset, clowder
-  talks to Hetzner's API and Let's Encrypt over https. When they are set, they may also be
-  `http://`, and `ServiceURLWarnings` warns about it: an apply returns the warning (the CLI
-  prints it on stderr), and the leader logs it once per configuration
+  Kubernetes' `caBundle`, within `clusterspec.MaxCASize`, because the configuration travels
+  in the state, which every agent keeps in memory. `Check` requires a certificate in each.
+- **`hetzner.api` and `acme.directory`** are for test labs. When they are set, they may also
+  be `http://`, and `ServiceURLWarnings` warns about it: an apply returns the warning (the
+  CLI prints it on stderr), and the leader logs it once per configuration
   (`controller.warnServiceURLs`).
+- **A new Hetzner token is confirmed** before it is applied
+  ([The commands](api.md#the-commands)).
 - **Registry logins belong to a namespace,** as Kubernetes puts `imagePullSecrets` on a
-  namespace's default service account. `spec.imagePullSecrets: [{name: ghcr}]` names
-  Secrets of the namespace, each with the keys `server`, `username` and `password`
-  (`resource.RegistryLoginKeys`). As in Kubernetes, they are not checked at apply: the
+  namespace's default service account (`resource.NamespaceSpec`,
+  `resource.RegistryLoginKeys`). As in Kubernetes, they are not checked at apply: the
   Secrets live in the namespace, so they come after it. Like the kubelet, a host pulls
   without a missing login; if the pull then fails, `get stacks` names the missing login
   (`State.RegistryLogins`).
 - Durations (`acme.renewBefore`, `alerts.heartbeat.interval`) are parsed by
   `units.ParseDuration`. It uses Go's format, which may start with whole days (`30d`,
-  `1d12h`).
+  `1d12h`). A stack's durations use Go's `time.ParseDuration`, without days. Sizes in both
+  are parsed by `units.ParseSize`.
 
 ## The CLI's credentials (`internal/clientconfig`)
 
@@ -201,27 +255,22 @@ on a host (`compose.Render`).
 
 A Secret's values come in one of two ways, as in Kubernetes with Bitnami's sealed secrets.
 Both end up as the same Secret in the state, so whatever names a Secret does not care how
-it came in.
+it came in. What users write is in [resources.md](../resources.md#secret-and-sealedsecret).
 
-- **`Secret`** (`resource.SecretSpec`): the values in clear, `spec.data` in Base64 and
-  `spec.stringData` as text; for a key in both, `stringData` wins, as in Kubernetes. Unlike
-  in Kubernetes, both stand under `spec`, like every clowder resource's fields. The CLI sends
-  the values over its mTLS connection, and the cluster encrypts them with its data key. Such
-  a file does not belong in Git. `clowder create secret [<namespace>/]<name>
-  --from-literal <key>=<value> --from-file <key>=<path|->` sends one without a file, and,
-  like `kubectl create`, refuses a Secret that exists (`api.ApplyRequest.Create`,
-  `state.PutResource.Create`).
+- **`Secret`** (`resource.SecretSpec`, `Values`): for a key in both `data` and
+  `stringData`, `stringData` wins, as in Kubernetes. No error names a value; base64's
+  errors name only an offset. The CLI sends the values over its mTLS connection, and the
+  API encrypts them with the data key (`api/changes.go` `encryptSecret`). The state checks
+  the encrypted values without opening them: `state.ClearSize` works out the clear length
+  from the encrypted one, and a test in `datakey` compares it with real encryption.
 - **`SealedSecret`** (`resource.SealedSecretSpec`): `spec.encryptedData` holds each value
   sealed for the cluster's sealing key, one line of Base64 of age's ciphertext, as kubeseal
-  writes it. It goes into Git. The apply turns it into the Secret of the same namespace and
-  name (`resource.StoredKind`); `get`, `delete -f` and `diff -f` work on that Secret. Unlike
-  Bitnami's, it is not a resource of its own in the cluster, and it has no `template`.
-- **`clowder secret seal`** makes SealedSecrets, as kubeseal does: from the Secrets of a
-  file (`-f <file|->`), or from `--from-literal` and `--from-file` for one Secret. It seals
-  for the public sealing key that the cluster names (`GET /v1/sealing-key`), and the CLI
-  asks for it each time instead of keeping a copy that someone could change. With
-  `--cert <file>`, it seals offline for the public key that `clowderd sealing-key export
-  --public` wrote, like kubeseal's `--cert`.
+  writes it. How the API stores it as a Secret is in
+  [Secret values](api.md#secret-values).
+- **`clowder secret seal`** seals for the public sealing key that the cluster names
+  (`GET /v1/sealing-key`), and the CLI asks for it each time instead of keeping a copy that
+  someone could change. With `--cert <file>`, it seals offline for the public key that
+  `clowderd sealing-key export --public` wrote, like kubeseal's `--cert`.
 
 The rest of this section is about sealed values.
 

@@ -33,7 +33,7 @@ func newCreateSecret(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// no question about the Hetzner token, as apply asks: a new
+			// unlike apply, no question about the Hetzner token: a new
 			// Secret cannot change it, because the configuration names
 			// only Secrets that exist
 			request := api.ApplyRequest{Resources: []resource.Object{secret}, Create: true}

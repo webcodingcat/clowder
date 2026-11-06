@@ -15,7 +15,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// stackSecrets is what compose up of a stack needs from its secrets.
+// stackSecrets is what compose up needs from a stack's secrets.
 type stackSecrets struct {
 	// files holds the values of each secret that a service asks for as
 	// files, by secret and key.
@@ -26,7 +26,7 @@ type stackSecrets struct {
 	// labels holds, for each service that asks for secret files, the
 	// digest of those secrets (compose.Target.SecretLabels).
 	labels map[string]string
-	// env is the second Compose file with the secret variables; it is nil
+	// env is the second Compose file with the secret variables. It is nil
 	// if the stack sets none.
 	env []byte
 	// digests holds the state's digest of every secret that the stack
@@ -35,13 +35,13 @@ type stackSecrets struct {
 	digests map[string]string
 }
 
-// SecretLabelPurpose names the key, derived from the data key, that the
-// labels of secret files are made with (Parts.DigestKey).
+// SecretLabelPurpose is the purpose for which the key of the secret files'
+// labels is derived from the data key (Parts.DigestKey).
 const SecretLabelPurpose = "clowder secrets label"
 
 // secretLabel is an HMAC-SHA256 over the names and the state's digests of
 // one service's secret files, in name order. It changes when any of them
-// changes, so Compose recreates the container. It reveals nothing about
+// changes, so that Compose recreates the container. It reveals nothing about
 // the values to anyone who reads docker inspect.
 func secretLabel(key []byte, digests map[string]string, secretNames []string) string {
 	var parts [][]byte
@@ -51,8 +51,8 @@ func secretLabel(key []byte, digests map[string]string, secretNames []string) st
 	return digest.HMAC(key, parts...)
 }
 
-// openSecrets opens the secrets that a stack names, which are Secret
-// resources of its namespace.
+// openSecrets decrypts the secrets that a stack names. They are Secret
+// resources of the stack's namespace.
 func (r *Runner) openSecrets(desired desiredState, stack *state.Stack) (stackSecrets, error) {
 	values := map[names.SecretKeyRef]string{}
 	secrets := stackSecrets{
@@ -98,23 +98,23 @@ func (r *Runner) openSecrets(desired desiredState, stack *state.Stack) (stackSec
 // variables, at every pass of a stack that runs here. A file is replaced by
 // a rename, so a running container keeps the old value until compose up
 // recreates it. An unchanged file stays, and its owner and mode are set
-// again; the same holds for the stack's directories. A stack without
-// secrets has nothing to protect; removeStaleSecrets empties what it had.
+// again. The same holds for the stack's directories. A stack without
+// secrets has nothing to protect. removeStaleSecrets empties what it had.
 func (r *Runner) writeSecrets(project string, secrets stackSecrets) error {
 	if len(secrets.files) == 0 && secrets.env == nil {
 		return nil
 	}
-	// root-only each time, even a directory that already existed with other
-	// permissions, because the files below are readable by all. The agent
-	// protects SecretsDir itself when it starts (agent.Run).
+	// root-only each time, even if a directory already existed with other
+	// permissions, because the files below are readable by everyone. The
+	// agent protects SecretsDir itself when it starts (agent.Run).
 	for _, dir := range []string{r.files.secretsDir(project), r.files.secretFilesDir(project)} {
 		if err := atomicfile.EnsureDir(dir, 0o700); err != nil {
 			return err
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(secrets.files)) {
-		// readable by all, the directory too: dockerd bind-mounts the files
-		// as root, and the container reads them as its own user
+		// readable by everyone, and so is the directory: dockerd bind-mounts
+		// the files as root, and the container reads them as its own user
 		if err := atomicfile.EnsureDir(filepath.Join(r.files.secretFilesDir(project), name), 0o755); err != nil {
 			return err
 		}

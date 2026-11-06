@@ -9,8 +9,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// drbdBasePort is the port of minor 0; a resource listens on 10000 + minor
-// on the node address (stackspec.ReservedPort keeps 10000-10999 free).
+// drbdBasePort is the port of minor 0. A resource listens on the node
+// address, on port 10000 + minor (stackspec.ReservedPort keeps 10000-10999
+// free).
 const drbdBasePort = 10000
 
 // maxPeers is how many peers each resource's metadata has room for: three
@@ -23,7 +24,8 @@ type Resource struct {
 	Name  string
 	Minor int
 	Nodes []Node
-	// ResyncRate caps the resync per host (DRBD's c-max-rate), e.g. "50M".
+	// ResyncRate caps each resync of this volume's copies (DRBD's
+	// c-max-rate), e.g. "50M".
 	ResyncRate string
 }
 

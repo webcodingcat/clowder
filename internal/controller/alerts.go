@@ -16,18 +16,18 @@ import (
 )
 
 const (
-	// alertsInterval is how often the alerts loop looks while the state
-	// does not change. The heartbeat's loop looks this often for a
-	// heartbeat in a new configuration.
+	// alertsInterval is how often the alerts loop runs a pass while the
+	// state does not change. The heartbeat's loop checks this often whether
+	// a new configuration has a heartbeat.
 	alertsInterval = 15 * time.Second
 	// remindEvery is how often an open alert is sent again.
 	remindEvery = 6 * time.Hour
-	// firstRetry and lastRetry bound the wait before a failed delivery is
-	// tried again; it doubles from the first to the last.
+	// firstRetry and lastRetry limit the wait before a failed delivery is
+	// tried again. The wait doubles from the first to the last.
 	firstRetry = time.Minute
 	lastRetry  = time.Hour
-	// maxOutbox is the most deliveries that may wait. When the outbox is
-	// full, the oldest are dropped first.
+	// maxOutbox is the largest number of deliveries that may wait. When the
+	// outbox is full, the oldest are dropped first.
 	maxOutbox = 200
 )
 
@@ -35,12 +35,12 @@ const (
 type Connect func(channel clusterspec.AlertChannel, secrets notify.Secrets) (notify.Notifier, error)
 
 // Alerts raises and resolves the cluster's alerts while this agent leads,
-// and tells the channels. It sends a message when an alert is raised or
-// gets worse, every remindEvery while it is open, and when it is resolved.
-// Its second loop calls the heartbeat. The alerts are in the state, but the
-// deliveries are only in this agent's memory. So after a change of leader,
-// the new leader sends one reminder of each open alert: a duplicate is
-// better than a lost alert.
+// and sends them to the channels. It sends a message when an alert is
+// raised or gets worse, every remindEvery while it is open, and when it is
+// resolved. Its second loop calls the heartbeat. The alerts are in the
+// state, but the deliveries are only in this agent's memory. So after a
+// change of leader, the new leader sends one reminder for each open alert:
+// a duplicate is better than a lost alert.
 //
 // One pass moves a message through these steps:
 //   - wantedAlerts says which alerts should be open.
@@ -61,19 +61,20 @@ type Alerts struct {
 	// belong to the loop alone
 	mu     sync.Mutex
 	outbox []delivery
-	// noticed are the open alerts that the channels were told of, and when
+	// noticed holds the open alerts that the channels were told about, and
+	// when
 	noticed map[string]notice
-	// raisedHere are the alerts that this leader raised. Their first
+	// raisedHere holds the alerts that this leader raised. Their first
 	// message is "raised", not the reminder that a new leader sends for an
-	// alert it found already open.
+	// alert that was already open.
 	raisedHere map[string]bool
 }
 
 type notice struct {
 	alert state.Alert
-	// peak is the highest severity that the channels were told of. The
-	// all-clear is sent with this severity, so a channel that takes only
-	// critical messages gets the all-clear too.
+	// peak is the highest severity that the channels were told about. The
+	// all-clear carries this severity, so a channel that takes only
+	// critical messages gets the all-clear too, even after a downgrade.
 	peak string
 	at   time.Time
 }
@@ -82,7 +83,7 @@ type notice struct {
 type delivery struct {
 	channel int // index in alerts.channels
 	// generation is the generation of the configuration that the message
-	// was meant for. In a newer configuration the index may name another
+	// was meant for. In a newer configuration, the index may name another
 	// channel, so the message is then dropped.
 	generation int64
 	message    notify.Message
@@ -92,7 +93,7 @@ type delivery struct {
 }
 
 // NewAlerts makes the alerts loop. conditions are the conditions that the
-// other loops hold.
+// other loops observe.
 func NewAlerts(cluster Cluster, propose Propose, open Open, conditions *Conditions, logger *slog.Logger) *Alerts {
 	return &Alerts{
 		cluster: cluster, propose: propose, open: open, connect: notify.New, conditions: conditions, logger: logger,
@@ -119,9 +120,9 @@ func (a *Alerts) Run(ctx context.Context) {
 }
 
 // forget drops what this agent kept while it led, because the new leader
-// tells the channels now. It also forgets the conditions that the other
-// loops hold, since this is the one place that sees the lead end. What this
-// agent saw is stale by the time it might lead again.
+// informs the channels now. It also forgets the conditions that the other
+// loops observe, because this is the one place that sees the lead end.
+// What this agent saw will be stale if it leads again later.
 func (a *Alerts) forget() {
 	a.mu.Lock()
 	a.outbox = nil
@@ -151,8 +152,8 @@ func (a *Alerts) RunHeartbeat(ctx context.Context) {
 	}
 }
 
-// heartbeat calls the heartbeat's URL once and tells how long to wait until
-// the next call. It returns false if the configuration has no heartbeat.
+// heartbeat calls the heartbeat's URL once and returns how long to wait
+// until the next call. It returns false if the configuration has no heartbeat.
 func (a *Alerts) heartbeat(ctx context.Context) (time.Duration, bool) {
 	copied := a.cluster.SharedCopy()
 	alerts := copied.Config.Spec.Alerts
@@ -170,7 +171,7 @@ func (a *Alerts) heartbeat(ctx context.Context) (time.Duration, bool) {
 }
 
 // pass brings the open alerts in line with what the cluster shows, then
-// tells the channels.
+// informs the channels.
 func (a *Alerts) pass(ctx context.Context) {
 	copied := a.cluster.SharedCopy()
 	if !copied.Configured() {
@@ -225,8 +226,8 @@ func (a *Alerts) pass(ctx context.Context) {
 	a.deliver(ctx, copied, now)
 }
 
-// commitOrLog writes one command and tells whether it committed; a failure
-// is logged, and the next pass tries again.
+// commitOrLog writes one command and reports whether it committed. It logs
+// a failure, and the next pass tries again.
 func (a *Alerts) commitOrLog(ctx context.Context, kind string, payload any) bool {
 	if _, err := commit(ctx, a.propose, kind, payload); err != nil {
 		a.logger.Error("raise the alerts", "command", kind, "error", err)
@@ -235,10 +236,10 @@ func (a *Alerts) commitOrLog(ctx context.Context, kind string, payload any) bool
 	return true
 }
 
-// notice puts the messages that the open alerts call for into the outbox:
-// an alert that was raised or is worse than the channels were told, a
-// reminder, or an alert that was resolved. An alert that gets better (or
-// worse again, up to its peak) sends nothing until its reminder or its
+// notice puts into the outbox the messages that the open alerts call for:
+// an alert that was raised or is worse than what the channels were told, a
+// reminder, or an alert that was resolved. An alert that gets better, or
+// worse again up to its peak, sends nothing until its reminder or its
 // all-clear.
 func (a *Alerts) notice(clusterName string, config clusterspec.Config, generation int64, open map[string]state.Alert,
 	now time.Time,
@@ -347,7 +348,8 @@ func (a *Alerts) deliver(ctx context.Context, copied *state.State, now time.Time
 	a.outbox = kept // only this loop adds to it
 }
 
-// send delivers one message, making the channel's notifier once per pass.
+// send delivers one message. It makes each channel's notifier only once
+// per pass.
 func (a *Alerts) send(ctx context.Context, copied *state.State, notifiers map[int]notify.Notifier, item delivery) error {
 	config := copied.Config.Spec
 	if config.Alerts == nil || item.channel >= len(config.Alerts.Channels) {
@@ -366,7 +368,8 @@ func (a *Alerts) send(ctx context.Context, copied *state.State, notifiers map[in
 	return notifier.Send(ctx, item.message)
 }
 
-// secrets opens the values the configuration names from the state.
+// secrets returns a function that opens the secret values that the
+// configuration names, from the state.
 func (a *Alerts) secrets(copied *state.State) notify.Secrets {
 	return func(ref names.SecretKeyRef) (string, error) {
 		encrypted, ok := copied.SystemSecret(ref)
@@ -378,7 +381,7 @@ func (a *Alerts) secrets(copied *state.State) notify.Secrets {
 	}
 }
 
-// channelName names a channel of the configuration for people.
+// channelName names a channel of the configuration for people to read.
 func channelName(config clusterspec.Config, index int) string {
 	if config.Alerts == nil || index >= len(config.Alerts.Channels) {
 		return fmt.Sprintf("alerts.channels[%d]", index)
@@ -386,7 +389,7 @@ func channelName(config clusterspec.Config, index int) string {
 	return fmt.Sprintf("alerts.channels[%d] (%s)", index, config.Alerts.Channels[index].Type)
 }
 
-// Failure is a message a channel has not taken yet.
+// Failure is a message that a channel has not taken yet.
 type Failure struct {
 	Channel   string
 	Key       string
@@ -395,8 +398,8 @@ type Failure struct {
 	LastError string
 }
 
-// Failures are the messages that failed at least once and wait for
-// another try. They are empty on an agent that does not lead.
+// Failures returns the messages that failed at least once and wait for
+// another try. It returns none on an agent that does not lead.
 func (a *Alerts) Failures() []Failure {
 	var config clusterspec.Config
 	a.cluster.Read(func(current *state.State) { config = current.Config.Spec })
@@ -414,14 +417,15 @@ func (a *Alerts) Failures() []Failure {
 	return failures
 }
 
-// TestResult is how a channel took the test alert; Err is nil if it did.
+// TestResult says how a channel took the test alert; Err is nil if the
+// channel took it.
 type TestResult struct {
 	Channel string
 	Err     error
 }
 
 // Test sends a test alert to every channel, whatever its minSeverity. It
-// sends at once and from this agent, and tells how each channel took it.
+// sends at once and from this agent, and reports how each channel took it.
 // It returns no results when the configuration names no channel.
 func (a *Alerts) Test(ctx context.Context) ([]TestResult, error) {
 	copied := a.cluster.SharedCopy()

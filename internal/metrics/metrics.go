@@ -31,7 +31,7 @@ type family struct {
 	samples []sample
 }
 
-// sample is one value of a family, told apart by its labels.
+// sample is one value of a family, identified by its labels.
 type sample struct {
 	labels map[string]string
 	value  float64
@@ -47,9 +47,9 @@ func NewSet() *Set {
 	return &Set{families: map[string]*family{}}
 }
 
-// Add adds a sample to a family, which the first sample defines. labels
-// alternates names and values. A list of odd length is a bug of the
-// caller, so Add panics, and the tests catch it.
+// Add adds a sample to a family. The first sample of a family sets its help
+// and kind. labels alternates names and values. A list of odd length is a
+// bug in the caller, so Add panics, and the tests catch it.
 func (s *Set) Add(name, help string, kind Kind, value float64, labels ...string) {
 	if len(labels)%2 != 0 {
 		panic(fmt.Sprintf("metric %s: labels %q are not pairs of name and value", name, labels))
@@ -66,8 +66,8 @@ func (s *Set) Add(name, help string, kind Kind, value float64, labels ...string)
 	metric.samples = append(metric.samples, added)
 }
 
-// Write writes the set in the text format, families by name and samples by
-// their labels.
+// Write writes the set in the text format. It sorts the families by name
+// and the samples by their labels.
 func (s *Set) Write(out io.Writer) error {
 	var text strings.Builder
 	for _, name := range slices.Sorted(maps.Keys(s.families)) {
@@ -110,8 +110,8 @@ func escapeHelp(help string) string {
 	return strings.NewReplacer(`\`, `\\`, "\n", `\n`).Replace(help)
 }
 
-// formatValue writes a value without an exponent for whole numbers, so
-// byte counts read as they are.
+// formatValue writes whole numbers without an exponent, so byte counts are
+// easy to read.
 func formatValue(value float64) string {
 	if value == float64(int64(value)) {
 		return strconv.FormatInt(int64(value), 10)

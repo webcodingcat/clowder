@@ -23,8 +23,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// joiner is the leader's side of a join (api.Joins); join.go is the side of
-// the host that joins.
+// joiner is the leader's side of a join (api.Joins). join.go is the side of
+// the joining host.
 type joiner struct {
 	cluster interface {
 		SharedCopy() *state.State
@@ -32,30 +32,30 @@ type joiner struct {
 	propose controller.Propose
 	dataKey *datakey.Key
 
-	// mu lets one join run at a time: two joins at once would choose the
-	// same free ID, and the second would be refused through no fault of
-	// its own
+	// mu lets only one join run at a time. Two joins at once would choose
+	// the same free ID, and the second would be refused through no fault of
+	// its own.
 	mu sync.Mutex
 	// seen holds the nonces of the last joinNonceKept, each with the time
-	// it was seen, so the leader takes each request only once. That
+	// it was seen, so that the leader accepts each request only once. This
 	// protects little: whoever saw a request also saw its token, and only
-	// the cluster's agents see requests, over TLS. It is the design's
-	// insurance against a request sent twice. It lives only in this
-	// leader's memory, so a new leader starts with an empty map.
+	// the cluster's agents see requests, over TLS. It is insurance against
+	// a request sent twice. The map lives only in this leader's memory, so
+	// a new leader starts with an empty map.
 	seen map[string]time.Time
 }
 
-// joinNonceKept is how long a nonce is remembered. It is longer than the
-// time window in which a request is accepted (api.CheckJoinRequest), on
-// either side of the leader's clock.
+// joinNonceKept is how long the leader remembers a nonce. It is longer
+// than the time window around the leader's clock in which a request is
+// accepted (api.CheckJoinRequest).
 const joinNonceKept = 15 * time.Minute
 
 // Join checks a request against the state and Hetzner, and adds the
 // host. A refusal says why, and the token stays open for another try.
-// Someone who has only a token's ID learns whether the token is open, and
-// nothing more (state.ErrJoinTokenRefused); the other reasons need the
-// secret. Joins come one at a time, so a host that starts together with
-// others may wait a minute.
+// Someone who has only a token's ID learns only whether the token is open
+// (state.ErrJoinTokenRefused). The other reasons are shown only to a caller
+// with the secret. Joins run one at a time, so a host that starts together
+// with others may wait a minute.
 func (j *joiner) Join(ctx context.Context, request api.JoinRequest) (api.JoinAnswer, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -139,7 +139,8 @@ func comesFromHost(source netip.Addr, host state.Host) bool {
 	return source == host.Underlay || source == host.PublicAddress
 }
 
-// firstSeen records a nonce and tells whether it is new; the caller holds mu.
+// firstSeen records a nonce and reports whether it is new. The caller holds
+// mu.
 func (j *joiner) firstSeen(nonce string, now time.Time) bool {
 	if j.seen == nil {
 		j.seen = map[string]time.Time{}
@@ -152,8 +153,8 @@ func (j *joiner) firstSeen(nonce string, now time.Time) bool {
 	return true
 }
 
-// issue makes the joining host's certificate, for its own key, its ID, its
-// roles and its addresses.
+// issue creates the joining host's certificate for the host's own key, its
+// ID, its roles and its addresses.
 func (j *joiner) issue(current *state.State, request api.JoinRequest, id state.HostID, now time.Time) (
 	[]byte, *x509.Certificate, error,
 ) {
@@ -181,8 +182,9 @@ func (j *joiner) issue(current *state.State, request api.JoinRequest, id state.H
 }
 
 // checkServer asks Hetzner whether the server belongs to the host
-// (hetzner.Client.CheckServer). A server that belongs to someone else is a
-// refusal; an API that does not answer is not.
+// (hetzner.Client.CheckServer). A server that belongs to someone else
+// refuses the join. An API that does not answer is an error, but not a
+// refusal.
 func (j *joiner) checkServer(ctx context.Context, current *state.State, host state.Host) error {
 	client, err := controller.OpenHetzner(current, j.dataKey.Decrypt)
 	if err != nil {
@@ -195,8 +197,8 @@ func (j *joiner) checkServer(ctx context.Context, current *state.State, host sta
 	return err
 }
 
-// joinPeers are the hosts to which a joining host builds its WireGuard
-// interfaces, the same hosts that readWantedNetwork picks.
+// joinPeers are the hosts that a joining host connects to over WireGuard.
+// They are the same hosts that readWantedNetwork picks.
 func joinPeers(current *state.State, joining state.HostID) []api.JoinPeer {
 	var peers []api.JoinPeer
 	for _, id := range slices.Sorted(maps.Keys(current.Hosts)) {

@@ -38,9 +38,9 @@ func NewRoot() *cobra.Command {
 	return root
 }
 
-// hostFlags are the flags that init and join share; they say who the host
-// is. The host's name in the cluster is its hostname, which is also the
-// name DRBD uses for it in a resource.
+// hostFlags are the flags that init and join share. They describe the host.
+// The host's name in the cluster is its hostname, which DRBD also uses for
+// the host in a resource.
 type hostFlags struct {
 	underlay, publicAddress, roles string
 	serverID                       int64
@@ -59,7 +59,7 @@ func (f *hostFlags) add(cmd *cobra.Command, roles hostrole.Set) {
 	}
 }
 
-// parsedHost is what hostFlags.parse reads.
+// parsedHost holds the values that hostFlags.parse returns.
 type parsedHost struct {
 	name                    string
 	roles                   hostrole.Set
@@ -85,8 +85,8 @@ func (f *hostFlags) parse() (parsedHost, error) {
 	return host, nil
 }
 
-// startService enables and starts clowderd.service, so that from then on
-// the agent runs as a service, across reboots.
+// startService enables and starts clowderd.service. From then on the agent
+// runs as a service and survives reboots.
 func (f *hostFlags) startService(ctx context.Context) error {
 	if !f.start {
 		return nil

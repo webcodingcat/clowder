@@ -17,7 +17,7 @@ const (
 	// here and mounted.
 	targetMounted
 	// targetKept: a stack that left this host may still hold the copy (its
-	// compose down has not succeeded yet); nothing changes until the stack
+	// compose down has not succeeded yet). Nothing changes until the stack
 	// has stopped.
 	targetKept
 )
@@ -53,7 +53,7 @@ const (
 // kind, and what the host has of it.
 type copyFacts struct {
 	target target
-	// plain is a copy without DRBD (replicas 0); diskless is a tiebreaker
+	// plain is a copy without DRBD (replicas 0), diskless a tiebreaker
 	plain, diskless bool
 	// initialized is what the state says (Volume.Initialized)
 	initialized bool
@@ -71,7 +71,7 @@ var (
 )
 
 // plan returns, in order, the steps that bring a copy from what the host
-// has to its target; it returns none when the copy is already there. It
+// has to its target. It returns none when the copy is already there. It
 // only decides, so a pass that finds everything in place runs no tool.
 //
 // A volume that never held data is promoted with --force and formatted,
@@ -97,7 +97,7 @@ func plan(facts copyFacts) ([]step, error) {
 	var steps []step
 	// a resource that is down or whose file changed needs ensure, which
 	// runs drbdadm adjust. A tiebreaker that still has the LV of its former
-	// disk needs ensure too, which removes the LV
+	// disk needs ensure too, which removes the LV.
 	resourceBehind := !facts.plain && (seen.Role == storage.RoleDown || !seen.ResourceFileCurrent)
 	missingLV := !seen.LV && !facts.diskless
 	leftoverLV := seen.LV && facts.diskless

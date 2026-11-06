@@ -11,23 +11,22 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// MoveCooldown is how long a stack that an operation moved stays where it
-// is before the placement moves it again to make room for another stack.
+// MoveCooldown is how long a stack stays where an operation moved it
+// before the placement may move it again to make room for another stack.
 // This keeps a stack from being pushed from host to host.
 const MoveCooldown = 10 * time.Minute
 
 // makeRoom makes room for a stack without a host. It moves stacks of lower
-// priority off a host that has the stack's data, to hosts where all of
-// each moved stack fits and that have its data (no resync). It is the third
-// way to place a stack: after the free room, and before pushing services
-// out (place). A stack moved within MoveCooldown, or one that an operation
-// holds, stays.
+// priority off a host that has the stack's data. Each moved stack goes to
+// a host where all of it fits and that has its data, so nothing resyncs.
+// It is the third way to place a stack (place): after free room, and
+// before pushing services out. A stack moved within MoveCooldown, or one
+// that an operation holds, stays.
 //
-// The moves are the decisions, and the stack waits (the reason). It finds
-// the room once the moved stacks have stopped on the host, because
-// room.running counts a moving stack on both hosts until then. So while
-// stacks move off a host, the stack waits for them instead of sending more
-// stacks away.
+// The moves are the decisions, and the stack waits; the reason says so.
+// The stack finds the room only once the moved stacks have stopped,
+// because room.running counts a moving stack on both hosts until then. So
+// the stack waits for the moves instead of sending more stacks away.
 func (p *planner) makeRoom(stack *state.Stack) (moves []decision, reason string, ok bool) {
 	priority := p.stackPriority(stack.ID())
 	for _, host := range p.stackHosts(nil) {
@@ -46,7 +45,7 @@ func (p *planner) makeRoom(stack *state.Stack) (moves []decision, reason string,
 	return nil, "", false
 }
 
-// movingOff returns the stacks that move off a host and have not stopped
+// movingOff returns the stacks that move off host and have not stopped
 // there yet.
 func (p *planner) movingOff(host state.HostID) []string {
 	var leaving []string
@@ -59,7 +58,7 @@ func (p *planner) movingOff(host state.HostID) []string {
 }
 
 // moveOff moves stacks below priority off host, lowest first, until all of
-// the stack fits there. ok is false if it never does.
+// stack fits there. It returns false if the stack never fits.
 func (p *planner) moveOff(stack *state.Stack, host state.HostID, priority int) ([]decision, bool) {
 	var candidates []*state.Stack
 	for _, id := range slices.Sorted(maps.Keys(p.current.Stacks)) {
@@ -107,8 +106,9 @@ func (p *planner) fitsWhole(stack *state.Stack, host state.HostID) bool {
 
 // hostWithData finds another host that has a stack's data and where all of
 // the stack fits without pushing anything out. A stack that names a volume
-// still waiting for its first stack stays, because the move would place
-// that volume, and a stack moved to make room should change nothing else.
+// that still waits for its first stack stays where it is. The move would
+// place that volume, and a stack moved to make room should change nothing
+// else.
 func (p *planner) hostWithData(stack *state.Stack, leftOut state.HostID) (stackFit, bool) {
 	for _, host := range p.stackHosts(&leftOut) {
 		if !p.fitsWhole(stack, host) || !p.hasData(stack, host) {
@@ -122,8 +122,8 @@ func (p *planner) hostWithData(stack *state.Stack, leftOut state.HostID) (stackF
 	return stackFit{}, false
 }
 
-// stackPriority returns a stack's highest effective priority, which the
-// stack is placed with.
+// stackPriority returns the highest effective priority of a stack's
+// services. The stack is placed with this priority.
 func (p *planner) stackPriority(id string) int {
 	highest := 0
 	for service := range p.current.Stacks[id].Services {
@@ -142,9 +142,10 @@ func waitsForRoom(moves []decision) string {
 	return "waits for " + strings.Join(stacks, ", ") + " to move and make room"
 }
 
-// failedRecently tells whether a move of the stack failed within
-// MoveCooldown. Until then, the placement does not start a move of its own
-// again, so a move that cannot work does not resync copies over and over.
+// failedRecently tells whether a move of the stack failed within the last
+// MoveCooldown. Until then, the placement starts no move of its own for
+// the stack, so a move that cannot work does not resync copies over and
+// over.
 func (p *planner) failedRecently(stack *state.Stack) bool {
 	return !stack.MoveFailed.IsZero() && p.now.Sub(stack.MoveFailed) < MoveCooldown
 }

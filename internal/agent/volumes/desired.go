@@ -25,8 +25,8 @@ type wantedCopy struct {
 }
 
 // desired returns the copies that the state places on this host, sorted by
-// volume ID. A copy that a stack placed on this host names is mounted,
-// unless the stack stops for a move (State.StopsForMove). A copy that a
+// volume ID. A copy that is named by a stack placed on this host is
+// mounted, unless the stack stops for a move (State.StopsForMove). A copy that a
 // local stack may still hold (held, or any copy while holdAll) is kept as
 // it is. Any other copy is secondary.
 func (r *Reconciler) desired(copied *state.State, held map[string]bool, holdAll bool) []wantedCopy {
@@ -64,7 +64,7 @@ func (r *Reconciler) desired(copied *state.State, held map[string]bool, holdAll 
 }
 
 // describe turns a volume of the state into this host's copy of it, in the
-// form the storage driver takes. The LV's name contains the generation, so
+// form that the storage driver expects. The LV's name contains the generation, so
 // a restored volume is a new LV next to the old one. The DRBD resource has
 // the LV's name. Even a copy that cannot be described has its ID and LV, so
 // that the error reaches the stack that waits for it. The caller (desired)
@@ -75,8 +75,8 @@ func (r *Reconciler) describe(copied *state.State, volume *state.Volume) (storag
 	described := storage.Volume{ID: id, LV: lv, SizeBytes: int64(volume.Spec.Size)}
 	config := copied.Config.Spec
 	index := slices.IndexFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == r.host })
-	// a tiebreaker has no pool, except a former copy with a disk: its
-	// class names the pool of the LV that must be removed
+	// a tiebreaker has no pool, unless it was a copy with a disk before:
+	// then its class names the pool of the LV that must be removed
 	described.Diskless = volume.Copies[index].Tiebreaker
 	if class := volume.Copies[index].Class; !described.Diskless || class != "" {
 		pool, err := poolOf(config, id, class)
@@ -99,8 +99,8 @@ func (r *Reconciler) describe(copied *state.State, volume *state.Volume) (storag
 			if err != nil {
 				return described, err
 			}
-			// a pool is "<volume group>/<thin pool>"; the LV's device is in
-			// the volume group
+			// a pool is "<volume group>/<thin pool>", and the LV's device is
+			// in the volume group
 			group, _, _ := strings.Cut(peerPool, "/")
 			node.Disk = "/dev/" + group + "/" + lv
 		}
@@ -122,7 +122,7 @@ func poolOf(config clusterspec.Config, volumeID, class string) (string, error) {
 	return storageClass.Pool, nil
 }
 
-// placedHere tells whether the state has a copy of the volume on this host
+// placedHere reports whether the state has a copy of the volume on this host
 // in the recorded data generation.
 func (r *Reconciler) placedHere(copied *state.State, volume storage.Volume) bool {
 	current, ok := copied.Volumes[volume.ID]

@@ -13,27 +13,29 @@ import (
 
 // Observed is the current state of a copy on the host.
 type Observed struct {
-	// LV says that the copy's LV exists. A tiebreaker has no LV, except a
-	// copy that had a disk, until its host removes that LV.
+	// LV says that the copy's LV exists. A tiebreaker has no LV. The
+	// exception is a tiebreaker that used to have a disk: its LV exists
+	// until its host removes it.
 	LV bool
 	// ResourceFileCurrent says that the DRBD resource file is the one the
-	// copy should have (only for replicated volumes); a new peer changes it.
+	// copy should have (only for replicated volumes). A new peer changes the
+	// file.
 	ResourceFileCurrent bool
 	// Role is the DRBD resource's role on this host (only for replicated
 	// volumes).
 	Role Role
 	// Disk is DRBD's disk state of the copy on this host (DiskUpToDate,
-	// ...). OutOfSyncBytes is the largest difference from any peer: while
-	// the copy resyncs, the amount that is left. Both are set only for
+	// ...). OutOfSyncBytes is the largest difference from any peer; during
+	// a resync, it is the amount that is left. Both are set only for
 	// replicated volumes, and only while the resource is up.
 	Disk           string
 	OutOfSyncBytes int64
-	// Quorum says that the copy has DRBD's quorum, and SplitBrain that a
-	// peer stands alone (standAlonePeers). Both are set only while the
-	// resource is up.
+	// Quorum says that the copy has DRBD's quorum. SplitBrain says that a
+	// peer is in the StandAlone state (standAlonePeers). Both are set only
+	// while the resource is up.
 	Quorum, SplitBrain bool
-	// Mounted says that a file system is mounted at the copy's mount point,
-	// and OtherDevice that it is not the copy's device.
+	// Mounted says that a file system is mounted at the copy's mount point.
+	// OtherDevice says that the mounted device is not the copy's device.
 	Mounted, OtherDevice bool
 }
 
@@ -48,7 +50,7 @@ func (o Observed) Synced(volume Volume) bool {
 
 // Observe reads the state of the copies on the host, keyed by LV. It only
 // reads, and it reads for all copies at once: lvs per volume group, the
-// state of all DRBD resources and the mount table. So a pass that finds
+// state of all DRBD resources, and the mount table. So a pass that finds
 // everything in order runs no tool per copy, and no tool that touches a
 // volume.
 func (d Driver) Observe(ctx context.Context, volumes []Volume) (map[string]Observed, error) {
@@ -102,9 +104,9 @@ func (d Driver) Observe(ctx context.Context, volumes []Volume) (map[string]Obser
 
 // mounts reads the mount table: the source of each mount point. --raw
 // lists one mount per line and escapes blanks, so each line has two
-// fields. Without a filter, the table always contains the root, so
-// findmnt's exit code 1 means a failure here (a wrong argument also exits
-// with 1), never "nothing mounted".
+// fields. Without a filter, the table always contains the root. So here
+// findmnt's exit code 1 means a failure (a wrong argument also exits with
+// 1), never "nothing mounted".
 func (d Driver) mounts(ctx context.Context) (map[string]string, error) {
 	output, err := d.Run(ctx, statusTimeout, "findmnt", "--raw", "--noheadings", "--output", "TARGET,SOURCE")
 	if err != nil {
@@ -120,9 +122,9 @@ func (d Driver) mounts(ctx context.Context) (map[string]string, error) {
 }
 
 // sameDevice tells whether findmnt's source is the device. findmnt names an
-// LV as /dev/mapper/<vg>-<lv> and a bind mount with its directory in
-// brackets, so sameDevice follows both paths to the device node they link
-// to.
+// LV as /dev/mapper/<vg>-<lv>, and adds a bind mount's directory in
+// brackets. So sameDevice drops the brackets and follows both paths to the
+// device node they link to.
 func sameDevice(source, device string) bool {
 	source, _, _ = strings.Cut(source, "[")
 	if source == device {
@@ -147,6 +149,6 @@ func (d Driver) resourceFileCurrent(resource *Resource) (bool, error) {
 		return false, nil
 	}
 	// a file that adjust did not apply (it failed, for example without
-	// quorum) is not current yet: the next pass runs adjust again
+	// quorum) is not current yet, so the next pass runs adjust again
 	return d.hasMarker(resource.Name, "adjusted")
 }

@@ -1,11 +1,11 @@
-// Package secretvalue is a value of a SealedSecret: age's ciphertext for
-// the cluster's sealing key, written as one line of Base64, as kubeseal
-// writes a value of spec.encryptedData. What age encrypts is an envelope
-// that binds the value to the Secret it is for (its ID), so a value copied
-// to another Secret is refused when it is opened.
+// Package secretvalue seals and opens the values of a SealedSecret. A
+// sealed value is age's ciphertext for the cluster's sealing key, written
+// as one line of Base64, as kubeseal writes a value of spec.encryptedData.
+// age encrypts an envelope that binds the value to its Secret (by ID). So
+// a value copied to another Secret is refused when it is opened.
 //
-// No error contains a value: a file may be read with a wrong key or be
-// broken, and the message goes to a terminal or a log.
+// No error message contains a value. A file may be read with a wrong key
+// or be broken, and the message goes to a terminal or a log.
 package secretvalue
 
 import (
@@ -19,19 +19,19 @@ import (
 	"filippo.io/age"
 )
 
-// version is the envelope's format. A newer clowder may write a higher
-// version.
+// version is the envelope's format version. A newer clowder may write a
+// higher version.
 const version = 1
 
-// Value is a value in clear and the Secret it is for.
+// Value is a value in clear, and the ID of the Secret it is for.
 type Value struct {
 	For   string
 	Bytes []byte
 }
 
-// envelope is what age encrypts. The value is Base64 (encoding/json does
-// this for []byte), so there is no escaping that changes its size, no
-// question of UTF-8, and binary values need no other format.
+// envelope is what age encrypts. encoding/json writes the []byte value as
+// Base64. So no escaping changes its size, UTF-8 does not matter, and
+// binary values need no other format.
 type envelope struct {
 	Version int    `json:"v"`
 	For     string `json:"for"`
@@ -62,9 +62,9 @@ func Seal(value Value, recipient age.Recipient) (string, error) {
 	return base64.StdEncoding.EncodeToString(ciphertext.Bytes()), nil
 }
 
-// OpenFor decrypts a value found in the Secret whose ID is want. It
-// refuses a value meant for another Secret, such as the Hetzner token of
-// clowder-system copied into a stack's Secret.
+// OpenFor decrypts a value that was found in the Secret with the ID want.
+// It refuses a value meant for another Secret, such as the Hetzner token
+// of clowder-system copied into a stack's Secret.
 func OpenFor(sealed, want string, identities ...age.Identity) (Value, error) {
 	opened, err := Open(sealed, identities...)
 	if err != nil {
@@ -76,9 +76,9 @@ func OpenFor(sealed, want string, identities ...age.Identity) (Value, error) {
 	return opened, nil
 }
 
-// Open decrypts a sealed value with one of the identities. The caller
-// checks whether the value is meant for the Secret where it was found
-// (Value.For), or uses OpenFor, which does that check.
+// Open decrypts a sealed value with one of the identities. The caller must
+// check that the value is meant for the Secret where it was found
+// (Value.For), or use OpenFor, which does that check.
 func Open(sealed string, identities ...age.Identity) (Value, error) {
 	// base64's errors name only an offset, never the text
 	ciphertext, err := base64.StdEncoding.DecodeString(sealed)
@@ -93,7 +93,7 @@ func Open(sealed string, identities ...age.Identity) (Value, error) {
 	if err != nil {
 		return Value{}, fmt.Errorf("open a secret value: %w", err)
 	}
-	// json's messages may quote the text they choke on, which is the value
+	// drop json's message: it may quote the text it fails on, the value
 	var written envelope
 	if json.Unmarshal(plaintext, &written) != nil {
 		return Value{}, errors.New("open a secret value: it holds no envelope of clowder's")

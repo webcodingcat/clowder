@@ -30,13 +30,14 @@ import (
 // kubeadm's clusterName is "kubernetes" by default.
 const DefaultClusterName = "clowder-cluster"
 
-// InitOptions are what cloud-init gives clowderd init.
+// InitOptions are the values that cloud-init passes to clowderd init.
 type InitOptions struct {
-	// ClusterName names the cluster, as kubeadm's clusterName; it checks
-	// nothing.
+	// ClusterName is the cluster's name, like kubeadm's clusterName. It is
+	// only a label: no check depends on it.
 	ClusterName string
 	Name        string
-	// Roles are the host's roles; the first host is a control-plane host.
+	// Roles are the host's roles. The first host must be a control-plane
+	// host.
 	Roles hostrole.Set
 	// Underlay is the server's address in the Hetzner private network.
 	Underlay netip.Addr
@@ -45,7 +46,7 @@ type InitOptions struct {
 	// ServerID is the Hetzner Cloud ID of the server, for the Floating IP
 	// and fencing.
 	ServerID int64
-	// NodeAddress, RaftPort and APIPort are fixed in a cluster; tests change
+	// NodeAddress, RaftPort and APIPort are fixed in a cluster. Tests change
 	// them to run on 127.0.0.1.
 	NodeAddress netip.Addr
 	RaftPort    int
@@ -53,8 +54,8 @@ type InitOptions struct {
 }
 
 // checkHostName refuses a name that the state would refuse. The host's name
-// in the cluster is its hostname, and a hostname may be a FQDN or contain
-// capitals.
+// in the cluster is its hostname, and a hostname may be an FQDN or contain
+// capital letters, which the state does not accept.
 func checkHostName(name string) error {
 	if !names.Valid(name) {
 		return fmt.Errorf("the hostname %q cannot name a host of the cluster: %s", name, names.Rule)
@@ -68,7 +69,7 @@ const leaderTimeout = 30 * time.Second
 // Init makes this host the first of a new cluster: it creates the CA, the
 // data key and the cluster's sealing key, the host's certificate and WireGuard
 // key, and a Raft group with this host as its only voter. It refuses a host
-// that has a cluster already.
+// that already belongs to a cluster.
 func Init(ctx context.Context, files Files, options InitOptions, hostNetwork HostNetwork, logger *slog.Logger) error {
 	if _, err := os.Stat(files.raftDir()); err == nil {
 		return fmt.Errorf("%s exists: this host was part of a cluster, or an init failed halfway "+
@@ -77,24 +78,22 @@ func Init(ctx context.Context, files Files, options InitOptions, hostNetwork Hos
 	if options.Name == "" || options.ServerID <= 0 {
 		return errors.New("init needs the host's name and its server ID")
 	}
-	// the state accepts only a DNS label (applyBootstrap); if the state
-	// refused it, init would stop halfway
+	// The checks below repeat what the state refuses. If the state refused
+	// a value instead, init would stop halfway.
+	// a DNS label only (applyBootstrap)
 	if !names.Valid(options.ClusterName) {
 		return fmt.Errorf("cluster name %q: %s", options.ClusterName, names.Rule)
 	}
-	// the state accepts only a DNS label (checkNewHost); if the state
-	// refused it, init would stop halfway
+	// a DNS label only (checkNewHost)
 	if err := checkHostName(options.Name); err != nil {
 		return err
 	}
-	// the state accepts only a control-plane host (applyBootstrap); if the
-	// state refused it, init would stop halfway
+	// a control-plane host only (applyBootstrap)
 	if !options.Roles.Has(hostrole.ControlPlane) {
 		return fmt.Errorf("the roles %s lack %s: the first host is the cluster's only voter", options.Roles,
 			hostrole.ControlPlane)
 	}
-	// the state accepts only IPv4 (checkNewHost); if the state refused
-	// it, init would stop halfway
+	// IPv4 only (checkNewHost)
 	if !options.Underlay.Is4() || !options.PublicAddress.Is4() {
 		return errors.New("the underlay and the public address must be IPv4 addresses")
 	}
@@ -118,13 +117,13 @@ func Init(ctx context.Context, files Files, options InitOptions, hostNetwork Hos
 	if err := bootstrapRaft(ctx, files, host, keys, hostEntry, options.ClusterName, logger); err != nil {
 		return err
 	}
-	// host.json last: a host with it has everything else
+	// host.json comes last: a host with it has everything else
 	return files.writeHost(host)
 }
 
-// createKeys makes the cluster's keys and this host's, writes the host's to
-// disk and returns what goes into the state. The functions it calls say in
-// their errors what failed.
+// createKeys creates the cluster's keys and this host's keys. It writes the
+// host's keys to disk and returns what goes into the state. It does not
+// wrap errors, because the functions it calls already say what failed.
 func createKeys(files Files, clusterName string, host Host) (state.ClusterKeys, state.Host, error) {
 	var keys state.ClusterKeys
 	now := time.Now()
@@ -187,9 +186,9 @@ func createKeys(files Files, clusterName string, host Host) (state.ClusterKeys, 
 	return keys, entry, nil
 }
 
-// writeKeys writes what the host proves itself with: the CA's certificate,
-// its own certificate and key, its WireGuard key and the data key. init and
-// join write them alike.
+// writeKeys writes the host's credentials: the CA's certificate, the host's
+// own certificate and key, its WireGuard key and the data key. init and
+// join both use it.
 func (f Files) writeKeys(caPEM, certificatePEM, hostKeyPEM []byte, wireGuardKey *ecdh.PrivateKey,
 	dataKey *datakey.Key,
 ) error {
@@ -226,7 +225,7 @@ func bootstrapRaft(ctx context.Context, files Files, host Host, keys state.Clust
 	if err != nil {
 		return err
 	}
-	defer func() { _ = node.Close() }() // the bootstrap is committed, or its error reported
+	defer func() { _ = node.Close() }() // the bootstrap is committed or failed by now
 	if err := node.Bootstrap(); err != nil {
 		return err
 	}

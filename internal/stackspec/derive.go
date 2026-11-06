@@ -10,14 +10,14 @@ import (
 	"github.com/webcodingcat/clowder/internal/names"
 )
 
-// Normalize fills in the schema's own defaults and writes everything that
-// can be written in several ways in one way. So two specs that are written
-// differently but mean the same are equal: lists whose order means nothing
-// are sorted, a route's host is in lower case, and a capability has no
-// CAP_. Defaults of the configuration (reservations, priority) are left
-// out, because the scheduler applies them when it places. Normalize shares
-// nothing with the spec it gets and leaves that spec unchanged. A
-// normalized spec normalizes to itself.
+// Normalize fills in the schema's own defaults. It also writes everything
+// that can be written in several ways in one way, so that two specs that
+// mean the same are equal. For example, it sorts the lists whose order
+// means nothing, writes a route's host in lower case, and drops CAP_ from
+// capabilities. It leaves out the configuration's defaults (reservations,
+// priority), because the scheduler applies them when it places. The
+// result shares nothing with spec, and spec stays unchanged. A normalized
+// spec normalizes to itself.
 func Normalize(spec Spec) Spec {
 	normalized := Spec{Priority: spec.Priority, Services: map[string]Service{}}
 	for name, service := range spec.Services {
@@ -28,7 +28,7 @@ func Normalize(spec Spec) Spec {
 
 func normalizeService(service Service) Service {
 	if service.Restart == "" {
-		// an orchestrator's service comes back; a one-shot job says no
+		// an orchestrator restarts a service; a one-shot job must say no
 		service.Restart = "always"
 	}
 	restartUnhealthy := service.RestartsUnhealthy()
@@ -80,8 +80,8 @@ func copyAmount(amount *Amount) *Amount {
 	return &copied
 }
 
-// capabilities are the names of capabilities as Docker writes them: in
-// upper case, without CAP_, sorted, each once.
+// capabilities returns the names of capabilities as Docker writes them:
+// in upper case, without CAP_, sorted, and each once.
 func capabilities(names []string) []string {
 	written := make([]string, 0, len(names))
 	for _, name := range names {
@@ -90,7 +90,8 @@ func capabilities(names []string) []string {
 	return sortedSet(written)
 }
 
-// sortedSet returns a set's members sorted, each once, or nil for none.
+// sortedSet returns a set's members sorted and each once, or nil if there
+// are none.
 func sortedSet(members []string) []string {
 	return nilIfEmpty(slices.Compact(slices.Sorted(slices.Values(members))))
 }
@@ -110,13 +111,13 @@ func mapOrNil[Value any](values map[string]Value) map[string]Value {
 }
 
 // RestartsUnhealthy tells whether the supervisor restarts the service's
-// container when it turns unhealthy. It does unless the spec says no.
+// container when it turns unhealthy. It does, unless the spec says no.
 func (s Service) RestartsUnhealthy() bool {
 	return s.RestartUnhealthy == nil || *s.RestartUnhealthy
 }
 
-// withDefaults returns the port with the schema's defaults filled in:
-// published as the container's port, over tcp.
+// withDefaults returns the port with the schema's defaults: the published
+// port is the container's port, and the protocol is tcp.
 func (p Port) withDefaults() Port {
 	if p.Published == 0 {
 		p.Published = p.Port
@@ -200,8 +201,8 @@ func (s Spec) WithDependents(services []string) []string {
 	return slices.Sorted(maps.Keys(with))
 }
 
-// SecretNames returns the secrets of the namespace that the stack uses, as
-// files or variables, sorted.
+// SecretNames returns the namespace's secrets that the stack uses, as files
+// or as variables, sorted.
 func (s Spec) SecretNames() []string {
 	var secrets []string
 	for _, service := range s.Services {
@@ -213,8 +214,8 @@ func (s Spec) SecretNames() []string {
 	return sortedSet(secrets)
 }
 
-// SecretKeyRefs returns the values of secrets that the stack names one by
-// one, as variables, sorted and each once. A secret must keep these keys.
+// SecretKeyRefs returns the single values of secrets that the stack uses
+// as variables, sorted and each once. A secret must keep these keys.
 func (s Spec) SecretKeyRefs() []names.SecretKeyRef {
 	var refs []names.SecretKeyRef
 	for _, service := range s.Services {

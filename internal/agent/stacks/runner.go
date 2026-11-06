@@ -2,8 +2,8 @@
 // state places on this host with docker compose, writes their secrets, and
 // stops the stacks that left the host. The volume reconciler (agent/volumes)
 // keeps their volume copies, and the runner waits until those are mounted.
-// This file has the pass; apply.go runs one stack, and leavers.go stops the
-// stacks that left.
+// This file holds the pass. apply.go runs one stack, and leavers.go stops
+// the stacks that left.
 package stacks
 
 import (
@@ -25,8 +25,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Docker is what the runner needs from Docker; docker.Client is the real
-// one.
+// Docker is what the runner needs from Docker. docker.Client is the real
+// implementation.
 type Docker interface {
 	// ComposeUp and ComposePull pull with the logins of the Docker config
 	// directory config (registryConfigDir).
@@ -38,23 +38,23 @@ type Docker interface {
 	Containers(ctx context.Context, label string) ([]docker.Container, error)
 }
 
-// Volumes is what the runner needs from the volume reconciler;
-// volumes.Reconciler is the real one. Mounted tells about this host's copy
-// of a volume, by its LV. It returns the mount point once the copy is ready
-// for a stack, and an error if the copy cannot get there. While the copy is
-// on its way, it returns neither.
+// Volumes is what the runner needs from the volume reconciler.
+// volumes.Reconciler is the real implementation. Mounted reports on this
+// host's copy of a volume, by its LV. It returns the mount point once the
+// copy is ready for a stack, and an error if the copy cannot get there.
+// While the copy is still on its way, it returns neither.
 type Volumes interface {
 	Mounted(lv string) (dir string, ready bool, err error)
 }
 
 // Files are the files where the runner keeps what it knows about the stacks
-// on this host. The agent's files give their paths.
+// on this host. The agent sets their paths.
 type Files struct {
 	// StacksDir has one directory per stack, named by its Compose project
 	// (names.Project), with its rendered Compose file and the LVs it mounts
 	StacksDir string
-	// SecretsDir holds the stacks' secrets in plain text, on tmpfs;
-	// clowder's own projects keep their secrets next to them
+	// SecretsDir holds the stacks' secrets in plain text, on tmpfs.
+	// clowder's own projects keep their secrets there too.
 	SecretsDir string
 }
 
@@ -86,8 +86,9 @@ func (f Files) secretFile(project, name, key string) string {
 	return filepath.Join(f.secretFilesDir(project), name, key)
 }
 
-// Stopped tells whether a stack (by its project) has no containers on this
-// host: it never ran here, or its compose down succeeded (stopLeavers).
+// Stopped reports whether a stack (by its project) has no containers on
+// this host: it never ran here, or its compose down succeeded
+// (stopLeavers).
 func (f Files) Stopped(project string) (bool, error) {
 	_, err := os.Stat(f.stackFile(project))
 	switch {
@@ -129,8 +130,8 @@ func (f Files) HeldLVs() (map[string]bool, error) {
 // Parts are what the agent gives the runner to work with.
 type Parts struct {
 	Files Files
-	// Host is this host's ID; NodeAddress is its address in the overlay,
-	// where published ports listen
+	// Host is this host's ID. NodeAddress is its address in the overlay,
+	// where published ports listen.
 	Host        state.HostID
 	NodeAddress netip.Addr
 	Cluster     loop.Cluster
@@ -138,8 +139,8 @@ type Parts struct {
 	Volumes     Volumes
 	// Open decrypts the secrets' values (datakey.Key.Decrypt)
 	Open func(encrypted state.Encrypted) ([]byte, error)
-	// DigestKey keys the labels of secret files, derived from the data key
-	// for SecretLabelPurpose
+	// DigestKey is the key for the labels of secret files. It is derived
+	// from the data key for SecretLabelPurpose.
 	DigestKey []byte
 	// Supervisor is paused while compose up or down changes a stack's
 	// containers
@@ -147,11 +148,12 @@ type Parts struct {
 	// Signal is how the supervisor and the volume reconciler start a pass,
 	// and how the supervisor reports that Docker restarted
 	Signal *loop.Signal
-	// Registries writes the Docker configs that the stacks pull with; the
-	// prefetcher shares it
+	// Registries writes the Docker configs that the stacks pull with. The
+	// prefetcher shares it.
 	Registries *RegistryConfigs
 	// VolumesReleased starts a pass of the volume reconciler once a stack
-	// that left this host no longer holds its copies; nil starts no pass
+	// that left this host no longer holds its copies. If it is nil, no pass
+	// starts.
 	VolumesReleased func()
 	// Propose commits a command (a controller.Propose, spelled out as in
 	// loop.CommitAsHost)
@@ -187,13 +189,13 @@ type Runner struct {
 	// starts empty, so every stack comes up again after the agent starts:
 	// after a boot nothing runs (restart: "no").
 	applied map[string]loop.BroughtUp
-	// busy holds the projects of the stacks that have a job running; stale
+	// busy holds the projects of the stacks that have a job running. stale
 	// holds those of them that a pass skipped, so that the job starts
-	// another pass when it ends
+	// another pass when it ends.
 	busy, stale map[string]bool
 }
 
-// New makes the runner; it starts nothing.
+// New creates the runner but starts nothing.
 func New(parts Parts) *Runner {
 	return &Runner{
 		files: parts.Files, host: parts.Host, nodeAddress: parts.NodeAddress, cluster: parts.Cluster,
@@ -213,13 +215,14 @@ type desiredState struct {
 	stacks  map[string]*state.Stack
 	volumes map[string]*state.Volume
 	secrets map[string]*state.Secret
-	// copied is the copy that all of this comes from; the registry logins
-	// are read from it (RegistryConfigs.Write)
+	// copied is the copy that all of this comes from. The registry logins
+	// are read from it (RegistryConfigs.Write).
 	copied *state.State
 }
 
 // readDesired reads what this host should run from the shared copy of the
-// state, so the pass works outside the lock that Raft's Apply waits for.
+// state, so that the pass works outside the lock that Raft's Apply waits
+// for.
 func readDesired(cluster loop.Cluster, self state.HostID) desiredState {
 	copied := cluster.SharedCopy()
 	desired := desiredState{
@@ -246,15 +249,15 @@ func (r *Runner) Run(ctx context.Context) {
 	r.jobs.Wait()
 }
 
-// pass brings this host once to what the state says. First it stops the
+// pass brings this host in line with the state once. First it stops the
 // stacks that left this host. Then it starts a job for each other stack
-// that has no job running, so a stack whose image pull or compose up takes
-// long, or hangs on a suspended volume, holds up no other stack. A volume
-// that passes from one stack to another must never be used by both at
-// once: two databases on one file system would ruin it. If a stack fails to
-// stop, it may still use its volumes, and a stack that names one of them
-// waits for the next pass. A stack whose volume is not mounted yet waits
-// too. A stack that fails to come up is reported as failing.
+// that has no job running. So a stack whose image pull or compose up takes
+// long, or hangs on a suspended volume, does not hold up the other stacks.
+// A volume that passes from one stack to another must never be used by
+// both at once: two databases on one file system would ruin it. If a stack
+// fails to stop, it may still use its volumes, and a stack that names one
+// of them waits for the next pass. A stack whose volume is not mounted yet
+// waits too. A stack that fails to come up is reported as failing.
 func (r *Runner) pass(ctx context.Context) {
 	desired := readDesired(r.cluster, r.host)
 	inUse := r.stopLeavers(ctx, desired)
@@ -291,7 +294,7 @@ func (r *Runner) start(project string, job func()) {
 	})
 }
 
-// markStaleIfBusy tells whether a stack has a job running, and if so
+// markStaleIfBusy reports whether a stack has a job running, and if so
 // marks it stale. The job then starts another pass when it ends, and that
 // pass handles the stack (start).
 func (r *Runner) markStaleIfBusy(project string) bool {
@@ -303,12 +306,13 @@ func (r *Runner) markStaleIfBusy(project string) bool {
 	return r.busy[project]
 }
 
-// run brings one stack up, as a job, and reports it as failing if that fails.
+// run brings one stack up as a job, and reports the stack as failing if
+// that fails.
 func (r *Runner) run(ctx context.Context, desired desiredState, stack *state.Stack, inUse volumesInUse) {
 	err := r.apply(ctx, desired, stack, inUse)
 	switch {
 	case errors.Is(err, errVolumeInUse), errors.Is(err, errVolumeNotReady):
-		// the stack waits, at every pass, until the stop succeeded or the
+		// the stack waits, pass after pass, until the stop succeeds or the
 		// volume is mounted
 		r.logger.Info("a stack waits for its volume", "stack", stack.ID(), "reason", err)
 	case err != nil && ctx.Err() != nil:
@@ -319,7 +323,7 @@ func (r *Runner) run(ctx context.Context, desired desiredState, stack *state.Sta
 	}
 }
 
-// appliedWith is what a stack last came up with on this host.
+// appliedWith returns what a stack last came up with on this host.
 func (r *Runner) appliedWith(project string) loop.BroughtUp {
 	r.mu.Lock()
 	defer r.mu.Unlock()

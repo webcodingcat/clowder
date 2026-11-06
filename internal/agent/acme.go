@@ -33,8 +33,8 @@ func challengeHandler(cluster loop.Cluster) http.Handler {
 }
 
 // serveChallenges serves challengeHandler on 127.0.0.1, where Traefik's
-// router for the challenges sends them. The loopback address is always
-// there, so it needs no freeBind.
+// challenge router sends the requests. The loopback address always exists,
+// so the listener needs no freeBind.
 func serveChallenges(cluster loop.Cluster, logger *slog.Logger) (*http.Server, error) {
 	listener, err := net.Listen("tcp", ingress.ChallengeAddress)
 	if err != nil {

@@ -13,12 +13,14 @@ import (
 )
 
 // tlsStream is Raft's network layer over mutual TLS. Both sides present a
-// host certificate from the cluster CA that is not revoked. The listener
-// takes only control-plane hosts: only the leader and the candidates send,
-// and they are voters, while a worker that got in could send entries of its
-// own past every check of the API. The dial takes any host, because the
-// leader also sends to the hosts that follow the log without a vote.
-// CLI certificates and strangers' certificates fail the handshake.
+// host certificate from the cluster CA that is not revoked.
+//   - The listener accepts only control-plane hosts. Only the leader and
+//     the candidates send, and they are voters. A worker that got in could
+//     send entries of its own and bypass every check of the API.
+//   - Dial accepts any host, because the leader also sends to the hosts
+//     that follow the log without a vote.
+//
+// CLI certificates and certificates from other CAs fail the handshake.
 type tlsStream struct {
 	net.Listener
 	advertise net.Addr

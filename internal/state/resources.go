@@ -31,17 +31,17 @@ func (s *State) changed(kind string, meta *Meta) {
 	})
 }
 
-// ErrStale is the answer to a leader's command that was planned on a state
-// in which a stack or a volume that it changes was different. The leader
-// then plans again on the new state.
+// ErrStale is the error for a leader's command that was planned on an
+// older state, in which a stack or a volume that it changes was different.
+// The leader then plans again on the new state.
 var ErrStale = errors.New("changed since the plan")
 
-// checkPlanned refuses a leader's change to a resource that changed after
-// the state the leader planned with (the index plannedAt). The resource may
-// have changed, or been deleted and made anew under the same name; then its
-// ResourceVersion is the index at which it was made. The leader plans on a
-// copy of the state and commits later, so without this check it would
-// overwrite what came in between.
+// checkPlanned refuses the leader's change to a resource that changed after
+// the state that the leader planned with (the index plannedAt). The
+// resource may have changed, or it may have been deleted and created anew
+// under the same name. In both cases its ResourceVersion is higher than
+// plannedAt. The leader plans on a copy of the state and commits later.
+// Without this check, it would overwrite what came in between.
 func checkPlanned(kind, id string, stored *Meta, plannedAt uint64) error {
 	switch {
 	case plannedAt == 0:
@@ -60,22 +60,22 @@ func (s *State) deleted(kind string, meta Meta) {
 }
 
 // PutResource creates or changes a resource. A spec equal to the stored
-// one changes nothing, neither the generation nor the resource version, so
+// one changes nothing, neither the generation nor the resource version. So
 // applying the same files again restarts nothing.
 type PutResource struct {
-	// Kind is the resource's (resource.KindVolume), not the command's.
+	// Kind is the resource's kind (such as resource.KindVolume), not the
+	// command's.
 	Kind string `json:"kind"`
 	// Namespace is empty for a namespace, which lives in none.
 	Namespace string `json:"namespace,omitempty"`
 	Name      string `json:"name"`
 	Owner     string `json:"owner"` // the channel: OwnerCLI so far
-	// Spec is the kind's spec: none for a namespace, otherwise
+	// Spec is the kind's spec: clusterspec.Config, resource.NamespaceSpec,
 	// resource.VolumeSpec, EncryptedSecret or stackspec.Spec.
 	Spec json.RawMessage `json:"spec,omitempty"`
 	// Create refuses a resource that exists, as kubectl create does
-	// (clowder create secret). It needs no gate of its own in CheckKnown:
-	// change-resources itself comes with 0.2.0, so every agent that reads
-	// the command reads this field too.
+	// (clowder create secret). It needs no gate of its own in CheckKnown,
+	// because every agent that reads change-resources reads this field.
 	Create bool `json:"create,omitempty"`
 }
 
@@ -88,19 +88,18 @@ type DeleteResource struct {
 }
 
 // resourceKind says how the state keeps one kind of resource, by its ID
-// (resourceID). put and remove only check. They return the change as a
-// function that the handler runs once every check has passed, so a refused
-// command leaves no trace (docs/developing/cluster.md, Cluster state).
+// (resourceID).
 type resourceKind struct {
 	// find returns the resource's Meta, or nil if there is none.
 	find func(s *State, id string) *Meta
-	// put and remove only read the state and return their change, as a
-	// handler does, so a refused command leaves no trace.
+	// put and remove only read the state. Like a handler, they return
+	// their change as a function, which runs only once every check has
+	// passed.
 	//
-	// put first decodes the spec and compares it with the stored one; for
-	// an equal spec it returns errUnchanged. Then it checks the spec against
-	// the state and returns the change that stores it. The change returns
-	// the stored Meta, so that the handler can count the generation.
+	// put first decodes the spec and compares it with the stored one. For
+	// an equal spec it returns errUnchanged. Then it checks the spec
+	// against the state and returns the change that stores it. That change
+	// returns the stored Meta, so that the caller can count the generation.
 	put func(s *State, id string, payload PutResource) (store func() *Meta, err error)
 	// remove checks that nothing uses the resource, then returns the change
 	// that removes it.
@@ -117,9 +116,9 @@ var resourceKinds = map[string]resourceKind{
 
 // ChangeResources puts and deletes resources in order, all of them or none.
 // Each change is checked against the state with the changes before it
-// applied. So a Secret placed before the configuration that names it, or a
-// namespace placed before its stacks, goes in together with them. Every
-// apply and delete of a user comes in this way (api's runChanges).
+// applied. So a Secret can come before the configuration that names it, or
+// a namespace before its stacks, in the same command. Every apply and
+// delete of a user comes in this way (runChanges in the api package).
 type ChangeResources struct {
 	Changes []ResourceChange `json:"changes"`
 }
@@ -131,7 +130,7 @@ type ResourceChange struct {
 }
 
 // ChangeError is a change-resources command that was refused at one of its
-// changes, given by index. None of its changes went in.
+// changes, given by index. None of its changes were applied.
 type ChangeError struct {
 	Index int
 	Err   error
@@ -141,14 +140,13 @@ func (e *ChangeError) Error() string { return fmt.Sprintf("change %d: %v", e.Ind
 
 func (e *ChangeError) Unwrap() error { return e.Err }
 
-// applyChangeResources applies the changes to a clone of the state, one
-// after the other, because each needs the changes before it. The function
-// it returns puts the clone in place. This is the one handler that works on
-// a clone, because what a change checks depends on the changes before it.
-// The clone shares the specs and the encrypted values (State.Clone), so a
-// batch costs about as much as the resources' statuses, not the secrets. A
-// change that changes nothing does not count, and a batch of only such
-// changes is unchanged.
+// applyChangeResources applies the changes in order to a clone of the
+// state, and the function it returns puts the clone in place. It is the one
+// handler that works on a clone, because what each change checks depends
+// on the changes before it. The clone shares the specs and the encrypted
+// values (State.Clone), so it costs about as much as the statuses, not as
+// much as the secrets. A change that changes nothing does not count, and a
+// batch of only such changes is unchanged.
 func applyChangeResources(s *State, cmd Command, payload ChangeResources) (func(), error) {
 	if len(payload.Changes) == 0 {
 		return nil, errors.New("no changes")
@@ -178,21 +176,23 @@ func applyChangeResources(s *State, cmd Command, payload ChangeResources) (func(
 	}
 	return func() {
 		// Clone leaves the audit out, and Apply adds this command's entry
-		// to the state's own
+		// to the original audit
 		audit := s.Audit
 		*s = *copied
 		s.Audit = audit
 	}, nil
 }
 
-// applyPutResource checks in a fixed order: which channel owns the
-// resource, whether anything changes, and only then everything else. It
-// does not check the actor: the cluster has no users, so every CLI
-// certificate may change every resource, and the API decides who may send
-// change-resources at all. This way a channel learns nothing about another
-// channel's spec, only that the resource belongs to another channel. And an
-// unchanged resource passes even if the state has changed since in a way
-// that would make the same spec fail the other checks.
+// applyPutResource checks in a fixed order: first which channel owns the
+// resource, then whether anything changes, and only then everything else.
+// So a channel learns nothing about another channel's spec, only that the
+// resource belongs to another channel. And an unchanged resource passes,
+// even if the state has changed since in a way that would make the same
+// spec fail the other checks.
+//
+// It does not check the actor. The cluster has no users, so every CLI
+// certificate may change every resource. The API decides who may send
+// change-resources at all.
 func applyPutResource(s *State, payload PutResource) (func(), error) {
 	kind, ok := resourceKinds[payload.Kind]
 	if !ok {
@@ -284,8 +284,9 @@ func checkOwner(stored *Meta, kind, id, owner string) error {
 	return nil
 }
 
-// decodeSpec reads a spec. Unknown fields are ignored, as in every payload:
-// a command of the next release may carry fields this one does not know.
+// decodeSpec reads a spec. Like every payload, it ignores unknown fields,
+// because a command of the next release may carry fields that this release
+// does not know.
 func decodeSpec[Spec any](kind, id string, raw json.RawMessage) (Spec, error) {
 	var spec Spec
 	if len(raw) == 0 {
@@ -304,7 +305,7 @@ func findNamespace(s *State, id string) *Meta {
 	return nil
 }
 
-// putNamespace makes a namespace or changes its spec. Its owner owns only
+// putNamespace creates a namespace or changes its spec. Its owner owns only
 // the namespace: any channel may put resources into it. names.System holds
 // no stacks, so it takes no image pull secrets.
 func putNamespace(s *State, id string, payload PutResource) (func() *Meta, error) {
@@ -333,10 +334,10 @@ func putNamespace(s *State, id string, payload PutResource) (func() *Meta, error
 }
 
 // removeNamespace refuses names.Default, names.System and a namespace that
-// holds resources. Nothing cascades; the user empties the namespace first.
+// holds resources. Nothing cascades: the user empties the namespace first.
 // Retired copies of its volumes do not count. They stay in the state until
 // their hosts have removed them, even if a namespace of the same name is
-// made again.
+// created again.
 func removeNamespace(s *State, id string) (func(), error) {
 	if id == names.Default || id == names.System {
 		return nil, fmt.Errorf("namespace %s belongs to the cluster", id)
@@ -362,9 +363,9 @@ func removeNamespace(s *State, id string) (func(), error) {
 }
 
 // sameJSON tells whether two values encode to the same JSON. The state
-// compares what it stores this way, not field by field. An agent that read
-// its state from a snapshot (JSON, where an empty list and no list read
-// back the same) must decide like one that applied the whole log.
+// compares what it stores this way, not field by field. In JSON, an empty
+// list and no list read back the same. So an agent that read its state
+// from a snapshot decides like one that applied the whole log.
 func sameJSON(a, b any) bool {
 	encodedA, errA := json.Marshal(a)
 	encodedB, errB := json.Marshal(b)
@@ -372,7 +373,7 @@ func sameJSON(a, b any) bool {
 }
 
 // stackNaming returns the first stack, by ID, that names the volume or
-// secret name of a namespace, or "" if none does. named returns what a stack
+// secret name in a namespace, or "" if none does. named returns what a stack
 // names (its volumes or its secrets). The stack with the ID except is left
 // out, because it is the one being put.
 func (s *State) stackNaming(namespace, name, except string, named func(stack *Stack) []string) string {

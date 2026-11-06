@@ -8,7 +8,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/command"
 )
 
-// Timeouts of docker compose; up pulls images, which may take a while.
+// Timeouts of docker compose. up pulls images, which may take a while.
 const (
 	upTimeout   = 15 * time.Minute
 	downTimeout = 5 * time.Minute
@@ -47,7 +47,7 @@ func (c *Client) ComposeUp(ctx context.Context, config, stack string, files, lef
 
 // ComposePull pulls the images of some services of a stack again, even the
 // ones that Docker already has, because an image may have changed under the
-// same tag; compose up pulls only missing images. ComposePull logs in with
+// same tag. compose up pulls only missing images. ComposePull logs in with
 // the registry logins of config (withConfig).
 func (c *Client) ComposePull(ctx context.Context, config, stack string, files, services []string) error {
 	args := withConfig(config, "compose", "--project-name", stack)
@@ -61,8 +61,8 @@ func (c *Client) ComposePull(ctx context.Context, config, stack string, files, s
 }
 
 // ComposeDown stops and removes a stack's containers, networks and Docker
-// volumes. The data stays: a Docker volume only binds a directory of
-// clowder's volume (compose.Render), and that is clowder's to remove.
+// volumes. The data stays, because a Docker volume only binds a directory
+// of clowder's volume (compose.Render), and only clowder removes that.
 func (c *Client) ComposeDown(ctx context.Context, stack, file string) error {
 	_, err := command.Run(ctx, downTimeout, "docker", "compose", "--project-name", stack, "--file", file,
 		"down", "--remove-orphans", "--volumes")
@@ -75,7 +75,8 @@ func (c *Client) ComposePs(ctx context.Context, stack, file string) (string, err
 		"ps", "--all", "--format", "json")
 }
 
-// ComposeLogs writes a stack's logs to out; with follow, until ctx ends.
+// ComposeLogs writes a stack's logs to out. With follow, it goes on until
+// ctx ends.
 func (c *Client) ComposeLogs(ctx context.Context, stack, file string, follow bool, out io.Writer) error {
 	args := []string{"compose", "--project-name", stack, "--file", file, "logs", "--no-color", "--timestamps"}
 	if follow {

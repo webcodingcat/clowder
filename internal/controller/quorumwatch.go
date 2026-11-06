@@ -11,45 +11,47 @@ import (
 	"github.com/webcodingcat/clowder/internal/notify"
 )
 
-// noLeaderFor is how long an agent knows no leader before it alerts by
-// itself.
+// noLeaderFor is how long an agent must know no leader before it sends an
+// alert by itself.
 const noLeaderFor = 2 * time.Minute
 
-// QuorumWatch alerts from this agent, not from the leader, while this agent
-// knows no Raft leader. Without a majority of the voters there is no
-// leader, so the leader's alerts are silent (for example, two hosts of
-// three are down, or this host is cut off). It tells the channels once
-// there has been no leader for noLeaderFor, reminds them every remindEvery,
-// and gives the all-clear when a leader is back. The channels and their
-// secrets come from this agent's own state, the last one it applied. What
-// it told is kept in memory only, so an agent that restarts without a
-// leader tells the channels again.
+// QuorumWatch sends alerts from this agent while it knows no Raft leader.
+// Without a majority of the voters there is no leader, so the leader's
+// alerts are silent. That happens, for example, when two hosts of three
+// are down, or when this host is cut off. The watch alerts the channels
+// once there has been no leader for noLeaderFor, reminds them every
+// remindEvery, and sends the all-clear when a leader is back. It takes the
+// channels and their secrets from this agent's own state, the last one it
+// applied. It keeps what it sent in memory only, so an agent that restarts
+// without a leader alerts the channels again.
 type QuorumWatch struct {
 	alerts *Alerts
 	host   string
-	// leader tells whether this agent knows a leader (raftnode.Node.Leader)
+	// leader reports whether this agent knows a leader
+	// (raftnode.Node.Leader)
 	leader func() bool
 
-	// Only the watch's loop uses what follows.
+	// Only the watch's loop uses the fields below.
 
 	// lostAt is when this agent last stopped knowing a leader; zero while
 	// it knows one
 	lostAt time.Time
-	// open says that the channels were told, and toldAt says when they
-	// were told last
+	// open is true once the alert is raised; toldAt is when the watch last
+	// queued a message
 	open   bool
 	toldAt time.Time
-	// pending is the message that each channel, by index, has not taken
-	// yet; a newer message replaces it
+	// pending holds, by channel index, the message that the channel has
+	// not taken yet; a newer message replaces it
 	pending map[int]notify.Message
 }
 
-// NewQuorumWatch makes the watch of the agent on host, given by its name.
+// NewQuorumWatch makes the watch for the agent on the host with the given
+// name.
 func NewQuorumWatch(alerts *Alerts, host string, leader func() bool) *QuorumWatch {
 	return &QuorumWatch{alerts: alerts, host: host, leader: leader, pending: map[int]notify.Message{}}
 }
 
-// Run looks every alertsInterval until ctx ends.
+// Run runs a round every alertsInterval until ctx ends.
 func (w *QuorumWatch) Run(ctx context.Context) {
 	for {
 		w.round(ctx, time.Now())
@@ -61,9 +63,9 @@ func (w *QuorumWatch) Run(ctx context.Context) {
 	}
 }
 
-// round notes whether a leader is known, queues the message that is due
-// for each channel, and sends what the channels have not taken yet. A
-// channel that fails gets the message again in the next round.
+// round checks whether this agent knows a leader, queues the message that
+// is due for each channel, and sends the pending messages. A channel that
+// fails gets its message again in the next round.
 func (w *QuorumWatch) round(ctx context.Context, now time.Time) {
 	if w.leader() {
 		if w.open {
@@ -87,9 +89,9 @@ func (w *QuorumWatch) round(ctx context.Context, now time.Time) {
 }
 
 // tell queues a message for every channel that takes critical alerts.
-// Without channels there is nobody to tell, which counts as told. A
-// channel that has not taken the raised message yet does not get the
-// all-clear either.
+// Without channels there is nobody to tell, but the message still counts as
+// sent. If a channel has not taken the raised message yet, the all-clear
+// drops it, and the channel gets neither.
 func (w *QuorumWatch) tell(event string, now time.Time) {
 	copied := w.alerts.cluster.SharedCopy()
 	w.toldAt = now

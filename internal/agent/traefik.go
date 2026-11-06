@@ -30,7 +30,7 @@ import (
 var traefikRule = supervisor.Rule{Restart: "always", RestartUnhealthy: true}
 
 // traefikRunner runs clowder's Traefik on this host and writes its routes.
-// Traefik is not a stack, so it has its own loop beside the stack runner.
+// Traefik is not a stack, so it has its own loop next to the stack runner.
 // That way a stack's long image pull does not hold up the ingress.
 type traefikRunner struct {
 	files   Files
@@ -43,21 +43,22 @@ type traefikRunner struct {
 	// supervisor is paused while compose up recreates Traefik
 	supervisor loop.Pauser
 	// signal is how the supervisor starts a pass: after each Docker event,
-	// so a container that turns unhealthy leaves its route within seconds,
-	// and after Docker restarted
+	// so that a container that turns unhealthy leaves its route within
+	// seconds, and after a restart of Docker
 	signal *loop.Signal
 
 	// Only the runner's loop uses the fields below, so they need no lock.
 
-	// cameUp is what Traefik last came up with. It is zero after the agent
-	// starts, so Traefik comes up again (restart: "no")
+	// cameUp records what Traefik last came up with. It is zero after the
+	// agent starts, so that Traefik comes up again (restart: "no")
 	cameUp loop.BroughtUp
-	// unopened are the encrypted keys that did not open; each is logged once
+	// unopened holds the encrypted keys that could not be decrypted, so
+	// that each is logged only once
 	unopened map[string]bool
 }
 
-// run keeps Traefik and its routes as this host needs them, until ctx ends
-// (loop.Run). Each pass compares every file with what is on disk, so it
+// run keeps Traefik and its routes the way this host needs them, until ctx
+// ends (loop.Run). Each pass compares every file with what is on disk, so it
 // also repairs what someone changed by hand.
 func (t *traefikRunner) run(ctx context.Context) {
 	loop.Run(ctx, t.cluster, t.signal.Wake(), func() {
@@ -77,8 +78,8 @@ func (t *traefikRunner) pass(ctx context.Context) error {
 	floatingIP, err := netip.ParseAddr(input.floatingIP)
 	if err != nil {
 		// empty before the first configuration, when there is nothing to
-		// bind; the configuration's check refuses any other value that
-		// does not parse
+		// bind. The configuration's check refuses any other value that
+		// does not parse.
 		return nil
 	}
 	static, err := ingress.RenderStatic(ingress.Static{
@@ -157,9 +158,9 @@ type traefikInput struct {
 	certificates []state.Certificate
 }
 
-// read takes from the state only what Traefik's files depend on. The runner
-// runs a pass at every Docker event, which is too often for a copy of the
-// whole state under the lock that Raft's Apply waits for.
+// read takes only what Traefik's files depend on from the state. The runner
+// runs a pass at every Docker event. That is too often to copy the whole
+// state under the lock that Raft's Apply waits for.
 func (t *traefikRunner) read() traefikInput {
 	input := traefikInput{routes: map[string]map[string]stackspec.HTTP{}}
 	t.cluster.Read(func(current *state.State) {
@@ -186,7 +187,7 @@ func (t *traefikRunner) read() traefikInput {
 			}
 		}
 		// every certificate, because the ingress host answers for the
-		// stacks of every host (phase 2)
+		// stacks of every host
 		for _, domain := range slices.Sorted(maps.Keys(current.Certificates)) {
 			// a copy is safe: Apply replaces a certificate, it never changes one
 			input.certificates = append(input.certificates, *current.Certificates[domain])
@@ -195,16 +196,17 @@ func (t *traefikRunner) read() traefikInput {
 	return input
 }
 
-// writeCertificates writes each certificate's chain and opened key into
+// writeCertificates writes each certificate's chain and decrypted key into
 // the certificates' directory, under names that change with the
-// certificate (ingress.CertificateFiles). A key that does not open leaves
-// its domain on plain HTTP; the other domains keep their certificates.
+// certificate (ingress.CertificateFiles). A key that cannot be decrypted
+// leaves its domain on plain HTTP. The other domains keep their
+// certificates.
 func (t *traefikRunner) writeCertificates(certificates []state.Certificate) ([]ingress.CertificateFiles, error) {
 	// create the directory even without certificates: Traefik's Compose
-	// file mounts it, and Docker would create a missing one readable by
-	// all. Make it root's only each time, even when it already existed with
-	// other rights. It lies in SecretsDir, which the agent guards at its
-	// start (Run).
+	// file mounts it, and Docker would create a missing directory that
+	// everyone can read. Restrict it to root each time, even if it already
+	// existed with other permissions. It lies in SecretsDir, which Run
+	// secures at the agent's start.
 	dir := t.files.traefikCertificatesDir()
 	if err := atomicfile.EnsureDir(dir, 0o700); err != nil {
 		return nil, err
@@ -260,7 +262,7 @@ func (t *traefikRunner) removeOtherCertificates(certificates []ingress.Certifica
 	return nil
 }
 
-// routes are the HTTP routes of the stacks on this host, each with the
+// routes returns the HTTP routes of the stacks on this host, each with the
 // containers that may take its requests: those that run and, if they have
 // a health check, are healthy.
 func (t *traefikRunner) routes(ctx context.Context, byProject map[string]map[string]stackspec.HTTP) ([]ingress.Route, error) {
@@ -311,9 +313,9 @@ func (t *traefikRunner) routes(ctx context.Context, byProject map[string]map[str
 	return routes, nil
 }
 
-// firstAddress is the container's address in the network whose name sorts
-// first, so the target stays the same from pass to pass. Traefik runs in the
-// host network and reaches every bridge.
+// firstAddress returns the container's address in the network whose name
+// sorts first, so that the target stays the same from pass to pass.
+// Traefik runs in the host network and reaches every bridge.
 func firstAddress(addresses map[string]netip.Addr) (netip.Addr, bool) {
 	for _, network := range slices.Sorted(maps.Keys(addresses)) {
 		return addresses[network], true

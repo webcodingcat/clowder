@@ -17,8 +17,8 @@ import (
 )
 
 // ResolveRequest is the body of POST
-// /v1/volumes/{namespace}/{name}/resolve-splitbrain: the host whose copy
-// keeps its data.
+// /v1/volumes/{namespace}/{name}/resolve-splitbrain. Keep names the host
+// whose copy keeps its data.
 type ResolveRequest struct {
 	Keep string `json:"keep"`
 }
@@ -33,10 +33,10 @@ type ResolveAnswer struct {
 type ResolvedCopy struct {
 	Host string `json:"host"`
 	// Discarded says that the copy gave up its changes since the split and
-	// connected again
+	// connected again.
 	Discarded bool `json:"discarded"`
-	// Connected is false when none of the copy's peers was StandAlone:
-	// there was nothing to do there
+	// Connected is false when none of the copy's peers was StandAlone, so
+	// there was nothing to do on that host.
 	Connected bool `json:"connected"`
 }
 
@@ -46,7 +46,7 @@ type internalResolve struct {
 	Discard bool `json:"discard"`
 }
 
-// resolvingCopy is a host with a copy of the volume, and whether its copy
+// resolvingCopy is a host with a copy of the volume, and whether that copy
 // discards its data.
 type resolvingCopy struct {
 	host    state.HostID
@@ -54,13 +54,13 @@ type resolvingCopy struct {
 	discard bool
 }
 
-// resolveSplitBrain asks each host with a copy of a volume to connect it
-// again. First come the hosts whose copies with a disk give up their
-// changes, then the host to keep and the tiebreaker, which keep their
+// resolveSplitBrain asks each host with a copy of a volume to connect the
+// copy again. First come the hosts whose disk copies give up their
+// changes. Then come the host to keep and the tiebreaker, which keep their
 // data. It refuses while the volume's stack runs on a host other than the
-// one to keep, because that copy is primary and its data cannot be
-// discarded. Nothing goes through Raft: the hosts' DRBD holds the split,
-// and the state knows of it only from their reports.
+// one to keep, because the copy there is primary and its data cannot be
+// discarded. Nothing goes through Raft: the split exists in the hosts'
+// DRBD, and the state knows of it only from their reports.
 func (s *Server) resolveSplitBrain(w http.ResponseWriter, r *http.Request) {
 	namespace, name := r.PathValue("namespace"), r.PathValue("name")
 	var request ResolveRequest
@@ -113,9 +113,9 @@ func doneSoFar(resolved []ResolvedCopy) string {
 }
 
 // resolveOrder returns the volume's copies in the order in which they are
-// resolved, or why the request is refused, with its HTTP status. Every
-// copy's host is in the state, because the state refuses a copy on a host
-// it does not know.
+// resolved. If the request is refused, it returns the reason and its HTTP
+// status. Every copy's host is in the state, because the state refuses a
+// copy on a host that it does not know.
 func resolveOrder(current *state.State, id, keep string) ([]resolvingCopy, int, error) {
 	volume, ok := current.Volumes[id]
 	if !ok {
@@ -150,7 +150,7 @@ func resolveOrder(current *state.State, id, keep string) ([]resolvingCopy, int, 
 	return append(discarding, keeping...), http.StatusOK, nil
 }
 
-// resolveOn resolves the copy on a host, this one or another. connected is
+// resolveOn resolves the copy on a host, this one or another. It returns
 // false when none of the copy's peers was StandAlone.
 func (s *Server) resolveOn(ctx context.Context, host state.HostID, volumeID string, discard bool) (bool, error) {
 	if host == s.config.HostID {
@@ -193,7 +193,7 @@ func (s *Server) localResolve(w http.ResponseWriter, r *http.Request) {
 	}
 	connected, err := s.resolveHere(r.Context(), names.ID(r.PathValue("namespace"), r.PathValue("name")), request.Discard)
 	if err != nil {
-		// no copy here, a step that runs, a primary, or DRBD's own refusal
+		// no copy here, a running step, a primary, or a refusal by DRBD
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

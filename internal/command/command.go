@@ -1,11 +1,10 @@
 // Package command runs the host's tools (lvs, drbdadm, mkfs, nft, ip,
 // systemctl, ...) so that none of them can hang the agent. Every host tool
 // runs through this package, with no exception. Without quorum, DRBD
-// suspends I/O, and a process that touches a volume then hangs in the
-// kernel in state D, where not even SIGKILL reaches it. A tool that hangs
-// for any other reason must not stop a reconciler either. Run gives up on
-// such a process after its timeout and leaves it behind instead of waiting
-// for it.
+// suspends I/O. A process that touches a volume then hangs in the kernel in
+// state D, and not even SIGKILL ends it. A tool that hangs for any other
+// reason must not stop a reconciler either. So Run gives up on a process
+// after its timeout and leaves it behind instead of waiting for it.
 package command
 
 import (
@@ -35,7 +34,7 @@ func (e *ExitError) Error() string {
 	return fmt.Sprintf("exit status %d: %s", e.Code, e.Stderr)
 }
 
-// ExitCode returns the exit code of a command that ran and failed; ok is
+// ExitCode returns the exit code of a command that ran and failed. ok is
 // false for any other error (a timeout, a missing tool).
 func ExitCode(err error) (code int, ok bool) {
 	var exitErr *ExitError
@@ -54,14 +53,14 @@ func Run(ctx context.Context, timeout time.Duration, name string, args ...string
 
 // hostTool returns a tool's process in the C locale. clowder parses what
 // tools print (lvs's sizes and percentages, findmnt) and matches their
-// messages, and a host's locale, such as one with a decimal comma, must
-// change neither.
+// messages. A host's locale, such as one with a decimal comma, must not
+// change either.
 func hostTool(ctx context.Context, name string, args ...string) *exec.Cmd {
 	process := exec.CommandContext(ctx, name, args...)
 	process.Env = append(os.Environ(), "LC_ALL=C")
 	// a child that the tool leaves running (a daemon it forks) may keep the
-	// output open after the tool is killed. After waitDelay, Go closes it,
-	// so only a process in state D can block the waiting goroutine
+	// output open after the tool is killed. After waitDelay, Go closes the
+	// output, so only a process in state D can block the waiting goroutine.
 	process.WaitDelay = waitDelay
 	return process
 }
@@ -70,9 +69,9 @@ func hostTool(ctx context.Context, name string, args ...string) *exec.Cmd {
 const waitDelay = 5 * time.Second
 
 // Stream runs a command that writes for as long as it runs (logs that
-// follow) and passes its output on as it comes. It has no timeout; ctx ends
-// it. Use it only for tools that touch no volume, because it waits for the
-// process.
+// follow) and passes its output on as it comes. It has no timeout, and only
+// ctx ends it. Use it only for tools that touch no volume, because it waits
+// for the process.
 func Stream(ctx context.Context, out io.Writer, name string, args ...string) error {
 	var stderr strings.Builder
 	process := hostTool(ctx, name, args...)
@@ -114,7 +113,7 @@ func RunWithInput(ctx context.Context, timeout time.Duration, input, name string
 	case <-toolCtx.Done():
 		if ctx.Err() != nil {
 			// the caller gave up (the agent stops) or ran out of its own
-			// time; the tool did not time out
+			// time. The tool did not time out.
 			return "", fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), ctx.Err())
 		}
 		return "", fmt.Errorf("%s %s: no answer within %s: %w", name, strings.Join(args, " "), timeout, toolCtx.Err())

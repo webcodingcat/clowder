@@ -19,8 +19,8 @@ import (
 // Write writes content to path with mode, creating the directory (mode
 // 0700) if needed. It writes a new file next to the old one, syncs it,
 // renames it over the old one, and syncs the directory so that the rename
-// lasts. Two writers of one path at the same time are not supported, as
-// each may remove the other's temporary file.
+// lasts. Two writers of one path at the same time are not supported,
+// because each may remove the other's temporary file.
 func Write(path string, content []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -80,9 +80,9 @@ func EnsureDir(dir string, mode os.FileMode) error {
 }
 
 // writeSynced makes a new file and waits until it is on disk. It first
-// removes a temporary file that a crash left behind: if it were opened as
-// it is, it would keep its owner and mode and pass them on with the
-// rename.
+// removes a temporary file that a crash left behind. If writeSynced opened
+// that file as it is, the file would keep its owner and mode, and the
+// rename would pass them on.
 func writeSynced(path string, content []byte, mode os.FileMode) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -109,9 +109,9 @@ func writeSynced(path string, content []byte, mode os.FileMode) error {
 }
 
 // own sets path's owner to this process's user and group and its mode to
-// mode. Windows has neither (the agent runs on Linux; the tests run
-// anywhere), so there it does nothing. Chmod follows a link, so the
-// callers either made path themselves or checked that it is not a link.
+// mode. Windows has neither, so there own does nothing; the agent runs on
+// Linux, but the tests run anywhere. Chmod follows a link, so the callers
+// either made path themselves or checked that it is not a link.
 func own(path string, mode os.FileMode) error {
 	if runtime.GOOS == "windows" {
 		return nil
@@ -122,8 +122,8 @@ func own(path string, mode os.FileMode) error {
 	return os.Chmod(path, mode)
 }
 
-// syncDir makes a rename in dir durable. Windows cannot sync a directory
-// (the agent runs on Linux; the tests run anywhere).
+// syncDir makes a rename in dir durable. Windows cannot sync a directory,
+// so there syncDir does nothing.
 func syncDir(dir string) error {
 	if runtime.GOOS == "windows" {
 		return nil

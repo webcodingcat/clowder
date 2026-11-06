@@ -31,8 +31,8 @@ func NewRoot() *cobra.Command {
 	return root
 }
 
-// usageError is a wrong call: an unknown command, a flag or arguments that
-// do not fit. clowder ends with exit code 2 for it.
+// usageError is a wrong call: an unknown command, or flags or arguments
+// that do not fit. clowder ends with exit code 2 for it.
 type usageError struct{ err error }
 
 func (e usageError) Error() string { return e.err.Error() }
@@ -44,9 +44,9 @@ func usage(format string, args ...any) error {
 	return usageError{fmt.Errorf(format, args...)}
 }
 
-// checkArgs turns the argument errors of every command into usage errors.
-// A command that only groups other commands (clowder, clowder stack) shows
-// its help and treats an unknown command as a wrong call. Without this,
+// checkArgs turns every command's argument errors into usage errors. A
+// command that only groups other commands (clowder, clowder stack) shows
+// its help and treats an unknown subcommand as a wrong call. Without this,
 // cobra would show the help and exit as if it had succeeded.
 func checkArgs(command *cobra.Command) {
 	if command.HasSubCommands() && !command.Runnable() {
@@ -89,14 +89,14 @@ func ExitCode(err error) int {
 	}
 }
 
-// Silent tells whether the error is an answer rather than a fault, so that
-// clowder prints nothing for it. diff's errDiffers is such an error.
+// Silent tells whether the error is an answer rather than a fault. clowder
+// prints nothing for such an error. diff's errDiffers is one.
 func Silent(err error) bool {
 	return errors.Is(err, errDiffers)
 }
 
-// diffFailed is an error of diff when it could not tell whether the
-// resources differ.
+// diffFailed is diff's error when it could not tell whether the resources
+// differ.
 type diffFailed struct{ err error }
 
 func (e diffFailed) Error() string { return e.err.Error() }

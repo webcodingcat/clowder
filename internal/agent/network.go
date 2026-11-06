@@ -22,7 +22,7 @@ import (
 )
 
 // HostNetwork is what the agent changes in the host's network. network.Host
-// is the real implementation; tests use a fake.
+// is the real implementation. Tests use a fake.
 type HostNetwork interface {
 	SetUpInterface(ctx context.Context, nodeAddress netip.Addr) error
 	ApplyMesh(ctx context.Context, mesh network.Mesh) error
@@ -38,11 +38,11 @@ type wantedNetwork struct {
 	ruleset network.Ruleset
 }
 
-// reconcileNetwork keeps the WireGuard mesh and the nft rules as the state
-// says, until ctx ends. It applies them after a change of the state when
-// they differ, and every loop.Interval anyway, to repair what someone
-// changed by hand. It saves the mesh it applied in net.json for the next
-// start (restoreMesh).
+// reconcileNetwork keeps the WireGuard mesh and the nft rules in line with
+// the state, until ctx ends. It applies them after a change of the state
+// when they differ, and every loop.Interval anyway, to repair what someone
+// changed by hand. It saves the applied mesh in net.json for the next start
+// (restoreMesh).
 func reconcileNetwork(ctx context.Context, cluster loop.Cluster, files Files, self state.HostID,
 	hostNetwork HostNetwork, logger *slog.Logger,
 ) {
@@ -50,20 +50,20 @@ func reconcileNetwork(ctx context.Context, cluster loop.Cluster, files Files, se
 	// a failure
 	var applied *wantedNetwork
 	var appliedAt time.Time
-	// forwarded are the forwards of the rules loaded last; nil until the
-	// first load. The first load forgets no connection: a port that moved
-	// while the agent was down keeps its connections until they end
+	// forwarded holds the forwards of the last loaded rules; nil until the
+	// first load. The first load forgets no connections: a port that moved
+	// while the agent was down keeps its connections until they end.
 	var forwarded []network.Forward
 	// dockerAllowed says that Docker's chain has the rule for the forwarded
-	// ports (AllowForwards). It is tracked apart from the rules and the
-	// mesh, which must not wait for a Docker that is not up yet
+	// ports (AllowForwards). It is tracked separately from the rules and
+	// the mesh, which must not wait for Docker to come up.
 	dockerAllowed := false
 	loop.Run(ctx, cluster, nil, func() {
 		wanted, known := readWantedNetwork(cluster, self)
 		if !known {
 			// a joined host's state is empty until the leader's log reaches
-			// it over the mesh of net.json; a mesh made from that empty
-			// state would have no peers and cut the host off for good
+			// it over the mesh of net.json. A mesh built from that empty
+			// state would have no peers and cut the host off for good.
 			return
 		}
 		repairDue := time.Since(appliedAt) >= loop.Interval
@@ -80,8 +80,8 @@ func reconcileNetwork(ctx context.Context, cluster loop.Cluster, files Files, se
 			return
 		}
 		applied = nil
-		// the rules first: the containers' boundaries must not wait for a
-		// mesh that fails
+		// the rules come first: the containers' isolation must not wait for
+		// a mesh that fails
 		if err := hostNetwork.ApplyRules(ctx, wanted.ruleset); err != nil {
 			logger.Error("apply the nft rules", "error", err)
 			return
@@ -122,7 +122,7 @@ func (f Files) writeMesh(mesh network.Mesh) error {
 // restoreMesh applies the mesh of net.json, if there is one. Raft runs
 // over the mesh, so after a reboot a host would have to learn its peers
 // from a leader that it cannot reach without them. The file breaks that
-// circle. The state's mesh replaces it once the state answers.
+// circle. The state's mesh replaces it once the state has caught up.
 func restoreMesh(ctx context.Context, files Files, self state.HostID, hostNetwork HostNetwork) error {
 	content, err := os.ReadFile(files.meshFile())
 	if errors.Is(err, os.ErrNotExist) {
@@ -148,7 +148,7 @@ func restoreMesh(ctx context.Context, files Files, self state.HostID, hostNetwor
 // state. Every other host is a peer until it is removed. The addresses of
 // all hosts stay closed to containers, including those of a removed host,
 // because it may still run until its server is gone. known is false while
-// the state does not know this host yet; then the state says nothing about
+// the state does not know this host yet. Such a state says nothing about
 // the network.
 func readWantedNetwork(cluster loop.Cluster, self state.HostID) (wanted wantedNetwork, known bool) {
 	wanted = wantedNetwork{mesh: network.Mesh{Self: self}, ruleset: network.Ruleset{NodeAddress: network.NodeAddress(self)}}
@@ -190,9 +190,10 @@ func readWantedNetwork(cluster loop.Cluster, self state.HostID) (wanted wantedNe
 	return wanted, known
 }
 
-// forwardsOf are the published ports of the stacks on other hosts, sorted,
-// each forwarded to the node address of its stack's host. A stack without
-// a host has no forwards: its ports lead nowhere until it is placed.
+// forwardsOf returns the published ports of the stacks on other hosts,
+// sorted. Each port is forwarded to the node address of its stack's host. A
+// stack without a host has no forwards: its ports lead nowhere until it is
+// placed.
 func forwardsOf(current *state.State, self state.HostID) []network.Forward {
 	var forwards []network.Forward
 	for _, stack := range current.Stacks {
@@ -213,9 +214,10 @@ func forwardsOf(current *state.State, self state.HostID) []network.Forward {
 	return forwards
 }
 
-// movedForwards are the ports whose target changed between two lists of
-// forwards: ports now forwarded elsewhere, newly forwarded, or no longer
-// forwarded (the stack came to this host, or left it).
+// movedForwards returns the ports whose target changed between two lists of
+// forwards: ports now forwarded elsewhere, newly forwarded ports, and ports
+// no longer forwarded. The last two happen, for example, when a stack
+// leaves this host or comes to it.
 func movedForwards(old, current []network.Forward) []network.Forward {
 	type port struct {
 		protocol string

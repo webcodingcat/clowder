@@ -1,7 +1,7 @@
 // Package supervisor restarts the stacks' containers. Docker restarts
-// nothing itself (every container has restart "no"), so that after a boot
-// no container starts before the agent has checked the cluster. Instead,
-// the supervisor applies each service's restart rule.
+// nothing itself, because every container has restart "no". So after a
+// boot, no container starts before the agent has checked the cluster. The
+// supervisor applies each service's restart rule instead.
 package supervisor
 
 import (
@@ -18,7 +18,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/docker"
 )
 
-// Docker is what the supervisor needs from Docker; docker.Client is the
+// Docker is what the supervisor needs from Docker. docker.Client is the
 // real implementation.
 type Docker interface {
 	Events(ctx context.Context, label string) (<-chan docker.Event, <-chan error)
@@ -26,8 +26,8 @@ type Docker interface {
 	Restart(ctx context.Context, id string) error
 }
 
-// Rule is how a service restarts: Compose's restart rule (no, always,
-// on-failure[:n], unless-stopped) and whether an unhealthy container is
+// Rule says how a service restarts: Compose's restart rule (no, always,
+// on-failure[:n], unless-stopped), and whether an unhealthy container is
 // restarted.
 type Rule struct {
 	Restart          string
@@ -45,8 +45,8 @@ type Backoff struct {
 	Base, Max, Stable time.Duration
 }
 
-// DefaultBackoff restarts at once, then waits 1 s, 2 s, 4 s ... up to 60 s,
-// and resets after 10 min.
+// DefaultBackoff restarts right away, then waits 1 s, 2 s, 4 s ... up to
+// 60 s, and resets after 10 min.
 var DefaultBackoff = Backoff{Base: time.Second, Max: time.Minute, Stable: 10 * time.Minute}
 
 // Supervisor watches Docker's events and restarts what crashed.
@@ -55,9 +55,9 @@ type Supervisor struct {
 	rules   Rules
 	backoff Backoff
 	// missed is called when the event stream broke off and is followed
-	// again. Containers that died in between went unseen (Docker restarted:
-	// live-restore keeps the containers running, but not their events), so
-	// the agent brings up its stacks as after a boot
+	// again. Containers that died in between went unseen. This happens when
+	// Docker restarts: live-restore keeps the containers running, but not
+	// their events. So the agent brings up its stacks as after a boot.
 	missed func()
 	// seen is called after each event, so that whoever follows the
 	// containers (the routes to them) checks them again
@@ -66,10 +66,10 @@ type Supervisor struct {
 
 	mu sync.Mutex
 	// paused are the stacks that the agent itself is stopping or
-	// recreating: the register of wanted stops. A container that dies in
-	// such a stack has not crashed.
+	// recreating, counted per stack. A container that dies in such a stack
+	// has not crashed.
 	paused map[string]int
-	// stopped are containers that someone stopped (docker stop); the
+	// stopped are containers that someone stopped (docker stop). The
 	// supervisor leaves them alone.
 	stopped map[string]bool
 	// crashes counts each container's restarts since it last ran stably.
@@ -77,7 +77,7 @@ type Supervisor struct {
 	started map[string]time.Time
 	// restarts counts every restart of each service since the agent
 	// started, for /metrics. A deleted stack's count stays until the agent
-	// restarts, because a counter must not go back
+	// restarts, because a counter must not go back.
 	restarts map[Service]int
 }
 
@@ -87,7 +87,7 @@ type Service struct {
 }
 
 // New creates a supervisor. missed is called after a break in Docker's
-// events, and seen after each event.
+// events, and seen is called after each event.
 func New(dockerAPI Docker, rules Rules, backoff Backoff, missed, seen func(), logger *slog.Logger) *Supervisor {
 	return &Supervisor{
 		docker: dockerAPI, rules: rules, backoff: backoff, missed: missed, seen: seen, logger: logger,
@@ -159,8 +159,8 @@ func (s *Supervisor) handle(ctx context.Context, event docker.Event) {
 		s.mu.Unlock()
 	case event.Action == "stop" || (event.Action == "kill" && endsContainer(event.Signal)):
 		// docker stop or kill: the container stays down, unless the agent
-		// stopped it; a kill that only sends a signal (a reload with SIGHUP)
-		// is not a stop
+		// stopped it. A kill that only sends a signal (a reload with SIGHUP)
+		// is not a stop.
 		s.mu.Lock()
 		if s.paused[stack] == 0 {
 			s.stopped[id] = true
@@ -169,7 +169,7 @@ func (s *Supervisor) handle(ctx context.Context, event docker.Event) {
 	case event.Action == "die":
 		s.crashed(ctx, stack, service, id, event.ExitCode)
 	case event.Action == "destroy":
-		// a new generation makes new containers; forget the old ones
+		// a new generation makes new containers, so forget the old ones
 		s.mu.Lock()
 		delete(s.started, id)
 		delete(s.stopped, id)
@@ -202,8 +202,8 @@ func (s *Supervisor) crashed(ctx context.Context, stack, service, id string, exi
 	s.logger.Warn("container crashed; restarting", "stack", stack, "service", service,
 		"exit_code", exitCode, "in", delay)
 	time.AfterFunc(delay, func() {
-		// the stack may be paused by now (an update); then the supervisor
-		// must not start it
+		// the stack may be paused by now (an update), and then the
+		// supervisor must not start it
 		s.mu.Lock()
 		leftAlone := s.paused[stack] > 0 || s.stopped[id]
 		s.mu.Unlock()
@@ -267,7 +267,7 @@ func (s *Supervisor) unhealthy(ctx context.Context, stack, service, id string) {
 }
 
 // delay is the wait before restart number attempt (counted from 0). The
-// first restart comes at once, so a service that crashed once is back
+// first restart comes right away, so a service that crashed once is back
 // within 2 s (a goal that the live test checks). A service that crashes
 // again waits, so a crash loop does not spin.
 func (s *Supervisor) delay(attempt int) time.Duration {
@@ -284,7 +284,7 @@ func (s *Supervisor) delay(attempt int) time.Duration {
 	return delay
 }
 
-// restarts applies Compose's restart rule to a container that exited; the
+// restarts applies Compose's restart rule to a container that exited. The
 // default (no rule) is unless-stopped.
 func restarts(rule string, exitCode, attempt int) bool {
 	name, limit, hasLimit := strings.Cut(rule, ":")

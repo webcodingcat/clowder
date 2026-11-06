@@ -1,9 +1,9 @@
-// Package stackspec is a stack as clowder describes it: its own schema,
-// not a Compose file. Compose is only how the agent runs a stack on a
-// host; the agent renders the Compose file from the spec (compose.Render).
-// A field that the schema does not have is an error, so only what clowder
-// knows runs. The package does no I/O, because the CLI, the API and the
-// state share it.
+// Package stackspec describes a stack in clowder's own schema, not as a
+// Compose file. Compose is only the way the agent runs a stack on a host:
+// the agent renders the Compose file from the spec (compose.Render). A
+// field that the schema does not have is an error, so only what clowder
+// knows can run. The package does no I/O, because the CLI, the API and
+// the state share it.
 package stackspec
 
 import (
@@ -18,20 +18,20 @@ import (
 	"github.com/webcodingcat/clowder/internal/names"
 )
 
-// Spec is a stack: its services, and the priority they have unless they
-// name their own.
+// Spec is a stack: its services, and the priority of every service that
+// names no priority of its own.
 type Spec struct {
 	// Priority is a number from 0 to 1000 or a category of the
-	// configuration. Empty means the cluster's default, which the scheduler
-	// applies when it places, so a changed configuration changes no stored
-	// spec.
+	// configuration. Empty means the cluster's default. The scheduler
+	// looks the default up when it places the stack, so a change of the
+	// configuration changes no stored spec.
 	Priority string             `yaml:"priority,omitempty" json:"priority,omitempty"`
 	Services map[string]Service `yaml:"services" json:"services"`
 }
 
-// Service is one container of a stack, by its name in Spec.Services. The
-// order of a list matters where the comment says so. The other lists are
-// sets, which Normalize sorts.
+// Service is one container of a stack, named by its key in Spec.Services.
+// The order of a list matters only where its comment says so. The other
+// lists are sets, and Normalize sorts them.
 type Service struct {
 	Image string `yaml:"image" json:"image"`
 	// Command and Entrypoint keep their order.
@@ -39,50 +39,52 @@ type Service struct {
 	Entrypoint []string `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty"`
 	WorkingDir string   `yaml:"workingDir,omitempty" json:"workingDir,omitempty"`
 	User       string   `yaml:"user,omitempty" json:"user,omitempty"`
-	// Env takes any of YAML's scalars and keeps the text as written
-	// (8080, 1.0, yes): the value is a string to the container anyway.
+	// Env takes any YAML scalar and keeps the text as written (8080, 1.0,
+	// yes). The container sees every value as a string anyway.
 	Env map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
-	// SecretEnv sets variables to values of secrets of the namespace:
-	// variable -> secret and key, as Kubernetes' secretKeyRef.
+	// SecretEnv sets variables to values of the namespace's secrets. It
+	// maps each variable to a secret and key, like Kubernetes'
+	// secretKeyRef.
 	SecretEnv map[string]names.SecretKeyRef `yaml:"secretEnv,omitempty" json:"secretEnv,omitempty"`
-	// Secrets are secrets of the namespace, each as a directory
-	// /run/secrets/<name> with a file per key, as Kubernetes mounts a
-	// secret.
+	// Secrets names secrets of the namespace. Each one appears as a
+	// directory /run/secrets/<name> with a file per key, as Kubernetes
+	// mounts a secret.
 	Secrets []string `yaml:"secrets,omitempty" json:"secrets,omitempty"`
-	// Volumes are a set by path. Docker mounts the outer path before the
-	// inner one, in whatever order they are written.
+	// Volumes are a set by path. Docker mounts an outer path before an
+	// inner one, whatever their order in the list.
 	Volumes []Mount `yaml:"volumes,omitempty" json:"volumes,omitempty"`
 	Tmpfs   []Tmpfs `yaml:"tmpfs,omitempty" json:"tmpfs,omitempty"`
 	// Localtime mounts the host's /etc/localtime read-only.
 	Localtime bool   `yaml:"localtime,omitempty" json:"localtime,omitempty"`
 	Ports     []Port `yaml:"ports,omitempty" json:"ports,omitempty"`
 	HTTP      *HTTP  `yaml:"http,omitempty" json:"http,omitempty"`
-	// DependsOn are services of the stack that this one starts after. For
-	// a service with a healthcheck, it starts once that service is healthy.
+	// DependsOn names services of the stack that this one starts after.
+	// If such a service has a healthcheck, this one waits until it is
+	// healthy.
 	DependsOn   []string     `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
 	Healthcheck *Healthcheck `yaml:"healthcheck,omitempty" json:"healthcheck,omitempty"`
 	// Restart is always (the default), no, on-failure or on-failure:<n>.
-	// The supervisor applies it; Docker never restarts a container itself.
+	// The supervisor applies it. Docker never restarts a container itself.
 	Restart string `yaml:"restart,omitempty" json:"restart,omitempty"`
-	// RestartUnhealthy restarts a container that turns unhealthy (default
-	// true; RestartsUnhealthy reads it).
+	// RestartUnhealthy restarts a container that turns unhealthy. It is
+	// true by default; read it with RestartsUnhealthy.
 	RestartUnhealthy *bool     `yaml:"restartUnhealthy,omitempty" json:"restartUnhealthy,omitempty"`
 	Resources        Resources `yaml:"resources,omitempty" json:"resources,omitzero"`
-	// StopGracePeriod is a duration (10s, 1m30s), StopSignal a signal's
-	// name (SIGTERM).
+	// StopGracePeriod is a duration (10s, 1m30s). StopSignal is a
+	// signal's name (SIGTERM).
 	StopGracePeriod string `yaml:"stopGracePeriod,omitempty" json:"stopGracePeriod,omitempty"`
 	StopSignal      string `yaml:"stopSignal,omitempty" json:"stopSignal,omitempty"`
 	ReadOnly        bool   `yaml:"readOnly,omitempty" json:"readOnly,omitempty"`
 	Init            bool   `yaml:"init,omitempty" json:"init,omitempty"`
 	ShmSize         string `yaml:"shmSize,omitempty" json:"shmSize,omitempty"`
-	// CapAdd beyond the harmless capabilities, Privileged, and SecurityOpt
+	// Privileged, CapAdd beyond the harmless capabilities, and SecurityOpt
 	// beyond no-new-privileges reach outside the container (Privileges).
 	CapAdd      []string `yaml:"capAdd,omitempty" json:"capAdd,omitempty"`
 	CapDrop     []string `yaml:"capDrop,omitempty" json:"capDrop,omitempty"`
 	Privileged  bool     `yaml:"privileged,omitempty" json:"privileged,omitempty"`
 	SecurityOpt []string `yaml:"securityOpt,omitempty" json:"securityOpt,omitempty"`
-	// Priority is the service's own priority; if empty, the stack's
-	// applies.
+	// Priority is the service's own priority. If it is empty, the stack's
+	// priority applies.
 	Priority string `yaml:"priority,omitempty" json:"priority,omitempty"`
 }
 
@@ -93,8 +95,8 @@ type Mount struct {
 	ReadOnly bool   `yaml:"readOnly,omitempty" json:"readOnly,omitempty"`
 }
 
-// Tmpfs is a file system in memory at an absolute path, of at most Size
-// (512M) if set.
+// Tmpfs is a file system in memory at an absolute path. If Size is set
+// (512M), it limits the file system's size.
 type Tmpfs struct {
 	Path string `yaml:"path" json:"path"`
 	Size string `yaml:"size,omitempty" json:"size,omitempty"`
@@ -103,22 +105,23 @@ type Tmpfs struct {
 // Port publishes a container's port on the cluster's Floating IP.
 type Port struct {
 	Port uint16 `yaml:"port" json:"port"`
-	// Published is the port outside, by default the container's port.
+	// Published is the port on the Floating IP. By default, it is the
+	// container's port.
 	Published uint16 `yaml:"published,omitempty" json:"published,omitempty"`
 	// Protocol is tcp (the default) or udp.
 	Protocol string `yaml:"protocol,omitempty" json:"protocol,omitempty"`
 }
 
-// HTTP routes the requests for a host, and a path below it, to a port of
-// the service through Traefik.
+// HTTP routes the requests for a host, and optionally for a path below
+// it, through Traefik to a port of the service.
 type HTTP struct {
 	Host string `yaml:"host" json:"host"`
 	Port uint16 `yaml:"port" json:"port"`
 	Path string `yaml:"path,omitempty" json:"path,omitempty"`
 }
 
-// Healthcheck runs a command in the container (exec form; a shell is
-// [sh, -c, "..."]).
+// Healthcheck runs a command in the container, in exec form. To use a
+// shell, write [sh, -c, "..."].
 type Healthcheck struct {
 	Command     []string `yaml:"command" json:"command"`
 	Interval    string   `yaml:"interval,omitempty" json:"interval,omitempty"`
@@ -128,8 +131,8 @@ type Healthcheck struct {
 }
 
 // Resources are what a service reserves and its limits. The scheduler
-// places by the reservations, or by the configuration's
-// defaults.reservations if there are none.
+// places a service by its reservations. Without them, it uses the
+// configuration's defaults.reservations.
 type Resources struct {
 	Reserve *Amount `yaml:"reserve,omitempty" json:"reserve,omitempty"`
 	Limit   *Amount `yaml:"limit,omitempty" json:"limit,omitempty"`
@@ -141,14 +144,14 @@ type Amount struct {
 	CPUs   float64 `yaml:"cpus,omitempty" json:"cpus,omitempty"`
 }
 
-// Decode reads a spec as users write it, in YAML. A field the schema does
-// not have is an error, not ignored.
+// Decode reads a spec as users write it, in YAML. A field that the schema
+// does not have is an error, so a typo is not silently ignored.
 //
 // JSON is YAML too, so the API also uses Decode for a spec that the CLI
 // sends as JSON. The CLI keeps each number as written
 // (resource.ParseDocuments), so an env value of 1.0 arrives as "1.0". A
-// number that JSON cannot write as it is arrives as YAML reads it (0x10 as
-// "16"), and a boolean as true or false.
+// number that JSON cannot hold as written arrives as YAML reads it (0x10
+// as "16"). A boolean arrives as true or false.
 func Decode(data []byte) (Spec, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)

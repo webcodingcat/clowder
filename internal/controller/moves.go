@@ -15,31 +15,31 @@ import (
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// Progress asks a host how far its copies are from their peers, by volume
-// ID, in bytes (volumes.Reconciler.Progress, over the agent's API).
+// Progress asks a host how far its copies are behind their peers, in bytes
+// by volume ID (volumes.Reconciler.Progress, through the agent's API).
 type Progress func(ctx context.Context, host state.HostID) (map[string]int64, error)
 
 // progressWindow is the extra time that a resync gets after its deadline
-// passed, as long as it still makes progress. The leader looks again when
-// the window ends.
+// has passed, as long as it still makes progress. The leader checks again
+// when the window ends.
 const progressWindow = 5 * time.Minute
 
-// mover drives the move-stack operations while this agent leads. It keeps
-// its records in memory, so a new leader starts with an empty memory.
+// mover carries out the move-stack operations while this agent leads. It
+// keeps its records in memory, so a new leader starts with an empty memory.
 type mover struct {
 	cluster  Cluster
 	propose  Propose
 	progress Progress
 	logger   *slog.Logger
-	// looks are the leader's last look at each late move's resync, by
+	// looks holds the leader's last look at each late move's resync, by
 	// operation ID
 	looks map[uint64]look
 }
 
-// RunMoves drives the move-stack operations while this agent leads, until
-// ctx ends. It runs the leader's steps and watches the deadline of every
-// step. The placement starts the moves (scheduler.Move), and the hosts run
-// their own steps (agent/moves.go).
+// RunMoves carries out the move-stack operations while this agent leads,
+// until ctx ends. It runs the leader's steps and watches each step's
+// deadline. The placement starts the moves (scheduler.Move), and the hosts
+// run their own steps (agent/moves.go).
 func RunMoves(ctx context.Context, cluster Cluster, propose Propose, progress Progress, logger *slog.Logger) {
 	m := &mover{cluster: cluster, propose: propose, progress: progress, logger: logger, looks: map[uint64]look{}}
 	for {
@@ -50,7 +50,7 @@ func RunMoves(ctx context.Context, cluster Cluster, propose Propose, progress Pr
 				wait = min(wait, soonest)
 			}
 		} else {
-			// a leader that gets the lead back starts its looks again
+			// if this agent leads again later, it starts its looks afresh
 			clear(m.looks)
 		}
 		select {
@@ -62,7 +62,8 @@ func RunMoves(ctx context.Context, cluster Cluster, propose Propose, progress Pr
 	}
 }
 
-// pass looks at each move once and tells how soon the next deadline comes.
+// pass looks at each move once and returns how soon the next deadline
+// comes.
 func (m *mover) pass(ctx context.Context) time.Duration {
 	copied := m.cluster.SharedCopy()
 	now := time.Now()
@@ -83,19 +84,18 @@ func (m *mover) pass(ctx context.Context) time.Duration {
 	return soonest
 }
 
-// step moves a move forward. A move that is late before its point of no
-// return is rolled back, and one that is late after that point is ended.
-// Otherwise step runs the leader's steps. A move whose host went down ends
-// at once, in the same way (abandon).
+// step advances a move. A late move rolls back before its point of no
+// return and ends after it (late). Otherwise step runs the leader's steps.
+// A move whose host went down ends at once in the same way (abandon).
 func (m *mover) step(ctx context.Context, copied *state.State, operation *state.Operation, now time.Time) error {
 	move := operation.Move
 	stack, ok := copied.Stacks[move.Stack]
 	down, isDown := downHost(copied, move)
 	switch {
 	case operation.State == state.OpRollingBack:
-		// nothing to undo: the stack runs on its old host again (its status
-		// shows running meanwhile, as after a restart), and the placement
-		// gives up the copies that the move left once the locks are free
+		// nothing to undo: the stack runs on its old host again (meanwhile
+		// its status shows running, as after a restart). Once the locks are
+		// free, the placement gives up the copies that the move left.
 		return m.finish(ctx, operation, true, "")
 	case !ok:
 		return m.finish(ctx, operation, true, "the stack is gone")
@@ -123,10 +123,9 @@ func (m *mover) step(ctx context.Context, copied *state.State, operation *state.
 	return nil
 }
 
-// placeCopies runs the first step: it places a copy of each volume on the
+// placeCopies runs the first step. It places a copy of each volume on the
 // new host, then hands the new host the step that waits for the copies.
-// That step's deadline allows twice the time that the resync of all the
-// stack's volumes takes at the resync rate (syncTime).
+// syncTime sets that step's deadline.
 func (m *mover) placeCopies(ctx context.Context, copied *state.State, operation *state.Operation, now time.Time) error {
 	move := operation.Move
 	volumes, reason := scheduler.MoveVolumes(copied, move.Stack, move.To)
@@ -148,8 +147,8 @@ func (m *mover) placeCopies(ctx context.Context, copied *state.State, operation 
 	return err
 }
 
-// syncTime is how long the resync of a stack's volumes may take: StepTime
-// plus twice the time that all of them take at the resync rate.
+// syncTime returns how long the resync of a stack's volumes may take:
+// StepTime plus twice the time that all of them take at the resync rate.
 func syncTime(copied *state.State, stackID string) time.Duration {
 	rate, err := units.ParseSize(copied.Config.Spec.WithDefaults().Replication.ResyncRate)
 	if err != nil || rate <= 0 {
@@ -162,8 +161,8 @@ func syncTime(copied *state.State, stackID string) time.Duration {
 			total += int64(volume.Spec.Size)
 		}
 	}
-	// compute in seconds first: total in bytes times a second in
-	// nanoseconds would overflow from a few GiB on
+	// compute in seconds first: bytes times the nanoseconds of a second
+	// would overflow from a few GiB on
 	return state.StepTime + time.Duration(2*total/rate+1)*time.Second
 }
 
@@ -223,17 +222,18 @@ func (m *mover) late(ctx context.Context, copied *state.State, operation *state.
 	return err
 }
 
-// lateResync looks at a move whose copies on the new host are late, and
-// says why the move should roll back. An empty reason means that the move
-// gets one more window (progressWindow). If the state knows the copies as
-// synced, the images are still coming, and the move gets one window.
-// Otherwise lateResync asks the new host how much of the resync of the
-// stack's volumes is left, and compares the answer with the last look:
-//   - The first look has nothing to compare with and gets a window, even
-//     when the host does not answer (a network hiccup). So does the first
-//     answer after a look without one.
-//   - Less left than at the last look gets a window. The same or more, or
-//     a second look without an answer, rolls back.
+// lateResync returns why a move whose copies on the new host are late
+// should roll back. An empty reason gives the move one more window
+// (progressWindow).
+//
+// If the state already knows the copies as synced, only the images are
+// still missing, and the move gets one window; a second such look rolls
+// back. Otherwise lateResync asks the new host how much resync is left and
+// compares the answer with the last look:
+//   - The first look gets a window, even without an answer (a network
+//     hiccup). So does the first answer after a look without one.
+//   - Less left than last time gets a window. The same or more rolls back,
+//     and so does a second look without an answer.
 //
 // The looks are kept in the leader's memory. A new leader starts its looks
 // again, so each change of leader gives at most one more window.
@@ -269,16 +269,18 @@ func (m *mover) lateResync(ctx context.Context, copied *state.State, operation *
 
 // look is what the leader saw at its last look at a late move's resync.
 type look struct {
-	// answered: the new host told how much of the resync is left (left)
+	// answered is true when the new host told how much of the resync is
+	// left (left)
 	answered bool
 	left     int64
-	// synced: the state knew the copies as synced; only the images were missing
+	// synced is true when the state knew the copies as synced, so only the
+	// images were missing
 	synced bool
 }
 
-// copiesSynced tells whether every copy that a move needs on the new host
-// is synced, as the hosts told the state. A volume that never held data has
-// nothing to sync.
+// copiesSynced reports whether every copy that a move needs on the new host
+// is synced, as the hosts reported to the state. A volume that never held
+// data has nothing to sync.
 func copiesSynced(copied *state.State, move *state.StackMove) bool {
 	stack := copied.Stacks[move.Stack]
 	for _, name := range stack.Spec.VolumeNames() {
@@ -293,7 +295,7 @@ func copiesSynced(copied *state.State, move *state.StackMove) bool {
 	return true
 }
 
-// rollBack turns a move back: the stack keeps or gets back its old host.
+// rollBack rolls a move back: the stack keeps its old host or gets it back.
 func (m *mover) rollBack(ctx context.Context, operation *state.Operation, reason string) error {
 	m.logger.Warn("a move rolls back", "operation", operation.ID, "stack", operation.Move.Stack, "reason", reason)
 	_, err := commit(ctx, m.propose, state.KindRollBackOperation, state.RollBackOperation{
@@ -302,7 +304,7 @@ func (m *mover) rollBack(ctx context.Context, operation *state.Operation, reason
 	return err
 }
 
-// finish ends a move. If the move failed, the log says why.
+// finish ends a move. If the move failed, it logs why.
 func (m *mover) finish(ctx context.Context, operation *state.Operation, failed bool, reason string) error {
 	if failed {
 		m.logger.Warn("a move failed", "operation", operation.ID, "stack", operation.Move.Stack,
@@ -315,9 +317,9 @@ func (m *mover) finish(ctx context.Context, operation *state.Operation, failed b
 	return err
 }
 
-// downHost is a host of the move that went down: it is no longer active or
-// draining, for example because it failed. The move cannot wait for it to
-// come back.
+// downHost returns a host of the move that went down, that is, a host that
+// is no longer active or draining, for example because it failed. The move
+// cannot wait for it to come back.
 func downHost(copied *state.State, move *state.StackMove) (*state.Host, bool) {
 	ids := []state.HostID{move.To}
 	if move.From != nil {

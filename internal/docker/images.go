@@ -6,7 +6,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/command"
 )
 
-// imageMissing is docker image inspect's exit code for an image Docker
+// imageMissing is docker image inspect's exit code for an image that Docker
 // does not have.
 const imageMissing = 1
 

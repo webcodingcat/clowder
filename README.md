@@ -5,9 +5,6 @@ RAM). It replicates volumes with DRBD 9, keeps the client's real IP behind a Flo
 places services by priority and fences failed hosts through Hetzner Cloud's API. It runs
 on Hetzner Cloud, with a Hetzner private network between the hosts.
 
-**Status:** under construction. Clusters of three hosts and more work: hosts join, stacks
-move between hosts with their data, and a failed host is fenced while its stacks start
-elsewhere. Backups come next. [docs/roadmap.md](docs/roadmap.md) says how far the work is.
 Until `v1.0.0`, a new release may need a cluster set up anew.
 
 ## What it does
@@ -27,6 +24,8 @@ Until `v1.0.0`, a new release may need a cluster set up anew.
 - **Failover with fencing:** when the other hosts stop hearing a host with stacks for
   45 s, clowder powers it off through Hetzner's API and starts its stacks on a host with a
   synced copy of their data, within about three minutes.
+- **Host roles as in Kubernetes:** `control-plane`, `worker` and `ingress`. Workers serve
+  only the control plane, over the private network.
 - **HTTP routes with certificates:** Traefik on the Floating IP, with the client's address
   in `X-Forwarded-For`, and certificates from Let's Encrypt once the domain's DNS points
   at the Floating IP (not through a proxying CDN). The cluster accepts Let's Encrypt's
@@ -35,19 +34,26 @@ Until `v1.0.0`, a new release may need a cluster set up anew.
 - **Alerts** to Discord, email or a webhook, with an optional heartbeat, and **metrics**
   for Prometheus on every host, which only the cluster's hosts can reach.
 
+clowder makes no backups. [docs/operating.md](docs/operating.md#known-limits) lists
+what else it does not do.
+
 ## Getting started on Hetzner Cloud
 
-You need the CLI `clowder` (the archive for Linux, macOS or Windows from a
-[release](https://github.com/webcodingcat/clowder/releases), or on Debian and Ubuntu
-(amd64) the package `clowder` from the APT repository
-`https://webcodingcat.github.io/clowder-apt`, distribution `trixie`, component `main`),
-[OpenTofu](https://opentofu.org), and the module [`examples/hetzner`](examples/hetzner) at
-the same release. The module sets up the first host in about 5 minutes
-(`journalctl -u clowder-setup` shows the progress); [its README](examples/hetzner/README.md)
-explains its settings.
+You need:
+
+- the CLI `clowder`: the archive for Linux, macOS or Windows from a
+  [release](https://github.com/webcodingcat/clowder/releases), or on Debian and Ubuntu
+  (amd64) the package `clowder` from the APT repository
+  `https://webcodingcat.github.io/clowder-apt`, distribution `trixie`, component `main`;
+- [OpenTofu](https://opentofu.org);
+- the module [`examples/hetzner`](examples/hetzner) of the same release as your CLI.
+
+The module sets up the first host in about 5 minutes (`journalctl -u clowder-setup` shows
+the progress); [its README](examples/hetzner/README.md) explains its settings. Replace
+`<release>` with your CLI's version (`clowder version`), such as `v0.2.0`:
 
 ```bash
-git clone --branch v0.1.0 https://github.com/webcodingcat/clowder.git
+git clone --branch <release> https://github.com/webcodingcat/clowder.git
 cd clowder/examples/hetzner
 export HCLOUD_TOKEN=...
 tofu init
@@ -57,19 +63,11 @@ clowder cluster status
 ssh "root@$(tofu output -raw public_address)" clowderd sealing-key export > sealing-key
 ```
 
-**Credentials** come over SSH from root on a host, as kubeadm's `admin.conf` does, so
-check the host's key on first contact. `clowderd credentials` prints a config with one
-context, and `clowder config import` adds it to `~/.clowder/config` (or `--config`,
-`$CLOWDER_CONFIG`). A cluster has no users: whoever holds a context controls the cluster.
-A CLI certificate lasts a year; run `clowderd credentials` again and import it with
-`--replace`. `clowderd credentials --revoke-older` locks out every CLI certificate issued
-before the new one.
+- **Credentials** come over SSH from root on a host, as kubeadm's `admin.conf` does, so
+  check the host's key on first contact. Whoever holds them controls the cluster.
+- **The sealing key** opens every SealedSecret. Keep the file offline.
 
-Every SealedSecret is sealed for the cluster's **sealing key**. Export it right after
-setup, as above, and keep it offline: whoever holds it can read every SealedSecret. If the
-cluster is lost, it still opens the values in your files (`secret decrypt`) and moves them
-to a new cluster (`secret rekey`). `clowderd sealing-key export --public` prints the
-public half, with which `clowder secret seal --cert` seals without a cluster.
+[docs/operating.md](docs/operating.md) explains both.
 
 The cluster's settings are one resource, the **`ClusterConfiguration`** named `cluster`.
 Its secrets are Secrets in the namespace `clowder-system`. `tofu output
@@ -98,19 +96,14 @@ spec:
     bulk: {pool: vg-bulk/thin}
 ```
 
-Then run `clowder apply -f system.yaml`. The file holds no value in clear, so it can live
-in a repository; keep it apart from the module's directory, whose OpenTofu state holds the join
-tokens. An apply that brings a new Hetzner token first says how many of the hosts' servers
-the token sees and asks (`--yes` skips the question).
-[docs/developing/specs.md](docs/developing/specs.md) explains the configuration.
+Run `clowder apply -f system.yaml`. The file holds no value in clear, so it can live in a
+repository. Keep it apart from the module's directory, whose OpenTofu state holds the join
+tokens. An apply that brings a new Hetzner token first says how many of the hosts'
+servers the token sees and asks (`--yes` skips the question).
+[docs/resources.md](docs/resources.md) explains the configuration.
 
-**More hosts** join once the configuration is applied, each with a token from `clowder
-host join-token` (it opens once, for an hour; `--ttl` up to a day). A host has roles, as
-a Kubernetes node does: `control-plane` (votes in Raft, leads, holds the cluster's keys),
-`worker` (runs stacks and holds volume copies) and `ingress` (may take the Floating IP).
-The module gives every host all three unless its `roles` say otherwise. A token allows
-`worker,ingress` unless `--roles` says more. A token for a host of the module with its
-default roles therefore needs all three, or the join is refused:
+**More hosts** join with a token each. The module gives every host all three roles unless
+its `roles` say otherwise, so the token needs all three:
 
 ```bash
 clowder host join-token --roles control-plane,worker,ingress   # one per host
@@ -118,17 +111,9 @@ tofu apply ... -var 'hosts=["clowder1", "clowder2"]' \
   -var 'join_tokens={clowder1 = "<token>", clowder2 = "<token>"}'
 ```
 
-The second control-plane host runs stacks (if it is a worker) but does not vote. With the
-third, all three vote, and `clowder host remove` refuses to go below three control-plane
-hosts. A host's roles are fixed once it joins. Only control-plane hosts serve the CLI
-and the join; the others answer only the control plane, over the private network. The
-CLI reaches the cluster only through the `endpoints` of its context, so after joins fetch
-new credentials or add the new control-plane hosts' public addresses there. Give each cluster a Hetzner project of its own.
-
-When a host fails and Hetzner's API cannot power it off, an alert says so; once you know
-the server is off, `clowder host fence-confirm <host>` lets its stacks start elsewhere.
-When two of three hosts are gone for good, `clowderd recover --power-off`, run as root on
-the host that is left, powers the others off and goes on with this host alone.
+With the third control-plane host, all three vote. Then fetch new credentials, so that the
+CLI knows the new hosts. [Hosts and roles](docs/operating.md#hosts-and-roles) explains the
+roles and what to do when a host fails.
 
 ## Running a stack
 
@@ -174,9 +159,10 @@ that stays out of Git can go in clear instead: in a file (`spec.data` in Base64,
 password=-`.
 
 Put the files in a directory and run `clowder apply -f shop/`. clowder reads the files in
-order of their names, and each file from top to bottom; a resource must come after the
-resources it needs (the Namespace first, the Secrets before the Stack). The stack spec is
-described in [docs/developing/specs.md](docs/developing/specs.md).
+the order of their names, and each file from top to bottom. A resource must come after the
+resources it needs: the Namespace first, the Secrets before the Stack. Applying the same
+files again changes nothing, and a field that clowder does not know is an error.
+[docs/resources.md](docs/resources.md) describes every field.
 
 | Command | What it does |
 |---|---|
@@ -192,10 +178,6 @@ described in [docs/developing/specs.md](docs/developing/specs.md).
 | `clowder secret rekey -f shop/ --identity sealing-key` | seals the values in files again, for the cluster of the context (`--cert`: for a public sealing key) |
 | `clowder secret decrypt --identity sealing-key -f <file>` | in an emergency, reads the values of SealedSecrets with the sealing key |
 
-Applying the same files again changes nothing, and a field that clowder does not know is
-an error. Backups come with phase 3; until then, a volume's data is only on its hosts'
-disks.
-
 ## Compatibility
 
 | Binary | What it is | Platforms |
@@ -203,7 +185,6 @@ disks.
 | `clowder` | the CLI | Linux, macOS, Windows |
 | `clowderd` | the agent on each host | Debian 13 (amd64) on Hetzner Cloud servers in one project, with a Hetzner private network between them |
 
-Before `v1.0.0`, the CLI and the agents work together only within one minor version:
-update all hosts and the CLI together to a new minor version, and host by host only to a
-patch release (the followers first, the leader last). How the code works and how to build
-it: [DEVELOPING.md](DEVELOPING.md).
+Before `v1.0.0`, the CLI and the agents work together only within one minor version
+([Updating a cluster](docs/operating.md#updating-a-cluster)). How the code works and how
+to build it: [DEVELOPING.md](DEVELOPING.md).

@@ -14,9 +14,9 @@ import (
 )
 
 // forgetPeers runs until ctx ends. The state lists the removed hosts that
-// this host still has to forget as DRBD peers; forgetPeers forgets each one
-// and reports it (report-peer-forgotten). A removed host's ID is free again
-// once every host has forgotten it.
+// this host must still forget as DRBD peers. forgetPeers forgets each one
+// and reports it with report-peer-forgotten. A removed host's ID becomes
+// free again once every host has forgotten it.
 func forgetPeers(ctx context.Context, cluster loop.Cluster, self state.HostID, driver Storage,
 	propose controller.Propose, logger *slog.Logger,
 ) {

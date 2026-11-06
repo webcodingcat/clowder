@@ -11,8 +11,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// How long a condition that the state does not show must last before it
-// raises an alert. A short hiccup does not raise one.
+// How long a condition must last before it raises an alert. A short hiccup
+// raises none.
 const (
 	dockerDownFor   = 2 * time.Minute
 	ingressLostFor  = 5 * time.Minute
@@ -21,21 +21,22 @@ const (
 	noQuorumFor     = 2 * time.Minute
 )
 
-// The keys of the conditions that other loops hold (Conditions). They name
-// a host by its ID, which never changes; the alerts' keys name a host by
-// its name, which people read. conditionKeys lists all of them.
+// The keys of the conditions that other loops observe (Conditions). A
+// condition's key names a host by its ID, which never changes. An alert's
+// key names a host by its name, which people read. conditionKeys lists all
+// condition keys.
 const (
 	ingressNotHeld = "ingress-not-held"
-	// hetznerTokenRefused holds while Hetzner refuses the token for the
-	// calls of fencing and of the Floating IP (hetzner.TokenRefused). No
-	// loop asks Hetzner more often because of it.
+	// hetznerTokenRefused holds while Hetzner refuses the token in the
+	// calls that fencing and the Floating IP make anyway
+	// (hetzner.TokenRefused). No loop asks Hetzner more often because of it.
 	hetznerTokenRefused = "hetzner-token"
 )
 
-// conditionKeys are the keys of every condition whose subject is still in
-// the state: the hosts that are not removed, and the stacks. A new key must
-// be added here too, or its conditions are forgotten at every alerts pass
-// (Conditions.Keep).
+// conditionKeys returns the keys of every condition whose subject is still
+// in the state: the hosts that are not removed, the stacks and the volumes.
+// A new key must be added here too, or every alerts pass forgets its
+// conditions (Conditions.Keep).
 func conditionKeys(current *state.State) map[string]bool {
 	keys := map[string]bool{ingressNotHeld: true, hetznerTokenRefused: true}
 	for id, host := range current.Hosts {
@@ -54,37 +55,38 @@ func conditionKeys(current *state.State) map[string]bool {
 	return keys
 }
 
-// overCapacityKey is the condition of a host over capacity.
+// overCapacityKey returns the condition key for a host over capacity.
 func overCapacityKey(host state.HostID) string {
 	return fmt.Sprintf("over-capacity/%d", host)
 }
 
-// dockerDownKey is the condition of a host whose Docker does not answer.
+// dockerDownKey returns the condition key for a host whose Docker does not
+// answer.
 func dockerDownKey(host state.HostID) string {
 	return fmt.Sprintf("docker-down/%d", host)
 }
 
-// fencingBlockedKey is the condition of a failed host that the leader
-// cannot fence (fencer.whyNotFence).
+// fencingBlockedKey returns the condition key for a failed host that the
+// leader cannot fence (fencer.whyNotFence).
 func fencingBlockedKey(host state.HostID) string {
 	return fmt.Sprintf("fencing-blocked/%d", host)
 }
 
-// stackFailingKey is the condition of a stack that its host could not bring
-// up. Like the alert's key, it names the stack by its ID.
+// stackFailingKey returns the condition key for a stack that its host could
+// not bring up. Like the alert's key, it names the stack by its ID.
 func stackFailingKey(stack string) string {
 	return "stack-failing/" + stack
 }
 
-// noQuorumKey is the condition of a volume whose primary copy lacks DRBD's
-// quorum. Like the alert's key, it names the volume by its ID.
+// noQuorumKey returns the condition key for a volume whose primary copy
+// lacks DRBD's quorum. Like the alert's key, it names the volume by its ID.
 func noQuorumKey(volume string) string {
 	return "no-quorum/" + volume
 }
 
 // level is a threshold of a value in percent. The alert is raised at raise
-// and cleared only below clear, so a value that hovers at the threshold
-// does not raise and clear the alert at every report.
+// and resolved only below clear. So a value that hovers near the threshold
+// does not raise and resolve the alert at every report.
 type level struct {
 	severity     string
 	raise, clear int
@@ -99,8 +101,9 @@ var (
 	rootLevels   = []level{{clusterspec.SeverityWarning, 90, 85}}
 )
 
-// leveled is the severity that a value has against levels, given the alert
-// that is open for it. It returns false when the value calls for no alert.
+// leveled returns the severity that a value has against levels, given the
+// alert that is open for it. It returns false when the value calls for no
+// alert.
 func leveled(value int, open *state.Alert, levels []level) (string, bool) {
 	for _, threshold := range levels {
 		stays := open != nil && clusterspec.AtLeast(open.Severity, threshold.severity) && value >= threshold.clear
@@ -111,9 +114,9 @@ func leveled(value int, open *state.Alert, levels []level) (string, bool) {
 	return "", false
 }
 
-// wantedAlerts are the alerts that the state and the conditions call for
-// now, by key. Subjects and messages hold no value that changes from report
-// to report, because each change is a Raft write.
+// wantedAlerts returns the alerts that the state and the conditions call
+// for now, by key. Subjects and messages hold no value that changes from
+// report to report, because each change is a Raft write.
 func wantedAlerts(current *state.State, conditions *Conditions, now time.Time) map[string]state.PutAlert {
 	wanted := map[string]state.PutAlert{}
 	add := func(key, kind, severity, subject, message string) {
@@ -121,7 +124,7 @@ func wantedAlerts(current *state.State, conditions *Conditions, now time.Time) m
 	}
 	// a condition raises its alert once it has lasted long enough. An open
 	// alert stays while its condition holds, and while no loop has looked
-	// at the condition yet (a new leader counts again from zero).
+	// at the condition yet (a new leader starts counting from zero).
 	held := func(condition, alert string, atLeast time.Duration) bool {
 		if current.Alerts[alert] != nil && !conditions.Seen(condition) {
 			return true
@@ -235,8 +238,9 @@ func addCertificateAlerts(current *state.State, now time.Time, add func(key, kin
 	}
 }
 
-// addHostAlerts adds the alerts of a host's failure: failed (and fencing),
-// fencing blocked, fenced (until it is active again) and disabled.
+// addHostAlerts adds the alerts about a host's failure: failed (also while
+// fencing), fencing blocked, fenced (until it is active again) and
+// disabled.
 func addHostAlerts(host *state.Host, blocked bool, add func(key, kind, severity, subject, message string)) {
 	switch host.Phase {
 	case state.Failed, state.Fencing:
@@ -262,10 +266,10 @@ func addHostAlerts(host *state.Host, blocked bool, add func(key, kind, severity,
 	}
 }
 
-// addVolumeAlerts adds the alerts of the volumes whose copies the hosts
-// report. A split brain raises an alert at once, because it needs a human
-// and does not go away by itself. A primary without DRBD's quorum raises an
-// alert once this has lasted noQuorumFor, because a failing host takes the
+// addVolumeAlerts adds the alerts about volumes, from the copies that the
+// hosts report. A split brain raises an alert at once, because it needs a
+// human and does not go away by itself. A primary without DRBD's quorum
+// raises an alert only after noQuorumFor, because a failing host takes the
 // quorum away until the failover.
 func addVolumeAlerts(current *state.State, held func(condition, alert string, atLeast time.Duration) bool,
 	add func(key, kind, severity, subject, message string),

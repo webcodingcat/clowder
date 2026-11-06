@@ -135,7 +135,7 @@ install_headers() {
   # the image ships empty index files for trixie-security, which hides the
   # headers of the running kernel; fetch the lists anew. Only the index
   # files go: apt's lock and partial/ stay, so another apt-get update at boot
-  # (HLab's guest agent, apt-daily) finishes before ours instead of breaking
+  # (such as apt-daily) finishes before ours instead of breaking
   find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock -delete
   "${APT[@]}" update
   # a package the mirror has must install; a failure then is no reason to reboot

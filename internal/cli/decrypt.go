@@ -14,7 +14,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/secretvalue"
 )
 
-// The markers decrypt writes in place of a value.
+// The markers that decrypt writes in place of a value.
 const (
 	errorMarker  = "error: "
 	base64Marker = "base64:"
@@ -74,10 +74,10 @@ func newDecrypt() *cobra.Command {
 	return command
 }
 
-// shownValue opens a value into the form decrypt prints: as it is if it is
-// printable text, or else in base64. A space at either end would not be
-// visible, and text that starts like a marker would read as a marker, so
-// both are also shown in base64.
+// shownValue opens a value and returns it in the form that decrypt prints:
+// unchanged if it is printable text, or else in base64. A space at either
+// end would not be visible, and text that starts like a marker would read
+// as a marker. So both are shown in base64 too.
 func shownValue(value fileValue, identities []age.Identity) (string, error) {
 	opened, err := secretvalue.OpenFor(value.sealed, value.secret, identities...)
 	if err != nil {
@@ -92,9 +92,9 @@ func shownValue(value fileValue, identities []age.Identity) (string, error) {
 	return base64Marker + base64.StdEncoding.EncodeToString(opened.Bytes), nil
 }
 
-// printable tells whether text prints on one line as it is: without line
-// ends, tabs, other control characters, or spaces that a reader cannot
-// tell apart from normal spaces.
+// printable tells whether text prints unchanged on one line. That means no
+// line breaks, tabs or other control characters, and no spaces that a
+// reader cannot tell apart from normal spaces.
 func printable(text string) bool {
 	return utf8.ValidString(text) && strings.IndexFunc(text, func(r rune) bool { return !unicode.IsPrint(r) }) < 0
 }

@@ -16,23 +16,24 @@ import (
 )
 
 // The WireGuard mesh has one interface per peer rather than one for all
-// peers. Each peer then has its own port, route and routing table, so an
-// answer without SNAT (it carries a client's address) goes back through the
-// peer that its connection came from.
+// peers. Each peer then has its own port, route and routing table. So an
+// answer without SNAT, which carries a client's address, goes back through
+// the peer that its connection came from.
 const (
 	peerInterfacePrefix = "clw-"
-	// wireGuardBasePort plus a host's ID is the port of the interface to it
-	// (stackspec reserves the ports of state.MaxHosts)
+	// wireGuardBasePort plus a host's ID is the port of the interface to
+	// that host (stackspec reserves the ports for state.MaxHosts hosts)
 	wireGuardBasePort = 51800
-	// peerTableBase plus a peer's ID is its routing table and the priority of
-	// the rule that leads there
+	// peerTableBase plus a peer's ID is the peer's routing table, and the
+	// priority of the rule that leads there
 	peerTableBase = 100
-	// peerMarkBase plus a peer's ID marks the connections that came from it:
-	// up to 0x11f for state.MaxHosts, within markMask
+	// peerMarkBase plus a peer's ID marks the connections that came from
+	// the peer. For state.MaxHosts hosts, this goes up to 0x11f, within
+	// markMask.
 	peerMarkBase = 0x100
-	// wireGuardOverhead is the most that WireGuard adds to a packet (over an
-	// IPv6 underlay; over IPv4 it is 60). An interface's MTU is the
-	// underlay's MTU minus this, as wg-quick sets it
+	// wireGuardOverhead is the most that WireGuard adds to a packet, over
+	// an IPv6 underlay (over IPv4 it is 60). An interface's MTU is the
+	// underlay's MTU minus this, as wg-quick sets it.
 	wireGuardOverhead = 80
 )
 
@@ -85,8 +86,8 @@ func wantedRule(id state.HostID) peerRule {
 }
 
 // selector is the rule as the arguments that ip rule takes after add or
-// delete. ip -j rule show leaves out the mask when it is all ones, and the
-// mark when there is none (a rule changed by hand).
+// delete. ip -j rule show leaves out the mask when it is all ones. It
+// leaves out the mark when there is none (a rule changed by hand).
 func (r peerRule) selector() []string {
 	selector := []string{"priority", strconv.Itoa(r.Priority)}
 	switch {
@@ -104,10 +105,12 @@ func (r peerRule) selector() []string {
 //
 // Each side listens on the port of the other side's ID. So the interface to
 // peer m listens on wireGuardBasePort + m and reaches m at
-// wireGuardBasePort + self: host 0's clw-2 listens on 51802, and host 2's
-// clw-0 on 51800. AllowedIPs allows every address: answers without SNAT and
-// a DNAT to another host carry a client's address, and the peers are the
-// cluster's own hosts, authenticated by their keys.
+// wireGuardBasePort + self. For example, host 0's clw-2 listens on 51802,
+// and host 2's clw-0 listens on 51800.
+//
+// AllowedIPs allows every address. Answers without SNAT, and a DNAT to
+// another host, carry a client's address. The peers are the cluster's own
+// hosts, authenticated by their keys.
 func RenderWireGuard(privateKey string, self state.HostID, peer Peer) string {
 	return fmt.Sprintf(`[Interface]
 PrivateKey = %s
@@ -127,7 +130,7 @@ AllowedIPs = 0.0.0.0/0
 // connections that came from it. At every pass it sets each peer's
 // interface and routes again (wg syncconf and ip replace change only what
 // differs), and it replaces any rule that differs from the wanted one. A
-// peer that fails does not hold up the others; ApplyMesh returns all errors
+// peer that fails does not hold up the others. ApplyMesh returns all errors
 // together.
 func (h Host) ApplyMesh(ctx context.Context, mesh Mesh) error {
 	listed, err := h.Run(ctx, toolTimeout, "", "ip", "-j", "link", "show", "type", "wireguard")
@@ -154,8 +157,8 @@ func (h Host) ApplyMesh(ctx context.Context, mesh Mesh) error {
 		if err != nil {
 			return fmt.Errorf("read the WireGuard key: %w", err)
 		}
-		// wg names a line it cannot read in its error, which would put the
-		// key into the log
+		// check the key here: wg quotes a line it cannot read in its error,
+		// which would put the key into the log
 		key := strings.TrimSpace(string(read))
 		if decoded, err := base64.StdEncoding.DecodeString(key); err != nil || len(decoded) != 32 {
 			return fmt.Errorf("%s holds no WireGuard key", h.WireGuardKey)
@@ -181,7 +184,7 @@ func (h Host) ApplyMesh(ctx context.Context, mesh Mesh) error {
 
 // connectPeer sets up the interface to a peer, its route and the routing
 // table of its answers. hasInterface says whether the interface exists.
-// rules are the peer's existing rules; connectPeer deletes all of them
+// rules are the peer's existing rules. connectPeer deletes all of them
 // except the wanted one.
 func (h Host) connectPeer(ctx context.Context, privateKey string, self state.HostID, peer Peer,
 	hasInterface bool, rules []peerRule,
@@ -205,11 +208,11 @@ func (h Host) connectPeer(ctx context.Context, privateKey string, self state.Hos
 	steps := [][]string{
 		{"link", "set", name, "mtu", strconv.Itoa(mtu - wireGuardOverhead), "up"},
 		// the reverse path filter, even in loose mode, drops what arrives on
-		// an interface without an IPv4 address (found in the phase 0 spike;
-		// docs/roadmap.md)
+		// an interface without an IPv4 address
 		{"address", "replace", node + "/32", "dev", name, "noprefixroute"},
-		// what the host sends to the peer carries the node address: the
-		// peer's Traefik trusts it, and the peer's services bind to it
+		// what the host sends to the peer comes from the node address,
+		// because the peer's Traefik trusts it and the peer's services bind
+		// to it
 		{"route", "replace", peerNode + "/32", "dev", name, "src", node},
 		{"route", "replace", "default", "dev", name, "table", rule.Table},
 	}
@@ -236,8 +239,8 @@ func (h Host) connectPeer(ctx context.Context, privateKey string, self state.Hos
 // disconnectPeer removes what connectPeer set up for a former peer (the
 // routes go away with the interface). First it forgets the connections that
 // came from the peer, because the peer's ID may come back with another host.
-// If the agent stops halfway, the interface or rule that is left brings it
-// back here at the next pass.
+// If the agent stops halfway, the interface or rule that is left makes the
+// next pass call disconnectPeer again.
 func (h Host) disconnectPeer(ctx context.Context, id state.HostID, hasInterface bool, rules []peerRule) error {
 	// conntrack exits with 1 when no connection had the mark
 	_, err := h.Run(ctx, toolTimeout, "", "conntrack", "--delete", "--mark",
@@ -259,8 +262,8 @@ func (h Host) disconnectPeer(ctx context.Context, id state.HostID, hasInterface 
 	return nil
 }
 
-// underlayMTU is the MTU of the interface the host reaches an underlay
-// address through.
+// underlayMTU is the MTU of the interface through which the host reaches an
+// underlay address.
 func (h Host) underlayMTU(ctx context.Context, address netip.Addr) (int, error) {
 	output, err := h.Run(ctx, toolTimeout, "", "ip", "-j", "route", "get", address.String())
 	if err != nil {
@@ -330,8 +333,8 @@ func peerRules(listed string) (map[state.HostID][]peerRule, error) {
 	return peers, nil
 }
 
-// unmarshalList reads the JSON list ip -j prints; it prints nothing for an
-// empty one.
+// unmarshalList reads the JSON list that ip -j prints. For an empty list,
+// ip prints nothing.
 func unmarshalList(listed string, list any) error {
 	if strings.TrimSpace(listed) == "" {
 		return nil

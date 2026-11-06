@@ -42,9 +42,9 @@ func newRekey(g *globals) *cobra.Command {
 			for _, path := range paths {
 				count, err := rekeyFile(path, identities, recipient)
 				if err != nil {
-					// each file is written whole or not at all: the files
-					// listed above are done, this one and the ones after it
-					// are not
+					// each file is written whole or not at all, so the
+					// files listed above are done, and this one and the
+					// ones after it are not
 					return fmt.Errorf("%w; the files listed above are rekeyed, the others not", err)
 				}
 				if count == 0 {
@@ -77,10 +77,10 @@ func filesOf(from string, report io.Writer) ([]string, error) {
 	return yamlFiles(from, report)
 }
 
-// rekeyFile opens the values of one file with identities, seals them for
-// recipient, each for the Secret it was for, and writes the file back
-// whole or not at all. It tells how many values it rekeyed. It refuses a
-// value that is not meant for its Secret, as an apply would.
+// rekeyFile opens the values of one file with identities. It seals each
+// value again for recipient and for the same Secret. Then it writes the
+// file back, whole or not at all. It returns how many values it rekeyed.
+// Like an apply, it refuses a value that is not meant for its Secret.
 func rekeyFile(path string, identities []age.Identity, recipient age.Recipient) (int, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {

@@ -11,17 +11,17 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// clowderVersions is the prefix of the apiVersion of every clowder
-// document, in this version and any other.
+// clowderVersions starts the apiVersion of every clowder document, of this
+// version or any other.
 const clowderVersions = "clowder/"
 
-// ParseDocuments reads the YAML documents of a file (JSON is YAML too) as
-// resources. A file holds only clowder's resources, or none of them (such
-// as a Compose file or a Kubernetes manifest next to them). For a file
-// without clowder's resources it returns none, so an apply of a directory
-// can skip it. A file that mixes both is an error, and so is a resource of
-// another clowder apiVersion. A resource is read strictly: a field that it
-// does not have is an error.
+// ParseDocuments reads the YAML documents of a file as resources (JSON is
+// YAML too). A file holds either only clowder's resources or none of them,
+// like a Compose file or a Kubernetes manifest in the same directory. For
+// a file without clowder's resources it returns none, so that an apply of
+// a directory can skip the file. A file that mixes both is an error, and
+// so is a resource of another clowder apiVersion. Resources are read
+// strictly: a field that the resource does not have is an error.
 func ParseDocuments(data []byte) ([]Object, error) {
 	documents, err := yamlDocuments(data)
 	if err != nil {
@@ -99,8 +99,8 @@ func decodeObject(encoded []byte) (Object, error) {
 	return object, nil
 }
 
-// jsonOf writes a YAML node as JSON and keeps each number as written, so a
-// field that takes text (a stack's env) gets "1.0", not "1".
+// jsonOf writes a YAML node as JSON. It keeps each number as written, so
+// that a field that takes text (a stack's env) gets "1.0", not "1".
 func jsonOf(node *yaml.Node) ([]byte, error) {
 	switch node.Kind {
 	case yaml.DocumentNode:

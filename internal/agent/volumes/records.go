@@ -17,7 +17,8 @@ import (
 // The record of a volume lists its copies on this host, one for each
 // generation that is still here. Each volume has its own file, so a copy is
 // found whatever happened to the state's record of it. A copy is recorded
-// before it is made, and its entry goes only after the copy is removed.
+// before it is created, and its entry is deleted only after the copy is
+// removed.
 // Only the volume's job writes its record (Reconciler.busy).
 
 func (r *Reconciler) recordFile(volumeID string) string {
@@ -45,7 +46,8 @@ func (r *Reconciler) forgetCopy(volume storage.Volume) error {
 	return r.writeRecord(volume.ID, recorded)
 }
 
-// writeRecord replaces a volume's record; without copies it removes the file.
+// writeRecord replaces a volume's record. Without copies, it removes the
+// file.
 func (r *Reconciler) writeRecord(volumeID string, volumes []storage.Volume) error {
 	file := r.recordFile(volumeID)
 	if len(volumes) == 0 {
@@ -62,7 +64,7 @@ func (r *Reconciler) writeRecord(volumeID string, volumes []storage.Volume) erro
 	return atomicfile.Write(file, encoded, 0o600)
 }
 
-// readRecord reads a volume's record; a missing file means no copies.
+// readRecord reads a volume's record. A missing file means no copies.
 func (r *Reconciler) readRecord(file string) ([]storage.Volume, error) {
 	content, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {

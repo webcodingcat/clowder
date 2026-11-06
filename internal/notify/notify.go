@@ -1,7 +1,7 @@
 // Package notify sends alerts to the channels that the configuration names:
-// Discord, email and webhooks. Only the leader's controller uses it. It
-// knows nothing about the state, and it receives each channel's secrets
-// already opened.
+// Discord, email and webhooks. Only the controller uses it. It knows
+// nothing about the state; it gets each channel's secrets already opened,
+// through Secrets.
 package notify
 
 import (
@@ -59,11 +59,11 @@ type Notifier interface {
 	Send(ctx context.Context, message Message) error
 }
 
-// sendTimeout bounds one message to one channel.
+// sendTimeout limits the sending of one message to one channel.
 const sendTimeout = 30 * time.Second
 
-// Secrets opens a value that the configuration names, from a Secret in
-// clowder-system.
+// Secrets returns the opened value that a reference in the configuration
+// names, from a Secret in clowder-system.
 type Secrets func(ref names.SecretKeyRef) (string, error)
 
 // New creates the notifier of a channel and opens the channel's secrets.
@@ -145,8 +145,8 @@ func (d discord) Send(ctx context.Context, message Message) error {
 	})
 }
 
-// Heartbeat calls the heartbeat's URL (with a GET, as services such as
-// healthchecks.io expect); the service raises an alarm when the calls stop.
+// Heartbeat calls the heartbeat's URL with a GET, as services such as
+// healthchecks.io expect. The service raises an alarm when the calls stop.
 func Heartbeat(ctx context.Context, target string) error {
 	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
@@ -181,7 +181,8 @@ func trust(caPEM []byte) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// tlsConfig is how the email channel speaks TLS with its server.
+// tlsConfig returns the TLS settings that the email channel uses with its
+// server.
 func tlsConfig(host string, caPEM []byte) (*tls.Config, error) {
 	pool, err := trust(caPEM)
 	if err != nil {

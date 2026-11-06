@@ -21,10 +21,11 @@ func findVolume(s *State, id string) *Meta {
 	return nil
 }
 
-// putVolumeResource makes a volume. It is placed together with the first
-// stack that names it, on that stack's host; until then it waits
-// (VolumePending). It does not check the volume's lock: it changes no
-// existing volume, and only an existing volume can be locked.
+// putVolumeResource creates a volume. The volume is placed together with
+// the first stack that names it, on that stack's host. Until then it waits
+// (VolumePending). putVolumeResource does not check the volume's lock,
+// because it changes no existing volume, and only an existing volume can
+// be locked.
 func putVolumeResource(s *State, id string, payload PutResource) (func() *Meta, error) {
 	spec, err := decodeSpec[resource.VolumeSpec](payload.Kind, id, payload.Spec)
 	if err != nil {
@@ -57,9 +58,9 @@ func putVolumeResource(s *State, id string, payload PutResource) (func() *Meta, 
 }
 
 // nextDataGeneration returns the data generation for a new volume: one
-// above the highest retired copy of a deleted volume with the same ID. This
-// way the new volume's LV cannot be mistaken for an old copy whose host may
-// not have removed it yet.
+// above the highest retired copy of a deleted volume with the same ID. So
+// the new volume's LV cannot be mistaken for an old copy that its host may
+// not have removed yet.
 func (s *State) nextDataGeneration(id string) int64 {
 	generation := int64(1)
 	for _, retired := range s.Retired {
@@ -112,10 +113,10 @@ func removeVolumeResource(s *State, id string) (func(), error) {
 
 // PutVolume replaces a volume's record: where its copies are and what
 // state they are in. The volume keeps its Meta and its spec, which only
-// put-resource sets.
+// change-resources sets.
 type PutVolume struct {
 	Volume Volume `json:"volume"`
-	// PlannedAt is the index of the state the leader planned with
+	// PlannedAt is the index of the state that the leader planned with
 	// (checkPlanned).
 	PlannedAt uint64 `json:"planned_at"`
 	// Operation is the leader's operation that makes the change, if any.
@@ -124,9 +125,9 @@ type PutVolume struct {
 }
 
 // applyPutVolume marks the copies that the new record no longer has as
-// retired, and their hosts remove them with their data. So a placed volume
-// keeps at least one copy and never goes back to pending: only deleting the
-// volume gives up all of its data.
+// retired, and their hosts remove them with their data. A placed volume
+// must keep at least one copy and never goes back to pending. So only
+// deleting the volume gives up all of its data.
 func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 	volume := payload.Volume
 	id := volume.ID()
@@ -149,8 +150,8 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 		return nil, fmt.Errorf("volume %s holds data: it keeps a copy until it is deleted", id)
 	}
 	volume.Meta = old.Meta
-	// only the hosts tell (set-volume-initialized); a new data generation
-	// is a new LV, never initialized yet
+	// only the hosts report it (set-volume-initialized), and a new data
+	// generation is a new LV that is not initialized yet
 	volume.Initialized = old.Initialized && volume.DataGeneration == old.DataGeneration
 	volume.Copies = slices.Clone(volume.Copies)
 	for i, volumeCopy := range volume.Copies {
@@ -204,7 +205,7 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 			return nil, fmt.Errorf("volume %s: two copies on host %d", id, volumeCopy.Host)
 		}
 		placed[volumeCopy.Host] = true
-		// the retired copy's LV has the same name, and its host would take
+		// the retired copy's LV has the same name, so its host would take
 		// the old data for the new copy's
 		if slices.Contains(s.Retired, RetiredCopy{Volume: id, DataGeneration: volume.DataGeneration, Host: volumeCopy.Host}) {
 			return nil, fmt.Errorf("volume %s: host %d still removes a copy it gave up", id, volumeCopy.Host)
@@ -218,11 +219,11 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 }
 
 // keptSynced returns the Synced flag of a copy in a volume's new record.
-// Only the copy's host reports it (set-copy-synced), so a copy that stays
-// what it was keeps the flag, and any other copy starts unsynced. A copy
-// with a disk that becomes the tiebreaker on its host keeps its class: the
-// class names the pool of the LV that the host removes, since no retired
-// copy does.
+// Only the copy's host reports the flag (set-copy-synced). So a copy that
+// stays as it was keeps the flag, and any other copy starts unsynced. A
+// copy with a disk that becomes the tiebreaker on its host must keep its
+// class. No retired copy names its old LV, so the class tells the host in
+// which pool that LV is when it removes it.
 func keptSynced(old *Volume, generation int64, volumeCopy VolumeCopy) (bool, error) {
 	if generation != old.DataGeneration {
 		return false, nil
@@ -259,7 +260,7 @@ func (s *State) retire(old *Volume, kept *Volume) {
 	}
 }
 
-// ForgetCopy is a host reporting that one of its retired copies is gone.
+// ForgetCopy is a host's report that one of its retired copies is gone.
 type ForgetCopy struct {
 	Copy RetiredCopy `json:"copy"`
 }
@@ -289,7 +290,7 @@ func (s *State) forgetRetiredMinors() {
 	maps.DeleteFunc(s.RetiredMinors, func(_ int, volume string) bool { return !left[volume] })
 }
 
-// SetVolumeInitialized is a host reporting that its copy of a volume is
+// SetVolumeInitialized is a host's report that its copy of a volume is
 // primary and has its file system.
 type SetVolumeInitialized struct {
 	Volume         string `json:"volume"` // the volume's ID
@@ -298,7 +299,8 @@ type SetVolumeInitialized struct {
 
 // applySetVolumeInitialized accepts the report of a host that has a copy
 // with a disk in the volume's data generation (diskCopyOf). It ignores
-// locks: the host reports what its copy holds, which no operation can undo.
+// locks, because the host reports what its copy holds, and no operation
+// can undo that.
 func applySetVolumeInitialized(s *State, cmd Command, payload SetVolumeInitialized) (func(), error) {
 	volume, _, err := s.diskCopyOf(cmd.Actor, payload.Volume, payload.DataGeneration)
 	if err != nil {
@@ -313,8 +315,8 @@ func applySetVolumeInitialized(s *State, cmd Command, payload SetVolumeInitializ
 	}, nil
 }
 
-// SetCopySynced is a host reporting whether its copy of a volume holds the
-// volume's current data (VolumeCopy.Synced).
+// SetCopySynced is a host's report on whether its copy of a volume holds
+// the volume's current data (VolumeCopy.Synced).
 type SetCopySynced struct {
 	Volume         string `json:"volume"` // the volume's ID
 	DataGeneration int64  `json:"data_generation"`
@@ -338,9 +340,10 @@ func applySetCopySynced(s *State, cmd Command, payload SetCopySynced) (func(), e
 	}, nil
 }
 
-// diskCopyOf finds the copy with a disk that the actor, a host, has of a
-// volume in the volume's data generation. A host that took long to report
-// must not speak for a newer generation, whose LV is a different one.
+// diskCopyOf finds the actor's copy with a disk of a volume, in the
+// volume's current data generation. The actor is a host. A host that was
+// slow to report must not speak for a newer generation, whose LV is a
+// different one.
 func (s *State) diskCopyOf(actor, volumeID string, generation int64) (*Volume, int, error) {
 	volume, ok := s.Volumes[volumeID]
 	if !ok {
@@ -360,11 +363,12 @@ func (s *State) diskCopyOf(actor, volumeID string, generation int64) (*Volume, i
 }
 
 // tiebreakerAllowed tells whether a volume may have a tiebreaker. A
-// tiebreaker gives two copies their third vote, and only two. A volume of
-// replicas 2 keeps it while a copy is missing or while one more copy moves
-// in. A volume of replicas 1 has it only while a move gives it two copies,
-// and one of replicas 3 only while it has two copies (fewer workers than
-// replicas).
+// tiebreaker gives two copies their third vote, and only two:
+//   - A volume of replicas 2 keeps it while a copy is missing, or while
+//     one more copy moves in.
+//   - A volume of replicas 1 has it only while a move gives it two copies.
+//   - A volume of replicas 3 has it only while it has two copies (fewer
+//     workers than replicas).
 func tiebreakerAllowed(replicas, copies int) bool {
 	return replicas == 2 || copies == 2
 }
@@ -394,8 +398,8 @@ func checkVolume(volume Volume) error {
 		// replicas 0 is one plain LV on one host
 		return fmt.Errorf("volume %s: %d copies for replicas 0", id, copies)
 	case copies > replicas+1:
-		// one more than replicas while a new copy takes the place of an
-		// old one (a move); DRBD's metadata has room for it (max-peers)
+		// one more than replicas while a move replaces an old copy with a
+		// new one, and DRBD's metadata has room for it (max-peers)
 		return fmt.Errorf("volume %s: %d copies for %d replicas", id, copies, replicas)
 	case tiebreakers > 1 || tiebreakers == 1 && !tiebreakerAllowed(replicas, copies):
 		return fmt.Errorf("volume %s: %d tiebreakers for %d replicas", id, tiebreakers, replicas)

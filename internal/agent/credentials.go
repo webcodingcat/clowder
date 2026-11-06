@@ -16,9 +16,9 @@ import (
 	"github.com/webcodingcat/clowder/internal/pki"
 )
 
-// credentialsTimeout bounds the call of clowderd credentials to its own
-// agent. With a cutoff (--revoke-older), the call waits until the leader
-// commits it.
+// credentialsTimeout limits the call from clowderd credentials to the agent
+// on the same host. With --revoke-older, the call also waits until the
+// leader commits the cutoff.
 const credentialsTimeout = time.Minute
 
 // CredentialsOptions are the flags of clowderd credentials.
@@ -57,7 +57,7 @@ func newCredentials() *cobra.Command {
 		},
 	}
 	// no default here: the agent names a certificate that has no name
-	// (pki.DefaultCLIName), so the rule lives in one place
+	// (pki.DefaultCLIName), so the rule lives in one place only
 	command.Flags().StringVar(&options.Name, "name", "",
 		"the name in the certificate, which the agents' logs and the audit show as cli/<name>; it grants nothing "+
 			"(default "+pki.DefaultCLIName+")")
@@ -68,10 +68,10 @@ func newCredentials() *cobra.Command {
 	return command
 }
 
-// printCredentials makes the CLI's key on this host and has the host's own
-// agent issue its certificate. Root on a host can read every key of the
-// cluster anyway, as with kubeadm's admin.conf. The agent only saves root
-// from handling the CA's key, which is encrypted in the state.
+// printCredentials creates the CLI's key on this host and asks the host's
+// own agent to issue the certificate. Root on a host can read every key of
+// the cluster anyway, as with kubeadm's admin.conf. The agent only spares
+// root from handling the CA's key, which the state keeps encrypted.
 func printCredentials(ctx context.Context, out io.Writer, files Files, options CredentialsOptions) error {
 	host, err := files.readHost()
 	if err != nil {

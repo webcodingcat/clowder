@@ -1,8 +1,8 @@
 // Package api is the agents' HTTP API (v1): the types that both sides use,
 // the server that every agent runs, and the CLI's client. Every call uses
 // mutual TLS: the CLI presents its certificate, and agents present their
-// host certificate. Any agent answers. Writes go on to the leader, and
-// reads come from the agent's own copy of the state.
+// host certificate. Any control-plane agent answers the CLI. It passes
+// writes on to the leader and answers reads from its own copy of the state.
 package api
 
 import (
@@ -15,7 +15,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Port is where every agent serves the API (underlay and node address).
+// Port is the port on which every agent serves the API.
 const Port = 7443
 
 // Headers of the API.
@@ -30,7 +30,8 @@ const (
 	MinIndexHeader = "X-Clowder-Min-Index"
 )
 
-// Address joins an endpoint and the API port; an endpoint may name its own port.
+// Address joins an endpoint and the API port. An endpoint that names its
+// own port stays as it is.
 func Address(endpoint string) string {
 	if _, _, err := net.SplitHostPort(endpoint); err == nil {
 		return endpoint
@@ -81,8 +82,8 @@ type AlertTestResult struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// AlertFailure is a message of an alert that a channel has not accepted
-// yet. The leader tries again.
+// AlertFailure is an alert message that a channel has not accepted yet.
+// The leader keeps trying.
 type AlertFailure struct {
 	Channel   string `json:"channel"`
 	Key       string `json:"key"`
@@ -119,7 +120,7 @@ type Written struct {
 
 // HostActionAnswer is the answer to a host action. Leaving says that a
 // removed host still has stacks or volume copies. The host drains, they
-// move off it, and then it goes.
+// move to other hosts, and then the host is removed.
 type HostActionAnswer struct {
 	Written
 	Leaving bool `json:"leaving,omitempty"`
@@ -132,7 +133,8 @@ type MoveRequest struct {
 
 // HostAction is something a user does to a host. POST
 // /v1/hosts/{id}/{name} moves the host from one of the phases in From (any
-// phase if empty) to To. The CLI makes its host subcommands from this list.
+// phase if From is empty) to To. The CLI builds its host subcommands from
+// this list.
 type HostAction struct {
 	Name        string
 	Description string

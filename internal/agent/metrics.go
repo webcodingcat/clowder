@@ -28,22 +28,22 @@ import (
 	"github.com/webcodingcat/clowder/internal/supervisor"
 )
 
-// MetricsPort is where every agent serves /metrics, on its node address
-// only. The cluster's hosts reach it through WireGuard, containers cannot
-// reach it (the nft table), and it needs no authentication. Unlike the Raft
-// and API ports, it is not a field of the host, because a Prometheus
+// MetricsPort is the port where every agent serves /metrics, on its node
+// address only. The cluster's hosts reach it through WireGuard. Containers
+// cannot reach it (the nft table), and it needs no authentication. Unlike
+// the Raft and API ports, it is not a field of the host, because Prometheus
 // scrapes every host on the same port.
 const MetricsPort = 7444
 
-// metricsTimeout bounds the scrape's calls to Docker. It is well below
-// Prometheus' default scrape timeout of 10 s, so a slow Docker loses only
+// metricsTimeout limits the scrape's calls to Docker. It is well below
+// Prometheus' default scrape timeout of 10 s. So a slow Docker costs only
 // the containers' values, not the whole scrape.
 const metricsTimeout = 5 * time.Second
 
 // metricsSource gathers what /metrics shows. Each agent exports the values
-// of its own host. Only the leader exports the values that the cluster has
-// once (open alerts, failed deliveries, certificates, the scheduler's room
-// per host), so a Prometheus that scrapes every host counts them once.
+// of its own host. Only the leader exports the cluster-wide values (open
+// alerts, failed deliveries, certificates, the scheduler's room per host),
+// so that a Prometheus that scrapes every host counts them once.
 type metricsSource struct {
 	host    Host
 	cluster interface {
@@ -53,8 +53,8 @@ type metricsSource struct {
 	docker   Docker
 	restarts func() map[supervisor.Service]int
 	failures func() []controller.Failure
-	// seen is what the volume reconciler last found out about the copies
-	// on this host (volumes.Reconciler.Seen)
+	// seen returns what the volume reconciler last observed about the
+	// copies on this host (volumes.Reconciler.Seen)
 	seen func() map[string]storage.Observed
 	// memory reads the agent's resident memory (readRSS); tests replace it
 	memory func() (int64, error)
@@ -64,8 +64,8 @@ type metricsSource struct {
 // collect gathers one scrape.
 func (m *metricsSource) collect(ctx context.Context) *metrics.Set {
 	set := metrics.NewSet()
-	// a copy, not the state under its lock: the scrape asks Docker, and
-	// Raft's Apply waits for the lock
+	// a copy instead of the state under its lock: the scrape waits for
+	// Docker, and meanwhile Raft's Apply would wait for the lock
 	copied := m.cluster.SharedCopy()
 	leads := m.cluster.IsLeader()
 	m.addHost(set, copied, leads)
@@ -109,8 +109,8 @@ func (m *metricsSource) addHost(set *metrics.Set, copied *state.State, leads boo
 
 // addCopies adds the values of this host's copies of the volumes: how far
 // each copy is behind its peers and, if its DRBD resource is up, its role,
-// whether its data is current, whether it has its quorum, and whether a
-// peer stands alone from it (split brain).
+// whether its data is current, whether it has quorum, and whether a peer
+// has split off from it (split brain).
 func (m *metricsSource) addCopies(set *metrics.Set) {
 	name := m.host.Name
 	seen := m.seen()
@@ -132,8 +132,8 @@ func (m *metricsSource) addCopies(set *metrics.Set) {
 	}
 }
 
-// addContainers adds the containers of the stacks on this host by state,
-// and how often the supervisor restarted each service.
+// addContainers adds the number of the stacks' containers on this host by
+// state, and how often the supervisor restarted each service.
 func (m *metricsSource) addContainers(ctx context.Context, set *metrics.Set) {
 	ctx, cancel := context.WithTimeout(ctx, metricsTimeout)
 	defer cancel()
@@ -143,8 +143,8 @@ func (m *metricsSource) addContainers(ctx context.Context, set *metrics.Set) {
 	if err != nil {
 		m.logger.Warn("collect the metrics: list the containers", "error", err)
 	}
-	// clowder's own Traefik counts too: like a stack's containers and
-	// restarts, its own show how the host is doing
+	// clowder's own Traefik counts too: its containers and restarts show
+	// the host's health just as a stack's do
 	counts := map[[3]string]int{}
 	for _, container := range containers {
 		counts[[3]string{container.Labels[docker.ProjectLabel], container.Labels[docker.ServiceLabel], container.State}]++
@@ -163,8 +163,9 @@ func (m *metricsSource) addContainers(ctx context.Context, set *metrics.Set) {
 	}
 }
 
-// stackLabels are the namespace and stack of a Compose project; clowder's
-// own projects (Traefik) have no namespace and keep their project's name.
+// stackLabels returns the namespace and stack of a Compose project.
+// clowder's own projects (Traefik) have no namespace and keep their project
+// name.
 func stackLabels(project string) (namespace, stack string) {
 	if namespace, stack, ok := names.SplitProject(project); ok {
 		return namespace, stack
@@ -172,8 +173,8 @@ func stackLabels(project string) (namespace, stack string) {
 	return "", project
 }
 
-// addCluster adds the values the cluster has once: the room of each host, the
-// certificates, the open alerts and the deliveries that failed.
+// addCluster adds the cluster-wide values: the room of each host, the
+// certificates, the open alerts and the failed deliveries.
 func (m *metricsSource) addCluster(set *metrics.Set, copied *state.State) {
 	rooms := scheduler.Rooms(copied)
 	for _, id := range slices.Sorted(maps.Keys(rooms)) {
@@ -210,8 +211,8 @@ func boolValue(value bool) float64 {
 	return 0
 }
 
-// readRSS reads the agent's resident memory (VmRSS in /proc/self/status),
-// the measure of the agent's RAM in the live test.
+// readRSS reads the agent's resident memory (VmRSS in /proc/self/status).
+// The live test measures the agent's RAM with this value.
 func readRSS() (int64, error) {
 	file, err := os.Open("/proc/self/status")
 	if err != nil {

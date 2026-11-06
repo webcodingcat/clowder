@@ -70,7 +70,8 @@ func newApplyResources(g *globals) *cobra.Command {
 	return command
 }
 
-// applyRequest sends an apply, and says what to do if it is too large.
+// applyRequest sends an apply. If the request is too large, the error
+// says what to do instead.
 func applyRequest(ctx context.Context, client *api.Client, request api.ApplyRequest, dryRun bool) (api.ChangeResult, error) {
 	result, err := client.ApplyResources(ctx, request, dryRun)
 	var statusError *api.StatusError
@@ -80,9 +81,9 @@ func applyRequest(ctx context.Context, client *api.Client, request api.ApplyRequ
 	return result, err
 }
 
-// mayChangeToken tells whether an apply may change the Hetzner token,
-// because it holds the configuration or a Secret of names.System (also as
-// a SealedSecret). Only then does the CLI ask the cluster first.
+// mayChangeToken tells whether an apply may change the Hetzner token. That
+// is the case if it holds the configuration or a Secret of names.System
+// (also as a SealedSecret). Only then does the CLI ask the cluster first.
 func mayChangeToken(objects []resource.Object) bool {
 	return slices.ContainsFunc(objects, func(object resource.Object) bool {
 		return object.Kind == resource.KindClusterConfiguration ||
@@ -92,16 +93,17 @@ func mayChangeToken(objects []resource.Object) bool {
 
 // confirmToken first sends the apply as a dry run. If the apply changes the
 // Hetzner token, it shows what the token sees and asks for confirmation,
-// as host remove does. It never refuses because of what the token sees: a
-// token may be changed on purpose before its project is. Without a
-// terminal, --yes is the only way to confirm.
+// as host remove does. It never refuses because of what the token sees,
+// because a user may change the token on purpose before moving the
+// servers to its project. Without a terminal, --yes is the only way to
+// confirm.
 func confirmToken(cmd *cobra.Command, client *api.Client, request api.ApplyRequest) error {
 	tried, err := applyRequest(cmd.Context(), client, request, true)
 	if err != nil {
 		return err
 	}
 	if tried.HetznerToken == nil || !applies(tried) {
-		return nil // the real apply answers the same refusal
+		return nil // the real apply reports the same refusal
 	}
 	if err := printTokenCheck(cmd.ErrOrStderr(), *tried.HetznerToken); err != nil {
 		return err
@@ -130,7 +132,7 @@ func applies(result api.ChangeResult) bool {
 	})
 }
 
-// printTokenCheck says what a new Hetzner token sees.
+// printTokenCheck prints what a new Hetzner token sees.
 func printTokenCheck(out io.Writer, check api.TokenCheck) error {
 	var found string
 	switch {
@@ -145,8 +147,8 @@ func printTokenCheck(out io.Writer, check api.TokenCheck) error {
 	return err
 }
 
-// printWarnings prints what the cluster warns about, and in a dry run what
-// a new Hetzner token sees, to stderr.
+// printWarnings prints the cluster's warnings to out (stderr). In a dry
+// run, it also prints what a new Hetzner token sees.
 func printWarnings(out io.Writer, result api.ChangeResult) error {
 	for _, warning := range result.Warnings {
 		if _, err := fmt.Fprintf(out, "warning: %s\n", warning); err != nil {
@@ -159,8 +161,8 @@ func printWarnings(out io.Writer, result api.ChangeResult) error {
 	return nil
 }
 
-// printResults prints what became of each resource. A request that did
-// not go through makes the command fail.
+// printResults prints the outcome for each resource. If the request was
+// not applied, the command fails.
 func printResults(out io.Writer, result api.ChangeResult, dryRun bool) error {
 	suffix := ""
 	if dryRun {
@@ -213,7 +215,7 @@ func newDiff(g *globals) *cobra.Command {
 	return command
 }
 
-// diffResources reads the resources and has the cluster try them.
+// diffResources reads the resources and sends them as a dry run.
 func diffResources(cmd *cobra.Command, g *globals, from string) error {
 	objects, err := readResourceFiles(from, cmd.InOrStdin(), cmd.ErrOrStderr())
 	if err != nil {

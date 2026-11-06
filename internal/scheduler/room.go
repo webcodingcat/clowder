@@ -13,8 +13,8 @@ import (
 	"github.com/webcodingcat/clowder/internal/units"
 )
 
-// resources are memory and CPUs as the scheduler counts them: in bytes and
-// in thousandths of a CPU, so that sums are exact.
+// resources are memory and CPUs as the scheduler counts them: memory in
+// bytes, and CPUs in thousandths of a CPU, so that sums are exact.
 type resources struct {
 	memory    int64
 	milliCPUs int64
@@ -33,7 +33,7 @@ func (r resources) within(room resources) bool {
 	return r.memory <= room.memory && r.milliCPUs <= room.milliCPUs
 }
 
-// short tells whether free room is below zero, that is, whether more is
+// short tells whether free room is below zero, which means that more is
 // reserved than there is.
 func (r resources) short() bool {
 	return r.memory < 0 || r.milliCPUs < 0
@@ -54,8 +54,9 @@ func (r resources) String() string {
 	return units.FormatSize(r.memory) + " and " + strconv.FormatFloat(float64(r.milliCPUs)/1000, 'f', -1, 64) + " CPUs"
 }
 
-// parseResources parses resources of the configuration. WithDefaults filled
-// them in, and Check made sure that they parse.
+// parseResources parses resources of the configuration. It ignores errors,
+// because WithDefaults filled the resources in and Check made sure that
+// they parse.
 func parseResources(config clusterspec.Resources) resources {
 	memory, _ := units.ParseSize(config.Memory)
 	cpus, _ := strconv.ParseFloat(config.CPUs, 64)
@@ -75,31 +76,31 @@ func (s serviceRef) String() string {
 	return s.stack + "/" + s.service
 }
 
-// room is what the services of the stacks on the hosts take, as the
+// room tracks what the services of the stacks on each host take, as the
 // decisions of a plan change it. A pushed-out service takes nothing.
 type room struct {
-	// current is the state the plan starts from; the plan's own decisions
-	// are in pushedOut and placed
+	// current is the state that the plan starts from; the plan's own
+	// decisions are in pushedOut and placed
 	current  *state.State
-	defaults resources // a service's reservation without its own
+	defaults resources // the reservation of a service without its own
 	reserve  resources // what each host keeps for itself
-	// pushedOut are the pushed-out services of each stack, as planned
+	// pushedOut holds the planned pushed-out services of each stack
 	pushedOut map[string]map[string]bool
-	// placed are the stacks this plan puts on a host
+	// placed holds the stacks that this plan puts on a host
 	placed map[string]state.HostID
 	// effective caches each stack's effective priorities
 	effective map[string]map[string]int
 }
 
 // HostRoom is what a host offers its services and what they reserve, as
-// the scheduler counts it: memory in bytes, CPUs in thousandths.
+// the scheduler counts it: memory in bytes, and CPUs in thousandths.
 type HostRoom struct {
 	OfferedMemory, ReservedMemory       int64
 	OfferedMilliCPUs, ReservedMilliCPUs int64
 }
 
 // Rooms returns the room of each host that is not removed, as the
-// scheduler counts it for placing (/metrics shows it).
+// scheduler counts it when it places. /metrics shows it.
 func Rooms(current *state.State) map[state.HostID]HostRoom {
 	counted := newRoom(current)
 	rooms := map[state.HostID]HostRoom{}
@@ -133,11 +134,11 @@ func newRoom(current *state.State) *room {
 	return r
 }
 
-// hostOf returns where a stack runs or is planned to run. It returns false
-// for a stack that has no host, or that does not run there yet or any
-// more. A failing stack keeps its place, because its host tries again at
-// every pass. A stack that moves counts on the host it moves to, so the
-// room there is taken from the start.
+// hostOf returns the host where a stack runs or is planned to run. It
+// returns false for a stack that has no host, or that does not run there
+// yet or any more. A failing stack keeps its place, because its host tries
+// again at every pass. A stack that moves counts on the host that it moves
+// to, so the room there is taken from the start.
 func (r *room) hostOf(id string) (state.HostID, bool) {
 	if host, ok := r.placed[id]; ok {
 		return host, true
@@ -170,9 +171,9 @@ func (r *room) capacity(host state.HostID) resources {
 }
 
 // reservation returns what a service takes: its own reservations, or else
-// the cluster's default. State.Services keeps a reservation that was left
-// out as 0, so a reservation written as 0 also takes the default. No
-// service reserves nothing.
+// the cluster's default. State.Services stores a reservation that was left
+// out as 0, so a reservation written as 0 also gets the default. So every
+// service reserves something.
 func (r *room) reservation(ref serviceRef) resources {
 	service := r.current.Stacks[ref.stack].Services[ref.service]
 	taken := resources{service.MemoryBytes, milli(service.CPUs)}
@@ -188,8 +189,8 @@ func (r *room) reservation(ref serviceRef) resources {
 // running returns the services that take room on a host: the services of
 // the stacks there that are not pushed out, sorted. A stack that moves
 // takes room on both hosts until it has stopped on the old one (stillOn).
-// Otherwise a stack placed in the room it leaves would run beside it
-// meanwhile.
+// Otherwise a stack placed in the room that it leaves would run beside it
+// for a while.
 func (r *room) running(host state.HostID) []serviceRef {
 	var refs []serviceRef
 	for _, id := range slices.Sorted(maps.Keys(r.current.Stacks)) {
@@ -218,10 +219,9 @@ func (r *room) free(host state.HostID) resources {
 }
 
 // priority returns a service's effective priority: the lowest of its own
-// priority and those of everything it depends on, since stopping a service
-// stops what depends on it. This way a service is never pushed out before
-// the services that depend on it, and a running service never depends on a
-// stopped one.
+// priority and those of everything it depends on. Stopping a service stops
+// what depends on it. So a service is never pushed out before the services
+// that depend on it, and a running service never depends on a stopped one.
 func (r *room) priority(ref serviceRef) int {
 	if r.effective[ref.stack] == nil {
 		r.effective[ref.stack] = r.effectiveOf(ref.stack)
@@ -230,9 +230,9 @@ func (r *room) priority(ref serviceRef) int {
 }
 
 // effectiveOf works out the effective priorities of a stack's services.
-// The categories come from the current configuration, so a changed category
-// takes effect without a new apply. The state keeps every category that a
-// stack names.
+// The categories come from the current configuration, so a changed
+// category takes effect without a new apply. The state makes sure that
+// every category that a stack names exists.
 func (r *room) effectiveOf(id string) map[string]int {
 	stack := r.current.Stacks[id]
 	priorities := r.current.Config.Spec.WithDefaults().Priorities
@@ -242,10 +242,10 @@ func (r *room) effectiveOf(id string) map[string]int {
 		if value, ok := effective[service]; ok {
 			return value
 		}
-		own, _ := priorities.Resolve(stack.Services[service].Priority) // resolves: the state checked it
+		own, _ := priorities.Resolve(stack.Services[service].Priority) // never fails: the state checked it
 		seen[service] = true
 		for _, dependency := range stack.Services[service].DependsOn {
-			if !seen[dependency] { // Compose refuses cycles; this only guards
+			if !seen[dependency] { // a guard: stackspec.Check refuses cycles
 				own = min(own, resolve(dependency, seen))
 			}
 		}
@@ -275,8 +275,8 @@ func depth(stack *state.Stack, service string, seen map[string]bool) int {
 }
 
 // startOrder sorts services by effective priority, highest first. At equal
-// priority, services that others depend on come first, then the order is
-// by stack and name.
+// priority, the services that others depend on come first. After that,
+// the order is by stack and name.
 func (r *room) startOrder(refs []serviceRef) {
 	slices.SortFunc(refs, func(a, b serviceRef) int {
 		return cmp.Or(
@@ -314,10 +314,11 @@ func (r *room) withDependents(ref serviceRef) []serviceRef {
 }
 
 // victims chooses running services of a host below a priority to push
-// out, lowest first, each with the services that depend on it, until need
-// fits into free. Services in gone already count as pushed out. ok is
-// false if even all of them would not make room. freeAfter is the room
-// once they are gone.
+// out, until need fits into free. It takes the lowest priority first, each
+// service together with the services that depend on it. Services in gone
+// already count as pushed out. freeAfter is the free room once the
+// victims are gone. ok is false if even all candidates would not make
+// enough room.
 func (r *room) victims(host state.HostID, below int, need, free resources, gone map[serviceRef]bool) (
 	victims []serviceRef, freeAfter resources, ok bool,
 ) {
@@ -347,8 +348,8 @@ func (r *room) victims(host state.HostID, below int, need, free resources, gone 
 	return victims, free, need.within(free)
 }
 
-// pushOut marks services as pushed out and returns the new lists of the
-// stacks they belong to, as set-pushed-out takes them.
+// pushOut marks services as pushed out. It writes the new lists of their
+// stacks into lists, in the form that set-pushed-out takes.
 func (r *room) pushOut(refs []serviceRef, lists map[string][]string) {
 	for _, ref := range refs {
 		r.pushedOut[ref.stack][ref.service] = true
@@ -359,11 +360,12 @@ func (r *room) pushOut(refs []serviceRef, lists map[string][]string) {
 }
 
 // fitOverCapacity pushes out services of a host whose reservations exceed
-// its capacity (because systemReserve was raised, or a stack reserves
-// more). It pushes out services below the highest effective priority
-// there, lowest first, until the rest fit. Services at the highest
-// priority are never pushed out for this. If pushing out all services
-// below it is not enough, nothing goes and the host stays over capacity.
+// its capacity, for example after systemReserve was raised or a stack
+// reserves more. It pushes out services below the highest effective
+// priority on the host, lowest first, until the rest fit. Services at the
+// highest priority are never pushed out for this. If pushing out all
+// services below it is not enough, it pushes out nothing, and the host
+// stays over capacity.
 func (r *room) fitOverCapacity(host state.HostID) (lists map[string][]string, over bool) {
 	free := r.free(host)
 	running := r.running(host)
@@ -375,7 +377,7 @@ func (r *room) fitOverCapacity(host state.HostID) (lists map[string][]string, ov
 		highest = max(highest, r.priority(ref))
 	}
 	// victims pushes out until need fits into the free room; with an
-	// empty need, that is until the free room is no longer below zero
+	// empty need, that means until the free room is no longer below zero
 	nothing := resources{}
 	victims, _, ok := r.victims(host, highest, nothing, free, nil)
 	if !ok {
@@ -389,17 +391,17 @@ func (r *room) fitOverCapacity(host state.HostID) (lists map[string][]string, ov
 // stackFit is how a new stack fits on a host.
 type stackFit struct {
 	host state.HostID
-	// pushed are the services of other stacks that it pushes out; own are
-	// the services of the new stack that start pushed out
+	// pushed are the services of other stacks that the stack pushes out;
+	// own are the stack's own services that start pushed out
 	pushed, own []serviceRef
 }
 
 // fitStack plans a new stack's services on a host, highest effective
 // priority first. Each service takes free room or pushes out running
 // services below its own priority. A service that still finds no room
-// starts pushed out, together with the services that depend on it. A
-// reason says that the stack does not fit at all, because its first
-// service finds no room. Nothing changes until accept.
+// starts pushed out, together with the services that depend on it. If the
+// stack's first service finds no room, the stack does not fit at all, and
+// fitStack returns the reason. Nothing changes until accept.
 func (r *room) fitStack(id string, host state.HostID) (stackFit, string) {
 	stack := r.current.Stacks[id]
 	var order []serviceRef
@@ -439,11 +441,11 @@ func (r *room) fitStack(id string, host state.HostID) (stackFit, string) {
 	return fit, ""
 }
 
-// accept makes a planned fit part of the plan: the stack is on its host,
-// the services it pushes out are out, and so are its own services that
-// found no room. It returns the pushed-out lists to write. The new stack's
-// list is always among them, so a list left by an earlier leader is
-// replaced.
+// accept makes a planned fit part of the plan. The stack is on its host.
+// The services that it pushes out are out, and so are its own services
+// that found no room. accept returns the pushed-out lists to write. The
+// new stack's list is always among them, so a list left by an earlier
+// leader is replaced.
 func (r *room) accept(id string, fit stackFit) map[string][]string {
 	r.placed[id] = fit.host
 	clear(r.pushedOut[id])
@@ -452,10 +454,10 @@ func (r *room) accept(id string, fit stackFit) map[string][]string {
 	return lists
 }
 
-// comingBack returns the pushed-out service that may come back first. Of
-// the services whose dependencies all run, it takes them by effective
-// priority, highest first, and picks the first whose reservation plus a
-// margin fits into its host's free room.
+// comingBack returns the pushed-out service that may come back first. It
+// looks at the services whose dependencies all run, highest effective
+// priority first. It picks the first one whose reservation plus a margin
+// fits into its host's free room.
 func (r *room) comingBack() (serviceRef, bool) {
 	var candidates []serviceRef
 	for _, id := range slices.Sorted(maps.Keys(r.current.Stacks)) {
@@ -483,8 +485,8 @@ func (r *room) comingBack() (serviceRef, bool) {
 	return serviceRef{}, false
 }
 
-// roomSave holds what a plan has decided about the room, so the plan can go
-// back to it when an attempt does not work out (makeRoom).
+// roomSave holds what a plan has decided about the room, so that the plan
+// can go back to it when an attempt does not work out (makeRoom).
 type roomSave struct {
 	pushedOut map[string]map[string]bool
 	placed    map[string]state.HostID

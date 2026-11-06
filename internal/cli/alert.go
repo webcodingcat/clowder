@@ -34,7 +34,7 @@ func newAlert(g *globals) *cobra.Command {
 }
 
 // printAlertTest shows whether each channel accepted the test alert. It
-// fails if one did not.
+// fails if any channel did not.
 func printAlertTest(out io.Writer, results []api.AlertTestResult) error {
 	failed := 0
 	for _, result := range results {

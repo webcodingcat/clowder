@@ -12,21 +12,22 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Interface is the dummy interface that carries the node address, so the
-// address is there even on a host without peers (one host, or all peers
-// down): Raft, the API and published ports bind to it.
+// Interface is the dummy interface that carries the node address. Raft, the
+// API and published ports bind to that address, so it must exist even on a
+// host without peers (one host, or all peers down).
 const Interface = "clowder0"
 
 // NodeAddress is the node address of a host: 10.77.0.<ID + 1>, in the
-// overlay 10.77.0.0/24 that WireGuard connects (state.MaxHosts fits in it).
+// overlay 10.77.0.0/24 that WireGuard connects. state.MaxHosts hosts fit
+// in it.
 func NodeAddress(id state.HostID) netip.Addr {
 	return netip.AddrFrom4([4]byte{10, 77, 0, byte(id + 1)})
 }
 
 // SetUpInterface creates clowder0 if it is missing, brings it up and gives
 // it the node address and the resolver's address. It does only what is
-// missing, so the agent runs it at every start (the interface does not
-// survive a reboot).
+// missing. The interface does not survive a reboot, so the agent runs
+// SetUpInterface at every start.
 func (h Host) SetUpInterface(ctx context.Context, nodeAddress netip.Addr) error {
 	// ip exits with 1 when the interface does not exist
 	_, err := h.Run(ctx, toolTimeout, "", "ip", "link", "show", Interface)

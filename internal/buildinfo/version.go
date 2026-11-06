@@ -81,14 +81,17 @@ func rank(value bool) int {
 }
 
 // Compatible tells whether two builds may talk to each other (a CLI and an
-// agent, or two agents). Before 1.0.0, only builds of the same minor
-// version may talk: the state and the commands may change with any minor
-// release, while a patch release changes neither. From 1.0.0 on, builds of
-// the same major version may talk if they are at most one minor version
-// apart, because N and N-1 run side by side during an upgrade. Development
-// builds talk to everything (callers warn about that), and so does a
-// caller without a readable version (curl, a script). The check is there
-// to explain a mismatch, not to keep anyone out.
+// agent, or two agents):
+//   - Before 1.0.0, only builds of the same minor version may talk. The
+//     state and the commands may change with any minor release, but a
+//     patch release changes neither.
+//   - From 1.0.0 on, builds of the same major version may talk if they are
+//     at most one minor version apart, because N and N-1 run side by side
+//     during an upgrade.
+//   - Development builds talk to everything (callers warn about that), and
+//     so does a caller without a readable version (curl, a script).
+//
+// The check is there to explain a mismatch, not to keep anyone out.
 func Compatible(a, b string) bool {
 	if IsDevelopment(a) || IsDevelopment(b) {
 		return true
@@ -113,10 +116,10 @@ func IsDevelopment(text string) bool {
 	return !ok || strings.HasPrefix(version.suffix, "~dev")
 }
 
-// Includes tells whether a build has what release brought: the build's
-// numbers are the release's numbers or later ones, whatever its suffix
-// (1.2.0~rc1 includes 1.2.0). A development build is built from the
-// current code and includes every release.
+// Includes tells whether a build contains what release brought. That is
+// the case when the build's numbers are the release's numbers or later
+// ones, whatever its suffix (1.2.0~rc1 includes 1.2.0). A development build
+// is built from the current code and includes every release.
 func Includes(build, release string) bool {
 	if IsDevelopment(build) {
 		return true

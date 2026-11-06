@@ -88,7 +88,7 @@ func (e email) Send(ctx context.Context, message Message) error {
 	return client.Quit()
 }
 
-// connect connects to the server and makes sure the connection is
+// connect connects to the server and makes sure that the connection is
 // encrypted: TLS from the start on port 465, otherwise STARTTLS, which the
 // server must offer.
 func (e email) connect(ctx context.Context) (*smtp.Client, error) {
@@ -98,7 +98,7 @@ func (e email) connect(ctx context.Context) (*smtp.Client, error) {
 		return nil, fmt.Errorf("reach the mail server: %w", err)
 	}
 	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline) // a conn of the dialer always takes a deadline
+		_ = conn.SetDeadline(deadline) // a TCP connection always accepts a deadline
 	}
 	if e.port == implicitTLSPort {
 		conn = tls.Client(conn, e.tls)
@@ -124,7 +124,7 @@ func (e email) connect(ctx context.Context) (*smtp.Client, error) {
 // mail formats the message as a mail: headers, a blank line and the text,
 // with CRLF line ends. The headers are the ones that strict providers
 // require. The subject is encoded (RFC 2047), because a stack's name may
-// contain more than ASCII.
+// contain characters outside ASCII.
 func (e email) mail(message Message) ([]byte, error) {
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {

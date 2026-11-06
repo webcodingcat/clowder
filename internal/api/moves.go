@@ -9,19 +9,19 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// Volumes is what the API needs of this host's volume copies.
+// Volumes is what the API needs from this host's volume copies.
 type Volumes interface {
-	// Progress is how far each copy on this host differs from a peer, by
-	// volume ID, in bytes. While a copy resyncs, this is what is left.
+	// Progress returns, by volume ID, how many bytes each copy on this
+	// host differs from a peer. While a copy resyncs, this is what is left.
 	Progress() map[string]int64
-	// ResolveSplitBrain connects this host's copy of a volume, by ID,
-	// again to the peers it is cut off from; with discard, it takes their
-	// data. connected is false when none of its peers was StandAlone.
+	// ResolveSplitBrain connects this host's copy of a volume (by ID)
+	// again to the peers it is cut off from. With discard, the copy takes
+	// their data. connected is false when none of its peers was StandAlone.
 	ResolveSplitBrain(ctx context.Context, volumeID string, discard bool) (connected bool, err error)
 }
 
-// moveStack commits request-move for a host that the user named. The
-// placement starts the move once the stack fits there.
+// moveStack commits request-move to a host that the user named. The
+// placement starts the move once the stack fits on that host.
 func (s *Server) moveStack(w http.ResponseWriter, r *http.Request) {
 	var request MoveRequest
 	if err := decodeStrict(r.Body, &request); err != nil {
@@ -48,9 +48,9 @@ func (s *Server) moveStack(w http.ResponseWriter, r *http.Request) {
 
 // leaves returns the phase change for removing a host that still has
 // stacks or volume copies. The host drains and leaves
-// (SetHostPhase.Leaving), and the leader removes it once they have moved
-// off. It returns nil for a host that the state would remove at once, or
-// would refuse anyway.
+// (SetHostPhase.Leaving). The leader removes it once they have moved to
+// other hosts. It returns nil for a host that the state would remove at
+// once, or would refuse to remove anyway.
 func (s *Server) leaves(id state.HostID) *state.SetHostPhase {
 	var leave *state.SetHostPhase
 	s.config.Cluster.Read(func(current *state.State) {

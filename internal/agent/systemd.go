@@ -31,8 +31,9 @@ func notify(message string) error {
 	return nil
 }
 
-// watchdogInterval is how often the agent reports to systemd's watchdog:
-// half the watchdog's timeout (WatchdogSec), or 0 if there is no watchdog.
+// watchdogInterval returns how often the agent reports to systemd's
+// watchdog: half the watchdog's timeout (WatchdogSec), or 0 if there is no
+// watchdog.
 func watchdogInterval() time.Duration {
 	microseconds, err := strconv.ParseInt(os.Getenv("WATCHDOG_USEC"), 10, 64)
 	if err != nil || microseconds <= 0 {

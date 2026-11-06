@@ -25,13 +25,13 @@ import (
 // DefaultDir is where a host keeps its files.
 const DefaultDir = "/var/lib/clowder"
 
-// DefaultSecretsDir holds the stacks' secrets in clear. /run is a tmpfs, so
-// the secrets never reach a disk, and a boot clears them. It is not a
-// systemd RuntimeDirectory: systemd removes that each time the agent stops,
-// while the containers still use it.
+// DefaultSecretsDir holds the stacks' secrets in plain text. /run is a
+// tmpfs, so the secrets never reach a disk, and a reboot clears them. It is
+// not a systemd RuntimeDirectory, because systemd removes such a directory
+// each time the agent stops, while the containers still use it.
 const DefaultSecretsDir = "/run/clowder-secrets"
 
-// The ports of an agent; tests use others.
+// The agent's ports. Tests use other ports.
 const (
 	RaftPort = 7400
 	APIPort  = 7443
@@ -41,8 +41,8 @@ const (
 // certificates are readable by root only.
 type Files struct {
 	Dir string
-	// SecretsDir holds the stacks' secrets in clear (DefaultSecretsDir, on
-	// tmpfs); run needs it, init does not.
+	// SecretsDir holds the stacks' secrets in plain text (DefaultSecretsDir,
+	// on tmpfs). run needs it, init does not.
 	SecretsDir string
 }
 
@@ -57,40 +57,40 @@ func (f Files) raftDir() string         { return filepath.Join(f.Dir, "raft") }
 func (f Files) meshFile() string        { return filepath.Join(f.Dir, "net.json") }
 func (f Files) joinFile() string        { return filepath.Join(f.Dir, "keys", "join.json") }
 
-// The storage driver's directories: the mount points of the volumes, and
-// the driver's state. The agent keeps the time of the last trim beside the
-// state.
+// The storage driver's directories: the volumes' mount points and the
+// driver's state. The agent keeps the time of the last trim next to the
+// driver's state.
 func (f Files) volumesDir() string { return filepath.Join(f.Dir, "volumes") }
 func (f Files) storageDir() string { return filepath.Join(f.Dir, "storage") }
 func (f Files) lastTrim() string   { return filepath.Join(f.storageDir(), "last-trim") }
 
-// stackFiles are where the stack runner keeps the stacks on this host: a
-// directory per stack, the secrets on the tmpfs.
+// stackFiles says where the stack runner keeps the stacks on this host: one
+// directory per stack, and the secrets on the tmpfs.
 func (f Files) stackFiles() stacks.Files {
 	return stacks.Files{StacksDir: filepath.Join(f.Dir, "stacks"), SecretsDir: f.SecretsDir}
 }
 
-// volumeFiles are where the volume reconciler keeps the copies on this
-// host: a record per volume, the time of the last trim.
+// volumeFiles says where the volume reconciler keeps its files on this
+// host: one record per volume, and the time of the last trim.
 func (f Files) volumeFiles() volumes.Files {
 	return volumes.Files{RecordsDir: filepath.Join(f.Dir, "volume-records"), LastTrim: f.lastTrim()}
 }
 
-// Traefik's files sit beside stacks/, so the search for stacks that left
-// this host never finds them. They are Traefik's Compose file, the
-// directory of traefik.yml, and the directory of the routes, which Traefik
-// watches.
+// Traefik's files sit next to stacks/, not inside it, so the search for
+// stacks that left this host never finds them. They are Traefik's Compose
+// file, the directory of traefik.yml, and the directory of the routes,
+// which Traefik watches.
 func (f Files) traefikCompose() string    { return filepath.Join(f.Dir, "traefik", "compose.yaml") }
 func (f Files) traefikStaticDir() string  { return filepath.Join(f.Dir, "traefik", "static") }
 func (f Files) traefikDynamicDir() string { return filepath.Join(f.Dir, "traefik", "dynamic") }
 
-// traefikCertificatesDir holds the routes' certificates and keys in clear,
-// beside the stacks' secrets on the tmpfs. The "clowder-" prefix keeps a
-// stack from using the same directory.
+// traefikCertificatesDir holds the routes' certificates and keys in plain
+// text, next to the stacks' secrets on the tmpfs. The "clowder-" prefix
+// keeps a stack from using the same directory.
 func (f Files) traefikCertificatesDir() string { return filepath.Join(f.SecretsDir, ingress.Project) }
 
-// Host is host.json: who this host is in the cluster. init and join write it
-// last, so a host with this file has all the others.
+// Host is the content of host.json: this host's identity in the cluster.
+// init and join write it last, so a host with this file has all the others.
 type Host struct {
 	ID   state.HostID `json:"id"`
 	Name string       `json:"name"`
@@ -105,9 +105,9 @@ type Host struct {
 	APIPort       int        `json:"api_port"`
 }
 
-// checkControlPlane refuses a host command that only a control-plane host
-// runs: one that hands out the cluster's keys or makes the host the only
-// voter.
+// checkControlPlane returns an error unless this is a control-plane host.
+// Only such a host may run a command that hands out the cluster's keys or
+// makes the host the only voter.
 func (h Host) checkControlPlane(command string) error {
 	if !h.Roles.Has(hostrole.ControlPlane) {
 		return fmt.Errorf("this host has the roles %s; clowderd %s runs on a %s host only", h.Roles, command,
@@ -116,16 +116,17 @@ func (h Host) checkControlPlane(command string) error {
 	return nil
 }
 
-// raftAddress is where the host's Raft member listens and is reached.
+// raftAddress is the address where the host's Raft member listens and
+// where the other members reach it.
 func (h Host) raftAddress() string {
 	return net.JoinHostPort(h.NodeAddress.String(), strconv.Itoa(h.RaftPort))
 }
 
 // checkRoles makes sure that host.json, the host's certificate and the
 // state on disk name the same roles. The API checks a caller by its
-// certificate, while the agent's loops read host.json and the state; if
-// they differed, a host would do one thing and be allowed another. They
-// differ only if a file was changed by hand. A state that does not know
+// certificate, while the agent's loops read host.json and the state. If
+// they differed, a host would do one thing but be allowed another. They
+// differ only if someone changed a file by hand. A state that does not know
 // the host yet (before the first entries of a join) is not compared.
 func (h Host) checkRoles(certificate *x509.Certificate, current *state.State) error {
 	named, err := pki.HostRoles(certificate)
@@ -141,10 +142,10 @@ func (h Host) checkRoles(certificate *x509.Certificate, current *state.State) er
 	return nil
 }
 
-// apiAddresses are where the host serves the API: the underlay, the node
-// address and, on a control-plane host, the public address, each once. A
-// host without the control plane serves only the control plane, which
-// reaches it over the private network.
+// apiAddresses are the addresses where the host serves the API, each listed
+// once: the underlay, the node address and, on a control-plane host, the
+// public address. A host without the control-plane role serves only the
+// control-plane hosts, and they reach it over the private network.
 func (h Host) apiAddresses() []string {
 	reached := []netip.Addr{h.Underlay, h.NodeAddress}
 	if h.Roles.Has(hostrole.ControlPlane) {
@@ -181,7 +182,8 @@ func (f Files) writeHost(host Host) error {
 	return atomicfile.Write(f.hostFile(), append(content, '\n'), 0o600)
 }
 
-// credentials are what the host proves itself with.
+// credentials are the CA certificate and the host's certificate, which the
+// host proves its identity with, and the data key.
 type credentials struct {
 	ca          *x509.Certificate
 	certificate tls.Certificate

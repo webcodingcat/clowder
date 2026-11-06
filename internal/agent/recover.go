@@ -27,26 +27,27 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// recoverTimeout bounds each step of recover that waits on Hetzner or
+// recoverTimeout limits each step of recover that waits for Hetzner or
 // Raft: a power action, the new leader, the remap.
 const recoverTimeout = 3 * time.Minute
 
-// RecoverParts are what recover changes on the host and what it asks other
-// hosts. clowderd recover passes the real parts; the tests pass fakes.
+// RecoverParts are what recover changes on the host and what it asks of
+// other hosts. clowderd recover passes the real parts. The tests pass fakes.
 type RecoverParts struct {
 	// Storage drops the DRBD peers that are gone (storage.Driver.DropPeers)
 	Storage interface {
 		DropPeers(ctx context.Context, peers []int) error
 	}
-	// Service runs systemctl's action ("stop", "start") on clowderd.service
+	// Service runs a systemctl action ("stop", "start") on clowderd.service
 	Service func(ctx context.Context, action string) error
 	// KnowsLeader asks the agent at address (another host's underlay and API
-	// port), as this host, whether it knows a leader (api.KnowsLeader)
+	// port) whether it knows a leader. It authenticates as this host
+	// (api.KnowsLeader).
 	KnowsLeader func(ctx context.Context, address string, certificate tls.Certificate, ca *x509.Certificate) (bool, error)
 }
 
-// RecoverOptions say how recover gets its confirmation: Yes skips the
-// question; otherwise the answer is read from In.
+// RecoverOptions say how recover gets its confirmation. With Yes, recover
+// skips the question. Otherwise it reads the answer from In.
 type RecoverOptions struct {
 	Yes bool
 	In  io.Reader
@@ -100,26 +101,24 @@ type recovery struct {
 	logger      *slog.Logger
 }
 
-// Recover makes this host the only one of its cluster: clowderd recover.
-// It runs these steps in order, and each step is safe to run again after a
-// failure:
-//  1. It stops the agent and reads the state from the Raft log on disk.
-//  2. It refuses while another host knows a leader of the cluster, or
-//     answers without saying whether it does. Step 3 names each host that
-//     it cannot reach.
-//  3. It says what it will do and asks for confirmation (RecoverOptions).
-//  4. For each other host, it sets the label clowder-retired and then
-//     powers the server off; Hetzner confirms both. A server that the
-//     leader never checked is checked first, because the token may power
-//     off any server of the project.
-//  5. It starts Raft with this host as its only voter (raftnode.Recover)
-//     and then commits the command recover-remap as the new leader.
-//  6. It removes the other hosts from DRBD (storage.Driver.DropPeers).
-//  7. It starts the agent, whose loops do the rest: the mesh, the Floating
-//     IP, the placement, and forgetting the removed hosts.
+// Recover makes this host the only one of its cluster (clowderd recover).
+// Each step is safe to run again after a failure:
+//  1. Stop the agent and read the state from the Raft log on disk.
+//  2. Refuse while another host knows a leader, or while it answers without
+//     saying whether it does. Step 3 names each host it cannot reach.
+//  3. Describe what it will do and ask for confirmation (RecoverOptions).
+//  4. For each other host, set the label clowder-retired, then power the
+//     server off. Hetzner confirms both. A server that the leader never
+//     checked is checked first, because the token may power off any server
+//     of the project.
+//  5. Start Raft with this host as its only voter (raftnode.Recover) and
+//     commit recover-remap as the new leader.
+//  6. Remove the other hosts from DRBD (storage.Driver.DropPeers).
+//  7. Start the agent. Its loops do the rest.
 //
-// If it ends before step 4, nothing has changed, and it starts the agent
-// again. From step 4 on, the agent stays stopped until a recover finishes.
+// If Recover fails before step 4, nothing has changed, and it starts the
+// agent again. From step 4 on, the agent stays stopped until a recover
+// finishes.
 func Recover(ctx context.Context, files Files, parts RecoverParts, options RecoverOptions, logger *slog.Logger) (err error) {
 	r := recovery{files: files, parts: parts, options: options, logger: logger}
 	if r.host, err = files.readHost(); err != nil {
@@ -136,8 +135,8 @@ func Recover(ctx context.Context, files Files, parts RecoverParts, options Recov
 	}
 	// changing is set right before the first step that changes something
 	// (the retire, or the remap in a run after an earlier retire). From
-	// there on the agent stays stopped, because it would start with the old
-	// cluster's state
+	// then on the agent stays stopped, because it would start with the old
+	// cluster's state.
 	changing := false
 	defer func() {
 		if err == nil {
@@ -147,8 +146,8 @@ func Recover(ctx context.Context, files Files, parts RecoverParts, options Recov
 			err = fmt.Errorf("%w (clowderd.service is stopped: run recover again)", err)
 			return
 		}
-		// nothing changed: the agent keeps running, even when the command
-		// was interrupted
+		// nothing changed: start the agent again, even if the command was
+		// interrupted
 		restart, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 		defer cancel()
 		err = errors.Join(err, r.parts.Service(restart, "start"))
@@ -199,10 +198,9 @@ func Recover(ctx context.Context, files Files, parts RecoverParts, options Recov
 	return err
 }
 
-// hostsToRetire are the hosts that recover powers off and retires: every
-// host except this one that is not removed. After a recover has run, there
-// are none. A cluster of one host that never recovered has nothing to
-// recover.
+// hostsToRetire returns the hosts that recover powers off and retires:
+// every other host that is not removed. After a recover has run, there are
+// none. A cluster of one host that never recovered has nothing to recover.
 func hostsToRetire(current *state.State, self Host) ([]*state.Host, error) {
 	if current.Keys == nil {
 		return nil, errors.New("the cluster is not bootstrapped; there is nothing to recover")
@@ -225,9 +223,10 @@ func hostsToRetire(current *state.State, self Host) ([]*state.Host, error) {
 	return gone, nil
 }
 
-// ask refuses while another host knows a leader, or answers without saying
-// whether it does. Then it says what recover will do and asks for this
-// host's name: whoever types it knows which host continues alone.
+// ask refuses while another host knows a leader, or while it answers
+// without saying whether it does. Then it describes what recover will do
+// and asks for this host's name: whoever types it knows which host
+// continues alone.
 func (r recovery) ask(ctx context.Context, current *state.State, gone []*state.Host, remap state.Command) error {
 	var notReached []string
 	for _, other := range gone {
@@ -263,8 +262,8 @@ func (r recovery) ask(ctx context.Context, current *state.State, gone []*state.H
 	return nil
 }
 
-// describe says what recover will do. It works out the outcome of the remap
-// on a copy of the state.
+// describe returns a text that says what recover will do. It applies the
+// remap to a copy of the state to find the outcome.
 func (r recovery) describe(current *state.State, gone []*state.Host, notReached []string, remap state.Command) (string, error) {
 	after := current.Clone()
 	if _, err := after.Apply(current.Index+1, remap); err != nil {

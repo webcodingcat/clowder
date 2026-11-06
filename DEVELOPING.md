@@ -3,9 +3,11 @@
 This file explains how the code fits together, the rules that keep it that way, and the
 reasons for them. Numbers, paths and timeouts are named constants in the code, so this file
 names the constant instead of repeating its value. [STYLE.md](STYLE.md) has the coding
-standards, and `bin/dev` has the commands.
+standards, and `bin/dev` has the commands. How to use clowder is in the
+[README](README.md), [docs/operating.md](docs/operating.md) and
+[docs/resources.md](docs/resources.md).
 
-New here? Read [Start here](#start-here-one-apply-through-the-code) first, then the part
+New here? Read [Start here](#start-here-one-apply-through-the-code) first, then the file
 about the package you change. This file covers the whole picture and the rules that apply
 everywhere: [Getting started](#getting-started), [The big picture](#the-big-picture),
 [Words](#words), [The two binaries](#the-two-binaries), [Layers](#layers),
@@ -13,12 +15,15 @@ everywhere: [Getting started](#getting-started), [The big picture](#the-big-pict
 [Logging and errors](#logging-and-errors). Each package has its own section in one of these
 files:
 
-| File | Sections |
+| File | Packages |
 |---|---|
-| [What users write](docs/developing/specs.md) | namespaces and names, stack specs, rendering, the cluster's configuration, the CLI's credentials, Secrets and sealed values |
-| [The cluster](docs/developing/cluster.md) | cluster state, certificates, Raft and the data key, API and the CLI, placement |
-| [A host](docs/developing/host.md) | the agent, network, storage, containers, host check |
-| [Ingress, fencing, certificates, alerts and metrics](docs/developing/loops.md) | Traefik, Hetzner and ingress, fencing, certificates of the routes, alerts, metrics |
+| [What users write](docs/developing/specs.md) | `names`, `stackspec`, `compose`, `clusterspec`, `clientconfig`, `secretvalue` |
+| [The cluster state](docs/developing/state.md) | `state`: commands, resources, operations, host phases, versions |
+| [The API and the CLI](docs/developing/api.md) | `api`, `cli`: access, resources, the watch, secret values, joins, credentials |
+| [Placement](docs/developing/placement.md) | `scheduler`, and the placement in `controller` |
+| [Certificates, Raft and Recover](docs/developing/cluster.md) | `pki`, `raftnode`, `datakey`, `clowderd recover` |
+| [A host](docs/developing/host.md) | `agent`, `network`, `storage`, `docker`, `supervisor`, `hostcheck` |
+| [Ingress, fencing, certificates, alerts and metrics](docs/developing/loops.md) | `ingress`, `hetzner`, the other loops of `controller`, `notify`, `metrics` |
 | [Shipping](docs/developing/shipping.md) | packages and units, CI, releases |
 
 ## Getting started
@@ -37,8 +42,7 @@ You do not need Go on the host: `bin/dev` runs everything in pinned images and k
 caches in a Docker volume. If Go is installed, `go test ./...` works the same way.
 
 [docs/live-tests.md](docs/live-tests.md) describes the live tests, which run on real VMs
-in HLab. [docs/roadmap.md](docs/roadmap.md) describes the phases, the known gaps and the
-results of the phase 0 spike.
+in HLab. [docs/roadmap.md](docs/roadmap.md) says how far the work is and what comes next.
 
 ## The big picture
 
@@ -113,87 +117,84 @@ What follows from this:
 
 ## Words
 
-| Word | Means |
-|---|---|
-| underlay | the Hetzner private network that the hosts share; a host's underlay is its address there |
-| configuration | the cluster's one `ClusterConfiguration` resource (`clusterspec.Config`), with everything cluster-wide |
-| clowder-system | the reserved namespace for the cluster's own Secrets (`names.System`) |
-| node address | a host's address in the overlay (`network.NodeAddress`) |
-| endpoint | an agent address that the CLI asks, from a context's `endpoints` |
-| context | the way into one cluster in the CLI's credentials file (`~/.clowder/config`) |
-| Floating IP | the cluster's one public address; Hetzner routes it to the ingress host |
-| leader | the Raft leader among the agents; it decides (placement, failover) and commits every write |
-| role | what a host does: `control-plane`, `worker` or `ingress` (`hostrole`); fixed when it joins |
-| voter | a control-plane host that takes part in Raft's elections; other hosts only follow the log |
-| quorum | a majority of the voters (Raft) or of a volume's copies (DRBD); without it, nothing changes |
-| fencing | powering off a failed host's server through Hetzner's API before its stacks start elsewhere |
-| tiebreaker | a diskless DRBD member that gives a volume with two copies its third vote |
-| active, in service | an active host does its roles' work; a draining one is in service too |
-| actor | who sent a command: `leader`, `host/<id>` or `cli/<name>` |
-| channel, owner | the way a resource came in; a resource's owner is the channel that made it |
-| data key | the age key that every host keeps; it encrypts secrets before they go into the state (`datakey`) |
-| sealing key | the cluster's age key that SealedSecrets are sealed for (`state.ClusterKeys.SealingKey`) |
-| sealed | sealed for the cluster's sealing key, as a SealedSecret's value is |
-| generation | of a resource: counts the changes of its spec |
-| data generation | of a volume: a number in its LV's name that grows with each new, empty LV |
-| pushed out, coming back | a service stopped to make room for one of higher priority, and back once there is room |
-| retired copy | a volume's copy that the state gave up; its host removes it |
-| leavers, in use | stacks that left a host; a volume they still hold is in use |
-| pass | one run of a loop that brings its part of the host or the cluster to what the state says |
-| room | what a host offers its services (memory, CPUs) minus what they reserve |
-| desired | what the state wants on this host, read once per pass |
+Each word is explained here once, in alphabetical order.
 
-More on some of these words:
-
-- **underlay**: the configuration's `privateNetwork`.
-- **configuration**: it is named `cluster` and corresponds to kubeadm's
-  `ClusterConfiguration`. It names its secrets in `clowder-system`.
-- **clowder-system**: it holds the Hetzner token and the alert channels' URLs and
-  passwords, like `kube-system` in Kubernetes. It always exists and holds no stacks or
-  volumes.
-- **node address**: it is on `clowder0`, and other hosts reach it through WireGuard.
-- **endpoint**: the address is a host's public address or one in front of the hosts. The
-  CLI's credentials file (`clientconfig`) lists the endpoints of each context. The CLI tries
-  them in turn and learns no others.
-- **context**: like a context in a kubeconfig, it holds the endpoints, the CA, and the CLI's
-  key and certificate. `current_context` picks one.
-- **role**: like a Kubernetes node role. A `control-plane` host may vote, lead, serve
-  the CLI and the join, and run the host commands that need the cluster's keys
-  (`clowderd credentials`, `sealing-key`, `recover`). A `worker` runs stacks and holds volume copies with a disk.
-  An `ingress` host may take the Floating IP. A tiebreaker needs no role. The join token
-  names the roles a host may take, and the host's certificate names the roles it took.
-- **active, in service**: an active host takes stacks if it is a worker, and may vote if
-  it is a control-plane host. The first host starts active. A host that joins becomes
-  active once its agent reports, and so does one that comes back from `recovering`. In
-  service (`state.InService`) means active or draining. Of the control-plane hosts, 1, 3
-  or 5 vote: the second one waits for its vote until a third comes
-  (`state.MinHAHosts`), because two voters would stop when either fails.
-- **actor**: `<name>` is the name in the CLI's certificate (`state.CLIActor`,
-  `state.IsCLIActor`). The cluster has no users: the name is for the audit and grants
-  nothing. Whoever holds a CLI certificate controls the cluster, as with kubeadm's
-  `admin.conf`. A control-plane host is trusted as fully as the CLI: it forwards the CLI's
-  commands with their actor (and could name another actor), and it prints credentials for
-  root (`clowderd credentials`). A worker may act only for itself (cluster.md, Who may
-  call what). Every host still holds the data key and the CA's key, though, so for now a
-  compromised host of any role means a compromised cluster (the roadmap's Known gaps).
-- **channel, owner**: today the only channel is `cli` (`clowder apply`, whatever the
-  certificate's name is); a GitOps source will come later. Only the owning channel changes a
-  resource. The word `cli` names three separate things: this channel, the role of a CLI
-  certificate (its organizational unit, `pki.Role`; not a host's role, which a host
-  certificate names as its organizations), and the prefix of the CLI's actor.
-- **generation**: an apply that changes nothing does not count.
-- **data generation**: a new, empty LV comes when a volume with replicas 0 moves, fails
-  over, or starts anew after a recover. Restores (phase 3) will raise it too.
-- **retired copy**: the state gives up a copy when the volume is deleted, when the copy
-  moves off its host, or when its data is given up for a new, empty LV. The data is gone
-  only once the host has removed the copy.
-- **leavers, in use**: leavers are the stacks that left the host because they moved
+- **active, in service**: an active host does the work of its roles: it takes stacks if it
+  is a worker, and may vote if it is a control-plane host. The first host starts active.
+  A joining host, and one back from `recovering`, becomes active once its agent reports.
+  In service (`state.InService`) means active or draining.
+- **actor**: who sent a command: `leader`, `host/<id>` or `cli/<name>`. `<name>` is the
+  name in the CLI's certificate (`state.CLIActor`, `state.IsCLIActor`). The cluster has no
+  users: the name is for the audit and grants nothing, and whoever holds a CLI certificate
+  controls the cluster. A control-plane host may speak for the CLI; a worker acts only for
+  itself ([Who may call what](docs/developing/api.md#who-may-call-what)).
+- **channel, owner**: the way a resource came in. A resource's owner is the channel that
+  made it, and only that channel changes the resource. Today the only channel is `cli`
+  (`clowder apply`, whatever the certificate's name).
+- **`cli`** names three separate things: the channel above, the role of a CLI certificate
+  (its organizational unit, `pki.Role`; not a host's role, which a host certificate names
+  as its organizations), and the prefix of the CLI's actor.
+- **clowder-system**: the reserved namespace for the cluster's own Secrets
+  (`names.System`), like `kube-system`: the Hetzner token and the alert channels' URLs and
+  passwords. It always exists and holds no stacks or volumes.
+- **configuration**: the cluster's one `ClusterConfiguration` resource, named `cluster`
+  (`clusterspec.Config`), as in kubeadm. It holds everything cluster-wide and names its
+  secrets in `clowder-system`.
+- **context**: the way into one cluster in the CLI's credentials file
+  (`~/.clowder/config`, `clientconfig`), like a kubeconfig context. It holds the
+  endpoints, the CA, and the CLI's key and certificate; `current_context` picks one.
+- **data generation**: of a volume, a number in its LV's name that grows with each new,
+  empty LV. A new LV comes when a volume of replicas 0 moves, fails over, or starts anew
+  after a recover.
+- **data key**: the age key that every host keeps (`datakey`). It encrypts secrets before
+  they go into the state ("encrypted with the data key").
+- **desired**: what the state wants on this host, read once per pass. The agent compares
+  the host with it.
+- **endpoint**: an agent address that the CLI asks, from a context's `endpoints`: a host's
+  public address, or one in front of the hosts. The CLI tries them in turn and learns no
+  others.
+- **fencing**: powering off a failed host's server through Hetzner's API before its stacks
+  start elsewhere.
+- **Floating IP**: the cluster's one public address. Hetzner routes it to the ingress host.
+- **generation**: of a resource, the count of its spec's changes. An apply that changes
+  nothing does not count.
+- **leader**: the Raft leader among the agents. It decides (placement, failover) and
+  commits every write.
+- **leavers, in use**: leavers are the stacks that left a host because they moved
   elsewhere or were deleted. The host stops them before it starts anything else. A volume
   is in use while a leaver whose stop failed still holds it, and no other stack may take
   the volume until then.
-- **pass**: a loop runs a pass at every change of the state and every 30 s.
-- **room**: it is the scheduler's only measure.
-- **desired**: the agent compares the host with it.
+- **node address**: a host's address in the overlay (`network.NodeAddress`), on
+  `clowder0`. Other hosts reach it through WireGuard.
+- **pass**: one run of a loop that brings its part of the host or the cluster to what the
+  state says. A loop runs a pass at every change of the state and every 30 s.
+- **pushed out, coming back**: a service stopped to make room for one of higher priority,
+  and back once there is room.
+- **quorum**: a majority of the voters (Raft) or of a volume's copies (DRBD). Without it,
+  nothing changes.
+- **retired copy**: a volume's copy that the state gave up: the volume was deleted, the
+  copy moved off its host, or its data was given up for a new, empty LV. The data is gone
+  only once the host has removed the copy.
+- **role**: what a host does, like a Kubernetes node role (`hostrole`), fixed when it
+  joins. A `control-plane` host may vote, lead, serve the CLI and the join, and run the
+  host commands that need the cluster's keys (`clowderd credentials`, `sealing-key`,
+  `recover`). A `worker` runs stacks and holds volume copies with a disk. An `ingress`
+  host may take the Floating IP. A tiebreaker needs no role. The join token names the
+  roles a host may take, and the host's certificate names the roles it took.
+- **room**: what a host offers its services (memory, CPUs) minus what they reserve. It is
+  the scheduler's only measure.
+- **sealed**: sealed for the cluster's sealing key, as a SealedSecret's value is.
+- **sealing key**: the cluster's age key that SealedSecrets are sealed for
+  (`state.ClusterKeys.SealingKey`).
+- **tiebreaker**: a diskless DRBD member that gives a volume with two copies its third
+  vote.
+- **underlay**: the Hetzner private network that the hosts share (the configuration's
+  `privateNetwork`). A host's underlay is its address there.
+- **voter**: a control-plane host that takes part in Raft's elections; the other hosts
+  only follow the log. 1, 3 or 5 hosts vote. The second control-plane host waits for its
+  vote until a third comes (`state.MinHAHosts`), because two voters would stop when either
+  fails.
+
 
 ## The two binaries
 
@@ -212,10 +213,10 @@ The package layout is planned for all of v1; packages appear as the phases add t
 
 - **Portable**: `cli`, `api`, `clusterspec` (the configuration's types and checks),
   `clientconfig` (the CLI's credentials file and its contexts), `secretvalue` (the
-  sealed values of SealedSecrets), `pki`, `jointoken` (the
-  tokens that hosts join with), `hostrole` (a host's roles), `compose`, `units`, `names` (the rules for the names that
-  users give, and the names on the host that are built from them), `buildinfo`, `logging`, `atomicfile`
-  (files written whole or not at all), `metrics` (Prometheus' text format), `stackspec` (a
+  sealed values of SealedSecrets), `pki`, `jointoken` (the tokens that hosts join with),
+  `hostrole` (a host's roles), `compose`, `units`, `names` (the rules for the names that
+  users give, and the names on the host that are built from them), `buildinfo`, `logging`,
+  `atomicfile` (files written whole or not at all), `metrics` (Prometheus' text format), `stackspec` (a
   stack's schema), `resource` (the kinds of resources and their specs), `digest` (hashes of
   lists of parts: the secrets' digests, what an agent applied). The CLI may import only
   these packages. depguard (rule `cli-portable` in `.golangci.yml`) rejects direct imports
@@ -226,7 +227,7 @@ The package layout is planned for all of v1; packages appear as the phases add t
   depguard (rule `state-pure`) keeps out `os`, `net/http` and randomness, and forbidigo
   keeps out the clock (`time.Now`, `time.Since`, `time.Until`).
 - **Decides**: `controller` (the leader's loops) writes Raft commands. It talks to external
-  services that only the leader uses (Hetzner's API, ACME, Git remotes, alert channels),
+  services that only the leader uses (Hetzner's API, ACME, alert channels),
   but it never changes the host. One of its loops runs on every agent, not only on the
   leader: `QuorumWatch`, which alerts through the alert channels while there is no leader.
   The clients of these services are separate packages: `hetzner`, `notify` and

@@ -11,34 +11,35 @@ import (
 )
 
 // RecoverRemap is the command of clowderd recover. It runs on the one host
-// left of a cluster that lost its majority for good: the other hosts were
+// left of a cluster that lost its majority for good. The other hosts were
 // powered off and labeled retired at Hetzner, and Raft runs with the
-// survivor alone. The command makes the state fit (applyRecoverRemap).
+// survivor alone. The command makes the state fit that (applyRecoverRemap).
 type RecoverRemap struct {
 	Survivor HostID `json:"survivor"`
 }
 
-// recoveredBy is the error of the operations a recover ended.
+// recoveredBy is the error of the operations that a recover ended.
 const recoveredBy = "clowderd recover ended it"
 
-// applyRecoverRemap marks every host except the survivor as removed: it
-// revokes the host's certificate and has the survivor forget it as a DRBD
-// peer. A volume's copies on removed hosts are gone. A volume of replicas 1
-// or more keeps a synced copy with a disk on the survivor. A volume without
-// such a copy waits for a restore (VolumeRestorePending): its tiebreaker on
-// the survivor is retired, but an unsynced copy there is kept, because the
-// state never removes what may hold older data that a human may want. A
-// volume of replicas 0 whose LV was on a removed host starts anew, as after
-// a failover. Every stack that is not on the survivor, or that names a
-// volume without data, is placed anew, and every running operation ends as
-// failed. The survivor, a control-plane host, is the only voter, and
-// holds the Floating IP if it is an ingress host. The
-// cluster is no longer highly available. It grows again as a new cluster
-// does, and RecoveredAt raises an alert until it is highly available again.
+// applyRecoverRemap marks every host except the survivor as removed. It
+// revokes their certificates, and the survivor forgets them as DRBD peers.
+// Their volume copies are gone.
 //
-// Only the leader proposes this command (clowderd recover, on the member
-// it just recovered); the API forwards no such command. A second one
-// changes nothing, so recover can run again after a failure.
+// A volume of replicas 1 or more keeps its synced copy with a disk on the
+// survivor. A volume without such a copy waits for a restore
+// (VolumeRestorePending). Its tiebreaker on the survivor is retired. An
+// unsynced copy is kept, because the state never removes what may hold
+// older data that a human may want. A volume of replicas 0 whose LV was on
+// a removed host starts anew, as after a failover.
+//
+// Every stack that is not on the survivor, or that names a volume without
+// data, is placed anew. Every running operation fails. The survivor is the
+// only voter, and it holds the Floating IP if it is an ingress host. The
+// cluster is no longer highly available. It grows again as a new cluster
+// does, and RecoveredAt raises an alert until then.
+//
+// Only the leader proposes this command (clowderd recover), and the API
+// forwards none. A second one changes nothing, so recover can run again.
 func applyRecoverRemap(s *State, cmd Command, payload RecoverRemap) (func(), error) {
 	if cmd.Actor != LeaderActor {
 		return nil, fmt.Errorf("%s cannot remap the cluster after a recover; only clowderd recover does", cmd.Actor)
@@ -89,7 +90,7 @@ func (s *State) others(id HostID) []HostID {
 }
 
 // endOperations ends every running operation as failed and frees its
-// locks: its hosts are gone, and the survivor starts over.
+// locks, because its hosts are gone and the survivor starts over.
 func (s *State) endOperations() {
 	for _, operation := range s.Operations {
 		if operation.State != OpRunning && operation.State != OpRollingBack {
@@ -100,7 +101,7 @@ func (s *State) endOperations() {
 			stack.MoveTo = nil
 		}
 	}
-	// every lock belongs to an operation that ran (Locks)
+	// every lock belongs to an operation that was running (Locks)
 	clear(s.Locks)
 	s.forgetFinished()
 }
@@ -130,14 +131,14 @@ func (s *State) remapVolumes(survivor HostID) map[string]bool {
 		case kept != nil && !kept.Tiebreaker && kept.Synced:
 			volume.Copies = []VolumeCopy{*kept}
 		case kept != nil && !kept.Tiebreaker:
-			// unsynced: it may hold older data, which a human may want; it
-			// stays a copy, so get volumes shows it and a delete removes it
+			// unsynced: it may hold older data that a human may want. It
+			// stays a copy, so get volumes shows it and a delete removes it.
 			volume.Copies, volume.Status = []VolumeCopy{*kept}, VolumeRestorePending
 			lost[id] = true
 		default:
 			if kept != nil {
-				// a tiebreaker has no data to keep; retire gives up every copy
-				// of the record it is handed, here the tiebreaker alone
+				// a tiebreaker has no data to keep. retire gives up every
+				// copy of the record it is handed, here only the tiebreaker.
 				s.retire(&Volume{
 					Meta: volume.Meta, DataGeneration: volume.DataGeneration, Minor: volume.Minor,
 					Copies: []VolumeCopy{*kept},
@@ -151,9 +152,9 @@ func (s *State) remapVolumes(survivor HostID) map[string]bool {
 	return lost
 }
 
-// unplaceStacks makes every stack pending that is not on the survivor, or
-// that names a volume waiting for a restore. The placement then places it
-// anew.
+// unplaceStacks makes pending every stack that is not on the survivor, or
+// that names a volume waiting for a restore. The placement then places
+// these stacks anew.
 func (s *State) unplaceStacks(survivor HostID, lost map[string]bool) {
 	for _, id := range slices.Sorted(maps.Keys(s.Stacks)) {
 		stack := s.Stacks[id]

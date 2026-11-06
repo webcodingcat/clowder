@@ -1,8 +1,8 @@
 // Package datakey is the cluster's data key: an age identity that every
 // host keeps (only root may read it). Secrets are encrypted with it before
-// they go into the cluster state, so a Raft snapshot or backup that ends up
-// in the wrong hands holds no secret in plain text. A joining host gets the
-// key in the answer to its join; the Raft backup carries it as well.
+// they go into the cluster state. So a Raft snapshot that ends up in the
+// wrong hands holds no secret in plain text. A joining host gets the key in
+// the answer to its join.
 package datakey
 
 import (
@@ -26,7 +26,7 @@ type Key struct {
 	identity *age.X25519Identity
 }
 
-// New makes a data key; init does this once per cluster.
+// New makes a data key. init does this once per cluster.
 func New() (*Key, error) {
 	identity, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -44,7 +44,8 @@ func Parse(text string) (*Key, error) {
 	return &Key{identity: identity}, nil
 }
 
-// Text returns the key in age's text form, for the join answer and the backup.
+// Text returns the key in age's text form, for the key file and the join
+// answer.
 func (k *Key) Text() string {
 	return k.identity.String()
 }
@@ -103,8 +104,9 @@ func (k *Key) Decrypt(encrypted state.Encrypted) ([]byte, error) {
 // key is the same on every host and after every restart, and it reveals
 // nothing about the data key.
 func (k *Key) Derive(purpose string) ([]byte, error) {
-	// the key's text form is its secret scalar in a fixed encoding (the key
-	// file holds exactly this text), so it is the same wherever it is read
+	// the key's text form is its secret scalar in a fixed encoding, and the
+	// key file holds exactly this text. So the input is the same on every
+	// host.
 	derived, err := hkdf.Key(sha256.New, []byte(k.identity.String()), nil, purpose, 32)
 	if err != nil {
 		return nil, fmt.Errorf("derive a key for %s: %w", purpose, err)

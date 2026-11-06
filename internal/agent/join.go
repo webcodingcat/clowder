@@ -26,12 +26,12 @@ import (
 	"github.com/webcodingcat/clowder/internal/pki"
 )
 
-// JoinOptions are what cloud-init gives clowderd join.
+// JoinOptions are the values that cloud-init passes to clowderd join.
 type JoinOptions struct {
-	// Token is the join token a user made (clowder host join-token).
+	// Token is the join token that a user created (clowder host join-token).
 	Token jointoken.Token
-	// Via is an agent of the cluster to join through, by its address (and
-	// port).
+	// Via is the address (and optionally the port) of the cluster's agent
+	// that the host joins through.
 	Via  string
 	Name string
 	// Roles are the roles the host takes, within what the token allows.
@@ -39,26 +39,23 @@ type JoinOptions struct {
 	Underlay      netip.Addr
 	PublicAddress netip.Addr
 	ServerID      int64
-	// RaftPort and APIPort are fixed in a cluster; tests change them.
+	// RaftPort and APIPort are fixed in a cluster. Tests change them.
 	RaftPort int
 	APIPort  int
 }
 
 // Join makes this host a member of the cluster through the agent at
-// options.Via. It makes its own keys, asks the cluster to add the host,
-// and writes the files that the answer brings.
-// The leader adds the host to Raft as a non-voter at once. It moves the
-// host on to the next phase once the host's agent runs (clowderd run) and
-// reports. Join refuses a host that already has a cluster. joiner.go is the
-// leader's side.
+// options.Via. It creates its own keys, asks the cluster to add the host,
+// and writes the files that come with the answer. It refuses a host that
+// already belongs to a cluster. joiner.go is the leader's side.
 //
-// The cluster uses up the token when it takes the host. So Join saves its
-// keys, and then the answer, in join.json at once. A run that fails after
-// the answer (a full disk, an interface that does not come up) continues
-// from there the next time, without asking the cluster again. It writes
-// the host as it joined, whatever options the later run has. A host whose
-// answer never arrived stays joining in the state; a user removes it, and
-// the host joins again with a new token (DEVELOPING: A host).
+// The cluster uses up the token when it adds the host. So Join saves its
+// keys in join.json first, and then the answer as soon as it arrives. If a
+// run fails after the answer, the next run continues from join.json without
+// asking the cluster again. It writes the host as it joined, whatever
+// options the later run has. If the answer never arrived, the host stays
+// joining in the state. A user then removes it, and it joins again with a
+// new token.
 func Join(ctx context.Context, files Files, options JoinOptions, hostNetwork HostNetwork, logger *slog.Logger) error {
 	if _, err := os.Stat(files.raftDir()); err == nil {
 		return fmt.Errorf("%s exists: this host was part of a cluster, or an init failed halfway "+
@@ -92,10 +89,10 @@ func Join(ctx context.Context, files Files, options JoinOptions, hostNetwork Hos
 	return nil
 }
 
-// joining is join.json: the keys that a joining host made and, once it has
-// arrived, the cluster's answer with the host as it joined (the future
-// host.json). Only root may read it, because it holds the keys and the
-// data key.
+// joining is the content of join.json: the keys that a joining host
+// created and, once it has arrived, the cluster's answer with the host as
+// it joined (the future host.json). Only root may read it, because it holds
+// the host's keys and the data key.
 type joining struct {
 	HostKey      []byte          `json:"host_key"`      // PEM
 	WireGuardKey []byte          `json:"wireguard_key"` // X25519, raw
@@ -104,7 +101,8 @@ type joining struct {
 	Host         *Host           `json:"host,omitempty"`
 }
 
-// readJoining reads join.json, or makes the keys and writes it.
+// readJoining reads join.json. If the file is missing, it creates the keys
+// and writes the file.
 func (f Files) readJoining() (joining, error) {
 	var saved joining
 	content, err := os.ReadFile(f.joinFile())
@@ -140,8 +138,8 @@ func (f Files) writeJoining(saved joining) error {
 	return atomicfile.Write(f.joinFile(), content, 0o600)
 }
 
-// askToJoin trusts the cluster's CA through the token, sends the join and
-// saves the answer in join.json.
+// askToJoin uses the token to trust the cluster's CA, sends the join
+// request and saves the answer in join.json.
 func askToJoin(ctx context.Context, files Files, options JoinOptions, saved *joining) error {
 	// clowderd join has no --connect-timeout: it asks one host, and nobody
 	// waits at a terminal
@@ -183,8 +181,8 @@ func (j joining) keys() (ed25519.PrivateKey, *ecdh.PrivateKey, error) {
 	return hostKey, wireGuardKey, nil
 }
 
-// writeJoined writes the files of a joined host from join.json, host.json
-// last.
+// writeJoined writes the files of a joined host from join.json, with
+// host.json last.
 func writeJoined(ctx context.Context, files Files, saved joining, hostNetwork HostNetwork) error {
 	answer, host := *saved.Answer, *saved.Host
 	hostKey, wireGuardKey, err := saved.keys()
@@ -204,7 +202,7 @@ func writeJoined(ctx context.Context, files Files, saved joining, hostNetwork Ho
 	if err := hostNetwork.SetUpInterface(ctx, host.NodeAddress); err != nil {
 		return err
 	}
-	// the first peers come with the answer: Raft would name them, but Raft
+	// the first peers come with the answer, not from Raft, because Raft
 	// itself runs over the mesh to these peers
 	mesh := network.Mesh{Self: host.ID}
 	for _, peer := range answer.Peers {
@@ -213,13 +211,13 @@ func writeJoined(ctx context.Context, files Files, saved joining, hostNetwork Ho
 	if err := files.writeMesh(mesh); err != nil {
 		return err
 	}
-	// host.json last: a host with it has everything else
+	// host.json comes last: a host with it has everything else
 	return files.writeHost(host)
 }
 
 // checkJoinCertificate makes sure that the CA issued the answer's
-// certificate, for this host's key, for the host ID the answer names and
-// for the roles the host asked for.
+// certificate, and that the certificate is for this host's key, for the
+// host ID that the answer names, and for the roles that the host asked for.
 func checkJoinCertificate(caPEM string, answer api.JoinAnswer, hostKey ed25519.PrivateKey,
 	roles hostrole.Set,
 ) error {

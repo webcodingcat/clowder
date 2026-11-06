@@ -13,8 +13,8 @@ import (
 )
 
 // WatchEvent is one change that GET /v1/watch streams, as one JSON object
-// per line. It says which resource changed (spec or status) or is gone.
-// The client reads the resource itself if it needs it.
+// per line. It says which resource changed (spec or status) or was
+// deleted. The client reads the resource itself if it needs it.
 type WatchEvent struct {
 	Kind            string `json:"kind"`
 	Namespace       string `json:"namespace,omitempty"`
@@ -23,24 +23,24 @@ type WatchEvent struct {
 	Deleted         bool   `json:"deleted,omitempty"`
 }
 
-// watchWaitTimeout bounds how long a watch from an index that this agent
-// has not applied yet waits for it; otherwise a follower cut off from the
+// watchWaitTimeout limits how long a watch waits for a since index that
+// this agent has not applied yet. Without it, a follower cut off from the
 // leader would wait forever. It is a variable so that the tests need not
 // wait as long.
 var watchWaitTimeout = 30 * time.Second
 
-// watch streams the changes of one kind in a namespace (or all of them)
-// after ?since=, the index of the client's list:
+// watch streams the changes of one kind in one namespace (or in all of
+// them) after ?since=, the index of the client's list:
 // GET /v1/watch?kind=&namespace=|allNamespaces=true&since=. Any agent
 // answers from its own ring of changes (state.ChangeRing), so a client
 // that listed on one agent can watch on another.
-//   - since is older than what the ring holds: 410, and the client lists
-//     again
-//   - since is ahead of this agent: it waits at most watchWaitTimeout,
-//     then 504
-//   - the stream ends when ctx ends, or when the ring has dropped changes
-//     that the client has not read yet (the client lists again, as after
-//     410)
+//   - If since is older than what the ring holds, the answer is 410, and
+//     the client lists again.
+//   - If this agent has not applied since yet, it waits at most
+//     watchWaitTimeout, then answers 504.
+//   - The stream ends when ctx ends, or when the ring has dropped changes
+//     that the client has not read yet. The client then lists again, as
+//     after a 410.
 func (s *Server) watch(w http.ResponseWriter, r *http.Request) {
 	kind, ok := resource.KindOf(r.URL.Query().Get("kind"))
 	if !ok {
@@ -96,7 +96,7 @@ func (s *Server) watch(w http.ResponseWriter, r *http.Request) {
 		}
 		changed = s.config.Cluster.Changed()
 		if changes, index, err = s.config.Cluster.Changes(since); err != nil {
-			return // the ring went on without the client: it lists again
+			return // the ring dropped changes the client missed; it lists again
 		}
 	}
 }

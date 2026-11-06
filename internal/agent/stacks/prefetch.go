@@ -21,9 +21,9 @@ type Puller interface {
 
 // Prefetcher pulls the images of the stacks that this host may take over,
 // before it needs them, so that a failover or a move starts the containers
-// at once. It runs its own loop, one pull at a time, so a long pull holds up
-// neither the runner nor a pass of anything else. Like the runner, it pulls
-// with the registry logins of each stack's namespace.
+// immediately. It runs its own loop, one pull at a time, so a long pull
+// holds up neither the runner nor any other loop's pass. Like the runner, it
+// pulls with the registry logins of each stack's namespace.
 type Prefetcher struct {
 	host       state.HostID
 	cluster    loop.Cluster
@@ -36,8 +36,8 @@ type Prefetcher struct {
 	pulled map[string]bool
 }
 
-// NewPrefetcher makes the prefetcher, which shares the runner's
-// registries; it starts nothing.
+// NewPrefetcher creates the prefetcher, which shares the runner's
+// registries. It starts nothing.
 func NewPrefetcher(host state.HostID, cluster loop.Cluster, docker Puller, registries *RegistryConfigs,
 	logger *slog.Logger,
 ) *Prefetcher {
@@ -47,14 +47,14 @@ func NewPrefetcher(host state.HostID, cluster loop.Cluster, docker Puller, regis
 	}
 }
 
-// Run pulls at every change of the state and every interval, until ctx
-// ends (loop.Run).
+// Run pulls at every change of the state and every loop.Interval, until
+// ctx ends (loop.Run).
 func (p *Prefetcher) Run(ctx context.Context) {
 	loop.Run(ctx, p.cluster, nil, func() { p.pass(ctx) })
 }
 
-// Ready tells whether Docker has every image of a stack, by its ID. A move
-// to this host waits until it does.
+// Ready reports whether Docker has every image of a stack, by its ID. A
+// move to this host waits until it does.
 func (p *Prefetcher) Ready(stackID string) bool {
 	copied := p.cluster.SharedCopy()
 	stack, ok := copied.Stacks[stackID]
@@ -73,7 +73,7 @@ func (p *Prefetcher) Ready(stackID string) bool {
 
 // pass makes sure that Docker has the images of the stacks this host may
 // take. PullMissing pulls only what is missing, so an image removed by hand
-// comes back. A tag that changed under the same name is pulled again only
+// comes back. If a tag now points to a new image, that image is pulled only
 // when a user restarts the stack (Runner.pullRestarted).
 func (p *Prefetcher) pass(ctx context.Context) {
 	copied := p.cluster.SharedCopy()
@@ -123,11 +123,11 @@ func (p *Prefetcher) pullMissing(ctx context.Context, config string, stackImages
 	}
 }
 
-// mayTake tells whether a host may take a stack that runs elsewhere, in a
-// failover or a move. That is the case when the host has a copy with a disk
-// of each of the stack's volumes that hold data (replicas 1 and more). A
-// stack without such volumes may go to any host that takes stacks. A stack
-// that already runs here gets its images from compose up.
+// mayTake reports whether a host may take over a stack that runs elsewhere,
+// in a failover or a move. That is the case when the host has a copy with a
+// disk of each of the stack's volumes that hold data (replicas 1 and more).
+// A stack without such volumes may go to any host that takes stacks. A
+// stack that already runs here gets its images from compose up.
 func mayTake(current *state.State, stack *state.Stack, host state.HostID) bool {
 	if stack.Host != nil && *stack.Host == host {
 		return false

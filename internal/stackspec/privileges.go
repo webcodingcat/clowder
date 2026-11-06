@@ -2,9 +2,9 @@ package stackspec
 
 import "strings"
 
-// harmlessCapabilities act only inside the container's own namespaces (its
-// network, its processes): Docker's default set, and a few that services
-// commonly add. Any other capability reaches the host.
+// harmlessCapabilities act only inside the container's own namespaces,
+// such as its network and its processes. They are Docker's default set and
+// a few that services often add. Any other capability reaches the host.
 var harmlessCapabilities = map[string]bool{
 	"AUDIT_WRITE": true, "CHOWN": true, "DAC_OVERRIDE": true, "FOWNER": true, "FSETID": true,
 	"KILL": true, "MKNOD": true, "NET_BIND_SERVICE": true, "NET_RAW": true, "SETFCAP": true,
@@ -12,7 +12,7 @@ var harmlessCapabilities = map[string]bool{
 	"NET_ADMIN": true, "NET_BROADCAST": true, "IPC_LOCK": true, "SYS_NICE": true,
 }
 
-// CapabilityName is a capability as Docker writes it: in upper case,
+// CapabilityName returns a capability as Docker writes it: in upper case,
 // without CAP_.
 func CapabilityName(capability string) string {
 	return strings.TrimPrefix(strings.ToUpper(capability), "CAP_")
@@ -30,11 +30,11 @@ func HarmlessSecurityOpt(option string) bool {
 	return option == "no-new-privileges" || option == "no-new-privileges:true"
 }
 
-// Privileges lists what a service asks for beyond a normal container. Such
-// a container can read the host's keys and other stacks' volumes and
-// secrets, and it can change the network rules that keep containers apart.
-// Only stacks that the configuration names in stacks.privileged may have
-// privileges.
+// Privileges lists what a service asks for beyond a normal container. A
+// container with privileges can read the host's keys and other stacks'
+// volumes and secrets. It can also change the network rules that keep
+// containers apart. Only the stacks that the configuration names in
+// stacks.privileged may have privileges.
 func (s Service) Privileges() []string {
 	var asked []string
 	if s.Privileged {

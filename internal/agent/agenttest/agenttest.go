@@ -1,7 +1,7 @@
 // Package agenttest has the fakes that the tests of the agent, its stack
 // runner and its volume reconciler share: a cluster that applies what is
 // proposed, Docker, the storage driver and the volume reconciler. Each fake
-// is a sync.Locker, so a test changes its fields under its lock while a
+// is a sync.Locker, so a test can change its fields under the lock while a
 // loop runs.
 package agenttest
 
@@ -49,7 +49,7 @@ func UsingDB(app stackspec.Service) stackspec.Spec {
 	return stackspec.Spec{Services: map[string]stackspec.Service{"app": app}}
 }
 
-// Calls is what a fake was asked to do, one line per call.
+// Calls records what a fake was asked to do, one line per call.
 type Calls struct {
 	sync.Mutex
 	lines []string
@@ -62,14 +62,14 @@ func (c *Calls) Add(format string, args ...any) {
 	c.lines = append(c.lines, fmt.Sprintf(format, args...))
 }
 
-// Lines are the calls so far.
+// Lines returns the calls so far.
 func (c *Calls) Lines() []string {
 	c.Lock()
 	defer c.Unlock()
 	return slices.Clone(c.lines)
 }
 
-// Count is how often a call was made.
+// Count returns how often a call was made.
 func (c *Calls) Count(line string) int {
 	c.Lock()
 	defer c.Unlock()
@@ -95,10 +95,11 @@ func (c *Calls) WaitFor(t *testing.T, line string) {
 	t.Errorf("no call %q; the calls: %q", line, c.Lines())
 }
 
-// Storage stands in for the storage driver: it keeps what the host has of
-// each copy (Copies) as the driver's steps would leave it, and records each
-// step as "<step> <LV>". Every pool has 100 GiB, DataPercent full, unless
-// reading it fails (PoolFails). A trim fails while TrimFails is set.
+// Storage stands in for the storage driver. It keeps what the host has of
+// each copy (Copies), as the driver's steps would leave it, and records
+// each step as "<step> <LV>". Every pool has 100 GiB and is DataPercent
+// full, unless reading it fails (PoolFails). A trim fails while TrimFails
+// is set.
 type Storage struct {
 	Calls
 	Dir         string
@@ -109,8 +110,8 @@ type Storage struct {
 	Copies map[string]storage.Observed
 	// Fails makes every step on an LV fail with its error
 	Fails map[string]error
-	// Hold makes the steps on an LV wait until its channel closes, as a
-	// write to a suspended volume hangs
+	// Hold makes the steps on an LV wait until its channel closes, the way
+	// a write to a suspended volume hangs
 	Hold map[string]chan struct{}
 }
 
@@ -160,8 +161,9 @@ func (f *Storage) Observe(_ context.Context, volumes []storage.Volume) (map[stri
 	return observed, nil
 }
 
-// Ensure makes the LV and brings the resource up secondary: a new copy is
-// Inconsistent until a test says otherwise, a tiebreaker Diskless.
+// Ensure creates the LV and brings the resource up as secondary. A new copy
+// is Inconsistent until a test says otherwise, and a tiebreaker is
+// Diskless.
 func (f *Storage) Ensure(ctx context.Context, volume storage.Volume) error {
 	return f.step(ctx, "ensure", volume, func(copyNow *storage.Observed) {
 		copyNow.LV = !volume.Diskless
@@ -180,7 +182,7 @@ func (f *Storage) Ensure(ctx context.Context, volume storage.Volume) error {
 	})
 }
 
-// Promote makes the copy primary; with force, its data counts as current.
+// Promote makes the copy primary. With force, its data counts as current.
 func (f *Storage) Promote(ctx context.Context, volume storage.Volume, force bool) error {
 	name := "promote"
 	if force {
@@ -213,7 +215,7 @@ func (f *Storage) Demote(ctx context.Context, volume storage.Volume) error {
 	return f.step(ctx, "demote", volume, func(copyNow *storage.Observed) { copyNow.Role = storage.RoleSecondary })
 }
 
-// Remove takes the copy away.
+// Remove deletes the copy.
 func (f *Storage) Remove(ctx context.Context, volume storage.Volume) error {
 	return f.step(ctx, "remove", volume, func(copyNow *storage.Observed) { *copyNow = storage.Observed{} })
 }
@@ -244,7 +246,7 @@ func (f *Storage) ForgetPeer(_ context.Context, peer int) error {
 	return nil
 }
 
-// PoolUsage is 100 GiB, DataPercent full.
+// PoolUsage reports 100 GiB, DataPercent full.
 func (f *Storage) PoolUsage(context.Context, string) (int64, float64, float64, error) {
 	f.Lock()
 	defer f.Unlock()
@@ -268,7 +270,8 @@ type Volumes struct {
 	Errors   map[string]error
 }
 
-// Mounted tells about a copy, by its LV.
+// Mounted reports where a copy is mounted and whether it is ready, by its
+// LV.
 func (f *Volumes) Mounted(lv string) (string, bool, error) {
 	f.Lock()
 	defer f.Unlock()
@@ -295,7 +298,8 @@ type Docker struct {
 	// Listed and Details are what Docker lists and inspects
 	Listed  []docker.Container
 	Details map[string]docker.Details
-	// DuringUp runs within each compose up, as a Docker restart would
+	// DuringUp runs during each compose up, for example to simulate a
+	// restart of Docker
 	DuringUp func()
 }
 
@@ -332,7 +336,7 @@ func (f *Docker) Start(context.Context, string) error { return nil }
 // Restart does nothing.
 func (f *Docker) Restart(context.Context, string) error { return nil }
 
-// ComposeUp records the call; it fails while FailedUps is above zero.
+// ComposeUp records the call. It fails while FailedUps is above zero.
 func (f *Docker) ComposeUp(_ context.Context, config, stack string, files, leftOut []string) error {
 	f.Add("up %s", stack)
 	if f.DuringUp != nil {
@@ -361,7 +365,7 @@ func (f *Docker) PullMissing(_ context.Context, config, image string) error {
 	return nil
 }
 
-// ComposeDown records the call; it fails while FailedDowns is above zero.
+// ComposeDown records the call. It fails while FailedDowns is above zero.
 func (f *Docker) ComposeDown(_ context.Context, stack, _ string) error {
 	f.Add("down %s", stack)
 	f.Lock()
@@ -412,7 +416,7 @@ type Cluster struct {
 	Keys *datakey.Key
 }
 
-// NewCluster is a bootstrapped cluster with one host, node0, and the stack
+// NewCluster returns a bootstrapped cluster with one host, node0, and the stack
 // shop of the namespace default: one service that mounts the volume db
 // (data generation 1), both placed on host 0.
 func NewCluster(t *testing.T) *Cluster {
@@ -467,8 +471,8 @@ func (c *Cluster) Read(use func(current *state.State)) {
 	use(c.State)
 }
 
-// SharedCopy copies afresh each time, and fails the test if a loop writes
-// into its copy (statetest.ReadOnlyCopy).
+// SharedCopy makes a new copy each time, and fails the test if a loop
+// writes into it (statetest.ReadOnlyCopy).
 func (c *Cluster) SharedCopy() *state.State {
 	c.Lock()
 	defer c.Unlock()
@@ -506,8 +510,8 @@ func (c *Cluster) Put(kind, name string, spec any) {
 	c.PutIn(names.Default, kind, name, spec)
 }
 
-// PutIn applies a resource of a namespace ("" for a kind that lives in
-// none).
+// PutIn applies a resource of a namespace ("" for a kind without a
+// namespace).
 func (c *Cluster) PutIn(namespace, kind, name string, spec any) {
 	c.t.Helper()
 	encoded, err := json.Marshal(spec)
@@ -541,8 +545,8 @@ func (c *Cluster) PutSecretIn(namespace, name string, values map[string]string) 
 	c.PutIn(namespace, resource.KindSecret, name, c.encrypted(values))
 }
 
-// encrypted encrypts a secret's values with the cluster's data key; its
-// digest stands for one the API computes.
+// encrypted encrypts a secret's values with the cluster's data key. Its
+// digest is a stand-in for the one that the API computes.
 func (c *Cluster) encrypted(values map[string]string) state.EncryptedSecret {
 	c.t.Helper()
 	secret := state.EncryptedSecret{Data: map[string]state.Encrypted{}, Digest: "digest of"}
@@ -567,8 +571,8 @@ func (c *Cluster) Place(name string) {
 	})
 }
 
-// Index returns the state's index. A test's leader commands use it to plan
-// on the current state (state.SetStackStatus.PlannedAt).
+// Index returns the state's index. Leader commands in a test use it to
+// plan against the current state (state.SetStackStatus.PlannedAt).
 func (c *Cluster) Index() uint64 {
 	c.Lock()
 	defer c.Unlock()

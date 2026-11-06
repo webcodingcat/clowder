@@ -8,10 +8,10 @@ import (
 	"time"
 )
 
-// How many tries an agent accepts per minute at a route without a client
-// certificate (the join's routes). There is a limit per sender, so that a
-// stranger cannot lock everybody out, and a limit in all, so that many
-// senders cannot keep the agent busy: each such route works with the data
+// How many tries an agent accepts per minute on a route without a client
+// certificate (the join's routes). The limit per sender keeps a single
+// stranger from locking everybody out. The total limit keeps many senders
+// from keeping the agent busy, because each such route works with the data
 // key for anyone who asks. Someone with many addresses can still block the
 // route for minutes, but no data is at risk then.
 const (
@@ -19,7 +19,7 @@ const (
 	triesInAll     = 100
 )
 
-// limiter counts the tries of the current minute in memory; each agent
+// limiter counts the tries of the current minute in memory. Each agent
 // counts for itself. A refused try is not counted, so the map never holds
 // more than triesInAll senders, however many there are.
 type limiter struct {
@@ -29,7 +29,7 @@ type limiter struct {
 	total    int
 }
 
-// allow tells whether a try of sender at now is accepted, and counts it.
+// allow tells whether a try by sender at now is accepted, and counts it.
 func (l *limiter) allow(sender netip.Addr, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -45,7 +45,8 @@ func (l *limiter) allow(sender netip.Addr, now time.Time) bool {
 }
 
 // senderOf returns the address that a request counts for: the IPv4
-// address, or for IPv6 the /64, which one machine usually has to itself.
+// address, or for IPv6 the /64, because one machine usually has a whole
+// /64 to itself.
 func senderOf(r *http.Request) netip.Addr {
 	addressPort, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil {
@@ -53,14 +54,14 @@ func senderOf(r *http.Request) netip.Addr {
 	}
 	address := addressPort.Addr().Unmap()
 	if address.Is6() {
-		prefix, _ := address.Prefix(64) // an IPv6 address has 64 bits to keep
+		prefix, _ := address.Prefix(64) // cannot fail for an IPv6 address
 		return prefix.Addr()
 	}
 	return address
 }
 
-// limited lets a route accept only the tries that tries allows. The rest
-// get 429.
+// limited lets a route accept only the tries that the limiter allows. The
+// others get 429.
 func limited(tries *limiter, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !tries.allow(senderOf(r), time.Now()) {

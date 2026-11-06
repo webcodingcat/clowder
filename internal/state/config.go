@@ -32,7 +32,7 @@ func (s *State) SystemSecret(ref names.SecretKeyRef) (Encrypted, bool) {
 // a configuration.
 var ErrNotConfigured = errors.New("the cluster has no ClusterConfiguration yet")
 
-// HetznerToken is the encrypted token the configuration names.
+// HetznerToken returns the encrypted token that the configuration names.
 func (s *State) HetznerToken() (Encrypted, error) {
 	if !s.Configured() {
 		return nil, ErrNotConfigured
@@ -47,7 +47,7 @@ func (s *State) HetznerToken() (Encrypted, error) {
 }
 
 // RegistryLogin is the login for one private image registry. Each part is
-// encrypted, as its Secret holds it.
+// encrypted, as its Secret stores it.
 type RegistryLogin struct {
 	Secret                     string
 	Server, Username, Password Encrypted
@@ -55,9 +55,9 @@ type RegistryLogin struct {
 
 // RegistryLogins returns the logins that a namespace's stacks pull their
 // images with, in the order of its imagePullSecrets. Like the kubelet, it
-// skips a Secret that is missing or lacks a key and goes on, so an image
+// skips a Secret that is missing or lacks a key, and goes on. So an image
 // that needs no login still pulls. missing says which Secrets it skipped
-// and why; the stack's host names them when a pull fails.
+// and why. The stack's host names them when a pull fails.
 func (s *State) RegistryLogins(namespace string) (logins []RegistryLogin, missing error) {
 	held, ok := s.Namespaces[namespace]
 	if !ok {
@@ -96,13 +96,16 @@ func findConfig(s *State, id string) *Meta {
 	return nil
 }
 
-// putConfig replaces the configuration. It refuses a configuration that a
-// resource of the cluster would no longer pass: one without a storage class
-// that a volume has, without a priority category that a stack names, or
-// without a stack's entry in stacks.privileged, or one that puts a host's
-// underlay outside the private network. It also refuses a configuration
-// that names a value names.System lacks. The state checks all this itself,
-// in the log's order, so no resource can slip in between.
+// putConfig replaces the configuration. It refuses a configuration that an
+// existing resource would no longer pass:
+//   - one without a storage class that a volume or one of its copies has;
+//   - one without a priority category that a stack names;
+//   - one without the entry in stacks.privileged that a stack needs;
+//   - one that puts a host's underlay outside the private network.
+//
+// It also refuses a configuration that names a value that names.System
+// lacks. The state checks all this itself, in the log's order, so no
+// resource can slip in between.
 func putConfig(s *State, id string, payload PutResource) (func() *Meta, error) {
 	if id != resource.ClusterConfigurationName {
 		return nil, fmt.Errorf("the ClusterConfiguration is named %s, not %s", resource.ClusterConfigurationName, id)
@@ -140,7 +143,7 @@ func putConfig(s *State, id string, payload PutResource) (func() *Meta, error) {
 			return nil, fmt.Errorf("the configuration would break stack %s: %w", stackID, err)
 		}
 	}
-	// a volume's class, and the class each copy is in (a fallback of it)
+	// a volume's class, and the class of each copy's pool (a fallback of it)
 	for _, volumeID := range slices.Sorted(maps.Keys(s.Volumes)) {
 		volume := s.Volumes[volumeID]
 		classes := []string{volume.Spec.Class}
@@ -169,8 +172,8 @@ func removeConfig(*State, string) (func(), error) {
 }
 
 // configNaming returns the first field of the configuration that names a
-// key of the Secret name in names.System that the Secret would no longer
-// have (keep holds the keys it keeps; nil keeps none). It returns false if
+// key that the Secret name in names.System would no longer have. keep holds
+// the keys that the Secret keeps, and nil keeps none. It returns false if
 // there is no such field.
 func (s *State) configNaming(name string, keep map[string]Encrypted) (clusterspec.SecretPlace, bool) {
 	if !s.Configured() {
