@@ -5,6 +5,7 @@ import (
 	"maps"
 	"slices"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
@@ -30,7 +31,8 @@ const recoveredBy = "clowderd recover ended it"
 // volume of replicas 0 whose LV was on a removed host starts anew, as after
 // a failover. Every stack that is not on the survivor, or that names a
 // volume without data, is placed anew, and every running operation ends as
-// failed. The survivor holds the Floating IP and is the only voter. The
+// failed. The survivor, a control-plane host, is the only voter, and
+// holds the Floating IP if it is an ingress host. The
 // cluster is no longer highly available. It grows again as a new cluster
 // does, and RecoveredAt raises an alert until it is highly available again.
 //
@@ -47,6 +49,10 @@ func applyRecoverRemap(s *State, cmd Command, payload RecoverRemap) (func(), err
 		return nil, fmt.Errorf("no host %d", payload.Survivor)
 	case survivor.Phase == Removed:
 		return nil, fmt.Errorf("host %s is removed", survivor.Name)
+	// it becomes the only voter
+	case !survivor.Roles.Has(hostrole.ControlPlane):
+		return nil, fmt.Errorf("host %s has the roles %s; only a %s host recovers", survivor.Name, survivor.Roles,
+			hostrole.ControlPlane)
 	}
 	gone := s.others(payload.Survivor)
 	if len(gone) == 0 && !s.RecoveredAt.IsZero() {
@@ -57,9 +63,12 @@ func applyRecoverRemap(s *State, cmd Command, payload RecoverRemap) (func(), err
 			s.remove(s.Hosts[id], cmd.At)
 		}
 		// whatever the others thought of it (failed, draining), it is the
-		// one host that runs stacks now
+		// one host in service now
 		survivor.Phase, survivor.Voter, survivor.Leaving = Active, true, false
-		s.Ingress = &payload.Survivor
+		s.Ingress = nil
+		if survivor.Roles.Has(hostrole.Ingress) {
+			s.Ingress = &payload.Survivor
+		}
 		s.HA, s.RecoveredAt = false, cmd.At
 		s.endOperations()
 		lost := s.remapVolumes(payload.Survivor)

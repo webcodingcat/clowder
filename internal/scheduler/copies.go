@@ -8,14 +8,18 @@ import (
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// minTiebreakerHosts is how many hosts that take stacks a cluster needs
-// before a volume with two copies gets a tiebreaker on a third.
+// minTiebreakerHosts is how many hosts that take tiebreakers a cluster
+// needs before a volume with two copies gets a tiebreaker on a third. A
+// volume gets its second copy with a disk only then (addCopy).
 const minTiebreakerHosts = 3
 
 // keepCopies brings the copies of every placed volume to what its replicas
 // ask for. It makes one change per volume and plan, in this order:
 //   - it adds a missing copy, on the host that takes stacks and has the
-//     most free space in the volume's pool; a tiebreaker there gets a disk;
+//     most free space in the volume's pool; a tiebreaker there gets a disk.
+//     The second copy waits until a third host can take the tiebreaker
+//     (minTiebreakerHosts): with quorum majority, two copies without a
+//     tiebreaker would stop writing when either host fails;
 //   - it gives up a surplus copy once the others are synced: first the one
 //     on a host that leaves, never the one where its stack runs;
 //   - it sets the tiebreaker of a volume with two copies, on a host without
@@ -72,7 +76,7 @@ func (p *planner) leaveThrownAway(volume *state.Volume) (state.Volume, bool) {
 		return state.Volume{}, false
 	}
 	best, bestFree, bestClass := state.HostID(0), int64(-1), ""
-	for _, host := range p.activeHosts(nil) {
+	for _, host := range p.stackHosts(nil) {
 		class, pool, ok := p.fit(host, volume.Spec.Class, int64(volume.Spec.Size), nil)
 		if free := p.freeSpace(host, pool); ok && free > bestFree {
 			best, bestFree, bestClass = host, free, class
@@ -134,6 +138,11 @@ func (p *planner) addCopy(volume *state.Volume) (state.Volume, bool) {
 	if len(counted) >= volume.Spec.Replicas || p.syncing {
 		return state.Volume{}, false
 	}
+	// only a new second copy waits; one that replaces a copy on a host
+	// that leaves or is down joins a resource that still has that node
+	if len(diskCopies(volume)) == 1 && len(p.tiebreakerHosts()) < minTiebreakerHosts {
+		return state.Volume{}, false
+	}
 	type candidate struct {
 		host       state.HostID
 		class      string
@@ -141,7 +150,7 @@ func (p *planner) addCopy(volume *state.Volume) (state.Volume, bool) {
 		tiebreaker bool
 	}
 	var candidates []candidate
-	for _, host := range p.activeHosts(nil) {
+	for _, host := range p.stackHosts(nil) {
 		index := slices.IndexFunc(volume.Copies, func(c state.VolumeCopy) bool { return c.Host == host })
 		hasDisk := index >= 0 && !volume.Copies[index].Tiebreaker
 		if hasDisk || p.retiresHere(volume.ID(), volume.DataGeneration, host) {
@@ -241,8 +250,8 @@ func (p *planner) stackHostOf(volume *state.Volume) (state.HostID, bool) {
 }
 
 // setTiebreaker gives a volume the tiebreaker that its copies need
-// (fitTiebreaker). It moves a tiebreaker away from a host that leaves or no
-// longer runs stacks; a draining host keeps its tiebreaker, as it keeps its
+// (fitTiebreaker). It moves a tiebreaker away from a host that leaves or is
+// out of service; a draining host keeps its tiebreaker, as it keeps its
 // copies. The old tiebreaker goes even if there is no new one, because a
 // host that leaves must not keep it.
 func (p *planner) setTiebreaker(volume *state.Volume) (state.Volume, bool) {
@@ -262,35 +271,40 @@ func (p *planner) setTiebreaker(volume *state.Volume) (state.Volume, bool) {
 // copies gained or lost their third vote in a separate command, they would
 // lack DRBD's quorum in between (one of two nodes), and the failover of the
 // copy with the stack would hang if that host failed then.
-//   - Two copies with a disk get a tiebreaker: in a volume of replicas 2,
-//     and in one of replicas 1 while it moves. It goes on the host of
-//     prefer if that host takes stacks: the copy given up there becomes the
-//     tiebreaker, so no node joins or leaves the resource (the host detaches
-//     the disk and removes the LV, which the copy's class still names).
-//     Otherwise it goes on a host without a copy that holds the fewest
-//     tiebreakers. There is none while fewer than minTiebreakerHosts hosts
-//     take stacks.
+//   - Two copies with a disk get a tiebreaker, whatever the volume's
+//     replicas: in a volume of replicas 2, in one of replicas 1 while it
+//     moves, and in one of replicas 3 while fewer than three workers hold
+//     its copies. It goes on the host of
+//     prefer if that host takes tiebreakers: the copy given up there
+//     becomes the tiebreaker, so no node joins or leaves the resource (the
+//     host detaches the disk and removes the LV, which the copy's class
+//     still names). Otherwise it goes on a host without a copy that holds
+//     the fewest tiebreakers, whatever its roles. There is none while fewer
+//     than minTiebreakerHosts hosts take tiebreakers.
 //   - One copy with a disk loses its tiebreaker: with two nodes, the copy
-//     would lose its quorum along with the tiebreaker.
+//     would lose its quorum along with the tiebreaker. So does a volume of
+//     replicas 3 once it has three copies with a disk, which give each
+//     other their votes (and the state allows a tiebreaker only next to
+//     two copies, or in a volume of replicas 2).
 //
-// An existing tiebreaker stays. With three copies (a move of replicas 2) it
-// does no harm, and it is in place once one of them goes.
+// Otherwise an existing tiebreaker stays. With three copies (a move of
+// replicas 2) it does no harm, and it is in place once one of them goes.
 func (p *planner) fitTiebreaker(record *state.Volume, prefer *state.VolumeCopy) {
 	index := slices.IndexFunc(record.Copies, func(c state.VolumeCopy) bool { return c.Tiebreaker })
 	disks := len(diskCopies(record))
 	switch {
-	case disks < 2 && index >= 0:
+	case index >= 0 && (disks < 2 || disks > 2 && record.Spec.Replicas > 2):
 		record.Copies = slices.Delete(slices.Clone(record.Copies), index, index+1)
 		return
-	case disks != 2 || index >= 0 || record.Spec.Replicas > 2 || len(p.activeHosts(nil)) < minTiebreakerHosts:
+	case disks != 2 || index >= 0 || len(p.tiebreakerHosts()) < minTiebreakerHosts:
 		return
 	}
-	if prefer != nil && p.takesStacks(prefer.Host) {
+	if prefer != nil && p.takesTiebreakers(prefer.Host) {
 		record.Copies = append(record.Copies, state.VolumeCopy{Host: prefer.Host, Class: prefer.Class, Tiebreaker: true})
 		return
 	}
 	var candidates []state.HostID
-	for _, host := range p.activeHosts(nil) {
+	for _, host := range p.tiebreakerHosts() {
 		if !slices.ContainsFunc(record.Copies, func(c state.VolumeCopy) bool { return c.Host == host }) &&
 			!p.retiresHere(record.ID(), record.DataGeneration, host) {
 			candidates = append(candidates, host)

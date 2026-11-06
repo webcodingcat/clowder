@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/clientconfig"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -122,7 +124,7 @@ func startCluster(t *testing.T) {
 		Keys:        state.ClusterKeys{CACertificate: ca.CertificatePEM(), CAKey: state.Encrypted("key"), SealingKey: state.Encrypted("age")},
 		ClusterName: "test",
 		Host: state.Host{
-			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
+			ID: 0, Name: "node0", Roles: hostrole.DefaultInit, ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
 			PublicAddress: netip.MustParseAddr("203.0.113.2"), WGPublicKey: "wg", CertificateSerial: "s0",
 			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
@@ -135,7 +137,7 @@ func startCluster(t *testing.T) {
 	}
 	current.Config.Spec.StorageClasses = map[string]clusterspec.StorageClass{"fast": {Pool: "vg-fast/thin"}}
 	hostCertificate, hostKey := issue(func(public ed25519.PublicKey) ([]byte, error) {
-		return ca.IssueHost(public, 0, []netip.Addr{netip.MustParseAddr("127.0.0.1")}, time.Now())
+		return ca.IssueHost(public, 0, hostrole.DefaultInit, []netip.Addr{netip.MustParseAddr("127.0.0.1")}, time.Now())
 	})
 	serverCertificate, err := tls.X509KeyPair(hostCertificate, hostKey)
 	if err != nil {
@@ -289,17 +291,36 @@ func TestTheConnectTimeoutMustBePositive(t *testing.T) {
 	}
 }
 
-func TestHostListShowsTheAddresses(t *testing.T) {
+func TestHostListShowsTheRolesAndAddresses(t *testing.T) {
 	var out bytes.Buffer
 	hosts := []api.HostInfo{
-		{ID: 0, Name: "node0", Phase: "active", Underlay: "10.0.0.2", PublicAddress: "203.0.113.10"},
+		{
+			ID: 0, Name: "node0", Roles: hostrole.DefaultJoin, Phase: "active", Underlay: "10.0.0.2",
+			PublicAddress: "203.0.113.10",
+		},
 	}
 	if err := printHosts(&out, hosts); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 2 || strings.Fields(lines[1])[4] != "10.0.0.2" || strings.Fields(lines[1])[5] != "203.0.113.10" {
+	want := [][]string{
+		{"ID", "NAME", "ROLES", "PHASE", "VOTER", "UNDERLAY", "PUBLIC-ADDRESS", "VERSION"},
+		{"0", "node0", "worker,ingress", "active", "no", "10.0.0.2", "203.0.113.10"},
+	}
+	if len(lines) != len(want) || !slices.Equal(strings.Fields(lines[0]), want[0]) ||
+		!slices.Equal(strings.Fields(lines[1]), want[1]) {
 		t.Errorf("host list:\n%s", out.String())
+	}
+}
+
+func TestAJoinTokenAllowsTheRolesAsked(t *testing.T) {
+	startCluster(t)
+	if _, err := run(t, "host", "join-token", "--roles", "worker,database"); err == nil ||
+		!strings.Contains(err.Error(), `--roles: unknown role "database"`) {
+		t.Errorf("a token with an unknown role: %v", err)
+	}
+	if out, err := run(t, "host", "join-token", "--roles", "control-plane"); err != nil || !strings.Contains(out, ".") {
+		t.Errorf("a token for a control-plane host: %q, %v", out, err)
 	}
 }
 
@@ -309,7 +330,8 @@ func TestHostCommandsTalkToTheCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "node0") || !strings.Contains(out, "active") || !strings.Contains(out, "PUBLIC-ADDRESS") {
+	if !strings.Contains(out, "node0") || !strings.Contains(out, "control-plane,worker,ingress") ||
+		!strings.Contains(out, "active") || !strings.Contains(out, "PUBLIC-ADDRESS") {
 		t.Errorf("host list:\n%s", out)
 	}
 
@@ -342,7 +364,7 @@ func TestRemovingAHostNeedsAConfirmation(t *testing.T) {
 		t.Errorf("want a refusal without --yes, got %v", err)
 	}
 	if _, err := run(t, "host", "remove", "node0", "--yes"); err == nil ||
-		!strings.Contains(err.Error(), "the last that runs stacks") {
+		!strings.Contains(err.Error(), "the last control-plane host in service") {
 		t.Errorf("want the state's refusal for the only host, got %v", err)
 	}
 }

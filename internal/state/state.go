@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
@@ -47,8 +48,9 @@ type State struct {
 	// stays until a host joins with it or it expires.
 	JoinTokens map[string]JoinToken `json:"join_tokens,omitempty"`
 	Hosts      map[HostID]*Host     `json:"hosts,omitempty"`
-	// HA is set once MinHAHosts hosts ran stacks at the same time. From
-	// then on, the cluster stays highly available (checkRemoval).
+	// HA is set once MinHAHosts control-plane hosts were in service at the
+	// same time. From then on, the cluster stays highly available
+	// (checkRemoval).
 	HA bool `json:"ha,omitempty"`
 	// RecoveredAt is when clowderd recover left this cluster with one host
 	// (recover-remap). It is zero again once the cluster is highly
@@ -128,7 +130,6 @@ type HostPhase string
 // belong to the failover (fencing.go in the controller).
 const (
 	Joining    HostPhase = "joining"
-	Passive    HostPhase = "passive"
 	Active     HostPhase = "active"
 	Draining   HostPhase = "draining"
 	Failed     HostPhase = "failed"
@@ -140,12 +141,15 @@ const (
 )
 
 // Phases are all phases of a host, in the order of a host's life.
-var Phases = []HostPhase{Joining, Passive, Active, Draining, Failed, Fencing, Fenced, Recovering, Disabled, Removed}
+var Phases = []HostPhase{Joining, Active, Draining, Failed, Fencing, Fenced, Recovering, Disabled, Removed}
 
 // Host is one member of the cluster.
 type Host struct {
 	ID   HostID `json:"id"`
 	Name string `json:"name"`
+	// Roles are the host's roles, fixed when it joined; its certificate
+	// names the same roles.
+	Roles hostrole.Set `json:"roles"`
 	// ServerID is the Hetzner Cloud server the host runs on.
 	ServerID int64 `json:"server_id"`
 	// ServerChecked says that the leader asked Hetzner and confirmed that

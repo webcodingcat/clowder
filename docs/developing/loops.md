@@ -116,7 +116,8 @@ abstraction layer sits between clowder and Hetzner's API.
   record of what the requests changed. A test names it in `hetzner.api`, so the real
   client talks to it.
 - `controller.RunFloatingIP` (`floatingip.go`) acts only on the leader. It picks the
-  ingress host (`State.Ingress`, `set-ingress`) this way:
+  ingress host (`State.Ingress`, `set-ingress`) among the active hosts with the role
+  `ingress` this way:
   - the recorded ingress host while it is active, so the Floating IP never switches back
     by itself;
   - otherwise the first host in `ingress.preferredHosts` that can take it;
@@ -326,7 +327,7 @@ start elsewhere. Until then it is the only host that runs them, and it may still
 | `host-disabled` | critical | `disabled` (flapping brake) | enabled |
 | `split-brain` | critical | a host reports a copy that has split from a peer (`Host.SplitBrain`) | connected again (`volume resolve-splitbrain`) |
 | `no-quorum` | critical | a primary copy without DRBD's quorum for 2 min (`Host.NoQuorum`) | quorum back |
-| `no-ha` | critical | `clowderd recover` left one host (`RecoveredAt`) | three hosts run stacks |
+| `no-ha` | critical | `clowderd recover` left one host (`RecoveredAt`) | three control-plane hosts are in service |
 
 An alert is resolved below its raise threshold, so a value that hovers near the threshold
 does not raise and resolve the alert at every report. Likewise, an alert that gets better

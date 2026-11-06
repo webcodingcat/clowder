@@ -434,7 +434,7 @@ func hostInfos(current *state.State) []HostInfo {
 	for _, id := range slices.Sorted(maps.Keys(current.Hosts)) {
 		host := current.Hosts[id]
 		hosts = append(hosts, HostInfo{
-			ID: int(host.ID), Name: host.Name, Phase: string(host.Phase), Voter: host.Voter,
+			ID: int(host.ID), Name: host.Name, Roles: host.Roles, Phase: string(host.Phase), Voter: host.Voter,
 			Underlay: host.Underlay.String(), PublicAddress: host.PublicAddress.String(), Version: host.Version,
 		})
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/agent/volumes"
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/datakey"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/ingress"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -91,8 +92,10 @@ func (f Files) traefikCertificatesDir() string { return filepath.Join(f.SecretsD
 // Host is host.json: who this host is in the cluster. init and join write it
 // last, so a host with this file has all the others.
 type Host struct {
-	ID          state.HostID `json:"id"`
-	Name        string       `json:"name"`
+	ID   state.HostID `json:"id"`
+	Name string       `json:"name"`
+	// Roles are the host's roles, as its certificate names them.
+	Roles       hostrole.Set `json:"roles"`
 	NodeAddress netip.Addr   `json:"node_address"`
 	Underlay    netip.Addr   `json:"underlay"`
 	// PublicAddress is where users reach the API.
@@ -100,6 +103,17 @@ type Host struct {
 	ServerID      int64      `json:"server_id"`
 	RaftPort      int        `json:"raft_port"`
 	APIPort       int        `json:"api_port"`
+}
+
+// checkControlPlane refuses a host command that only a control-plane host
+// runs: one that hands out the cluster's keys or makes the host the only
+// voter.
+func (h Host) checkControlPlane(command string) error {
+	if !h.Roles.Has(hostrole.ControlPlane) {
+		return fmt.Errorf("this host has the roles %s; clowderd %s runs on a %s host only", h.Roles, command,
+			hostrole.ControlPlane)
+	}
+	return nil
 }
 
 // raftAddress is where the host's Raft member listens and is reached.

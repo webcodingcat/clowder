@@ -8,21 +8,19 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/webcodingcat/clowder/internal/hostrole"
 )
 
 func TestInitTakesOnlyIPv4(t *testing.T) {
 	files := Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}
-	for _, options := range []InitOptions{
-		{
-			ClusterName: testClusterName, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("2001:db8::2"),
-			PublicAddress: netip.MustParseAddr("198.51.100.2"),
-		},
-		{
-			ClusterName: testClusterName, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
-			PublicAddress: netip.MustParseAddr("2001:db8::3"),
-		},
-		{ClusterName: testClusterName, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2")},
+	for _, addresses := range [][2]netip.Addr{
+		{netip.MustParseAddr("2001:db8::2"), netip.MustParseAddr("198.51.100.2")},
+		{netip.MustParseAddr("10.0.0.2"), netip.MustParseAddr("2001:db8::3")},
+		{netip.MustParseAddr("10.0.0.2"), {}},
 	} {
+		options := node0Options()
+		options.Underlay, options.PublicAddress = addresses[0], addresses[1]
 		err := Init(context.Background(), files, options, &fakeNetwork{}, slog.Default())
 		if err == nil || !strings.Contains(err.Error(), "IPv4") {
 			t.Errorf("init with %s and %s: %v", options.Underlay, options.PublicAddress, err)
@@ -39,8 +37,21 @@ const testClusterName = "prod"
 // node0Options are what cloud-init gives node0's clowderd init.
 func node0Options() InitOptions {
 	return InitOptions{
-		ClusterName: testClusterName, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
-		PublicAddress: netip.MustParseAddr("198.51.100.2"),
+		ClusterName: testClusterName, Name: "node0", Roles: hostrole.DefaultInit, ServerID: 40,
+		Underlay: netip.MustParseAddr("10.0.0.2"), PublicAddress: netip.MustParseAddr("198.51.100.2"),
+	}
+}
+
+func TestInitTakesOnlyAControlPlaneHost(t *testing.T) {
+	files := Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}
+	options := node0Options()
+	options.Roles = hostrole.DefaultJoin
+	err := Init(context.Background(), files, options, &fakeNetwork{}, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "the roles worker,ingress lack control-plane") {
+		t.Errorf("init of a worker: %v", err)
+	}
+	if _, err := os.Stat(files.raftDir()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a refused init left %s: %v", files.raftDir(), err)
 	}
 }
 

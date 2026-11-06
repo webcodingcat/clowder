@@ -125,6 +125,9 @@ func Recover(ctx context.Context, files Files, parts RecoverParts, options Recov
 	if r.host, err = files.readHost(); err != nil {
 		return err
 	}
+	if err := r.host.checkControlPlane("recover"); err != nil {
+		return err
+	}
 	if r.credentials, err = files.readCredentials(); err != nil {
 		return err
 	}

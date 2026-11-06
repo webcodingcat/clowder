@@ -16,6 +16,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/jointoken"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -56,6 +57,8 @@ type JoinRequest struct {
 	PublicAddress netip.Addr `json:"public_address"`
 	ServerID      int64      `json:"server_id"`
 	WGPublicKey   string     `json:"wg_public_key"`
+	// Roles are the roles the host takes, within what the token allows.
+	Roles hostrole.Set `json:"roles"`
 	// PublicKey is the host's own key (Ed25519), which its certificate is
 	// issued for. The private half never leaves the host.
 	PublicKey []byte `json:"public_key"`
@@ -108,9 +111,10 @@ func JoinRefused(err error) error {
 const DefaultJoinTokenTTL = state.DefaultJoinTokenTTL
 
 // JoinTokenRequest asks for a join token that lives for TTL, a Go
-// duration ("1h", "90m").
+// duration ("1h", "90m"), and lets a host take the roles in Roles.
 type JoinTokenRequest struct {
-	TTL string `json:"ttl"`
+	TTL   string       `json:"ttl"`
+	Roles hostrole.Set `json:"roles"`
 }
 
 // JoinTokenAnswer is a new join token. This is the only time the token is
@@ -228,6 +232,9 @@ func CheckJoinRequest(request JoinRequest, now time.Time) error {
 	case len(request.PublicKey) != ed25519.PublicKeySize:
 		return errors.New("the host's public key is no Ed25519 key")
 	}
+	if err := request.Roles.Check(); err != nil {
+		return fmt.Errorf("the host's roles: %w", err)
+	}
 	return nil
 }
 
@@ -246,6 +253,10 @@ func (s *Server) newJoinToken(w http.ResponseWriter, r *http.Request) {
 			state.MinJoinTokenTTL, state.MaxJoinTokenTTL, request.TTL))
 		return
 	}
+	if err := request.Roles.Check(); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("the join token's roles: %w", err))
+		return
+	}
 	token, err := jointoken.New()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -254,7 +265,7 @@ func (s *Server) newJoinToken(w http.ResponseWriter, r *http.Request) {
 	// no time here: the leader puts its own clock into the command as it
 	// commits it, and the handler counts the token's life from there
 	cmd, err := state.NewCommand(state.KindAddJoinToken, time.Time{}, actorOf(identityOf(r)),
-		state.AddJoinToken{ID: token.ID, Hash: token.Hash(), TTL: ttl})
+		state.AddJoinToken{ID: token.ID, Hash: token.Hash(), TTL: ttl, Roles: request.Roles})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

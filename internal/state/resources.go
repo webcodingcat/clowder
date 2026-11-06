@@ -186,9 +186,11 @@ func applyChangeResources(s *State, cmd Command, payload ChangeResources) (func(
 	}, nil
 }
 
-// applyPutResource checks in a fixed order: whether the actor may put the
-// resource, which channel owns it, whether anything changes, and only then
-// everything else. This way a channel learns nothing about another
+// applyPutResource checks in a fixed order: which channel owns the
+// resource, whether anything changes, and only then everything else. It
+// does not check the actor: the cluster has no users, so every CLI
+// certificate may change every resource, and the API decides who may send
+// change-resources at all. This way a channel learns nothing about another
 // channel's spec, only that the resource belongs to another channel. And an
 // unchanged resource passes even if the state has changed since in a way
 // that would make the same spec fail the other checks.

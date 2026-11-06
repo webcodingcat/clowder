@@ -192,7 +192,12 @@ func applyPutVolume(s *State, _ Command, payload PutVolume) (func(), error) {
 	// its missing copies
 	placed := map[HostID]bool{}
 	for _, volumeCopy := range volume.Copies {
-		if err := s.checkLiveHost(&volumeCopy.Host); err != nil {
+		check := s.checkWorker
+		if volumeCopy.Tiebreaker {
+			// a tiebreaker holds no data, so any host may hold it
+			check = s.checkLiveHost
+		}
+		if err := check(&volumeCopy.Host); err != nil {
 			return nil, fmt.Errorf("volume %s: %w", id, err)
 		}
 		if placed[volumeCopy.Host] {
@@ -357,9 +362,11 @@ func (s *State) diskCopyOf(actor, volumeID string, generation int64) (*Volume, i
 // tiebreakerAllowed tells whether a volume may have a tiebreaker. A
 // tiebreaker gives two copies their third vote, and only two. A volume of
 // replicas 2 keeps it while a copy is missing or while one more copy moves
-// in. A volume of replicas 1 has it only while a move gives it two copies.
+// in. A volume of replicas 1 has it only while a move gives it two copies,
+// and one of replicas 3 only while it has two copies (fewer workers than
+// replicas).
 func tiebreakerAllowed(replicas, copies int) bool {
-	return replicas == 2 || replicas == 1 && copies == 2
+	return replicas == 2 || copies == 2
 }
 
 // checkVolume checks the rules that a volume's record must meet on its

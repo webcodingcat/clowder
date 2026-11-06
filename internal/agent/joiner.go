@@ -85,6 +85,9 @@ func (j *joiner) Join(ctx context.Context, request api.JoinRequest) (api.JoinAns
 	if subtle.ConstantTimeCompare([]byte(open.Hash), []byte(token.Hash())) != 1 {
 		return api.JoinAnswer{}, api.JoinRefused(fmt.Errorf("%w: the secret is wrong", state.ErrJoinTokenRefused))
 	}
+	if err := open.CheckRoles(request.Roles); err != nil {
+		return api.JoinAnswer{}, api.JoinRefused(err)
+	}
 	id, ok := current.FreeHostID()
 	if !ok {
 		return api.JoinAnswer{}, api.JoinRefused(fmt.Errorf("the cluster has %d hosts, the most there may be", state.MaxHosts))
@@ -96,7 +99,7 @@ func (j *joiner) Join(ctx context.Context, request api.JoinRequest) (api.JoinAns
 		return api.JoinAnswer{}, err
 	}
 	host := state.Host{
-		ID: id, Name: request.Name, ServerID: request.ServerID, Underlay: request.Underlay,
+		ID: id, Name: request.Name, Roles: request.Roles, ServerID: request.ServerID, Underlay: request.Underlay,
 		PublicAddress: request.PublicAddress, WGPublicKey: request.WGPublicKey,
 		CertificateSerial: pki.Serial(certificate), CertificateNotAfter: certificate.NotAfter,
 	}
@@ -152,8 +155,8 @@ func (j *joiner) firstSeen(nonce string, now time.Time) bool {
 	return true
 }
 
-// issue makes the joining host's certificate, for its own key, its ID and
-// its addresses.
+// issue makes the joining host's certificate, for its own key, its ID, its
+// roles and its addresses.
 func (j *joiner) issue(current *state.State, request api.JoinRequest, id state.HostID, now time.Time) (
 	[]byte, *x509.Certificate, error,
 ) {
@@ -168,7 +171,7 @@ func (j *joiner) issue(current *state.State, request api.JoinRequest, id state.H
 	if err != nil {
 		return nil, nil, err
 	}
-	certificatePEM, err := ca.IssueHost(ed25519.PublicKey(request.PublicKey), int(id),
+	certificatePEM, err := ca.IssueHost(ed25519.PublicKey(request.PublicKey), int(id), request.Roles,
 		[]netip.Addr{request.Underlay, network.NodeAddress(id)}, now)
 	if err != nil {
 		return nil, nil, err

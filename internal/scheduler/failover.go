@@ -34,7 +34,7 @@ func (p *planner) failover(stack *state.Stack) []decision {
 	// those where it pushes services out (stackFit), as in place
 	var whole, pushing []stackFit
 	volumes := map[state.HostID][]state.Volume{}
-	for _, id := range p.activeHosts(&from) {
+	for _, id := range p.stackHosts(&from) {
 		fresh, reason := p.failoverVolumes(stack, id)
 		var fit stackFit
 		if reason == "" {

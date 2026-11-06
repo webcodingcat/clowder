@@ -1,6 +1,7 @@
 # A clowder cluster on Hetzner Cloud: the first host (var.name) and the hosts
-# that join it (var.hosts), each a server with its volumes (one per storage
-# class), in one private network behind one Cloud firewall, and the
+# that join it (var.hosts), each a server with its roles (var.roles) and, if
+# it is a worker, its volumes (one per storage class), in one private
+# network behind one Cloud firewall, and the
 # cluster's Floating IP. cloud-init writes setup.sh and its settings; setup.sh
 # prepares a host and runs clowderd init (the first) or clowderd join (the
 # others, each with a join token from clowder host join-token). The user's
@@ -91,7 +92,7 @@ resource "hcloud_floating_ip" "ingress" {
 # The first host.
 
 resource "hcloud_volume" "class" {
-  for_each = var.storage_classes
+  for_each = local.first_volumes
 
   name     = "${var.name}-${each.key}"
   size     = each.value
@@ -139,7 +140,7 @@ resource "hcloud_floating_ip_assignment" "ingress" {
 }
 
 resource "hcloud_volume_attachment" "class" {
-  for_each = var.storage_classes
+  for_each = local.first_volumes
 
   volume_id = hcloud_volume.class[each.key].id
   server_id = hcloud_server.host.id
@@ -192,9 +193,15 @@ resource "hcloud_volume_attachment" "joining" {
 }
 
 locals {
+  # each host's roles, all three unless var.roles names others
+  roles = { for host in concat([var.name], var.hosts) : host => lookup(var.roles, host, "control-plane,worker,ingress") }
+  # only a worker holds copies with a disk, so only a worker gets volumes
+  workers = [for host, roles in local.roles : host if contains(split(",", roles), "worker")]
+  # the first host's volumes, by class
+  first_volumes = contains(local.workers, var.name) ? var.storage_classes : {}
   # each joining host's volumes, by "<host>-<class>"
   joining_volumes = {
-    for pair in setproduct(var.hosts, keys(var.storage_classes)) :
+    for pair in setproduct([for host in var.hosts : host if contains(local.workers, host)], keys(var.storage_classes)) :
     "${pair[0]}-${pair[1]}" => { host = pair[0], class = pair[1] }
   }
 
@@ -223,6 +230,7 @@ locals {
         content = join("\n", concat(local.common_settings, [
           "VOLUMES='${join(" ", [for name, volume in hcloud_volume.class : "${name}=${volume.id}"])}'",
           "CLUSTER_NAME='${var.cluster_name}'",
+          "ROLES='${local.roles[var.name]}'",
           "",
         ]))
       },
@@ -238,6 +246,7 @@ locals {
           content = join("\n", concat(local.common_settings, [
             "VOLUMES='${join(" ", [for key, volume in local.joining_volumes : "${volume.class}=${hcloud_volume.joining[key].id}" if volume.host == host])}'",
             "JOIN_VIA='${one(hcloud_server.host.network).ip}'",
+            "ROLES='${local.roles[host]}'",
             "",
           ]))
         },

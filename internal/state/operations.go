@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
@@ -357,8 +358,8 @@ func (s *State) checkMove(payload StartOperation) error {
 		return fmt.Errorf("stack %s is on host %d already", move.Stack, move.To)
 	}
 	host, ok := s.Hosts[move.To]
-	if !ok || host.Phase != Active || host.Leaving {
-		return fmt.Errorf("stack %s cannot move to host %d: it is no active host", move.Stack, move.To)
+	if !ok || host.Phase != Active || host.Leaving || !host.Roles.Has(hostrole.Worker) {
+		return fmt.Errorf("stack %s cannot move to host %d: it is no active worker", move.Stack, move.To)
 	}
 	return nil
 }

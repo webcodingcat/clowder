@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/agent/agenttest"
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/hetzner/hetznertest"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/jointoken"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
@@ -74,7 +76,7 @@ func setHetznerToken(t *testing.T, cluster *agenttest.Cluster, token string) {
 	cluster.PutSecretIn(names.System, "hetzner", map[string]string{"token": token})
 }
 
-// token opens a join token.
+// token opens a join token for a worker with ingress, as by default.
 func (j *joinTest) token() jointoken.Token {
 	j.t.Helper()
 	token, err := jointoken.New()
@@ -82,18 +84,19 @@ func (j *joinTest) token() jointoken.Token {
 		j.t.Fatal(err)
 	}
 	j.cluster.Apply(state.KindAddJoinToken, state.CLIActor("admin"),
-		state.AddJoinToken{ID: token.ID, Hash: token.Hash(), TTL: time.Hour})
+		state.AddJoinToken{ID: token.ID, Hash: token.Hash(), TTL: time.Hour, Roles: hostrole.DefaultJoin})
 	return token
 }
 
-// request is node2's join with the token, on server 42, from its underlay.
+// request is node2's join as a worker with ingress with the token, on
+// server 42, from its underlay.
 func (j *joinTest) request(token string) api.JoinRequest {
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
 		j.t.Fatal(err)
 	}
 	return api.JoinRequest{
-		Token: token, Name: "node2", Underlay: netip.MustParseAddr("10.0.0.4"),
+		Token: token, Name: "node2", Roles: hostrole.DefaultJoin, Underlay: netip.MustParseAddr("10.0.0.4"),
 		PublicAddress: netip.MustParseAddr("198.51.100.4"), ServerID: 42,
 		WGPublicKey: "wg-2", PublicKey: j.key.Public().(ed25519.PublicKey), Nonce: nonce, Time: time.Now(),
 		Source: netip.MustParseAddr("10.0.0.4"),
@@ -127,7 +130,8 @@ func TestALeaderAddsAHostWithAnOpenTokenAndItsOwnServer(t *testing.T) {
 	}
 	j.cluster.Read(func(current *state.State) {
 		host := current.Hosts[1]
-		if host == nil || host.Phase != state.Joining || !host.ServerChecked || host.CertificateSerial != pki.Serial(certificate) {
+		if host == nil || host.Phase != state.Joining || !host.ServerChecked || host.CertificateSerial != pki.Serial(certificate) ||
+			!slices.Equal(host.Roles, hostrole.DefaultJoin) {
 			t.Errorf("host 1: %+v", host)
 		}
 		if _, open := current.JoinTokens[token.ID]; open {
@@ -135,6 +139,24 @@ func TestALeaderAddsAHostWithAnOpenTokenAndItsOwnServer(t *testing.T) {
 		}
 	})
 	j.refused(j.request(token.String()), "it is unknown, or a host joined with it")
+}
+
+func TestAJoinWithRolesItsTokenDoesNotAllowIsRefused(t *testing.T) {
+	j := newJoinTest(t)
+	token := j.token()
+	controlPlane := j.request(token.String())
+	controlPlane.Roles = hostrole.DefaultInit
+	j.refused(controlPlane, "the join token allows the roles worker,ingress, not control-plane,worker,ingress")
+	j.cluster.Read(func(current *state.State) {
+		if _, open := current.JoinTokens[token.ID]; !open || len(current.Hosts) != 1 {
+			t.Errorf("a refused join changed the state: tokens %v, hosts %d", current.JoinTokens, len(current.Hosts))
+		}
+	})
+	worker := j.request(token.String())
+	worker.Roles = hostrole.Set{hostrole.Worker}
+	if _, err := j.joiner.Join(context.Background(), worker); err != nil {
+		t.Errorf("a join with fewer roles than the token allows: %v", err)
+	}
 }
 
 func TestAJoinWithAWrongTokenIsRefused(t *testing.T) {
@@ -224,7 +246,7 @@ func (j *joinTest) joinedFiles(key ed25519.PrivateKey) Files {
 		HostKey: keyPEM, WireGuardKey: wireGuardKey.Bytes(),
 		CA: string(j.cluster.State.Keys.CACertificate), Answer: &answer,
 		Host: &Host{
-			ID: answer.Host, Name: "node2", NodeAddress: network.NodeAddress(answer.Host),
+			ID: answer.Host, Name: "node2", Roles: hostrole.DefaultJoin, NodeAddress: network.NodeAddress(answer.Host),
 			Underlay: netip.MustParseAddr("10.0.0.4"), PublicAddress: netip.MustParseAddr("198.51.100.4"),
 			ServerID: 42, RaftPort: RaftPort, APIPort: APIPort,
 		},
@@ -238,8 +260,8 @@ func (j *joinTest) joinedFiles(key ed25519.PrivateKey) Files {
 // node2Options are what cloud-init gives node2's clowderd join.
 func node2Options() JoinOptions {
 	return JoinOptions{
-		Name: "node2", Underlay: netip.MustParseAddr("10.0.0.4"), PublicAddress: netip.MustParseAddr("198.51.100.4"),
-		ServerID: 42,
+		Name: "node2", Roles: hostrole.DefaultJoin, Underlay: netip.MustParseAddr("10.0.0.4"),
+		PublicAddress: netip.MustParseAddr("198.51.100.4"), ServerID: 42,
 	}
 }
 
@@ -289,6 +311,46 @@ func TestAJoinTakesNoCertificateForAnotherKey(t *testing.T) {
 	err = Join(context.Background(), files, node2Options(), &fakeNetwork{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err == nil || !strings.Contains(err.Error(), "not for this host's key") {
 		t.Errorf("a certificate for another key: %v", err)
+	}
+}
+
+func TestAJoinTakesNoCertificateForOtherRoles(t *testing.T) {
+	j := newJoinTest(t)
+	answer, err := j.joiner.Join(context.Background(), j.request(j.token().String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	caPEM := string(j.cluster.State.Keys.CACertificate)
+	if err := checkJoinCertificate(caPEM, answer, j.key, hostrole.DefaultJoin); err != nil {
+		t.Errorf("the certificate for the roles asked for: %v", err)
+	}
+	err = checkJoinCertificate(caPEM, answer, j.key, hostrole.Set{hostrole.Worker})
+	if err == nil || !strings.Contains(err.Error(), "names the roles worker,ingress, not worker") {
+		t.Errorf("a certificate for other roles: %v", err)
+	}
+}
+
+func TestOnlyAControlPlaneHostHandsOutTheClustersKeys(t *testing.T) {
+	files := Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}
+	if err := files.writeHost(Host{ID: 1, Name: "node1", Roles: hostrole.DefaultJoin}); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		command string
+		run     func() error
+	}{
+		{"credentials", func() error {
+			return printCredentials(context.Background(), io.Discard, files, CredentialsOptions{Name: "alice"})
+		}},
+		{"sealing-key", func() error { return printSealingKey(context.Background(), io.Discard, files, false) }},
+	}
+	for _, test := range tests {
+		t.Run(test.command, func(t *testing.T) {
+			want := "this host has the roles worker,ingress; clowderd " + test.command + " runs on a control-plane host only"
+			if err := test.run(); err == nil || err.Error() != want {
+				t.Errorf("got %v, want %q", err, want)
+			}
+		})
 	}
 }
 

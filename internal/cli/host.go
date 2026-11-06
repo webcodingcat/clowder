@@ -15,18 +15,19 @@ import (
 	"golang.org/x/term"
 
 	"github.com/webcodingcat/clowder/internal/api"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 )
 
 func printHosts(out io.Writer, hosts []api.HostInfo) error {
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(table, "ID\tNAME\tPHASE\tVOTER\tUNDERLAY\tPUBLIC-ADDRESS\tVERSION") // tabwriter reports errors on Flush
+	_, _ = fmt.Fprintln(table, "ID\tNAME\tROLES\tPHASE\tVOTER\tUNDERLAY\tPUBLIC-ADDRESS\tVERSION") // tabwriter reports errors on Flush
 	for _, host := range hosts {
 		voter := "no"
 		if host.Voter {
 			voter = "yes"
 		}
-		_, _ = fmt.Fprintf(table, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			host.ID, host.Name, host.Phase, voter, host.Underlay, host.PublicAddress, host.Version)
+		_, _ = fmt.Fprintf(table, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			host.ID, host.Name, host.Roles, host.Phase, voter, host.Underlay, host.PublicAddress, host.Version)
 	}
 	return table.Flush()
 }
@@ -59,31 +60,41 @@ func newHost(g *globals) *cobra.Command {
 // newJoinToken makes the subcommand that makes a join token.
 func newJoinToken(g *globals) *cobra.Command {
 	var ttl time.Duration
+	var roles string
 	command := &cobra.Command{
 		Use:   "join-token",
 		Short: "Make a token one host joins the cluster with (clowderd join --token-file)",
 		Long: "Makes a token that one host can join the cluster with: run clowderd join --token-file\n" +
 			"<file> on the new host. The token works once and only until it expires. It is shown only\n" +
-			"now.",
+			"now. The host may take only the roles that the token names (--roles); a token for a\n" +
+			"control-plane host names control-plane, and the host joins with clowderd join --roles.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			allowed, err := hostrole.Parse(roles)
+			if err != nil {
+				return fmt.Errorf("--roles: %w", err)
+			}
 			client, err := g.connect()
 			if err != nil {
 				return err
 			}
 			var answer api.JoinTokenAnswer
-			if err := client.Act(cmd.Context(), "/v1/join-tokens", api.JoinTokenRequest{TTL: ttl.String()}, &answer); err != nil {
+			request := api.JoinTokenRequest{TTL: ttl.String(), Roles: allowed}
+			if err := client.Act(cmd.Context(), "/v1/join-tokens", request, &answer); err != nil {
 				return err
 			}
 			if _, err := fmt.Fprintln(cmd.OutOrStdout(), answer.Token); err != nil {
 				return err
 			}
 			// on stderr, so the token alone goes into a file
-			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "valid until %s, for one host\n", answer.Expires.Local().Format(time.RFC3339))
+			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "valid until %s, for one host with at most the roles %s\n",
+				answer.Expires.Local().Format(time.RFC3339), allowed)
 			return err
 		},
 	}
 	command.Flags().DurationVar(&ttl, "ttl", api.DefaultJoinTokenTTL, "how long the token opens: a minute to a day")
+	command.Flags().StringVar(&roles, "roles", hostrole.DefaultJoin.String(),
+		"the roles the host may take: "+hostrole.Rule)
 	return command
 }
 

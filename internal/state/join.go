@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"maps"
 	"time"
+
+	"github.com/webcodingcat/clowder/internal/hostrole"
 )
 
 // A host joins with a one-time token (internal/jointoken). A user makes the
@@ -17,6 +19,11 @@ type JoinToken struct {
 	// Hash is jointoken.Token.Hash: SHA-256 of the secret, in hex.
 	Hash    string    `json:"hash"`
 	Expires time.Time `json:"expires"`
+	// Roles are the roles that a host may take when it joins with the
+	// token. A token opens only once, so whoever reads a worker's token
+	// cannot join as a control-plane host with it; kubeadm needs a second
+	// secret for that (--certificate-key).
+	Roles hostrole.Set `json:"roles"`
 }
 
 // The limits of join tokens. A token lives at least a minute, so that a
@@ -38,9 +45,10 @@ const joinTokenKept = time.Hour
 
 // AddJoinToken opens a join token for TTL from the command's time.
 type AddJoinToken struct {
-	ID   string        `json:"id"`
-	Hash string        `json:"hash"`
-	TTL  time.Duration `json:"ttl"`
+	ID    string        `json:"id"`
+	Hash  string        `json:"hash"`
+	TTL   time.Duration `json:"ttl"`
+	Roles hostrole.Set  `json:"roles"`
 }
 
 func applyAddJoinToken(s *State, cmd Command, payload AddJoinToken) (func(), error) {
@@ -53,6 +61,9 @@ func applyAddJoinToken(s *State, cmd Command, payload AddJoinToken) (func(), err
 		return nil, errors.New("the join token's hash is no SHA-256 in hex")
 	case payload.TTL < MinJoinTokenTTL || payload.TTL > MaxJoinTokenTTL:
 		return nil, fmt.Errorf("a join token lives %s to %s, not %s", MinJoinTokenTTL, MaxJoinTokenTTL, payload.TTL)
+	}
+	if err := payload.Roles.Check(); err != nil {
+		return nil, fmt.Errorf("join token %s: %w", payload.ID, err)
 	}
 	if _, ok := s.JoinTokens[payload.ID]; ok {
 		return nil, fmt.Errorf("join token %s exists already", payload.ID)
@@ -68,7 +79,7 @@ func applyAddJoinToken(s *State, cmd Command, payload AddJoinToken) (func(), err
 	}
 	return func() {
 		s.dropExpiredTokens(cmd.At)
-		s.JoinTokens[payload.ID] = JoinToken{Hash: payload.Hash, Expires: cmd.At.Add(payload.TTL)}
+		s.JoinTokens[payload.ID] = JoinToken{Hash: payload.Hash, Expires: cmd.At.Add(payload.TTL), Roles: payload.Roles}
 	}, nil
 }
 
@@ -101,6 +112,15 @@ func (s *State) CheckJoinToken(id string, at time.Time) (JoinToken, error) {
 	return token, nil
 }
 
+// CheckRoles refuses roles that the token does not allow. The leader asks
+// before it issues the host's certificate, and add-host checks again.
+func (t JoinToken) CheckRoles(roles hostrole.Set) error {
+	if !roles.Within(t.Roles) {
+		return fmt.Errorf("the join token allows the roles %s, not %s", t.Roles, roles)
+	}
+	return nil
+}
+
 // AddHost adds a host that joined with a token. The leader checked the
 // token's hash and the host's server with Hetzner, issued the
 // host's certificate and chose its ID (FreeHostID).
@@ -115,7 +135,11 @@ func applyAddHost(s *State, cmd Command, payload AddHost) (func(), error) {
 	if cmd.Actor != LeaderActor {
 		return nil, fmt.Errorf("%s cannot add a host; only the leader does", cmd.Actor)
 	}
-	if _, err := s.CheckJoinToken(payload.Token, cmd.At); err != nil {
+	token, err := s.CheckJoinToken(payload.Token, cmd.At)
+	if err != nil {
+		return nil, err
+	}
+	if err := token.CheckRoles(host.Roles); err != nil {
 		return nil, err
 	}
 	if host.ID < 0 || host.ID >= MaxHosts {

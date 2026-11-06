@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -20,10 +21,10 @@ func addActiveHost(l *leader, id state.HostID) {
 	l.t.Helper()
 	token := "token-" + strconv.Itoa(int(id))
 	l.apply(state.KindAddJoinToken, state.CLIActor("admin"), state.AddJoinToken{
-		ID: token, Hash: strings.Repeat("ab", 32), TTL: time.Hour,
+		ID: token, Hash: strings.Repeat("ab", 32), TTL: time.Hour, Roles: hostrole.DefaultInit,
 	})
 	l.apply(state.KindAddHost, state.LeaderActor, state.AddHost{Token: token, Host: state.Host{
-		ID: id, Name: "node" + strconv.Itoa(int(id)), Underlay: underlayOf(id), PublicAddress: publicAddressOf(id),
+		ID: id, Name: "node" + strconv.Itoa(int(id)), Roles: hostrole.DefaultInit, Underlay: underlayOf(id), PublicAddress: publicAddressOf(id),
 		WGPublicKey: "wg", CertificateSerial: "s" + strconv.Itoa(int(id)), CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		ServerID: 40 + int64(id), ServerChecked: true,
 	}})

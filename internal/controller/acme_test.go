@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/ingress"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
@@ -258,7 +259,7 @@ func newACMERunner(t *testing.T, ca *fakeCA) (*acmeRunner, *leader) {
 		Keys:        state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Encrypted("k"), SealingKey: state.Encrypted("a")},
 		ClusterName: "prod",
 		Host: state.Host{
-			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
+			ID: 0, Name: "node0", Roles: hostrole.DefaultInit, ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
 			PublicAddress: netip.MustParseAddr("198.51.100.2"), WGPublicKey: "wg", CertificateSerial: "s0",
 			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},

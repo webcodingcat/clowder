@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
@@ -19,8 +20,9 @@ func joiningHost() AddHost {
 
 func TestATokenOpensOnceUntilItExpires(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddJoinToken, cliActor, AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
-	if token := c.state.JoinTokens["t1"]; token.Hash != testHash || !token.Expires.Equal(testTime.Add(time.Hour)) {
+	c.mustApply(KindAddJoinToken, cliActor, joinToken("t1"))
+	if token := c.state.JoinTokens["t1"]; token.Hash != testHash || !token.Expires.Equal(testTime.Add(time.Hour)) ||
+		!slices.Equal(token.Roles, hostrole.DefaultInit) {
 		t.Errorf("token %+v", token)
 	}
 
@@ -47,11 +49,15 @@ func TestATokenOpensOnceUntilItExpires(t *testing.T) {
 func TestAJoinTokenHasLimits(t *testing.T) {
 	c := newCluster(t)
 	token := func(id string, ttl time.Duration) AddJoinToken {
-		return AddJoinToken{ID: id, Hash: testHash, TTL: ttl}
+		add := joinToken(id)
+		add.TTL = ttl
+		return add
 	}
 	c.refuse(KindAddJoinToken, cliActor, token("a", 59*time.Second), "a join token lives 1m0s to 24h0m0s")
 	c.refuse(KindAddJoinToken, cliActor, token("a", 25*time.Hour), "a join token lives")
-	c.refuse(KindAddJoinToken, cliActor, AddJoinToken{ID: "a", Hash: "short", TTL: time.Hour}, "no SHA-256")
+	short := joinToken("a")
+	short.Hash = "short"
+	c.refuse(KindAddJoinToken, cliActor, short, "no SHA-256")
 	c.refuse(KindAddJoinToken, cliActor, token("", time.Hour), "has no ID")
 	c.refuse(KindAddJoinToken, HostActor(0), token("a", time.Hour), "only the CLI does")
 	c.mustApply(KindAddJoinToken, cliActor, token("a", time.Hour))
@@ -64,10 +70,11 @@ func TestAJoinTokenHasLimits(t *testing.T) {
 
 func TestExpiredTokensGoAWhileAfter(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddJoinToken, cliActor, AddJoinToken{ID: "old", Hash: testHash, TTL: time.Minute})
+	old := joinToken("old")
+	old.TTL = time.Minute
+	c.mustApply(KindAddJoinToken, cliActor, old)
 	later := testTime.Add(time.Minute + joinTokenKept + time.Second)
-	if _, err := c.applyAt(later, KindAddJoinToken, cliActor,
-		AddJoinToken{ID: "new", Hash: testHash, TTL: time.Hour}); err != nil {
+	if _, err := c.applyAt(later, KindAddJoinToken, cliActor, joinToken("new")); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := c.state.JoinTokens["old"]; ok || len(c.state.JoinTokens) != 1 {
@@ -77,7 +84,7 @@ func TestExpiredTokensGoAWhileAfter(t *testing.T) {
 
 func TestOnlyTheLeaderAddsAHostThatIsNew(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddJoinToken, cliActor, AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
+	c.mustApply(KindAddJoinToken, cliActor, joinToken("t1"))
 	c.refuse(KindAddHost, cliActor, joiningHost(), "only the leader does")
 	c.refuse(KindAddHost, HostActor(0), joiningHost(), "only the leader does")
 	for want, change := range map[string]func(*AddHost){
@@ -100,7 +107,7 @@ func TestOnlyTheLeaderAddsAHostThatIsNew(t *testing.T) {
 
 func TestAServerBelongsToOneHost(t *testing.T) {
 	c := newCluster(t)
-	c.mustApply(KindAddJoinToken, cliActor, AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
+	c.mustApply(KindAddJoinToken, cliActor, joinToken("t1"))
 	add := joiningHost()
 	add.Host.ServerID = 40
 	c.refuse(KindAddHost, LeaderActor, add, "host node0 has the server 40 already")
@@ -122,7 +129,7 @@ func TestAServerBelongsToOneHost(t *testing.T) {
 func TestAnUnderlayIsInThePrivateNetwork(t *testing.T) {
 	c := newCluster(t)
 	c.configure(testConfig())
-	c.mustApply(KindAddJoinToken, cliActor, AddJoinToken{ID: "t1", Hash: testHash, TTL: time.Hour})
+	c.mustApply(KindAddJoinToken, cliActor, joinToken("t1"))
 	add := joiningHost()
 	add.Host.Underlay = netip.MustParseAddr("192.168.0.3")
 	c.refuse(KindAddHost, LeaderActor, add, "host node1 has the underlay 192.168.0.3, outside privateNetwork 10.0.0.0/16")
@@ -147,14 +154,59 @@ func (c *cluster) activeHost(id HostID) {
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: id, Phase: Active})
 }
 
-func TestAPassiveSecondHostMayGoBeforeTheClusterIsHighlyAvailable(t *testing.T) {
+func TestASecondHostMayGoBeforeTheClusterIsHighlyAvailable(t *testing.T) {
 	c := newCluster(t)
 	c.addHost(testHost(1))
-	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Passive, From: Joining})
+	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active, From: Joining})
 	if c.state.HA {
-		t.Error("one active host and a passive one are highly available")
+		t.Error("two active hosts are highly available")
 	}
 	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed})
+}
+
+func TestAJoinTokenNamesValidRoles(t *testing.T) {
+	tests := []struct {
+		name  string
+		roles hostrole.Set
+	}{
+		{"none", nil},
+		{"unknown", hostrole.Set{"database"}},
+		{"twice", hostrole.Set{hostrole.Worker, hostrole.Worker}},
+		{"out of order", hostrole.Set{hostrole.Ingress, hostrole.Worker}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			c := newCluster(t)
+			token := joinToken("t1")
+			token.Roles = test.roles
+			c.refuse(KindAddJoinToken, cliActor, token, "join token t1")
+		})
+	}
+}
+
+func TestAHostJoinsOnlyWithRolesItsTokenAllows(t *testing.T) {
+	c := newCluster(t)
+	token := joinToken("t1")
+	token.Roles = hostrole.DefaultJoin
+	c.mustApply(KindAddJoinToken, cliActor, token)
+	add := joiningHost()
+	c.refuse(KindAddHost, LeaderActor, add,
+		"the join token allows the roles worker,ingress, not control-plane,worker,ingress")
+	add.Host.Roles = hostrole.Set{"database"}
+	c.refuse(KindAddHost, LeaderActor, add, "the join token allows")
+	add.Host.Roles = hostrole.Set{hostrole.Worker}
+	c.mustApply(KindAddHost, LeaderActor, add)
+	if roles := c.state.Hosts[1].Roles; !slices.Equal(roles, hostrole.Set{hostrole.Worker}) {
+		t.Errorf("host 1 has the roles %v", roles)
+	}
+}
+
+func TestAHostNeedsValidRoles(t *testing.T) {
+	c := newCluster(t)
+	c.mustApply(KindAddJoinToken, cliActor, joinToken("t1"))
+	add := joiningHost()
+	add.Host.Roles = hostrole.Set{hostrole.Worker, hostrole.ControlPlane}
+	c.refuse(KindAddHost, LeaderActor, add, "host node1: roles worker,control-plane are not in the order")
 }
 
 func TestAHighlyAvailableClusterKeepsThreeHosts(t *testing.T) {
@@ -164,7 +216,7 @@ func TestAHighlyAvailableClusterKeepsThreeHosts(t *testing.T) {
 		t.Fatal("three active hosts are not highly available")
 	}
 	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 2, Phase: Removed},
-		"2 hosts would be left to run stacks, and a highly available cluster keeps 3; join a replacement first")
+		"2 control-plane hosts would be left in service, and a highly available cluster keeps 3; join a replacement first")
 	// a dead host too: a replacement joins first
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 2, Phase: Failed})
 	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 2, Phase: Removed}, "join a replacement first")

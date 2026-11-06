@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
 )
@@ -69,6 +70,28 @@ func TestACopyKeepsItsSyncedWordWhileItStaysWhatItWas(t *testing.T) {
 	if copies := c.state.Volumes["default/data"].Copies; copies[1].Synced {
 		t.Errorf("a tiebreaker is synced: %+v", copies)
 	}
+}
+
+func TestOnlyAWorkerTakesAStackOrACopyWithADiskButAnyHostATiebreaker(t *testing.T) {
+	c := moveCluster(t)
+	c.state.Hosts[2].Roles = hostrole.Set{hostrole.ControlPlane, hostrole.Ingress}
+	const notWorker = "host node2 has the roles control-plane,ingress, not worker"
+	c.refuse(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: c.withCopies(
+		VolumeCopy{Host: 0, Class: "fast"}, VolumeCopy{Host: 2, Class: "fast"},
+	)}, notWorker)
+	two := HostID(2)
+	c.refuse(KindSetStackStatus, LeaderActor,
+		SetStackStatus{PlannedAt: c.index, ID: "default/shop", Status: StackStarting, Host: &two}, notWorker)
+	c.refuse(KindRequestMove, cliActor, RequestMove{Namespace: "default", Name: "shop", To: 2}, "host 2 is no active worker")
+	zero := HostID(0)
+	c.refuse(KindStartOperation, LeaderActor, StartOperation{
+		Kind: OperationMoveStack, Locks: []string{"stack/default/shop"},
+		Move: &StackMove{Stack: "default/shop", From: &zero, To: 2},
+	}, "it is no active worker")
+
+	c.mustApply(KindPutVolume, LeaderActor, PutVolume{PlannedAt: c.index, Volume: c.withCopies(
+		VolumeCopy{Host: 0, Class: "fast"}, VolumeCopy{Host: 1, Class: "fast"}, VolumeCopy{Host: 2, Tiebreaker: true},
+	)})
 }
 
 func TestAVolumeHasOneCopyMoreThanItsReplicasAtMostAndATiebreakerOnlyForTwoCopies(t *testing.T) {
@@ -178,7 +201,7 @@ func TestAMoveGoesFromTheStacksHostToAnActiveHost(t *testing.T) {
 		{"to a draining host", StartOperation{
 			Kind: OperationMoveStack, Locks: []string{"stack/default/shop"},
 			Move: &StackMove{Stack: "default/shop", From: &zero, To: 2},
-		}, "it is no active host"},
+		}, "it is no active worker"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -247,7 +270,7 @@ func TestAUserAsksToMoveAStackAndTheMovesEndAnswersIt(t *testing.T) {
 	c := moveCluster(t)
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 2, Phase: Draining})
 	c.refuse(KindRequestMove, cliActor, RequestMove{Namespace: "default", Name: "shop", To: 0}, "runs on host 0 already")
-	c.refuse(KindRequestMove, cliActor, RequestMove{Namespace: "default", Name: "shop", To: 2}, "no active host")
+	c.refuse(KindRequestMove, cliActor, RequestMove{Namespace: "default", Name: "shop", To: 2}, "no active worker")
 	c.refuse(KindRequestMove, cliActor, RequestMove{Namespace: "default", Name: "blog", To: 1}, "no stack default/blog")
 	c.mustApply(KindRequestMove, cliActor, RequestMove{Namespace: "default", Name: "shop", To: 1})
 	if got := c.state.Stacks["default/shop"].MoveTo; got == nil || *got != 1 {

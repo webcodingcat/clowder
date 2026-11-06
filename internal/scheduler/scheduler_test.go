@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
@@ -42,7 +43,8 @@ func TestVolumesFitOnlyWithoutOvercommit(t *testing.T) {
 // planTime is the leader's clock in the tests' plans.
 var planTime = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 
-// cluster is one active host with a 100 GiB fast and a 10 GiB bulk pool.
+// cluster is one active host with every role, a 100 GiB fast and a 10 GiB
+// bulk pool.
 func cluster() *state.State {
 	return &state.State{
 		Config: state.ClusterConfig{Spec: clusterspec.Config{StorageClasses: map[string]clusterspec.StorageClass{
@@ -51,7 +53,7 @@ func cluster() *state.State {
 			"any":  {Fallback: []string{"bulk", "fast"}},
 		}}},
 		Hosts: map[state.HostID]*state.Host{0: {
-			ID: 0, Name: "node0", Phase: state.Active, Pools: map[string]state.Pool{
+			ID: 0, Name: "node0", Roles: hostrole.DefaultInit, Phase: state.Active, Pools: map[string]state.Pool{
 				"vg-fast/thin": {Name: "vg-fast/thin", SizeBytes: 100 * gib},
 				"vg-bulk/thin": {Name: "vg-bulk/thin", SizeBytes: 10 * gib},
 			},
@@ -155,7 +157,9 @@ func TestAPlacedStackGetsOnlyItsNewVolumes(t *testing.T) {
 
 func TestAStackGoesWhereItsVolumeKeepsItsData(t *testing.T) {
 	current := cluster()
-	current.Hosts[1] = &state.Host{ID: 1, Name: "node1", Phase: state.Active, Pools: current.Hosts[0].Pools}
+	current.Hosts[1] = &state.Host{
+		ID: 1, Name: "node1", Roles: hostrole.DefaultInit, Phase: state.Active, Pools: current.Hosts[0].Pools,
+	}
 	stack(current, "shop", map[string]resource.VolumeSpec{"data": volume("fast", 1, 0)})
 	data := current.Volumes["default/data"]
 	data.Status, data.Copies = state.VolumeOK, []state.VolumeCopy{{Host: 1, Class: "fast"}}
@@ -172,11 +176,26 @@ func TestAStackGoesWhereItsVolumeKeepsItsData(t *testing.T) {
 	}
 }
 
+func TestAStackGoesOnlyToAWorker(t *testing.T) {
+	current := cluster()
+	current.Hosts[0].Roles = hostrole.Set{hostrole.ControlPlane, hostrole.Ingress}
+	stack(current, "shop", map[string]resource.VolumeSpec{"db": volume("fast", 1, 0)})
+	if waiting := Plan(current, planTime).Waiting; len(waiting) != 1 || waiting[0].Reason != "no active worker" {
+		t.Errorf("without a worker: waiting %+v", waiting)
+	}
+	current.Hosts[1] = &state.Host{
+		ID: 1, Name: "node1", Roles: hostrole.Set{hostrole.Worker}, Phase: state.Active, Pools: current.Hosts[0].Pools,
+	}
+	if placements := Plan(current, planTime).Placements; len(placements) != 1 || placements[0].Host != 1 {
+		t.Errorf("placements %+v", placements)
+	}
+}
+
 func TestWithoutAnActiveHostEveryStackWaits(t *testing.T) {
 	current := cluster()
 	current.Hosts[0].Phase = state.Draining
 	stack(current, "shop", map[string]resource.VolumeSpec{"db": volume("fast", 1, 0)})
-	if waiting := Plan(current, planTime).Waiting; len(waiting) != 1 || waiting[0].Reason != "no active host" {
+	if waiting := Plan(current, planTime).Waiting; len(waiting) != 1 || waiting[0].Reason != "no active worker" {
 		t.Errorf("waiting %+v", waiting)
 	}
 }

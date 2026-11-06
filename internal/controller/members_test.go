@@ -3,16 +3,19 @@ package controller
 import (
 	"testing"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// hostsIn is a state with hosts in the given phases, by ID; a host that is
-// not joining has reported its version, and host 0 votes, as the bootstrap
-// made it.
+// hostsIn is a state with hosts in the given phases, by ID, each with every
+// role; a host that is not joining has reported its version, and host 0
+// votes, as the bootstrap made it.
 func hostsIn(phases ...state.HostPhase) *state.State {
 	current := &state.State{Hosts: map[state.HostID]*state.Host{}}
 	for index, phase := range phases {
-		host := &state.Host{ID: state.HostID(index), Phase: phase, Version: "0.2.0", Voter: index == 0}
+		host := &state.Host{
+			ID: state.HostID(index), Roles: hostrole.DefaultInit, Phase: phase, Version: "0.2.0", Voter: index == 0,
+		}
 		if phase == state.Joining {
 			host.Version = ""
 		}
@@ -35,7 +38,7 @@ func voters(hosts int, voting ...state.HostID) map[state.HostID]bool {
 }
 
 func TestTheMembersFollowTheHostsOneStepAtATime(t *testing.T) {
-	const active, passive, joining, removed = state.Active, state.Passive, state.Joining, state.Removed
+	const active, joining, removed = state.Active, state.Joining, state.Removed
 	reported := func(current *state.State, id state.HostID) *state.State {
 		current.Hosts[id].Version = "0.2.0"
 		return current
@@ -54,14 +57,10 @@ func TestTheMembersFollowTheHostsOneStepAtATime(t *testing.T) {
 		{"a joining host becomes a member", hostsIn(active, joining), voters(1, 0), memberStep{action: addNonvoter, host: 1}},
 		{"it waits for its agent", hostsIn(active, joining), voters(2, 0), memberStep{}},
 		{
-			"the second host is passive", reported(hostsIn(active, joining), 1), voters(2, 0),
-			memberStep{action: makePassive, host: 1},
+			"the second host is active once its agent runs", reported(hostsIn(active, joining), 1), voters(2, 0),
+			memberStep{action: makeActive, host: 1},
 		},
-		{
-			"the third is active", reported(hostsIn(active, passive, joining), 2), voters(3, 0),
-			memberStep{action: makeActive, host: 2},
-		},
-		{"then the passive one", hostsIn(active, passive, active), voters(3, 0), memberStep{action: makeActive, host: 1}},
+		{"of two control-plane hosts, one votes", hostsIn(active, active), voters(2, 0), memberStep{}},
 		{"three active hosts get three voters", hostsIn(active, active, active), voters(3, 0), memberStep{action: addVoter, host: 1}},
 		{"one by one", hostsIn(active, active, active), voters(3, 0, 1), memberStep{action: addVoter, host: 2}},
 		{
@@ -107,6 +106,40 @@ func TestTheMembersFollowTheHostsOneStepAtATime(t *testing.T) {
 			"the leader keeps its vote", ha(hostsIn(active, active, active, removed, removed, removed)),
 			voters(3, 0, 1, 2),
 			memberStep{action: recordVoterRole, host: 1, voter: true},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := nextMemberStep(test.current, test.configuration, 0); got != test.want {
+				t.Errorf("got %+v, want %+v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestOnlyControlPlaneHostsVote(t *testing.T) {
+	// workers makes the given hosts workers with ingress
+	workers := func(current *state.State, ids ...state.HostID) *state.State {
+		for _, id := range ids {
+			current.Hosts[id].Roles = hostrole.DefaultJoin
+		}
+		return current
+	}
+	const active = state.Active
+	for _, test := range []struct {
+		name          string
+		current       *state.State
+		configuration map[state.HostID]bool
+		want          memberStep
+	}{
+		{"workers get no vote", workers(hostsIn(active, active, active), 1, 2), voters(3, 0), memberStep{}},
+		{
+			"a worker that votes loses its vote", workers(hostsIn(active, active, active), 1, 2), voters(3, 0, 1),
+			memberStep{action: demoteVoter, host: 1},
+		},
+		{
+			"three control-plane hosts among workers get three voters",
+			workers(hostsIn(active, active, active, active), 2), voters(4, 0, 1),
+			memberStep{action: addVoter, host: 3},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

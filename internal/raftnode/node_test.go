@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/pki"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -52,7 +53,7 @@ func (c *testCluster) certificate(issue func(public ed25519.PublicKey) ([]byte, 
 
 func (c *testCluster) hostCertificate(id state.HostID) tls.Certificate {
 	return c.certificate(func(public ed25519.PublicKey) ([]byte, error) {
-		return c.ca.IssueHost(public, int(id), []netip.Addr{netip.MustParseAddr("127.0.0.1")}, time.Now())
+		return c.ca.IssueHost(public, int(id), hostrole.DefaultInit, []netip.Addr{netip.MustParseAddr("127.0.0.1")}, time.Now())
 	})
 }
 
@@ -109,7 +110,7 @@ func bootstrapCommand(t *testing.T) state.Command {
 		Keys:        state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Encrypted("key"), SealingKey: state.Encrypted("age")},
 		ClusterName: "prod",
 		Host: state.Host{
-			ID: 0, Name: "node0", ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
+			ID: 0, Name: "node0", Roles: hostrole.DefaultInit, ServerID: 40, Underlay: netip.MustParseAddr("10.0.0.2"),
 			PublicAddress: netip.MustParseAddr("198.51.100.2"), WGPublicKey: "wg", CertificateSerial: "s0",
 			CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},

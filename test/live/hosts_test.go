@@ -98,10 +98,11 @@ func findHost(hosts []clusterHost, name string) (clusterHost, bool) {
 }
 
 // joinToken makes a join token with the CLI; the line after it, on stderr,
-// says until when it opens.
+// says until when it opens. The token allows every role, as the module
+// gives every host all three.
 func joinToken(t *testing.T, ttl time.Duration) string {
 	t.Helper()
-	output := mustClowder(t, "host", "join-token", "--ttl", ttl.String())
+	output := mustClowder(t, "host", "join-token", "--ttl", ttl.String(), "--roles", "control-plane,worker,ingress")
 	token, _, _ := strings.Cut(output, "\n")
 	if _, err := jointoken.Parse(token); err != nil {
 		t.Fatalf("join-token printed %q: %v", output, err)
@@ -205,15 +206,15 @@ func waitForJoined(t *testing.T, names ...string) {
 	})
 }
 
-// growToThreeHosts joins two hosts with a token each: the second waits
-// passive, and with the third all of them are active and vote. The joined
+// growToThreeHosts joins two hosts with a token each: the second is active
+// without a vote, and with the third all of them vote. The joined
 // hosts are drained, so the stacks of the scenarios start on the first host,
 // where they look for them; TestPlacement undrains them for a while.
 func growToThreeHosts(t *testing.T) {
 	tokens := map[string]string{firstJoining: joinToken(t, time.Hour), secondJoining: joinToken(t, time.Hour)}
 	applyHosts(t, []string{firstJoining}, map[string]string{firstJoining: tokens[firstJoining]})
-	eventually(t, joinDeadline, firstJoining+" passive", func() error {
-		if found, ok := findHost(clusterHosts(t), firstJoining); !ok || found.Phase != "passive" || found.Voter {
+	eventually(t, joinDeadline, firstJoining+" active without a vote", func() error {
+		if found, ok := findHost(clusterHosts(t), firstJoining); !ok || found.Phase != "active" || found.Voter {
 			return fmt.Errorf("%s is %+v", firstJoining, found)
 		}
 		return nil

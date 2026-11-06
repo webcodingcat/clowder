@@ -12,6 +12,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/hetzner"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -175,11 +176,11 @@ func OpenHetzner(current *state.State, open Open) (*hetzner.Client, error) {
 // recorded host while that host can hold it (there is no switching back).
 // Otherwise it is the first host of ingress.preferredHosts that can, and
 // otherwise the host with the lowest ID that can. A host can hold the
-// Floating IP when it is active and Hetzner has confirmed its server. A
-// host whose server is not checked yet (the first host, before its check in
-// holdFloatingIP) counts only while no such host exists. So a server that
-// Hetzner refuses never keeps the Floating IP from a host whose server is
-// checked.
+// Floating IP when it is an active ingress host and Hetzner has confirmed
+// its server. A host whose server is not checked yet (the first host,
+// before its check in holdFloatingIP) counts only while no such host
+// exists. So a server that Hetzner refuses never keeps the Floating IP from
+// a host whose server is checked.
 func ingressHost(current *state.State) (*state.Host, bool) {
 	if host, ok := chooseIngress(current, true); ok {
 		return host, true
@@ -191,7 +192,8 @@ func ingressHost(current *state.State) (*state.Host, bool) {
 // checkedOnly is true, it considers only hosts with checked servers.
 func chooseIngress(current *state.State, checkedOnly bool) (*state.Host, bool) {
 	canHold := func(host *state.Host) bool {
-		return host != nil && host.Phase == state.Active && (host.ServerChecked || !checkedOnly)
+		return host != nil && host.Roles.Has(hostrole.Ingress) && host.Phase == state.Active &&
+			(host.ServerChecked || !checkedOnly)
 	}
 	if current.Ingress != nil && canHold(current.Hosts[*current.Ingress]) {
 		return current.Hosts[*current.Ingress], true

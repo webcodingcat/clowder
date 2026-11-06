@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -33,7 +34,6 @@ const (
 	demoteVoter     memberAction = "take the vote of"
 	removeMember    memberAction = "remove from Raft"
 	handOverLead    memberAction = "hand the lead over, to be removed"
-	makePassive     memberAction = "make passive"
 	makeActive      memberAction = "make active"
 	recordVoterRole memberAction = "record the Raft role of"
 	removeLeaving   memberAction = "remove from the cluster once empty"
@@ -52,12 +52,10 @@ type memberStep struct {
 // time:
 //   - Every host that is not removed is a member. A joining host becomes a
 //     member as a non-voter.
-//   - A joining host that has reported (its agent runs) becomes passive
-//     while it is the second host of a cluster that is not highly available
-//     yet; otherwise it becomes active. A passive host becomes active once
-//     there are three hosts.
-//   - Of the active hosts, 1, 3 or 5 vote (voterCount): first those that
-//     voted already, then those with the lowest IDs.
+//   - A joining host that has reported (its agent runs) becomes active.
+//   - Of the control-plane hosts in service, 1, 3 or 5 vote (voterCount):
+//     first those that voted already, then those with the lowest IDs. The
+//     other hosts follow the log without a vote.
 //   - A removed host leaves Raft once another host has taken its vote. A
 //     removed leader hands over its lead first.
 //   - The state records each host's vote as Raft has it (set-host-voter).
@@ -113,8 +111,6 @@ func tendMembers(ctx context.Context, cluster Cluster, members Members, propose 
 		err = members.RemoveMember(step.host)
 	case handOverLead:
 		err = members.TransferLeadership()
-	case makePassive:
-		err = movePhase(ctx, propose, copied.Hosts[step.host], state.Passive)
 	case makeActive:
 		err = movePhase(ctx, propose, copied.Hosts[step.host], state.Active)
 	case removeLeaving:
@@ -134,9 +130,10 @@ func movePhase(ctx context.Context, propose Propose, host *state.Host, phase sta
 	return err
 }
 
-// voterCount is how many of n active hosts vote. Below three hosts, one
-// votes, because two voters would stop when either is lost. From six
-// hosts on, five vote.
+// voterCount is how many of n control-plane hosts vote. Below three, one
+// votes, because two voters would stop when either is lost: the second
+// control-plane host waits for its vote until a third one comes. From six
+// on, five vote.
 func voterCount(n int) int {
 	switch {
 	case n >= 6:
@@ -156,11 +153,11 @@ func voterCount(n int) int {
 //     removal revoked the leader's certificate, so the others accept no new
 //     connection from it. But Raft's open connections stay up, and so
 //     would its lead.
-//  2. Hosts that are not members join Raft, and a joining or passive host
-//     that is a voter loses its vote.
+//  2. Hosts that are not members join Raft, and a joining host or a host
+//     without the control plane that is a voter loses its vote.
 //  3. A leaving host (Host.Leaving) with nothing left on it is removed; if
-//     it leads, another leader removes it. Then joining and passive hosts
-//     move on to their next phase.
+//     it leads, another leader removes it. Then a joining host that has
+//     reported becomes active.
 //  4. Votes go where they belong before a removed voter leaves, so that
 //     the cluster never has fewer voters along the way than at the end.
 //  5. Removed hosts leave Raft.
@@ -175,13 +172,14 @@ func nextMemberStep(current *state.State, configuration map[state.HostID]bool, s
 		return memberStep{action: handOverLead, host: self}
 	}
 	for _, id := range ids {
-		phase := current.Hosts[id].Phase
+		host := current.Hosts[id]
 		switch {
-		case phase != state.Removed && !isMember(id):
+		case host.Phase != state.Removed && !isMember(id):
 			return memberStep{action: addNonvoter, host: id}
 		// a host that took the ID of a removed host before that host left
-		// Raft inherits its vote; it gets none until it runs stacks
-		case (phase == state.Joining || phase == state.Passive) && configuration[id] && id != self:
+		// Raft inherits its vote; it gets none until it is in service, and
+		// none at all without the control plane
+		case (host.Phase == state.Joining || !host.Roles.Has(hostrole.ControlPlane)) && configuration[id] && id != self:
 			return memberStep{action: demoteVoter, host: id}
 		}
 	}
@@ -195,8 +193,11 @@ func nextMemberStep(current *state.State, configuration map[state.HostID]bool, s
 			return memberStep{action: removeLeaving, host: id}
 		}
 	}
-	if step := nextPhase(current, ids); step.action != noMemberAction {
-		return step
+	for _, id := range ids {
+		// its agent runs
+		if host := current.Hosts[id]; host.Phase == state.Joining && host.Version != "" {
+			return memberStep{action: makeActive, host: id}
+		}
 	}
 	if step := nextVoter(current, configuration, ids, self); step.action != noMemberAction {
 		return step
@@ -215,40 +216,12 @@ func nextMemberStep(current *state.State, configuration map[state.HostID]bool, s
 	return memberStep{}
 }
 
-// nextPhase moves a joining host that has reported, or a passive host, on
-// to its next phase.
-func nextPhase(current *state.State, ids []state.HostID) memberStep {
-	// settled are the hosts that run stacks or wait to run them (passive);
-	// joining hosts do not count. With one active host and two joining
-	// hosts, the first to report becomes passive (settled is 1), the second
-	// becomes active (settled is 2), and then the passive one becomes
-	// active (settled is 3).
-	settled := 0
-	for _, host := range current.Hosts {
-		if host.Phase == state.Active || host.Phase == state.Draining || host.Phase == state.Passive {
-			settled++
-		}
-	}
-	for _, id := range ids {
-		host := current.Hosts[id]
-		switch {
-		case host.Phase == state.Joining && host.Version != "" && !current.HA && settled == 1:
-			return memberStep{action: makePassive, host: id}
-		case host.Phase == state.Joining && host.Version != "":
-			return memberStep{action: makeActive, host: id}
-		case host.Phase == state.Passive && (current.HA || settled >= state.MinHAHosts):
-			return memberStep{action: makeActive, host: id}
-		}
-	}
-	return memberStep{}
-}
-
 // nextVoter promotes or demotes one host, so that voterCount of the
-// eligible hosts vote. Eligible hosts run stacks, or ran them and are to
-// come back (votes). A host that voted keeps its vote while it may, and the
-// leader never gives up its own. Only an active or draining host gets a new
-// vote: a host that cannot answer would count toward a quorum that it does
-// not help to reach.
+// eligible hosts vote. Eligible hosts are the control-plane hosts in
+// service, or out of it and to come back (votes). A host that voted keeps
+// its vote while it may, and the leader never gives up its own. Only a
+// host in service gets a new vote: a host that cannot answer would count
+// toward a quorum that it does not help to reach.
 //
 // A failed or fenced voter keeps its vote. Taking it away would shrink the
 // cluster below what it was built for. With three hosts, the vote would go
@@ -259,7 +232,7 @@ func nextVoter(current *state.State, configuration map[state.HostID]bool, ids []
 ) memberStep {
 	var eligible, voting []state.HostID
 	for _, id := range ids {
-		if votes(current.Hosts[id].Phase) {
+		if host := current.Hosts[id]; host.Roles.Has(hostrole.ControlPlane) && votes(host.Phase) {
 			eligible = append(eligible, id)
 			if configuration[id] {
 				voting = append(voting, id)
@@ -270,7 +243,7 @@ func nextVoter(current *state.State, configuration map[state.HostID]bool, ids []
 	switch {
 	case len(voting) < want:
 		for _, id := range eligible {
-			if phase := current.Hosts[id].Phase; !configuration[id] && state.RunsStacks(phase) {
+			if phase := current.Hosts[id].Phase; !configuration[id] && state.InService(phase) {
 				return memberStep{action: addVoter, host: id}
 			}
 		}
@@ -284,8 +257,8 @@ func nextVoter(current *state.State, configuration map[state.HostID]bool, ids []
 	return memberStep{}
 }
 
-// votes tells whether a host in this phase counts for the voters: it runs
-// stacks, or it ran them and is to come back after a failure.
+// votes tells whether a control-plane host in this phase counts for the
+// voters: it is in service, or it was and is to come back after a failure.
 func votes(phase state.HostPhase) bool {
 	switch phase {
 	case state.Active, state.Draining, state.Failed, state.Fencing, state.Fenced, state.Recovering, state.Disabled:

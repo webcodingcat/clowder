@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/names"
 )
 
@@ -117,11 +118,19 @@ func (ca *CA) KeyPEM() ([]byte, error) {
 }
 
 // IssueHost issues the certificate of a host, for TLS both as server and
-// as client, valid for its addresses (underlay and node address).
-func (ca *CA) IssueHost(public crypto.PublicKey, id int, addresses []netip.Addr, now time.Time) ([]byte, error) {
+// as client, valid for its addresses (underlay and node address). The
+// certificate names the host's roles as its organizations, so that another
+// host can tell them from the certificate alone.
+func (ca *CA) IssueHost(public crypto.PublicKey, id int, roles hostrole.Set, addresses []netip.Addr,
+	now time.Time,
+) ([]byte, error) {
+	if err := roles.Check(); err != nil {
+		return nil, fmt.Errorf("host %d: %w", id, err)
+	}
 	template, err := newTemplate(pkix.Name{
 		CommonName:         HostName(id),
 		OrganizationalUnit: []string{string(RoleHost)},
+		Organization:       roles.Strings(),
 	}, now, leafLifetime)
 	if err != nil {
 		return nil, err
@@ -180,9 +189,10 @@ type Identity struct {
 	Role Role
 	// Name is the CLI's name, or the host's name (host-<id>).
 	Name string
-	// HostID is set for hosts.
-	HostID int
-	Serial string
+	// HostID and HostRoles are set for hosts.
+	HostID    int
+	HostRoles hostrole.Set
+	Serial    string
 	// NotBefore is when the certificate starts. The API uses it to check a
 	// CLI certificate against the cluster's cutoff.
 	NotBefore time.Time
@@ -221,7 +231,17 @@ func Verify(caCertificate, certificate *x509.Certificate, revoked func(serial st
 		if err != nil || HostName(id) != identity.Name {
 			return Identity{}, fmt.Errorf("host certificate with the name %q", identity.Name)
 		}
-		identity.HostID = id
+		// DER sorts a SET OF by its encoding, so the organizations come
+		// back in another order than IssueHost wrote them; New sorts them
+		named := make([]hostrole.Role, 0, len(certificate.Subject.Organization))
+		for _, organization := range certificate.Subject.Organization {
+			named = append(named, hostrole.Role(organization))
+		}
+		roles, err := hostrole.New(named...)
+		if err != nil {
+			return Identity{}, fmt.Errorf("host certificate %s: %w", identity.Name, err)
+		}
+		identity.HostID, identity.HostRoles = id, roles
 	default:
 		return Identity{}, fmt.Errorf("certificate %s has no known role", identity.Name)
 	}

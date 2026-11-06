@@ -1,8 +1,8 @@
 # A cluster on Hetzner Cloud
 
 An OpenTofu module for a clowder cluster. It creates the first host (`name`), the hosts
-that join it (`hosts`), and the cluster's Floating IP. Each host is a server (Debian 13)
-with one volume per storage class, and all hosts are in one private network behind one
+that join it (`hosts`), and the cluster's Floating IP. Each host is a server (Debian 13);
+a worker has one volume per storage class, and all hosts are in one private network behind one
 Cloud firewall. The module's cloud-init installs DRBD 9 from LINBIT and `clowderd` from
 clowder's APT repository, prepares the host, and checks it with `clowderd check`. It then
 runs `clowderd init` on the first host and `clowderd join` on the others. The main
@@ -33,16 +33,25 @@ runs `clowderd init` on the first host and `clowderd join` on the others. The ma
 - **More hosts** join with one token each. `clowder host join-token` prints a token; put it
   into `join_tokens` under the host's name, and put the host's name into `hosts`. A token
   works once and expires (after an hour by default, `--ttl` up to a day), so a host created
-  later needs a new token. Once a host has joined, you can remove its token. The second
-  host waits as passive; once the third joins, all three run stacks and vote. Joins need
+  later needs a new token. Once a host has joined, you can remove its token. Joins need
   the applied `ClusterConfiguration`, because the leader checks the server with its Hetzner
   token. Its `privateNetwork`, `ingress.floatingIP` and `storageClasses` come from the
   output `cluster_configuration`. A host that stays `joining` in `clowder host list` never
   received the cluster's answer. Remove it with `clowder host remove`, put a new token into
   its `/etc/clowder/join-token`, and reboot it.
+- **Roles.** Every host has all three roles (`control-plane`, `worker`, `ingress`) unless
+  `roles` names others for it, such as `{ node3 = "worker,ingress" }`. The first host needs
+  `control-plane`. A joining host's token must allow its roles, or the join is refused:
+  `clowder host join-token` allows `worker,ingress` by default, so a token for a host with
+  the module's default roles needs `--roles control-plane,worker,ingress`. The two
+  defaults differ on purpose: the module's keeps a cluster of three hosts highly
+  available, and the token's keeps a worker's token from making a control-plane host. A host without
+  `worker` gets no volumes. With every host's roles at their defaults, the second host runs
+  stacks but does not vote; once the third joins, all three vote. A host's roles are fixed
+  once it joins: to change them, remove the host and let it join anew.
 - **To replace a host**, add the new one to `hosts` and wait until it is active. Then run
   `clowder host remove` for the old one and take it out of `hosts`. A cluster that had
-  three hosts keeps three. The module joins every host through the first one (`name`), so
+  three control-plane hosts keeps three. The module joins every host through the first one (`name`), so
   it cannot replace the first host yet, and no host can join while the first host is down.
 - `clowderd_version` pins the version from clowder's APT repository, so that a host created
   later gets the cluster's version. Its default is the release that this module comes

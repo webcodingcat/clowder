@@ -176,9 +176,9 @@ func wantedAlerts(current *state.State, conditions *Conditions, now time.Time) m
 	}
 	if !current.RecoveredAt.IsZero() {
 		add("no-ha", "no-ha", clusterspec.SeverityCritical, "the cluster is not highly available",
-			fmt.Sprintf("clowderd recover left the cluster with one host on %s. Its stacks run there, without a "+
-				"second copy of their volumes, and a failure of the host stops them. Join two hosts "+
-				"(clowder host join-token); the alert ends once %d hosts run stacks.",
+			fmt.Sprintf("clowderd recover left the cluster with one host on %s. The volumes kept no second "+
+				"copy, and a failure of that host stops the cluster. Join two control-plane "+
+				"hosts (clowder host join-token --roles); the alert ends once %d control-plane hosts are in service.",
 				current.RecoveredAt.Format(time.RFC3339), state.MinHAHosts))
 	}
 	addVolumeAlerts(current, held, add)

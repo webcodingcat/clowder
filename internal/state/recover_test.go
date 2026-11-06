@@ -4,6 +4,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
 
@@ -125,6 +126,22 @@ func TestOnlyClowderdRecoverRemapsTheCluster(t *testing.T) {
 	c.refuse(KindRecoverRemap, cliActor, RecoverRemap{Survivor: 0}, "only clowderd recover")
 	c.refuse(KindRecoverRemap, HostActor(0), RecoverRemap{Survivor: 0}, "only clowderd recover")
 	c.refuse(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 7}, "no host 7")
+}
+
+func TestOnlyAControlPlaneHostSurvivesARecover(t *testing.T) {
+	c := lostMajority(t)
+	c.state.Hosts[1].Roles = hostrole.DefaultJoin
+	c.refuse(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 1},
+		"host node1 has the roles worker,ingress; only a control-plane host recovers")
+}
+
+func TestASurvivorWithoutIngressHoldsNoFloatingIP(t *testing.T) {
+	c := lostMajority(t)
+	c.state.Hosts[0].Roles = hostrole.Set{hostrole.ControlPlane, hostrole.Worker}
+	c.mustApply(KindRecoverRemap, LeaderActor, RecoverRemap{Survivor: 0})
+	if c.state.Ingress != nil {
+		t.Errorf("the ingress is host %d, which has no ingress role", *c.state.Ingress)
+	}
 }
 
 func TestTheClusterIsHighlyAvailableAgainWithThreeHosts(t *testing.T) {

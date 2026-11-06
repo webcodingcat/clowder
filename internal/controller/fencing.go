@@ -285,7 +285,7 @@ func (f *fencer) whyNotFence(copied *state.State, host *state.Host, now time.Tim
 		}
 		total++
 		// a recovering voter does not count: it was down a moment ago
-		if voter.ID != host.ID && state.RunsStacks(voter.Phase) {
+		if voter.ID != host.ID && state.InService(voter.Phase) {
 			active++
 		}
 	}

@@ -4,9 +4,12 @@ import (
 	"crypto/ed25519"
 	"crypto/x509"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/webcodingcat/clowder/internal/hostrole"
 )
 
 var testTime = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
@@ -46,16 +49,17 @@ func TestVerifyTellsTheCLIAndHostsApart(t *testing.T) {
 		return ca.IssueCLI(public, "alice", testTime)
 	})
 	_, host := issued(t, func(public ed25519.PublicKey) ([]byte, error) {
-		return ca.IssueHost(public, 2, []netip.Addr{netip.MustParseAddr("10.77.0.3")}, testTime)
+		return ca.IssueHost(public, 2, hostrole.DefaultInit, []netip.Addr{netip.MustParseAddr("10.77.0.3")}, testTime)
 	})
 
 	identity, err := Verify(ca.Certificate, cli, notRevoked, testTime)
 	if err != nil || identity.Role != RoleCLI || identity.Name != "alice" || identity.Serial != Serial(cli) ||
-		!identity.NotBefore.Equal(testTime.Add(-clockSkew)) {
+		!identity.NotBefore.Equal(testTime.Add(-clockSkew)) || identity.HostRoles != nil {
 		t.Errorf("CLI: %+v, %v", identity, err)
 	}
 	identity, err = Verify(ca.Certificate, host, notRevoked, testTime)
-	if err != nil || identity.Role != RoleHost || identity.HostID != 2 || identity.Name != "host-2" {
+	if err != nil || identity.Role != RoleHost || identity.HostID != 2 || identity.Name != "host-2" ||
+		!slices.Equal(identity.HostRoles, hostrole.DefaultInit) {
 		t.Errorf("host: %+v, %v", identity, err)
 	}
 	if err := host.VerifyHostname("10.77.0.3"); err != nil {
@@ -96,6 +100,30 @@ func TestVerifyRefuses(t *testing.T) {
 				t.Errorf("want no error, got %v", err)
 			case test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)):
 				t.Errorf("want an error with %q, got %v", test.want, err)
+			}
+		})
+	}
+}
+
+func TestIssueHostRefusesInvalidRoles(t *testing.T) {
+	ca := newTestCA(t)
+	key, err := NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name  string
+		roles hostrole.Set
+	}{
+		{"none", nil},
+		{"unknown", hostrole.Set{"database"}},
+		{"twice", hostrole.Set{hostrole.Worker, hostrole.Worker}},
+		{"out of order", hostrole.Set{hostrole.Worker, hostrole.ControlPlane}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := ca.IssueHost(key.Public(), 2, test.roles, loopback, testTime); err == nil {
+				t.Errorf("issued a host certificate with the roles %v", test.roles)
 			}
 		})
 	}

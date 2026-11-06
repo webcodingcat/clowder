@@ -228,7 +228,7 @@ func TestARecoveredClusterAlertsUntilItIsHighlyAvailable(t *testing.T) {
 	}
 	current.RecoveredAt = time.Now()
 	alert, ok := wantedAlerts(current, NewConditions(), time.Now())["no-ha"]
-	if !ok || alert.Severity != clusterspec.SeverityCritical || !strings.Contains(alert.Message, "Join two hosts") {
+	if !ok || alert.Severity != clusterspec.SeverityCritical || !strings.Contains(alert.Message, "Join two control-plane hosts") {
 		t.Errorf("alert %+v, %v", alert, ok)
 	}
 }

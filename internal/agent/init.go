@@ -18,6 +18,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/datakey"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/pki"
@@ -35,6 +36,8 @@ type InitOptions struct {
 	// nothing.
 	ClusterName string
 	Name        string
+	// Roles are the host's roles; the first host is a control-plane host.
+	Roles hostrole.Set
 	// Underlay is the server's address in the Hetzner private network.
 	Underlay netip.Addr
 	// PublicAddress is the server's public IPv4, where users reach the API.
@@ -84,13 +87,19 @@ func Init(ctx context.Context, files Files, options InitOptions, hostNetwork Hos
 	if err := checkHostName(options.Name); err != nil {
 		return err
 	}
+	// the state accepts only a control-plane host (applyBootstrap); if the
+	// state refused it, init would stop halfway
+	if !options.Roles.Has(hostrole.ControlPlane) {
+		return fmt.Errorf("the roles %s lack %s: the first host is the cluster's only voter", options.Roles,
+			hostrole.ControlPlane)
+	}
 	// the state accepts only IPv4 (checkNewHost); if the state refused
 	// it, init would stop halfway
 	if !options.Underlay.Is4() || !options.PublicAddress.Is4() {
 		return errors.New("the underlay and the public address must be IPv4 addresses")
 	}
 	host := Host{
-		ID: 0, Name: options.Name, NodeAddress: options.NodeAddress, Underlay: options.Underlay,
+		ID: 0, Name: options.Name, Roles: options.Roles, NodeAddress: options.NodeAddress, Underlay: options.Underlay,
 		PublicAddress: options.PublicAddress, ServerID: options.ServerID,
 		RaftPort: options.RaftPort, APIPort: options.APIPort,
 	}
@@ -135,7 +144,7 @@ func createKeys(files Files, clusterName string, host Host) (state.ClusterKeys, 
 	if err != nil {
 		return keys, state.Host{}, err
 	}
-	certificatePEM, err := ca.IssueHost(hostKey.Public().(ed25519.PublicKey), int(host.ID),
+	certificatePEM, err := ca.IssueHost(hostKey.Public().(ed25519.PublicKey), int(host.ID), host.Roles,
 		[]netip.Addr{host.Underlay, host.NodeAddress}, now)
 	if err != nil {
 		return keys, state.Host{}, err
@@ -169,7 +178,7 @@ func createKeys(files Files, clusterName string, host Host) (state.ClusterKeys, 
 		return keys, state.Host{}, err
 	}
 	entry := state.Host{
-		ID: host.ID, Name: host.Name, ServerID: host.ServerID, Underlay: host.Underlay,
+		ID: host.ID, Name: host.Name, Roles: host.Roles, ServerID: host.ServerID, Underlay: host.Underlay,
 		PublicAddress:       host.PublicAddress,
 		WGPublicKey:         base64.StdEncoding.EncodeToString(wireGuardKey.PublicKey().Bytes()),
 		CertificateSerial:   pki.Serial(certificate),

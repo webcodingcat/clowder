@@ -78,8 +78,8 @@ the rules.
    `change-resources` command, tries the command on a copy of the state, and proposes it
    only if it changes something.
 4. **The state applies the command.** `state/resources.go` `applyChangeResources` applies
-   the puts in order on a copy, all of them or none. `applyPutResource` checks that the
-   actor may make the change and who owns the resource, then calls the kind's `put`, here
+   the puts in order on a copy, all of them or none. `applyPutResource` checks who owns
+   the resource (not the actor: the cluster has no users), then calls the kind's `put`, here
    `state/stacks.go` `putStack`. New volumes and the new stack are `pending`.
 5. **The placement finds a host.** `controller/placement.go` `RunPlacement` runs on the
    leader. `scheduler/place.go` `Plan` picks a host for the stack and a pool for each new
@@ -123,11 +123,12 @@ What follows from this:
 | context | the way into one cluster in the CLI's credentials file (`~/.clowder/config`) |
 | Floating IP | the cluster's one public address; Hetzner routes it to the ingress host |
 | leader | the Raft leader among the agents; it decides (placement, failover) and commits every write |
-| voter | a host that takes part in Raft's elections; other hosts only follow the log |
+| role | what a host does: `control-plane`, `worker` or `ingress` (`hostrole`); fixed when it joins |
+| voter | a control-plane host that takes part in Raft's elections; other hosts only follow the log |
 | quorum | a majority of the voters (Raft) or of a volume's copies (DRBD); without it, nothing changes |
 | fencing | powering off a failed host's server through Hetzner's API before its stacks start elsewhere |
 | tiebreaker | a diskless DRBD member that gives a volume with two copies its third vote |
-| active, passive | the two phases of a host: an active host runs stacks, a passive one waits |
+| active, in service | an active host does its roles' work; a draining one is in service too |
 | actor | who sent a command: `leader`, `host/<id>` or `cli/<name>` |
 | channel, owner | the way a resource came in; a resource's owner is the channel that made it |
 | data key | the age key that every host keeps; it encrypts secrets before they go into the state (`datakey`) |
@@ -156,11 +157,17 @@ More on some of these words:
   them in turn and learns no others.
 - **context**: like a context in a kubeconfig, it holds the endpoints, the CA, and the CLI's
   key and certificate. `current_context` picks one.
-- **active, passive**: an active host takes and runs stacks and may vote. The first host
-  starts active. A host that joins becomes active, and so does one that comes back from
-  `recovering`. A passive host is the second host of a cluster that is not yet highly
-  available. It waits without stacks and without a vote until a third host joins
-  (`state.MinHAHosts`), then it becomes active too.
+- **role**: like a Kubernetes node role. A `control-plane` host may vote, lead and run
+  the host commands that need the cluster's keys (`clowderd credentials`,
+  `sealing-key`, `recover`). A `worker` runs stacks and holds volume copies with a disk.
+  An `ingress` host may take the Floating IP. A tiebreaker needs no role. The join token
+  names the roles a host may take, and the host's certificate names the roles it took.
+- **active, in service**: an active host takes stacks if it is a worker, and may vote if
+  it is a control-plane host. The first host starts active. A host that joins becomes
+  active once its agent reports, and so does one that comes back from `recovering`. In
+  service (`state.InService`) means active or draining. Of the control-plane hosts, 1, 3
+  or 5 vote: the second one waits for its vote until a third comes
+  (`state.MinHAHosts`), because two voters would stop when either fails.
 - **actor**: `<name>` is the name in the CLI's certificate (`state.CLIActor`,
   `state.IsCLIActor`). The cluster has no users: the name is for the audit and grants
   nothing. Whoever holds a CLI certificate controls the cluster, as with kubeadm's
@@ -171,7 +178,8 @@ More on some of these words:
 - **channel, owner**: today the only channel is `cli` (`clowder apply`, whatever the
   certificate's name is); a GitOps source will come later. Only the owning channel changes a
   resource. The word `cli` names three separate things: this channel, the role of a CLI
-  certificate (its organizational unit), and the prefix of the CLI's actor.
+  certificate (its organizational unit, `pki.Role`; not a host's role, which a host
+  certificate names as its organizations), and the prefix of the CLI's actor.
 - **generation**: an apply that changes nothing does not count.
 - **data generation**: a new, empty LV comes when a volume with replicas 0 moves, fails
   over, or starts anew after a recover. Restores (phase 3) will raise it too.
@@ -204,7 +212,7 @@ The package layout is planned for all of v1; packages appear as the phases add t
 - **Portable**: `cli`, `api`, `clusterspec` (the configuration's types and checks),
   `clientconfig` (the CLI's credentials file and its contexts), `secretvalue` (the
   sealed values of SealedSecrets), `pki`, `jointoken` (the
-  tokens that hosts join with), `compose`, `units`, `names` (the rules for the names that
+  tokens that hosts join with), `hostrole` (a host's roles), `compose`, `units`, `names` (the rules for the names that
   users give, and the names on the host that are built from them), `buildinfo`, `logging`, `atomicfile`
   (files written whole or not at all), `metrics` (Prometheus' text format), `stackspec` (a
   stack's schema), `resource` (the kinds of resources and their specs), `digest` (hashes of

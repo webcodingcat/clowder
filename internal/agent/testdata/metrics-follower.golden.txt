@@ -24,7 +24,6 @@ clowder_host_phase{host="node0",phase="failed"} 0
 clowder_host_phase{host="node0",phase="fenced"} 0
 clowder_host_phase{host="node0",phase="fencing"} 0
 clowder_host_phase{host="node0",phase="joining"} 0
-clowder_host_phase{host="node0",phase="passive"} 0
 clowder_host_phase{host="node0",phase="recovering"} 0
 clowder_host_phase{host="node0",phase="removed"} 0
 # HELP clowder_leader 1 while this host leads the cluster.

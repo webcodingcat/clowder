@@ -13,6 +13,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/hetzner/hetznertest"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -24,7 +25,7 @@ func withServers(l *leader) {
 	defer l.mu.Unlock()
 	for id := state.HostID(1); id <= 2; id++ {
 		l.state.Hosts[id] = &state.Host{
-			ID: id, Name: "node" + string(rune('0'+id)), ServerID: 40 + int64(id),
+			ID: id, Name: "node" + string(rune('0'+id)), Roles: hostrole.DefaultInit, ServerID: 40 + int64(id),
 			Underlay: underlayOf(id), PublicAddress: publicAddressOf(id),
 			WGPublicKey: "wg", CertificateSerial: "s" + string(rune('0'+id)),
 			CertificateNotAfter: time.Now().AddDate(1, 0, 0), Phase: state.Active,
@@ -119,7 +120,7 @@ func TestTheFloatingIPGoesToNoServerOfAnotherHost(t *testing.T) {
 
 func TestTheIngressHostIsKeptThenPreferredThenTheLowestID(t *testing.T) {
 	host := func(id state.HostID, name string, phase state.HostPhase) *state.Host {
-		return &state.Host{ID: id, Name: name, ServerID: 40 + int64(id), Phase: phase}
+		return &state.Host{ID: id, Name: name, Roles: hostrole.DefaultInit, ServerID: 40 + int64(id), Phase: phase}
 	}
 	recorded := func(id state.HostID) *state.HostID { return &id }
 	hosts := map[state.HostID]*state.Host{
@@ -154,6 +155,29 @@ func TestTheIngressHostIsKeptThenPreferredThenTheLowestID(t *testing.T) {
 	current := &state.State{Hosts: map[state.HostID]*state.Host{1: hosts[1], 2: checked}, Ingress: recorded(1)}
 	if got, ok := ingressHost(current); !ok || got.ID != 2 {
 		t.Errorf("with a checked host: got %v", got)
+	}
+}
+
+func TestTheIngressHostHasTheIngressRole(t *testing.T) {
+	host := func(id state.HostID, roles hostrole.Set) *state.Host {
+		return &state.Host{
+			ID: id, Name: "node" + string(rune('0'+id)), Roles: roles, ServerID: 40 + int64(id),
+			Phase: state.Active, ServerChecked: true,
+		}
+	}
+	recorded := state.HostID(0)
+	current := &state.State{Hosts: map[state.HostID]*state.Host{
+		0: host(0, hostrole.Set{hostrole.ControlPlane, hostrole.Worker}),
+		1: host(1, hostrole.Set{hostrole.Worker}),
+		2: host(2, hostrole.DefaultJoin),
+	}, Ingress: &recorded}
+	current.Config.Spec.Ingress.PreferredHosts = []string{"node1"}
+	if got, ok := ingressHost(current); !ok || got.ID != 2 {
+		t.Errorf("got %v, want host 2, the only one with ingress", got)
+	}
+	delete(current.Hosts, 2)
+	if got, ok := ingressHost(current); ok {
+		t.Errorf("host %d without ingress was chosen", got.ID)
 	}
 }
 

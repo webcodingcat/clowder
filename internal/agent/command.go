@@ -19,6 +19,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/command"
 	"github.com/webcodingcat/clowder/internal/docker"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/jointoken"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/storage"
@@ -41,12 +42,14 @@ func NewRoot() *cobra.Command {
 // is. The host's name in the cluster is its hostname, which is also the
 // name DRBD uses for it in a resource.
 type hostFlags struct {
-	underlay, publicAddress string
-	serverID                int64
-	start                   bool
+	underlay, publicAddress, roles string
+	serverID                       int64
+	start                          bool
 }
 
-func (f *hostFlags) add(cmd *cobra.Command) {
+// add adds the flags; roles is the default of --roles.
+func (f *hostFlags) add(cmd *cobra.Command, roles hostrole.Set) {
+	cmd.Flags().StringVar(&f.roles, "roles", roles.String(), "the host's roles: "+hostrole.Rule)
 	cmd.Flags().StringVar(&f.underlay, "underlay", "", "the server's address in the Hetzner private network")
 	cmd.Flags().StringVar(&f.publicAddress, "public-address", "", "the server's public IPv4, where users reach the API")
 	cmd.Flags().Int64Var(&f.serverID, "server-id", 0, "the Hetzner Cloud ID of this server")
@@ -56,18 +59,30 @@ func (f *hostFlags) add(cmd *cobra.Command) {
 	}
 }
 
-// parse reads the hostname and the addresses.
-func (f *hostFlags) parse() (name string, underlay, publicAddress netip.Addr, err error) {
-	if name, err = os.Hostname(); err != nil {
-		return "", underlay, publicAddress, fmt.Errorf("read the hostname, the host's name in the cluster: %w", err)
+// parsedHost is what hostFlags.parse reads.
+type parsedHost struct {
+	name                    string
+	roles                   hostrole.Set
+	underlay, publicAddress netip.Addr
+}
+
+// parse reads the hostname, the roles and the addresses.
+func (f *hostFlags) parse() (parsedHost, error) {
+	var host parsedHost
+	var err error
+	if host.name, err = os.Hostname(); err != nil {
+		return host, fmt.Errorf("read the hostname, the host's name in the cluster: %w", err)
 	}
-	if underlay, err = netip.ParseAddr(f.underlay); err != nil {
-		return "", underlay, publicAddress, fmt.Errorf("--underlay: %w", err)
+	if host.roles, err = hostrole.Parse(f.roles); err != nil {
+		return host, fmt.Errorf("--roles: %w", err)
 	}
-	if publicAddress, err = netip.ParseAddr(f.publicAddress); err != nil {
-		return "", underlay, publicAddress, fmt.Errorf("--public-address: %w", err)
+	if host.underlay, err = netip.ParseAddr(f.underlay); err != nil {
+		return host, fmt.Errorf("--underlay: %w", err)
 	}
-	return name, underlay, publicAddress, nil
+	if host.publicAddress, err = netip.ParseAddr(f.publicAddress); err != nil {
+		return host, fmt.Errorf("--public-address: %w", err)
+	}
+	return host, nil
 }
 
 // startService enables and starts clowderd.service, so that from then on
@@ -93,10 +108,13 @@ func newInit() *cobra.Command {
 			"Then export the cluster's sealing key and keep it offline: clowderd sealing-key export",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			options := InitOptions{ServerID: flags.serverID, ClusterName: clusterName}
-			var err error
-			if options.Name, options.Underlay, options.PublicAddress, err = flags.parse(); err != nil {
+			host, err := flags.parse()
+			if err != nil {
 				return err
+			}
+			options := InitOptions{
+				ClusterName: clusterName, Name: host.name, Roles: host.roles, Underlay: host.underlay,
+				PublicAddress: host.publicAddress, ServerID: flags.serverID,
 			}
 			files := Files{Dir: DefaultDir}
 			if err := Init(cmd.Context(), files, options, hostNetwork(files), slog.Default()); err != nil {
@@ -105,7 +123,7 @@ func newInit() *cobra.Command {
 			return flags.startService(cmd.Context())
 		},
 	}
-	flags.add(initCommand)
+	flags.add(initCommand, hostrole.DefaultInit)
 	initCommand.Flags().StringVar(&clusterName, "cluster-name", DefaultClusterName,
 		"the cluster's name: cluster status shows it, alerts and new credentials carry it")
 	return initCommand
@@ -119,10 +137,13 @@ func newJoin() *cobra.Command {
 		Short: "Make this host a member of a cluster, with a join token (from cloud-init)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			options := JoinOptions{Via: via, ServerID: flags.serverID}
-			var err error
-			if options.Name, options.Underlay, options.PublicAddress, err = flags.parse(); err != nil {
+			host, err := flags.parse()
+			if err != nil {
 				return err
+			}
+			options := JoinOptions{
+				Via: via, Name: host.name, Roles: host.roles, Underlay: host.underlay,
+				PublicAddress: host.publicAddress, ServerID: flags.serverID,
 			}
 			content, err := os.ReadFile(tokenFile)
 			if err != nil {
@@ -138,7 +159,7 @@ func newJoin() *cobra.Command {
 			return flags.startService(cmd.Context())
 		},
 	}
-	flags.add(joinCommand)
+	flags.add(joinCommand, hostrole.DefaultJoin)
 	joinCommand.Flags().StringVar(&via, "via", "", "an agent of the cluster to join through: its underlay address")
 	joinCommand.Flags().StringVar(&tokenFile, "token-file", "",
 		"a file with the join token (clowder host join-token); not a flag of its own, which /proc would show")

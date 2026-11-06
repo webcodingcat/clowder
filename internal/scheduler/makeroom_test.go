@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -11,7 +12,9 @@ import (
 // with blog (priority 200, 600M) running on host 0 and nothing on host 1.
 func twoRoomHosts() *state.State {
 	current := roomCluster(1000)
-	current.Hosts[1] = &state.Host{ID: 1, Name: "node1", Phase: state.Active, Capacity: current.Hosts[0].Capacity}
+	current.Hosts[1] = &state.Host{
+		ID: 1, Name: "node1", Roles: hostrole.DefaultInit, Phase: state.Active, Capacity: current.Hosts[0].Capacity,
+	}
 	running(current, "blog", map[string]state.Service{"app": service(200, 600)})
 	return current
 }

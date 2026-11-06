@@ -11,7 +11,7 @@ clowder is built in phases, and each phase ends with live tests on HLab
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values (`!secret`), access and recovery, still on one host | done, passes the live tests |
 | 2 | three hosts: replication, failover with fencing | done, passes the live tests |
-| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 3 done, step 4 next |
+| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 4 done, step 5 next |
 | 3 | backup and restore, GitOps | |
 | 4 | comfort and operations | |
 
@@ -44,9 +44,9 @@ once it is complete.
   whole, then the merge. The state and every format change, so a cluster of an earlier
   build must be set up anew.
 - Each step updates the documentation of what it changes: DEVELOPING.md (Words: actor,
-  endpoint, sealed, voter, active and passive, and the three things `cli` names: a
-  certificate's role, the owner channel and the actor's prefix; Layers: the entries of
-  `clusterdir` and `secretvalue` follow their code), `docs/developing/`, the README, the README of
+  endpoint, sealed, voter, role, active and in service, and the three things `cli`
+  names: a certificate's role, the owner channel and the actor's prefix; Layers: the
+  entries of `secretvalue` and `hostrole` follow their code), `docs/developing/`, the README, the README of
   `examples/hetzner`, and in this file the Known gaps (each new limit below that says so)
   and Keys of a removed host (steps 3 and 6).
 - Two keys keep their names apart. The **data key** encrypts the secrets in the state
@@ -136,52 +136,56 @@ API change, so a cluster of an earlier build must be set up anew. The details ar
 
 ### Step 4: host roles
 
-- **Three roles,** set with `--roles` at `clowderd init` (default
-  `control-plane,worker,ingress`) and at `clowderd join` (default `worker,ingress`). A
-  join token names the roles it allows (`clowder host join-token --roles …`, default
-  `worker,ingress`), and the join picks from them. So whoever reads a worker's token from
-  its user data cannot join as control plane. kubeadm needs a second secret for that
-  (`--certificate-key`); clowder's token opens only once, so the roles in it are enough.
-  A host's roles are fixed once it has joined. To change them, the host is removed and
-  joins anew (as with `kubeadm reset`), a known gap. `examples/hetzner` takes each host's
-  roles, all three by default, so a cluster of three hosts works as today.
-  - `control-plane`: may vote in Raft, leads, serves the CLI's API, forwards the CLI's
-    commands, and runs `clowderd credentials`, `clowderd sealing-key export` and
-    `clowderd recover`.
-  - `worker`: runs stacks and holds volume copies.
-  - `ingress`: may take the Floating IP. Every host runs Traefik for its own stacks, and
-    the ingress host's Traefik also takes what comes in on the Floating IP. TLS ends
-    there, and the request goes on as HTTP through WireGuard to the Traefik of the stack's
-    host, which needs no TLS key (loops.md, Traefik).
-- **Voters are control-plane hosts:** 1, 3 or 5 of them by today's rule (`voterCount` in
-  `controller/members.go`), counted over the control-plane hosts. `state.MinHAHosts`,
-  the floor of three in `host remove` and the alert `no-ha` count the control-plane hosts.
-  The passive phase is only about the vote: the second control-plane host waits for its
-  vote until a third one comes, as two voters would stop Raft when either fails. If it is
-  a worker, it runs stacks meanwhile. This is safe, because with one voter that voter
-  alone decides about the workers.
-- **One control-plane host gives high availability to the workers only,** by the
-  operator's choice. A failed worker is fenced and its stacks move while the control-plane
-  host lives. While the control-plane host is down, nothing is decided (no failover, no
-  apply), and the stacks run on. A worker that restarts meanwhile starts none of its
-  stacks, as a host waits for the leader's commit index before it starts any (and from
-  step 6 on, their secrets come from the control plane and are kept on no disk): a known
-  gap. `no-ha` stays quiet for a cluster that never had three control-plane hosts; it is
-  about a cluster that lost them.
-- Hosts without the control plane follow the Raft log as non-voters, so the agent's loops
-  keep reading the state as now. They see every spec, which Kubernetes does not show a
-  node: a known gap.
-- The placement puts stacks and copies on workers only. A tiebreaker holds no data and no
-  load, so it may go on any host. A control-plane host without the worker role needs DRBD
-  for it, but no thin pool. Such a host runs no stacks, so its failure is never fenced, as
-  a host without stacks is not fenced now; it keeps its vote.
-- A host certificate names its roles, and `host list` shows them.
-- The step touches `pki` (roles in the certificate), `jointoken` and the join (roles in
-  the token), `state` (a host's roles, `MinHAHosts`, the passive phase), `controller`
-  (members, placement, Floating IP), `scheduler`, `agent` (init, join), the flags of
-  `clowderd`, and `examples/hetzner`.
-- In steps 4 and 5 every host still holds the data key; step 6 removes it from the other
-  hosts.
+Done on `phase-2b` (lint and unit tests green, the full review loop over it; the live
+tests come after step 5). A host has roles, as a Kubernetes node does, in the new package
+`hostrole`:
+
+- `control-plane`: may vote in Raft and lead, and runs `clowderd credentials`,
+  `clowderd sealing-key export` and `clowderd recover`. That only control-plane hosts
+  serve the CLI's API and forward its commands comes with step 5.
+- `worker`: runs stacks and holds volume copies with a disk.
+- `ingress`: may take the Floating IP. Every host still runs Traefik for its own stacks.
+
+The roles come from `--roles` at `clowderd init` (default all three; it needs
+`control-plane`) and at `clowderd join` (default `worker,ingress`). A join token names the
+roles it allows (`clowder host join-token --roles`, default `worker,ingress`), and the join
+picks from them; there is no separate control-plane token. The host's certificate names
+its roles (as its organizations), `host list` shows them, and they are fixed once the host
+has joined. Voters are control-plane hosts (1, 3 or 5 by `voterCount`); `MinHAHosts`, the
+floor of three in `host remove` and `no-ha` count the control-plane hosts in service. The
+placement puts stacks and copies with a disk on workers only; a tiebreaker may go on any
+host, so a control-plane host without the worker role needs DRBD but no thin pool. Such a
+host is never fenced, as it has no stacks. Hosts without the control plane follow the
+Raft log as non-voters.
+
+As decided with the operator, the step went beyond the plan in two points:
+
+- The phase `passive` is gone. It was only about the vote, and `voterCount` over the
+  control-plane hosts already keeps the second one without a vote; a joining host becomes
+  active once it reports. With every host's roles at their defaults, the second host now
+  runs stacks without a vote, where it waited before.
+- A volume gets its second copy with a disk only once a third host can take its tiebreaker
+  (`minTiebreakerHosts`, counted over all hosts in service). Before, the passive phase kept
+  a second host from taking copies; without it, two workers would hold two copies without
+  a third vote, and DRBD would stop writing when either failed.
+
+Deviations from Kubernetes, each for a reason: the roles stand in the host's certificate
+rather than in labels, so that step 5 can check a host's calls from its certificate alone;
+the join token names the roles instead of a second secret, as it opens only once.
+
+`test/live` makes its tokens with all three roles, so the lab still has three hosts that
+do everything; the lab of roles comes before the interim live tests. In steps 4 and 5
+every host still holds the data key; step 6 removes it from the other hosts. Step 5
+starts from here.
+
+What changed, for the operator: `clowder host join-token` allows `worker,ingress` unless
+`--roles` says more, so a token for another control-plane host needs `--roles
+control-plane,worker,ingress`. The second host of a cluster runs stacks without a vote,
+and a volume of replicas 2 gets its second copy once three hosts are there.
+`examples/hetzner` takes a `roles` map (all three by default) and gives volumes only to
+workers. The state, the certificates and the join change, so a cluster of an earlier build
+must be set up anew. The details are in [cluster.md](developing/cluster.md) (Cluster state,
+Certificates, Raft, Joining hosts, Placement).
 
 ### Step 5: who may call what
 
@@ -212,6 +216,9 @@ gets no further than its own stacks. Today any host certificate passes everywher
   above. A test has a worker try.
 - **The CLI takes only control-plane hosts:** it refuses a host certificate without
   `control-plane`, so a removed worker cannot answer it as the cluster.
+- **One set of roles per host:** a host's roles stand in the state, in its certificate and
+  in its `host.json` (step 4). The checks above read the certificate, so the agent checks
+  at its start that the three agree, and refuses to run otherwise.
 
 ### Step 6: keys only on the control plane
 
@@ -299,8 +306,17 @@ The last step, before the final live tests, so that they run on what is merged.
   be its only caller.
 - **General tidying, without new behavior:** names and comments that still speak of users,
   the bootstrap, `cluster.yaml` or the recovery key, and the open points of the reviews
-  that are not behavior (the wiring of the loops in `agent/run.go`, comments that
-  contradict each other, long table cells).
+  that are not behavior (comments that contradict each other, long table cells).
+- **The agent's loops start one way:** today `agent/run.go` (`startLoops`,
+  `runOnceCaughtUp`) starts them as functions with arguments, with a parts struct, as
+  methods, through a constructor and as a value's `run`. Every loop gets the same form.
+- **The documentation shrinks:** `docs/roadmap.md` keeps the state and the plan, and the
+  finished steps of phase 2b shrink to what still holds (the Git log keeps the history).
+  `docs/developing/cluster.md` is cut down and split where a part stands on its own.
+- **A new release, not an update:** phase 2b's release fits no earlier cluster, so every
+  command kind is new with it. The command kinds' release gate (`since`,
+  `State.CheckKnown`) starts anew from that release or goes, and the README's Getting
+  started and `examples/hetzner`'s `clowderd_version` point to the new release.
 - **The plan for phase 3 and later:** phases 3 and 4 and the Known gaps are checked
   against phase 2b (`ClusterConfiguration`, Secrets, roles, sealing key) and rewritten
   where they no longer fit: backup and restore with the sealing key, GitOps that cannot
@@ -354,6 +370,18 @@ Phase 3 (backup and restore):
 
 Phase 4 (comfort and operations):
 
+- A host's roles are fixed once it has joined. To change them, remove the host and let it
+  join anew, as with `kubeadm reset`.
+- With one control-plane host, a worker that restarts while the control-plane host is down
+  starts none of its stacks: a host waits for the leader's commit index before it starts
+  any (and from step 6 on, their secrets come from the control plane and are kept on no
+  disk). The stacks that run keep running.
+- Hosts without the control plane follow the Raft log, so they see every spec, which
+  Kubernetes does not show a node.
+- In a cluster with two workers and no third host, a volume of replicas 1 that moves has
+  two copies without a tiebreaker for the length of the move; a failure of either host
+  then stops its writes until the host is back.
+
 - A removed host keeps the cluster's keys until `cluster rotate-keys` exists (see Keys of
   a removed host, below). Until then, wipe its disk.
 - A host that comes back after a fence resyncs all its copies at once, each at the rate of
@@ -364,8 +392,8 @@ Phase 4 (comfort and operations):
   server is not confirmed, or Hetzner's API is down for good.
 - A drained host that fails comes back active, not drained: its drain is lost. A user's
   remove is kept.
-- A disabled voter keeps its vote until it is removed: with more than three hosts, an
-  active host that does not vote does not take its place.
+- A disabled voter keeps its vote until it is removed: with more than three control-plane
+  hosts, an active one that does not vote does not take its place.
 - The CLI learns no hosts from the cluster. `clowderd credentials` writes the hosts of the
   time into the context's `endpoints`. After joins and removes, the user fetches new
   credentials or edits the endpoints; otherwise the CLI cannot reach the cluster while the
@@ -381,9 +409,9 @@ Phase 4 (comfort and operations):
   of the call before. So `clowder get` right after `clowder apply` may show, for a moment,
   the state of a follower that has not applied the apply yet. The CLI could keep the last
   index it wrote in its config directory and ask for it.
-- A cluster that had three hosts never goes below three, even when a host is dead: a
-  replacement joins first. If none can join (`examples/hetzner` joins through its first
-  host), the cluster stays at two hosts. `clowderd recover --power-off` is the way out
+- A cluster that had three control-plane hosts never goes below three, even when one is
+  dead: a replacement joins first. If none can join (`examples/hetzner` joins through its
+  first host), the cluster stays at two control-plane hosts. `clowderd recover --power-off` is the way out
   only when two hosts are gone.
 - A retired host whose agent starts while Hetzner's API does not answer starts as before,
   and two such hosts would have the old cluster's majority. recover tells the user to set

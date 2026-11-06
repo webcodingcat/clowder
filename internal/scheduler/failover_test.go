@@ -72,8 +72,9 @@ func TestAThrowAwayVolumeStartsAnewWhereItsStackFailsOver(t *testing.T) {
 }
 
 func TestAFencedHostsCopiesCountForAWhile(t *testing.T) {
-	current := hosts(2)
-	runningShop(current, 2, state.VolumeCopy{Host: 0}, state.VolumeCopy{Host: 2})
+	// a fourth host, so that three take tiebreakers while host 0 is fenced
+	current := hosts(3)
+	runningShop(current, 2, state.VolumeCopy{Host: 0}, state.VolumeCopy{Host: 2}, state.VolumeCopy{Host: 3, Tiebreaker: true})
 	fenced(current)
 	current.Volumes["default/data"].Copies[0].Synced = false
 	two := state.HostID(2)
@@ -82,7 +83,7 @@ func TestAFencedHostsCopiesCountForAWhile(t *testing.T) {
 		t.Errorf("a copy replaced while its host may come back: %+v", copies)
 	}
 	copies := Plan(current, planTime.Add(CopyWait)).Copies
-	if len(copies) != 1 || !slices.Equal(hostsOf(copies[0]), []string{"0", "1", "2"}) {
+	if len(copies) != 1 || !slices.Equal(hostsOf(copies[0]), []string{"0", "1", "2", "t3"}) {
 		t.Fatalf("copies %+v", copies)
 	}
 	// a copy on a host that is down takes no resync limit

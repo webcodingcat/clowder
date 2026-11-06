@@ -364,7 +364,7 @@ enter_cluster() {
   public_address="$(metadata public-ipv4)"
   server_id="$(metadata instance-id)"
   # the host's name in the cluster is its hostname, the server's name
-  host=(--underlay "${underlay}" --public-address "${public_address}" --server-id "${server_id}")
+  host=(--roles "${ROLES}" --underlay "${underlay}" --public-address "${public_address}" --server-id "${server_id}")
   if [[ -f "${TOKEN_FILE}" ]]; then
     join_cluster "${host[@]}"
   else

@@ -19,6 +19,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/hetzner/hetznertest"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/raftnode"
 	"github.com/webcodingcat/clowder/internal/resource"
@@ -49,7 +50,7 @@ func lostCluster(t *testing.T) (Files, *hetznertest.API) {
 	loopback := netip.MustParseAddr("127.0.0.1")
 	files := Files{Dir: t.TempDir()}
 	err := Init(context.Background(), files, InitOptions{
-		ClusterName: testClusterName, Name: "node0", Underlay: loopback,
+		ClusterName: testClusterName, Name: "node0", Roles: hostrole.DefaultInit, Underlay: loopback,
 		PublicAddress: netip.MustParseAddr("198.51.100.2"), ServerID: 1000001,
 		NodeAddress: loopback, RaftPort: freePort(t), APIPort: freePort(t),
 	}, &fakeNetwork{}, logger)
@@ -123,10 +124,10 @@ func lostCluster(t *testing.T) (Files, *hetznertest.API) {
 		underlay, public := netip.AddrFrom4([4]byte{127, 0, 0, byte(id + 2)}), netip.AddrFrom4([4]byte{198, 51, 100, byte(id + 2)})
 		project.AddServer(40+int64(id), underlay, public)
 		commit(state.KindAddJoinToken, state.CLIActor("admin"), state.AddJoinToken{
-			ID: name, Hash: strings.Repeat("ab", 32), TTL: time.Hour,
+			ID: name, Hash: strings.Repeat("ab", 32), TTL: time.Hour, Roles: hostrole.DefaultInit,
 		})
 		commit(state.KindAddHost, state.LeaderActor, state.AddHost{Token: name, Host: state.Host{
-			ID: id, Name: name, Underlay: underlay, PublicAddress: public, WGPublicKey: "wg",
+			ID: id, Name: name, Roles: hostrole.DefaultInit, Underlay: underlay, PublicAddress: public, WGPublicKey: "wg",
 			CertificateSerial: "s" + name, CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 			ServerID: 40 + int64(id), ServerChecked: true,
 		}})

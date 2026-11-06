@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
@@ -284,7 +285,7 @@ func applySetStackStatus(s *State, cmd Command, payload SetStackStatus) (func(),
 	case failing != (payload.UpError != ""):
 		return nil, fmt.Errorf("stack %s: an error goes with failing, and only with it", payload.ID)
 	}
-	if err := s.checkLiveHost(payload.Host); err != nil {
+	if err := s.checkWorker(payload.Host); err != nil {
 		return nil, err
 	}
 	applied := stack.AppliedSecrets
@@ -355,8 +356,8 @@ func applyRequestMove(s *State, cmd Command, payload RequestMove) (func(), error
 		}, nil
 	case *stack.Host == payload.To:
 		return nil, fmt.Errorf("stack %s runs on host %d already", id, payload.To)
-	case !ok || host.Phase != Active || host.Leaving:
-		return nil, fmt.Errorf("host %d is no active host; a stack moves only to one", payload.To)
+	case !ok || host.Phase != Active || host.Leaving || !host.Roles.Has(hostrole.Worker):
+		return nil, fmt.Errorf("host %d is no active worker; a stack moves only to one", payload.To)
 	case samePlace(stack.MoveTo, &payload.To):
 		return nil, errUnchanged
 	}
@@ -513,6 +514,18 @@ func (s *State) checkLiveHost(id *HostID) error {
 	}
 	if host, ok := s.Hosts[*id]; !ok || host.Phase == Removed {
 		return fmt.Errorf("host %d is not a member", *id)
+	}
+	return nil
+}
+
+// checkWorker accepts no host, or a member that is a worker: only a worker
+// runs stacks and holds copies with a disk.
+func (s *State) checkWorker(id *HostID) error {
+	if err := s.checkLiveHost(id); err != nil || id == nil {
+		return err
+	}
+	if host := s.Hosts[*id]; !host.Roles.Has(hostrole.Worker) {
+		return fmt.Errorf("host %s has the roles %s, not %s", host.Name, host.Roles, hostrole.Worker)
 	}
 	return nil
 }

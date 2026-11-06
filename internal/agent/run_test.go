@@ -26,6 +26,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/clientconfig"
 	"github.com/webcodingcat/clowder/internal/hetzner"
 	"github.com/webcodingcat/clowder/internal/hetzner/hetznertest"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/pki"
@@ -207,8 +208,8 @@ func initTestHost(t *testing.T) (files Files, raftPort, apiPort int) {
 	files = Files{Dir: t.TempDir(), SecretsDir: t.TempDir()}
 	raftPort, apiPort = freePort(t), freePort(t)
 	err := Init(context.Background(), files, InitOptions{
-		ClusterName: testClusterName, Name: "node0", Underlay: loopback, PublicAddress: netip.MustParseAddr("127.0.0.2"),
-		ServerID: 1000001, NodeAddress: loopback, RaftPort: raftPort, APIPort: apiPort,
+		ClusterName: testClusterName, Name: "node0", Roles: hostrole.DefaultInit, Underlay: loopback,
+		PublicAddress: netip.MustParseAddr("127.0.0.2"), ServerID: 1000001, NodeAddress: loopback, RaftPort: raftPort, APIPort: apiPort,
 	}, &fakeNetwork{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -303,14 +304,15 @@ func TestAFirstHostAndItsCLI(t *testing.T) {
 	// the public address is another loopback address, as a host's public
 	// address is another than its underlay; users reach the API there
 	err := Init(context.Background(), files, InitOptions{
-		ClusterName: testClusterName, Name: "node0", Underlay: loopback,
+		ClusterName: testClusterName, Name: "node0", Roles: hostrole.DefaultInit, Underlay: loopback,
 		PublicAddress: netip.MustParseAddr("127.0.0.2"), ServerID: 1000001,
 		NodeAddress: loopback, RaftPort: freePort(t), APIPort: apiPort,
 	}, hostNetwork, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Init(context.Background(), files, InitOptions{ClusterName: testClusterName, Name: "node0", Underlay: loopback},
+	if err := Init(context.Background(), files,
+		InitOptions{ClusterName: testClusterName, Name: "node0", Roles: hostrole.DefaultInit, Underlay: loopback},
 		hostNetwork, logger); err == nil || !strings.Contains(err.Error(), "was part of a cluster") {
 		t.Errorf("a second init: %v", err)
 	}

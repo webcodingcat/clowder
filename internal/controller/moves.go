@@ -328,7 +328,7 @@ func downHost(copied *state.State, move *state.StackMove) (*state.Host, bool) {
 		ids = append(ids, *move.From)
 	}
 	for _, id := range ids {
-		if host := copied.Hosts[id]; !state.RunsStacks(host.Phase) {
+		if host := copied.Hosts[id]; !state.InService(host.Phase) {
 			return host, true
 		}
 	}

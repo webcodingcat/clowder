@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
@@ -34,6 +35,9 @@ func applyBootstrap(s *State, _ Command, payload Bootstrap) (func(), error) {
 		return nil, fmt.Errorf("cluster name %q: %s", payload.ClusterName, names.Rule)
 	case payload.Host.ID != 0:
 		return nil, fmt.Errorf("the first host has ID 0, not %d", payload.Host.ID)
+	// it is the cluster's only voter
+	case !payload.Host.Roles.Has(hostrole.ControlPlane):
+		return nil, fmt.Errorf("the first host has the roles %s; it needs %s", payload.Host.Roles, hostrole.ControlPlane)
 	}
 	if err := checkNewHost(payload.Host); err != nil {
 		return nil, err
@@ -72,6 +76,9 @@ func checkNewHost(host Host) error {
 		return fmt.Errorf("host %s has no certificate serial", host.Name)
 	case host.CertificateNotAfter.IsZero():
 		return fmt.Errorf("host %s: the certificate has no expiry", host.Name)
+	}
+	if err := host.Roles.Check(); err != nil {
+		return fmt.Errorf("host %s: %w", host.Name, err)
 	}
 	return nil
 }
@@ -132,8 +139,7 @@ const (
 // the host cannot tell whether the leader is about to fence it. Once the
 // host is fencing, nothing stops the operation, not even a late beat.
 var phaseChanges = map[HostPhase]map[HostPhase]mover{
-	Joining:    {Passive: byLeaderOrCLI, Active: byLeaderOrCLI},
-	Passive:    {Active: byLeaderOrCLI},
+	Joining:    {Active: byLeaderOrCLI},
 	Active:     {Draining: byLeaderOrCLI, Failed: byLeaderOrCLI},
 	Draining:   {Active: byLeaderOrCLI, Failed: byLeaderOrCLI},
 	Failed:     {Active: byLeaderOrCLI, Fenced: byLeaderOrCLI}, // fenced: a user's fence-confirm
@@ -218,37 +224,38 @@ func (s *State) checkCaughtUp(host *Host) error {
 // KeepsStacks tells whether a host in this phase runs the stacks placed on
 // it. A failed host keeps running them until it is powered off, because no
 // other host runs them before that (fencing). A fenced host runs none until
-// it is active again, because they may run elsewhere by then. The section
-// Host phases in docs/developing/cluster.md has a table of what each phase
-// means where.
+// it is active again, because they may run elsewhere by then. Only a worker
+// has stacks placed on it. The section Host phases in
+// docs/developing/cluster.md has a table of what each phase means where.
 func KeepsStacks(phase HostPhase) bool {
-	return RunsStacks(phase) || phase == Failed || phase == Fencing
+	return InService(phase) || phase == Failed || phase == Fencing
 }
 
-// RunsStacks tells whether a host in this phase runs stacks: a draining
-// host keeps those it has.
-func RunsStacks(phase HostPhase) bool {
+// InService tells whether a host in this phase does its roles' work: a
+// worker runs stacks (a draining one keeps those it has), a control-plane
+// host may get a vote.
+func InService(phase HostPhase) bool {
 	return phase == Active || phase == Draining
 }
 
-// Up tells whether a host in this phase runs and is heard: it runs stacks,
-// or it catches its copies up after a fence. The leader fails such a host
-// when its beats stop, and only its copies resync.
+// Up tells whether a host in this phase runs and is heard: it is in
+// service, or it catches its copies up after a fence. The leader fails
+// such a host when its beats stop, and only its copies resync.
 func Up(phase HostPhase) bool {
-	return RunsStacks(phase) || phase == Recovering
+	return InService(phase) || phase == Recovering
 }
 
-// MinHAHosts is how many hosts run stacks in a cluster that is highly
-// available: three voters, so that a majority survives the loss of one
-// host.
+// MinHAHosts is how many control-plane hosts are in service in a cluster
+// that is highly available: three voters, so that a majority survives the
+// loss of one host.
 const MinHAHosts = 3
 
-// hostsRunningStacks counts the hosts that run stacks. The hosts in
-// leftOut are not counted.
-func (s *State) hostsRunningStacks(leftOut ...HostID) int {
+// controlPlaneInService counts the control-plane hosts in service. The
+// hosts in leftOut are not counted.
+func (s *State) controlPlaneInService(leftOut ...HostID) int {
 	count := 0
 	for _, other := range s.Hosts {
-		if !slices.Contains(leftOut, other.ID) && RunsStacks(other.Phase) {
+		if !slices.Contains(leftOut, other.ID) && other.Roles.Has(hostrole.ControlPlane) && InService(other.Phase) {
 			count++
 		}
 	}
@@ -283,29 +290,36 @@ func (s *State) CheckLeaving(id HostID) error {
 }
 
 // checkRemoval refuses to remove a host that the cluster cannot do without
-// (checkMayGo). It also refuses a host that runs stacks while a stack or a
+// (checkMayGo). It also refuses a host in service while a stack or a
 // volume copy is still on it, because they would be lost with it. Such a
 // host leaves instead (SetHostPhase.Leaving): its stacks and copies move
 // off it, and then the host goes.
 func (s *State) checkRemoval(host *Host) error {
-	if err := s.checkMayGo(host); err != nil || !RunsStacks(host.Phase) {
+	if err := s.checkMayGo(host); err != nil || !InService(host.Phase) {
 		return err
 	}
 	return s.checkEmpty(host)
 }
 
-// checkMayGo refuses to let a host go that the cluster cannot do without:
-//   - the last host that runs stacks: the cluster would go on without
-//     placement, ingress or alerts, and nothing brings a removed host back;
-//   - once the cluster is highly available, any host, even a dead one,
-//     whose removal would leave fewer than MinHAHosts hosts that run
-//     stacks; a replacement joins first. A cluster never goes back below
-//     three hosts. The one way out is clowderd recover --power-off, which
-//     phase 2 brings for a quorum that is lost for good.
+// checkMayGo refuses to let a control-plane host go that the cluster
+// cannot do without:
+//   - the last control-plane host in service: the cluster would go on
+//     without a leader, so without placement, ingress or alerts, and
+//     nothing brings a removed host back;
+//   - once the cluster is highly available, any control-plane host, even a
+//     dead one, whose removal would leave fewer than MinHAHosts
+//     control-plane hosts in service; a replacement joins first. A cluster
+//     never goes back below three. The one way out is clowderd recover
+//     --power-off, for a quorum that is lost for good.
 //
-// Before the cluster is highly available, a host that runs no stacks
-// (failed, fenced) may always go, so that a dead host can be given up.
+// Before the cluster is highly available, a control-plane host that is not
+// in service (failed, fenced) may always go, so that a dead host can be
+// given up. A host without the control plane may always go; its stacks
+// and copies move off it first (checkRemoval).
 func (s *State) checkMayGo(host *Host) error {
+	if !host.Roles.Has(hostrole.ControlPlane) {
+		return nil
+	}
 	// a host that leaves goes too, so it does not count as one that stays
 	going := []HostID{host.ID}
 	for _, other := range s.Hosts {
@@ -313,13 +327,14 @@ func (s *State) checkMayGo(host *Host) error {
 			going = append(going, other.ID)
 		}
 	}
-	remaining := s.hostsRunningStacks(going...)
+	remaining := s.controlPlaneInService(going...)
 	switch {
 	case s.HA && remaining < MinHAHosts:
-		return fmt.Errorf("host %s cannot go: %d hosts would be left to run stacks, and a highly available "+
-			"cluster keeps %d; join a replacement first", host.Name, remaining, MinHAHosts)
-	case RunsStacks(host.Phase) && remaining == 0:
-		return fmt.Errorf("host %s is the last that runs stacks; the cluster cannot do without it", host.Name)
+		return fmt.Errorf("host %s cannot go: %d control-plane hosts would be left in service, and a highly "+
+			"available cluster keeps %d; join a replacement first", host.Name, remaining, MinHAHosts)
+	case InService(host.Phase) && remaining == 0:
+		return fmt.Errorf("host %s is the last control-plane host in service; the cluster cannot do without it",
+			host.Name)
 	}
 	return nil
 }
@@ -465,7 +480,7 @@ func (s *State) enterPhase(host *Host, payload SetHostPhase, at time.Time) {
 	if payload.Phase != Active || payload.Leaving {
 		s.forgetMovesTo(host.ID)
 	}
-	if s.hostsRunningStacks() >= MinHAHosts {
+	if s.controlPlaneInService() >= MinHAHosts {
 		s.HA, s.RecoveredAt = true, time.Time{}
 	}
 }
@@ -513,8 +528,8 @@ func applyReportPeerForgotten(s *State, cmd Command, payload ReportPeerForgotten
 }
 
 // SetIngress records the host that should hold the Floating IP. Only an
-// active host with a checked server can hold it, because Hetzner routes
-// the address to a server by its ID.
+// active ingress host with a checked server can hold it, because Hetzner
+// routes the address to a server by its ID.
 type SetIngress struct {
 	Host HostID `json:"host"`
 }
@@ -524,6 +539,8 @@ func applySetIngress(s *State, _ Command, payload SetIngress) (func(), error) {
 	switch {
 	case !ok:
 		return nil, fmt.Errorf("no host %d", payload.Host)
+	case !host.Roles.Has(hostrole.Ingress):
+		return nil, fmt.Errorf("host %s has the roles %s, not %s", host.Name, host.Roles, hostrole.Ingress)
 	case host.Phase != Active:
 		return nil, fmt.Errorf("host %s is %s, not active", host.Name, host.Phase)
 	case !host.ServerChecked:

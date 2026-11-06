@@ -13,8 +13,9 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   group with this host as its only voter and the bootstrap command. The bootstrap command
   carries the cluster's name (`--cluster-name`, or `DefaultClusterName` without the flag;
   it must pass `names.Valid`), and the CA is named after it. Then init enables and starts
-  `clowderd.service`. It refuses a host that has a `raft/` directory. Three flags are
-  required, and each goes into `host.json` and the state:
+  `clowderd.service`. It refuses a host that has a `raft/` directory. `--roles` gives the
+  host's roles (`hostrole.DefaultInit`, all three, without the flag); the first host needs
+  `control-plane`. Three flags are required, and each goes into `host.json` and the state:
   - `--underlay`: the server's address in the Hetzner private network;
   - `--public-address`: its public IPv4, where users reach the API;
   - `--server-id`: its Hetzner Cloud ID (for the Floating IP and fencing).
@@ -24,10 +25,13 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   no key for them.
 - **`clowderd join`** (run from cloud-init) makes a host a member of a cluster. It reads a
   join token from a file (`--token-file`) and joins through the cluster agent named by
-  `--via`; the other flags are the same as init's. It works in this order:
+  `--via`; the other flags are the same as init's, but `--roles` is
+  `hostrole.DefaultJoin` (`worker,ingress`) without the flag, and the token must allow
+  the roles. It works in this order:
   1. It creates the host's own key and WireGuard key and keeps them in `keys/join.json`.
   2. It trusts the cluster's CA through the token's proof and sends the join
-     (`api.JoiningCluster.Join`). The answer goes into `join.json` immediately.
+     (`api.JoiningCluster.Join`). The answer goes into `join.json` immediately. Its
+     certificate must name the roles the host asked for (`checkJoinCertificate`).
   3. From `join.json` it writes the keys, the certificate and the data key (`writeKeys`,
      as init does), `clowder0`, and `net.json` with the other hosts as peers. Then it
      writes `host.json` and deletes `join.json`.
@@ -43,7 +47,9 @@ Part of [DEVELOPING.md](../../DEVELOPING.md): the agent and the drivers that cha
   user` does. It creates the key locally and asks its own agent for the certificate, using
   the host's certificate (`/v1/internal/credentials`, in [API and the
   CLI](cluster.md#credentials-from-a-host)). The agent must be running; `--revoke-older`
-  also needs the cluster's leader.
+  also needs the cluster's leader. Like `clowderd sealing-key export` and `clowderd
+  recover`, it runs only on a control-plane host: it reads the roles from `host.json`
+  (`Host.checkControlPlane`), which the join wrote from its certificate.
 - **`clowderd recover --power-off`** makes this host the only one in its cluster when the
   others are gone for good. It powers them off and labels their servers `clowder-retired`
   ([Recover](cluster.md#recover-clowderd-recover-agentrecovergo)). It stops the agent while

@@ -13,12 +13,14 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/api"
 	"github.com/webcodingcat/clowder/internal/atomicfile"
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/datakey"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/jointoken"
 	"github.com/webcodingcat/clowder/internal/network"
 	"github.com/webcodingcat/clowder/internal/pki"
@@ -30,8 +32,10 @@ type JoinOptions struct {
 	Token jointoken.Token
 	// Via is an agent of the cluster to join through, by its address (and
 	// port).
-	Via           string
-	Name          string
+	Via  string
+	Name string
+	// Roles are the roles the host takes, within what the token allows.
+	Roles         hostrole.Set
 	Underlay      netip.Addr
 	PublicAddress netip.Addr
 	ServerID      int64
@@ -150,7 +154,7 @@ func askToJoin(ctx context.Context, files Files, options JoinOptions, saved *joi
 		return err
 	}
 	answer, err := cluster.Join(ctx, api.JoinRequest{
-		Name: options.Name, Underlay: options.Underlay, PublicAddress: options.PublicAddress,
+		Name: options.Name, Roles: options.Roles, Underlay: options.Underlay, PublicAddress: options.PublicAddress,
 		ServerID: options.ServerID, PublicKey: hostKey.Public().(ed25519.PublicKey),
 		WGPublicKey: base64.StdEncoding.EncodeToString(wireGuardKey.PublicKey().Bytes()),
 	})
@@ -159,7 +163,7 @@ func askToJoin(ctx context.Context, files Files, options JoinOptions, saved *joi
 	}
 	saved.CA, saved.Answer = cluster.CAPEM, &answer
 	saved.Host = &Host{
-		ID: answer.Host, Name: options.Name, NodeAddress: network.NodeAddress(answer.Host),
+		ID: answer.Host, Name: options.Name, Roles: options.Roles, NodeAddress: network.NodeAddress(answer.Host),
 		Underlay: options.Underlay, PublicAddress: options.PublicAddress, ServerID: options.ServerID,
 		RaftPort: cmp.Or(options.RaftPort, RaftPort), APIPort: cmp.Or(options.APIPort, APIPort),
 	}
@@ -187,7 +191,7 @@ func writeJoined(ctx context.Context, files Files, saved joining, hostNetwork Ho
 	if err != nil {
 		return err
 	}
-	if err := checkJoinCertificate(saved.CA, answer, hostKey); err != nil {
+	if err := checkJoinCertificate(saved.CA, answer, hostKey, host.Roles); err != nil {
 		return err
 	}
 	dataKey, err := datakey.Parse(answer.DataKey)
@@ -214,8 +218,11 @@ func writeJoined(ctx context.Context, files Files, saved joining, hostNetwork Ho
 }
 
 // checkJoinCertificate makes sure that the CA issued the answer's
-// certificate, for this host's key and for the host ID the answer names.
-func checkJoinCertificate(caPEM string, answer api.JoinAnswer, hostKey ed25519.PrivateKey) error {
+// certificate, for this host's key, for the host ID the answer names and
+// for the roles the host asked for.
+func checkJoinCertificate(caPEM string, answer api.JoinAnswer, hostKey ed25519.PrivateKey,
+	roles hostrole.Set,
+) error {
 	ca, err := pki.ParseCertificate([]byte(caPEM))
 	if err != nil {
 		return err
@@ -233,6 +240,9 @@ func checkJoinCertificate(caPEM string, answer api.JoinAnswer, hostKey ed25519.P
 	}
 	if identity.Role != pki.RoleHost || identity.HostID != int(answer.Host) {
 		return fmt.Errorf("the cluster's certificate is for %s, not for host %d", identity.Name, answer.Host)
+	}
+	if !slices.Equal(identity.HostRoles, roles) {
+		return fmt.Errorf("the cluster's certificate names the roles %s, not %s", identity.HostRoles, roles)
 	}
 	return nil
 }

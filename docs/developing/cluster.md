@@ -36,7 +36,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   | the CLI | `set-host-phase` (host actions), `add-join-token`, `change-resources` (`/v1/apply`, `/v1/delete`; the leader decides), `restart-stack`, `request-move` |
   | root on a host | `set-cli-cutoff` (`clowderd credentials --revoke-older`, as that host) |
   | the leader, for a joining host | `add-host` |
-  | the members loop | `set-host-phase` (joining, passive, active; removed for a host that left), `set-host-voter` |
+  | the members loop | `set-host-phase` (joining to active; removed for a host that left), `set-host-voter` |
   | the placement, the stack's host | `put-volume`, `set-stack-status`, `set-stack-wait-reason`, `set-pushed-out`, `start-operation` (a move) |
   | the moves loop | `put-volume`, `set-stack-status`, `advance-operation`, `extend-operation`, `roll-back-operation`, `finish-operation` |
   | the Floating IP's loop | `confirm-server`, `set-ingress` |
@@ -252,8 +252,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   itself):
 
   ```
-  joining ─L→ passive ─L→ active ⇄L draining
-     └──────L──────────────↗
+  joining ─L→ active ⇄L draining
   active, draining, recovering ─L→ failed
   failed ─L→ active                       (heard again, before the fence)
   failed ─O→ fencing ─O→ fenced           (the server is off)
@@ -271,8 +270,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 
   | From | To | Who | When |
   |---|---|---|---|
-  | `joining` | `passive`, `active` | members loop | the host reported; passive while it is the second |
-  | `passive` | `active` | members loop | the third host is there |
+  | `joining` | `active` | members loop | the host reported |
   | `active` | `draining` and back | user | `host drain`, `host undrain` |
   | `active`, `draining`, `recovering` | `failed` | fencing loop | a majority of the voters has not heard it for `FailAfter` |
   | `failed` | `active` | fencing loop | a majority heard it again within `backWithin`; never the host itself |
@@ -292,7 +290,7 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   stacks.
 
   In words: a new host joins as `joining` (`add-host`). The members loop makes it
-  `passive` (waiting) or `active` (running stacks), and a user can drain it for
+  `active` once its agent reports, and a user can drain it for
   maintenance and undrain it again. A drain moves the host's stacks off it and keeps new
   ones off. Its volume copies stay, because the host comes back after the maintenance. A
   host that the voters stop hearing becomes `failed`, and the leader powers it off before
@@ -307,11 +305,12 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   or fencing host keeps running them, because no other host runs them before it is off; a
   fenced, recovering or disabled host runs none.
 
-  What each phase means elsewhere, in one place (Y: yes; the named functions decide):
+  What each phase means elsewhere, in one place (Y: yes; the named functions decide). Only
+  a worker has stacks and takes them, and only a control-plane host votes:
 
   | Phase | runs its stacks (`state.KeepsStacks`) | its stacks fail over (`state.FailsOver`) | takes new stacks (`scheduler.takesStacks`) | its copies count (`scheduler.counts`) | votes (`controller.votes`) |
   |---|---|---|---|---|---|
-  | `joining`, `passive` | | | | | |
+  | `joining` | | | | | |
   | `active` | Y | | Y, unless leaving | Y, unless leaving | Y |
   | `draining` | Y | | | Y, unless leaving | Y |
   | `failed`, `fencing` | Y | | | Y | Y |
@@ -324,14 +323,15 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   without it. So no stack fails over or moves to it until DRBD has caught its copies up and
   the host reports that.
 
-  **Removing** a host (`checkRemoval`; the CLI asks first) is refused for the last host that
-  runs stacks (`active` or `draining`), and for a host that runs stacks while a stack or a
-  volume copy is on it. When a user removes such a host, it leaves instead
-  (`SetHostPhase.Leaving`, `ErrNotEmpty`). It drains, the placement moves its copies off
-  too (they no longer count), and the members loop removes it once nothing is left on it.
-  An undrain takes it back. Once `MinHAHosts` hosts have run stacks, the state is `HA` for
-  good, and no removal may leave fewer than three hosts that run stacks; a replacement
-  joins first. A removed host's certificate is revoked. Every other host forgets it as a
+  **Removing** a host (`checkRemoval`; the CLI asks first) is refused for the last
+  control-plane host in service (`active` or `draining`, `InService`), and for a host in
+  service while a stack or a volume copy is on it. When a user removes such a host, it
+  leaves instead (`SetHostPhase.Leaving`, `ErrNotEmpty`). It drains, the placement moves
+  its copies off too (they no longer count), and the members loop removes it once nothing
+  is left on it. An undrain takes it back. Once `MinHAHosts` control-plane hosts have been
+  in service, the state is `HA` for good, and no removal may leave fewer than three of
+  them; a replacement joins first (`checkMayGo`). A host without the control plane may
+  always go once it is empty. A removed host's certificate is revoked. Every other host forgets it as a
   DRBD peer and reports that (`report-peer-forgotten`), and `Forgetting` holds the hosts
   that have not done so yet. Only then is its ID free for a host that joins (`HostIDFree`),
   because DRBD's node-id is the host ID and a peer's slot in the metadata outlives the
@@ -413,8 +413,14 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
 - **Join tokens** (`internal/jointoken`) consist of an ID and a 256-bit secret.
   `add-join-token` keeps only the secret's hash under the ID, with its expiry time: the
   command's `At` plus its TTL (`MinJoinTokenTTL` to `MaxJoinTokenTTL`, at most
-  `MaxJoinTokens` open). `add-host` checks the token against its own `At`
-  (`CheckJoinToken`) and deletes it in the same command, so a token works only once.
+  `MaxJoinTokens` open), and the roles a host may take with it (`JoinToken.Roles`).
+  `add-host` checks the token against its own `At` (`CheckJoinToken`), checks the host's
+  roles against the token's (`CheckRoles`) and deletes the token in the same command, so a
+  token works only once.
+- **Roles** (`internal/hostrole`, `Host.Roles`) are fixed once a host has joined; the first
+  host needs `control-plane` (`bootstrap`). The state refuses a stack placed on, or moved
+  to, a host without `worker`, and a copy with a disk there (`checkWorker`); a tiebreaker
+  may go on any host. Only an ingress host holds the Floating IP (`set-ingress`).
   `dropExpiredTokens` drops expired tokens a while later (`joinTokenKept`), so a late join
   learns that its token expired.
 - `Copy` returns a deep copy without the audit. It is for work that is too slow for the
@@ -432,7 +438,10 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
   unit, and the name is its common name: `host-<id>`, or the CLI's name (`clowderd
   credentials --name`, or `DefaultCLIName` without one, just as kubeadm's `admin.conf` is
   `kubernetes-admin`). The name must pass `names.Valid`. A CLI name is for the audit and
-  grants nothing.
+  grants nothing. A host certificate names the host's roles as its organizations
+  (`Identity.HostRoles`), so another host can tell them without the state. Kubernetes keeps
+  node roles in labels instead; clowder puts them in the certificate so that a host's
+  calls can be checked from the certificate alone.
 - Keys are Ed25519, and the CA signs public keys. Hosts' keys never leave the machine that
   created them. `clowderd credentials` creates the CLI's key on a host and hands it over in
   a CLI config, as kubeadm does with `admin.conf`.
@@ -493,15 +502,16 @@ Every agent holds the same `State` and applies the same `Command`s in Raft's ord
      coming: the others accept no new connection from a revoked leader, but Raft's open
      connections stay, and so would its lead.
   2. Every host that is not removed is a member; a joining host joins as a non-voter. A
-     joining or passive host that votes loses its vote. This happens to a host that took
-     the ID of a removed host before that host left Raft: it finds the old host's vote.
-  3. A joining host whose agent reported (`report-host`) becomes `passive` while it is the
-     second host of a cluster that is not `HA` yet, and `active` otherwise. A passive host
-     becomes active once there are three hosts.
-  4. Of the hosts that run stacks or are expected to come back after a failure (`votes`:
-     active, draining, failed, fencing, fenced, recovering, disabled), 1, 3 or 5 vote
-     (`voterCount`): first those that already vote, then those with the lowest IDs. Only an
-     active or draining host gets a new vote. A failed voter keeps its vote, because taking
+     joining host or a host without the control plane that votes loses its vote. This
+     happens to a host that took the ID of a removed host before that host left Raft: it
+     finds the old host's vote.
+  3. A joining host whose agent reported (`report-host`) becomes `active`.
+  4. Of the control-plane hosts in service or expected to come back after a failure
+     (`votes`: active, draining, failed, fencing, fenced, recovering, disabled), 1, 3 or 5
+     vote (`voterCount`): first those that already vote, then those with the lowest IDs.
+     The second control-plane host so waits for its vote until a third comes; if it is a
+     worker, it runs stacks meanwhile. Only a host in service gets a new vote. The other
+     hosts follow the log as non-voters, so their loops read the state as a voter's do. A failed voter keeps its vote, because taking
      it would take a live host's vote instead (with three hosts, the cluster would stop at
      the next failure). The leader keeps its own vote.
   5. A removed host leaves Raft, after step 4 has given its vote to another host.
@@ -572,9 +582,10 @@ holds:
   failover.
 - Every stack that is not on this host, or that names a volume without data, is placed
   anew. Every running operation ends as failed and frees its locks.
-- This host is active, the only voter and the ingress host. `HA` is false again, so the
-  cluster grows as a new one does (the second host is passive), and `RecoveredAt` raises
-  the alert `no-ha` until three hosts run stacks.
+- This host, which must be a control-plane host (`clowderd recover` refuses on any
+  other), is active and the only voter, and the ingress host if it has that role. `HA` is
+  false again, so the cluster grows as a new one does, and `RecoveredAt` raises the alert
+  `no-ha` until three control-plane hosts are in service.
 
 A retired host's agent ends at its start (host.md, `checkRetired`), because the label
 names its certificate. A server that is set up anew gets a certificate of its own and
@@ -894,7 +905,11 @@ or delete them.
 ### Joining hosts
 
 - **A host joins** with a token that the CLI created (`clowder host join-token`,
-  `api/join.go`, `agent/join.go`).
+  `api/join.go`, `agent/join.go`). The token names the roles a host may take
+  (`--roles`, `worker,ingress` by default), and `clowderd join --roles` picks from them.
+  So whoever reads a worker's token from its user data cannot join as a control-plane
+  host. kubeadm needs a second secret for that (`--certificate-key`); clowder's token opens
+  only once, so the roles in it are enough, and there is no separate control-plane token.
   - `GET /v1/join?token=<id>` returns the CA certificate with a `pki.TrustProof` made with
     the token's hash, while the token is open. The host trusts the CA only if the proof
     matches its token (`api.FindClusterByToken`).
@@ -907,7 +922,8 @@ or delete them.
     only once while it leads (a nonce in its memory). This is little more than insurance,
     because only the cluster's agents see a request, over TLS, and whoever saw one has seen
     its token.
-  - The leader compares the token's hash and requires an applied configuration
+  - The leader compares the token's hash, checks that the host's roles are within the
+    token's (`JoinToken.CheckRoles`), and requires an applied configuration
     (`Configured`). It chooses the lowest free ID and issues the host's certificate. It
     checks the host against the state (`CheckJoiningHost`), checks that the request comes
     from the host's underlay or public address (`JoinRequest.Source`, which the agent that
@@ -970,14 +986,21 @@ or delete them.
   is placed with the first stack that names it, on that stack's host, with one copy, and
   must fit its pool there (`Fits`). Without overcommit, the pool's volumes and the new one
   must stay within the pool minus its reserve, including a class's fallbacks. Volumes,
-  DRBD minors and room are taken only for a stack that fits.
+  DRBD minors and room are taken only for a stack that fits. Only an active worker that no
+  user removes takes stacks and copies with a disk (`takesStacks`, `stackHosts`). A
+  tiebreaker holds no data and no load, so any active host takes one
+  (`takesTiebreakers`); a host without the worker role has DRBD for it, but no thin pool.
 - **Copies** (`copies.go`, `keepCopies`) change by one change per volume and pass.
   - A missing copy goes to the host that takes stacks and has the most free space in the
-    pool; a tiebreaker on that host gets a disk.
+    pool; a tiebreaker on that host gets a disk. The second copy with a disk waits until
+    `minTiebreakerHosts` hosts take tiebreakers, so that it never runs without its third
+    vote: with two workers and no third host, a volume keeps one copy.
   - A copy beyond `replicas` is removed once the others are synced, the one on a leaving
     host first, but never the one where its stack runs.
   - A volume with two copies gets a tiebreaker (diskless) on a host without a copy, the
-    one with the fewest, once three hosts take stacks.
+    one with the fewest, once three hosts take tiebreakers. This holds for any
+    `replicas`: a volume of replicas 3 on two workers keeps a tiebreaker until a third
+    worker takes its third copy.
   - **Quorum while copies change** (`fitTiebreaker`): the change that gives a volume a
     second copy with a disk, or takes it away, adds or removes the tiebreaker in the same
     record. Two copies without their third vote lose DRBD's quorum if one fails (one of
@@ -1004,7 +1027,7 @@ or delete them.
 - **Failover** (`failover.go`): a stack whose host is fenced or disabled
   (`state.FailsOver`) gets another host at once, with `set-stack-status` and no move. The
   old host is off and stops nothing, and the state allows such a change of host without an
-  operation (`checkLeaderStatus`), but only to an active host. The new host must have a
+  operation (`checkLeaderStatus`), but only to an active worker. The new host must have a
   synced copy with a disk of each of the stack's volumes of replicas 1 or more, because
   nothing can sync from the host that is down. A volume of replicas 0 starts anew there,
   empty, in a new data generation. Of those hosts, the best fit wins, as for any placement.

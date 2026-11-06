@@ -16,6 +16,7 @@ import (
 
 	"github.com/webcodingcat/clowder/internal/buildinfo"
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 )
@@ -52,7 +53,7 @@ func newCluster(t *testing.T) *cluster {
 func (c *cluster) addHost(host Host) {
 	c.t.Helper()
 	token := "token-" + strconv.Itoa(int(host.ID))
-	c.mustApply(KindAddJoinToken, cliActor, AddJoinToken{ID: token, Hash: testHash, TTL: time.Hour})
+	c.mustApply(KindAddJoinToken, cliActor, joinToken(token))
 	host.ServerChecked = true
 	c.mustApply(KindAddHost, LeaderActor, AddHost{Token: token, Host: host})
 }
@@ -60,10 +61,17 @@ func (c *cluster) addHost(host Host) {
 // testHash is the hash of the tests' join tokens.
 var testHash = strings.Repeat("ab", 32)
 
+// joinToken is a token for an hour that allows every role.
+func joinToken(id string) AddJoinToken {
+	return AddJoinToken{ID: id, Hash: testHash, TTL: time.Hour, Roles: hostrole.DefaultInit}
+}
+
+// testHost is a host with every role, so that it does everything.
 func testHost(id HostID) Host {
 	return Host{
 		ID:                  id,
 		Name:                "node" + strconv.Itoa(int(id)),
+		Roles:               hostrole.DefaultInit,
 		ServerID:            40 + int64(id),
 		Underlay:            netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
 		PublicAddress:       netip.AddrFrom4([4]byte{198, 51, 100, byte(id + 2)}),
@@ -200,6 +208,35 @@ func TestBootstrapMakesHostZeroTheActiveVoter(t *testing.T) {
 		t.Errorf("cluster %q, keys %+v, host %+v", c.state.ClusterName, c.state.Keys, host)
 	}
 	c.refuse(KindBootstrap, LeaderActor, Bootstrap{}, "bootstrapped already")
+}
+
+func TestTheFirstHostIsAControlPlaneHostWithValidRoles(t *testing.T) {
+	tests := []struct {
+		name  string
+		roles hostrole.Set
+		want  string
+	}{
+		{"no control plane", hostrole.DefaultJoin, "the first host has the roles worker,ingress; it needs control-plane"},
+		{"out of order", hostrole.Set{hostrole.Worker, hostrole.ControlPlane}, "not in the order"},
+		{"control plane only", hostrole.Set{hostrole.ControlPlane}, ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			c := &cluster{t: t, state: &State{}}
+			host := testHost(0)
+			host.Roles = test.roles
+			bootstrap := Bootstrap{
+				Keys:        ClusterKeys{CACertificate: []byte("ca"), CAKey: Encrypted("key"), SealingKey: Encrypted("age")},
+				ClusterName: "prod",
+				Host:        host,
+			}
+			if test.want == "" {
+				c.mustApply(KindBootstrap, LeaderActor, bootstrap)
+				return
+			}
+			c.refuse(KindBootstrap, LeaderActor, bootstrap, test.want)
+		})
+	}
 }
 
 func TestTheClusterNameIsADNSLabel(t *testing.T) {
@@ -402,7 +439,7 @@ func TestHostPhasesMoveOnlyAsAllowed(t *testing.T) {
 }
 
 func TestEveryPhaseHasAWayOut(t *testing.T) {
-	for _, phase := range []HostPhase{Joining, Passive, Active, Draining, Failed, Fenced, Recovering, Disabled} {
+	for _, phase := range []HostPhase{Joining, Active, Draining, Failed, Fenced, Recovering, Disabled} {
 		if len(phaseChanges[phase]) == 0 {
 			t.Errorf("%s has no allowed change", phase)
 		}
@@ -440,6 +477,12 @@ func TestTheIngressIsAnActiveHostWithACheckedServer(t *testing.T) {
 	if c.state.Ingress == nil || *c.state.Ingress != 1 {
 		t.Errorf("ingress %v", c.state.Ingress)
 	}
+
+	worker := testHost(2)
+	worker.Roles = hostrole.Set{hostrole.ControlPlane, hostrole.Worker}
+	c.addHost(worker)
+	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 2, Phase: Active})
+	c.refuse(KindSetIngress, LeaderActor, SetIngress{Host: 2}, "host node2 has the roles control-plane,worker, not ingress")
 }
 
 func TestTheCLICutoffMovesOnlyForwardAndOnlyByAHost(t *testing.T) {
@@ -876,15 +919,49 @@ func TestRemovingAHostRevokesItsCertificate(t *testing.T) {
 	}
 }
 
-func TestTheLastHostThatRunsStacksStays(t *testing.T) {
+func TestTheLastControlPlaneHostInServiceStays(t *testing.T) {
+	const last = "the last control-plane host in service"
 	c := newCluster(t)
-	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 0, Phase: Removed}, "the last that runs stacks")
+	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 0, Phase: Removed}, last)
 	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 0, Phase: Draining})
-	c.refuse(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 0, Phase: Removed}, "the last that runs stacks")
+	c.refuse(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 0, Phase: Removed}, last)
 
-	// with a second active host, either may go, but not both
+	// with a second active control-plane host, either may go, but not both
 	c.addHost(testHost(1))
 	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
 	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 0, Phase: Removed})
-	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed}, "the last that runs stacks")
+	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed}, last)
+}
+
+func TestAWorkerDoesNotKeepTheLastControlPlaneHost(t *testing.T) {
+	c := newCluster(t)
+	worker := testHost(1)
+	worker.Roles = hostrole.Set{hostrole.Worker}
+	c.addHost(worker)
+	c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: 1, Phase: Active})
+	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 0, Phase: Removed},
+		"the last control-plane host in service")
+	// a host without the control plane may always go
+	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed})
+}
+
+func TestOnlyControlPlaneHostsMakeAClusterHighlyAvailable(t *testing.T) {
+	c := newCluster(t)
+	for id := HostID(1); id <= 2; id++ {
+		worker := testHost(id)
+		worker.Roles = hostrole.DefaultJoin
+		c.addHost(worker)
+		c.mustApply(KindSetHostPhase, LeaderActor, SetHostPhase{Host: id, Phase: Active})
+	}
+	if c.state.HA {
+		t.Fatal("one control-plane host and two workers are highly available")
+	}
+	// once highly available, a worker still may go, a control-plane host not
+	c.activeHost(3)
+	c.activeHost(4)
+	if !c.state.HA {
+		t.Fatal("three control-plane hosts are not highly available")
+	}
+	c.mustApply(KindSetHostPhase, cliActor, SetHostPhase{Host: 1, Phase: Removed})
+	c.refuse(KindSetHostPhase, cliActor, SetHostPhase{Host: 3, Phase: Removed}, "join a replacement first")
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -76,7 +77,7 @@ func TestAWriteWaitsForALeaderDuringAnElection(t *testing.T) {
 		follower.mu.Unlock()
 	}()
 	cmd, err := state.NewCommand(state.KindAddJoinToken, time.Time{}, state.CLIActor("admin"),
-		state.AddJoinToken{ID: "token", Hash: strings.Repeat("ab", 32), TTL: time.Hour})
+		state.AddJoinToken{ID: "token", Hash: strings.Repeat("ab", 32), TTL: time.Hour, Roles: hostrole.DefaultJoin})
 	if err != nil {
 		t.Fatal(err)
 	}

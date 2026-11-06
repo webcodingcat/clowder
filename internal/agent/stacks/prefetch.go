@@ -152,7 +152,7 @@ func mayTake(current *state.State, stack *state.Stack, host state.HostID) bool {
 		}
 	}
 	self, ok := current.Hosts[host]
-	return ok && state.RunsStacks(self.Phase)
+	return ok && state.InService(self.Phase)
 }
 
 // images returns the images of a stack's services.

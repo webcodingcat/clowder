@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/webcodingcat/clowder/internal/hostrole"
 )
 
 // TLS checks against the real clock, so these tests issue against it too.
@@ -19,7 +21,7 @@ var loopback = []netip.Addr{netip.MustParseAddr("127.0.0.1")}
 func hostAt(t *testing.T, ca *CA, id int, at time.Time) (ed25519.PrivateKey, *x509.Certificate) {
 	t.Helper()
 	return issued(t, func(public ed25519.PublicKey) ([]byte, error) {
-		return ca.IssueHost(public, id, loopback, at)
+		return ca.IssueHost(public, id, hostrole.DefaultInit, loopback, at)
 	})
 }
 

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
@@ -92,11 +93,12 @@ type AlertFailure struct {
 
 // HostInfo is one host as the CLI shows it.
 type HostInfo struct {
-	ID       int    `json:"id"`
-	Name     string `json:"name"`
-	Phase    string `json:"phase"`
-	Voter    bool   `json:"voter"`
-	Underlay string `json:"underlay"`
+	ID       int          `json:"id"`
+	Name     string       `json:"name"`
+	Roles    hostrole.Set `json:"roles"`
+	Phase    string       `json:"phase"`
+	Voter    bool         `json:"voter"`
+	Underlay string       `json:"underlay"`
 	// PublicAddress is where the CLI reaches the host's API.
 	PublicAddress string `json:"public_address"`
 	Version       string `json:"version,omitempty"`

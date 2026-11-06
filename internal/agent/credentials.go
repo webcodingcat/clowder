@@ -77,6 +77,9 @@ func printCredentials(ctx context.Context, out io.Writer, files Files, options C
 	if err != nil {
 		return err
 	}
+	if err := host.checkControlPlane("credentials"); err != nil {
+		return err
+	}
 	hostCredentials, err := files.readCredentials()
 	if err != nil {
 		return err

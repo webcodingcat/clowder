@@ -105,15 +105,22 @@ the token sees and asks (`--yes` skips the question).
 [docs/developing/specs.md](docs/developing/specs.md) explains the configuration.
 
 **More hosts** join once the configuration is applied, each with a token from `clowder
-host join-token` (it opens once, for an hour; `--ttl` up to a day):
+host join-token` (it opens once, for an hour; `--ttl` up to a day). A host has roles, as
+a Kubernetes node does: `control-plane` (votes in Raft, leads, holds the cluster's keys),
+`worker` (runs stacks and holds volume copies) and `ingress` (may take the Floating IP).
+The module gives every host all three unless its `roles` say otherwise. A token allows
+`worker,ingress` unless `--roles` says more. A token for a host of the module with its
+default roles therefore needs all three, or the join is refused:
 
 ```bash
+clowder host join-token --roles control-plane,worker,ingress   # one per host
 tofu apply ... -var 'hosts=["clowder1", "clowder2"]' \
   -var 'join_tokens={clowder1 = "<token>", clowder2 = "<token>"}'
 ```
 
-The second host waits as `passive`. With the third host, all three run stacks and vote,
-and `clowder host remove` refuses to go below three hosts. The CLI reaches the cluster only
+The second control-plane host runs stacks (if it is a worker) but does not vote. With the
+third, all three vote, and `clowder host remove` refuses to go below three control-plane
+hosts. A host's roles are fixed once it joins. The CLI reaches the cluster only
 through the `endpoints` of its context, so after joins fetch new credentials or add the
 new hosts' public addresses there. Give each cluster a Hetzner project of its own.
 
@@ -180,7 +187,7 @@ described in [docs/developing/specs.md](docs/developing/specs.md).
 | `clowder diff -f shop/` | what an apply would change (exit code 1 when something would) |
 | `clowder delete -f shop/ --with-data` | deletes the resources from the bottom up; a volume only with `--with-data` |
 | `clowder cluster status` | the configuration's generation, the hosts, the leader and the open alerts |
-| `clowder host list\|drain\|undrain\|remove` | the hosts; `drain` moves a host's stacks away for maintenance |
+| `clowder host list\|drain\|undrain\|remove` | the hosts with their roles; `drain` moves a host's stacks away for maintenance |
 | `clowder secret rekey -f shop/ --identity sealing-key` | seals the values in files again, for the cluster of the context (`--cert`: for a public sealing key) |
 | `clowder secret decrypt --identity sealing-key -f <file>` | in an emergency, reads the values of SealedSecrets with the sealing key |
 

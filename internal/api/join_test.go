@@ -6,11 +6,13 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/jointoken"
 	"github.com/webcodingcat/clowder/internal/state"
 )
@@ -52,7 +54,7 @@ func (c *testCluster) openToken(token jointoken.Token) {
 	c.t.Helper()
 	for _, cluster := range c.clusters {
 		cmd, err := state.NewCommand(state.KindAddJoinToken, time.Now(), state.CLIActor("admin"),
-			state.AddJoinToken{ID: token.ID, Hash: token.Hash(), TTL: time.Hour})
+			state.AddJoinToken{ID: token.ID, Hash: token.Hash(), TTL: time.Hour, Roles: hostrole.DefaultJoin})
 		if err != nil {
 			c.t.Fatal(err)
 		}
@@ -69,7 +71,8 @@ func TestAJoinTokenIsShownOnceAndTheStateKeepsItsHash(t *testing.T) {
 	cluster := newTestCluster(t)
 	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	var answer JoinTokenAnswer
-	if err := client.Act(context.Background(), "/v1/join-tokens", JoinTokenRequest{TTL: "2h"}, &answer); err != nil {
+	request := JoinTokenRequest{TTL: "2h", Roles: hostrole.DefaultJoin}
+	if err := client.Act(context.Background(), "/v1/join-tokens", request, &answer); err != nil {
 		t.Fatal(err)
 	}
 	token, err := jointoken.Parse(answer.Token)
@@ -85,13 +88,28 @@ func TestAJoinTokenIsShownOnceAndTheStateKeepsItsHash(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, secret, _ := strings.Cut(answer.Token, ".")
-		if current.JoinTokens[token.ID].Hash != token.Hash() || strings.Contains(string(encoded), secret) {
+		open := current.JoinTokens[token.ID]
+		if open.Hash != token.Hash() || !slices.Equal(open.Roles, hostrole.DefaultJoin) ||
+			strings.Contains(string(encoded), secret) {
 			t.Errorf("tokens %v", current.JoinTokens)
 		}
 	})
-	if err := client.Act(context.Background(), "/v1/join-tokens", JoinTokenRequest{TTL: "1s"}, &answer); err == nil ||
+	request.TTL = "1s"
+	if err := client.Act(context.Background(), "/v1/join-tokens", request, &answer); err == nil ||
 		!strings.Contains(err.Error(), "a join token lives 1m0s to 24h0m0s") {
 		t.Errorf("a token of a second: %v", err)
+	}
+}
+
+func TestAJoinTokenNamesValidRoles(t *testing.T) {
+	cluster := newTestCluster(t)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
+	for _, roles := range []hostrole.Set{nil, {"database"}, {hostrole.Ingress, hostrole.Worker}} {
+		var answer JoinTokenAnswer
+		err := client.Act(context.Background(), "/v1/join-tokens", JoinTokenRequest{TTL: "1h", Roles: roles}, &answer)
+		if statusOf(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "the join token's roles") {
+			t.Errorf("a token with the roles %v: %v", roles, err)
+		}
 	}
 }
 
@@ -142,8 +160,8 @@ func TestAFollowerHandsAJoinToTheLeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := JoinRequest{
-		Name: "node2", Underlay: netip.MustParseAddr("10.0.0.4"), PublicAddress: netip.MustParseAddr("203.0.113.4"),
-		ServerID: 42, WGPublicKey: "wg", PublicKey: make([]byte, 32),
+		Name: "node2", Roles: hostrole.DefaultJoin, Underlay: netip.MustParseAddr("10.0.0.4"),
+		PublicAddress: netip.MustParseAddr("203.0.113.4"), ServerID: 42, WGPublicKey: "wg", PublicKey: make([]byte, 32),
 	}
 	answer, err := found.Join(ctx, request)
 	if err != nil || answer.Host != 2 || answer.DataKey != "the data key" {
@@ -167,8 +185,8 @@ func TestAFollowerHandsAJoinToTheLeader(t *testing.T) {
 func TestAJoinRequestIsRecentAndWhole(t *testing.T) {
 	now := time.Now()
 	whole := JoinRequest{
-		Name: "node2", Underlay: netip.MustParseAddr("10.0.0.4"), PublicAddress: netip.MustParseAddr("203.0.113.4"),
-		ServerID: 42, WGPublicKey: "wg", PublicKey: make([]byte, 32), Nonce: make([]byte, 16), Time: now,
+		Name: "node2", Roles: hostrole.DefaultJoin, Underlay: netip.MustParseAddr("10.0.0.4"),
+		PublicAddress: netip.MustParseAddr("203.0.113.4"), ServerID: 42, WGPublicKey: "wg", PublicKey: make([]byte, 32), Nonce: make([]byte, 16), Time: now,
 	}
 	if err := CheckJoinRequest(whole, now); err != nil {
 		t.Errorf("a whole request: %v", err)
@@ -181,6 +199,7 @@ func TestAJoinRequestIsRecentAndWhole(t *testing.T) {
 		"public keys":       func(request *JoinRequest) { request.WGPublicKey = "" },
 		"underlay address":  func(request *JoinRequest) { request.Underlay = netip.Addr{} },
 		"clock is off by m": func(request *JoinRequest) { request.Time = now.Add(6 * time.Minute) },
+		"the host's roles":  func(request *JoinRequest) { request.Roles = hostrole.Set{"database"} },
 	} {
 		request := whole
 		change(&request)
@@ -215,7 +234,7 @@ func TestARefusedRemovalMovesNoLead(t *testing.T) {
 	cluster := newTestCluster(t)
 	client := cluster.client(cluster.cliCertificate(), testVersion, 0)
 	if _, err := client.Post(context.Background(), "/v1/hosts/0/remove", nil); statusOf(err) != http.StatusConflict ||
-		!strings.Contains(err.Error(), "the last that runs stacks") {
+		!strings.Contains(err.Error(), "the last control-plane host in service") {
 		t.Errorf("removing the last host: %v", err)
 	}
 	cluster.clusters[0].Read(func(*state.State) {

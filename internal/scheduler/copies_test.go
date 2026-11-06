@@ -5,16 +5,18 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
 )
 
-// hosts is cluster() with hosts 1 to last, active and with host 0's pools.
+// hosts is cluster() with hosts 1 to last, active, with every role and with
+// host 0's pools.
 func hosts(last state.HostID) *state.State {
 	current := cluster()
 	for id := state.HostID(1); id <= last; id++ {
 		current.Hosts[id] = &state.Host{
-			ID: id, Name: "node" + string(rune('0'+id)), Phase: state.Active,
+			ID: id, Name: "node" + string(rune('0'+id)), Roles: hostrole.DefaultInit, Phase: state.Active,
 			Pools: current.Hosts[0].Pools,
 		}
 	}
@@ -65,8 +67,75 @@ func TestAMissingCopyGoesToTheHostWithTheMostFreeSpace(t *testing.T) {
 	}
 }
 
+func TestAVolumeGetsItsSecondCopyOnlyWithAThirdHostForTheTiebreaker(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		thirdRoles hostrole.Set // nil: no third host
+		want       []string
+	}{
+		{"two workers alone", nil, nil},
+		{"a control-plane host", hostrole.Set{hostrole.ControlPlane}, []string{"0", "1", "t2"}},
+		{"an ingress host", hostrole.Set{hostrole.Ingress}, []string{"0", "1", "t2"}},
+		{"a worker", hostrole.DefaultJoin, []string{"0", "1", "t2"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			current := hosts(2)
+			if test.thirdRoles == nil {
+				delete(current.Hosts, 2)
+			} else {
+				current.Hosts[2].Roles = test.thirdRoles
+			}
+			runningShop(current, 2, state.VolumeCopy{Host: 0})
+			copies := Plan(current, planTime).Copies
+			switch {
+			case test.want == nil && len(copies) != 0:
+				t.Errorf("a second copy without a host for the tiebreaker: %+v", copies)
+			case test.want != nil && (len(copies) != 1 || !slices.Equal(hostsOf(copies[0]), test.want)):
+				t.Errorf("copies %+v, want %v", copies, test.want)
+			}
+		})
+	}
+}
+
+func TestAVolumeOfThreeReplicasOnTwoWorkersKeepsATiebreaker(t *testing.T) {
+	current := hosts(3)
+	current.Hosts[2].Roles = hostrole.Set{hostrole.ControlPlane}
+	delete(current.Hosts, 3)
+	runningShop(current, 3, state.VolumeCopy{Host: 0})
+	copies := Plan(current, planTime).Copies
+	if len(copies) != 1 || !slices.Equal(hostsOf(copies[0]), []string{"0", "1", "t2"}) {
+		t.Fatalf("two copies without their third vote: %+v", copies)
+	}
+	// a third worker takes the third copy, which ends the tiebreaker
+	current = hosts(3)
+	current.Hosts[2].Roles = hostrole.Set{hostrole.ControlPlane}
+	runningShop(current, 3, state.VolumeCopy{Host: 0, Synced: true}, state.VolumeCopy{Host: 1, Synced: true},
+		state.VolumeCopy{Host: 2, Tiebreaker: true})
+	copies = Plan(current, planTime).Copies
+	if len(copies) != 1 || !slices.Equal(hostsOf(copies[0]), []string{"0", "1", "3"}) {
+		t.Errorf("copies %+v", copies)
+	}
+}
+
+func TestACopyWithADiskGoesOnlyToAWorker(t *testing.T) {
+	current := hosts(3)
+	// host 1 has the most free space, but no worker role
+	current.Hosts[1].Roles = hostrole.Set{hostrole.ControlPlane, hostrole.Ingress}
+	current.Hosts[1].Pools = map[string]state.Pool{"vg-fast/thin": {SizeBytes: 500 * gib}}
+	current.Hosts[3].Pools = map[string]state.Pool{"vg-fast/thin": {SizeBytes: 50 * gib}}
+	runningShop(current, 2, state.VolumeCopy{Host: 0})
+	copies := Plan(current, planTime).Copies
+	if len(copies) != 1 || slices.ContainsFunc(copies[0].Copies, func(c state.VolumeCopy) bool {
+		return c.Host == 1 && !c.Tiebreaker
+	}) {
+		t.Errorf("copies %+v", copies)
+	}
+}
+
 func TestOneCopySyncsAtATimeInTheWholeCluster(t *testing.T) {
-	current := hosts(1)
+	current := hosts(2)
+	// host 2 holds only the tiebreakers
+	current.Hosts[2].Roles = hostrole.Set{hostrole.ControlPlane}
 	runningShop(current, 2, state.VolumeCopy{Host: 0})
 	blog := stack(current, "blog", map[string]resource.VolumeSpec{"files": volume("fast", 10, 2)})
 	host := state.HostID(1)
@@ -74,18 +143,19 @@ func TestOneCopySyncsAtATimeInTheWholeCluster(t *testing.T) {
 	files := current.Volumes["default/files"]
 	minor := 1
 	files.Status, files.Minor, files.Copies = state.VolumeOK, &minor, []state.VolumeCopy{{Host: 1, Class: "fast", Synced: true}}
-	if copies := Plan(current, planTime).Copies; len(copies) != 1 || copies[0].Name != "data" {
+	copies := Plan(current, planTime).Copies
+	if len(copies) != 1 || copies[0].Name != "data" || !slices.Equal(hostsOf(copies[0]), []string{"0", "1", "t2"}) {
 		t.Fatalf("two copies at once: %+v", copies)
 	}
 	// while data's new copy syncs, files waits
 	data := current.Volumes["default/data"]
-	data.Copies = append(data.Copies, state.VolumeCopy{Host: 1, Class: "fast"})
+	data.Copies = copies[0].Copies
 	if copies := Plan(current, planTime).Copies; len(copies) != 0 {
 		t.Errorf("a copy while another syncs: %+v", copies)
 	}
 	data.Copies[1].Synced = true
-	copies := Plan(current, planTime).Copies
-	if len(copies) != 1 || copies[0].Name != "files" || !slices.Equal(hostsOf(copies[0]), []string{"0", "1"}) {
+	copies = Plan(current, planTime).Copies
+	if len(copies) != 1 || copies[0].Name != "files" || !slices.Equal(hostsOf(copies[0]), []string{"0", "1", "t2"}) {
 		t.Errorf("once synced, files gets its copy: %+v", copies)
 	}
 }
@@ -143,7 +213,8 @@ func TestASurplusCopyGoesOnceTheOthersAreSyncedButNotWhereItsStackRuns(t *testin
 }
 
 func TestACopyOnALeavingHostIsReplacedAndThenGivenUp(t *testing.T) {
-	current := hosts(2)
+	// a fourth host, so that three take tiebreakers while host 1 leaves
+	current := hosts(3)
 	runningShop(current, 2, state.VolumeCopy{Host: 0}, state.VolumeCopy{Host: 1})
 	current.Hosts[1].Phase, current.Hosts[1].Leaving = state.Draining, true
 	copies := Plan(current, planTime).Copies
@@ -152,7 +223,8 @@ func TestACopyOnALeavingHostIsReplacedAndThenGivenUp(t *testing.T) {
 	}
 	current.Volumes["default/data"].Copies = copies[0].Copies
 	current.Volumes["default/data"].Copies[2].Synced = true
-	if copies := Plan(current, planTime).Copies; len(copies) != 1 || !slices.Equal(hostsOf(copies[0]), []string{"0", "2"}) {
+	// the copies left get their tiebreaker on the host that is left
+	if copies := Plan(current, planTime).Copies; len(copies) != 1 || !slices.Equal(hostsOf(copies[0]), []string{"0", "2", "t3"}) {
 		t.Errorf("copies %+v", copies)
 	}
 }

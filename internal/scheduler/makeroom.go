@@ -30,7 +30,7 @@ const MoveCooldown = 10 * time.Minute
 // stacks away.
 func (p *planner) makeRoom(stack *state.Stack) (moves []decision, reason string, ok bool) {
 	priority := p.stackPriority(stack.ID())
-	for _, host := range p.activeHosts(nil) {
+	for _, host := range p.stackHosts(nil) {
 		if !p.hasData(stack, host) {
 			continue
 		}
@@ -110,7 +110,7 @@ func (p *planner) fitsWhole(stack *state.Stack, host state.HostID) bool {
 // still waiting for its first stack stays, because the move would place
 // that volume, and a stack moved to make room should change nothing else.
 func (p *planner) hostWithData(stack *state.Stack, leftOut state.HostID) (stackFit, bool) {
-	for _, host := range p.activeHosts(&leftOut) {
+	for _, host := range p.stackHosts(&leftOut) {
 		if !p.fitsWhole(stack, host) || !p.hasData(stack, host) {
 			continue
 		}

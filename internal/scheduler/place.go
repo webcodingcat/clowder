@@ -8,7 +8,8 @@
 // host where its services push out services of lower effective priority,
 // one service after the other (fitStack). A host that has the stack's data
 // comes before a host that must get a copy first; a stack moves to such a
-// host (Move). copies.go keeps the copies of the volumes.
+// host (Move). Only workers take stacks and copies with a disk; any host
+// takes a tiebreaker. copies.go keeps the copies of the volumes.
 package scheduler
 
 import (
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/state"
@@ -125,7 +127,7 @@ func Plan(current *state.State, now time.Time) Decisions {
 		return cmp.Compare(planner.stackPriority(b.ID()), planner.stackPriority(a.ID()))
 	})
 	for _, stack := range unplaced {
-		decisions.add(planner.place(stack, planner.activeHosts(nil), "")...)
+		decisions.add(planner.place(stack, planner.stackHosts(nil), "")...)
 	}
 	decisions.Copies = planner.keepCopies()
 	// a pushed-out service comes back only in a pass that changes nothing
@@ -233,16 +235,35 @@ func (p *planner) take(host state.HostID, pool string, size int64) {
 	p.allocated[host][pool] = append(p.allocated[host][pool], size)
 }
 
-// takesStacks tells whether a host takes new stacks and copies: it is
-// active, and no user removes it.
+// takesStacks tells whether a host takes new stacks and copies with a
+// disk: it is an active worker, and no user removes it.
 func (p *planner) takesStacks(id state.HostID) bool {
+	host, ok := p.current.Hosts[id]
+	return ok && host.Roles.Has(hostrole.Worker) && host.Phase == state.Active && !host.Leaving
+}
+
+// takesTiebreakers tells whether a host takes new tiebreakers: it is
+// active, and no user removes it. A tiebreaker holds no data and no load,
+// so it needs no role; a host without the worker role has DRBD for it.
+func (p *planner) takesTiebreakers(id state.HostID) bool {
 	host, ok := p.current.Hosts[id]
 	return ok && host.Phase == state.Active && !host.Leaving
 }
 
-// activeHosts returns the hosts that take stacks, sorted, except the one
+// tiebreakerHosts returns the hosts that take tiebreakers, sorted.
+func (p *planner) tiebreakerHosts() []state.HostID {
+	var hosts []state.HostID
+	for _, id := range slices.Sorted(maps.Keys(p.current.Hosts)) {
+		if p.takesTiebreakers(id) {
+			hosts = append(hosts, id)
+		}
+	}
+	return hosts
+}
+
+// stackHosts returns the hosts that take stacks, sorted, except the one
 // left out.
-func (p *planner) activeHosts(leftOut *state.HostID) []state.HostID {
+func (p *planner) stackHosts(leftOut *state.HostID) []state.HostID {
 	var hosts []state.HostID
 	for _, id := range slices.Sorted(maps.Keys(p.current.Hosts)) {
 		if p.takesStacks(id) && (leftOut == nil || *leftOut != id) {
@@ -262,7 +283,7 @@ func (p *planner) keep(stack *state.Stack) []decision {
 	case state.FailsOver(p.current.Hosts[host].Phase):
 		return p.failover(stack)
 	case p.current.Hosts[host].Phase == state.Draining || p.current.Hosts[host].Leaving:
-		return p.place(stack, p.activeHosts(&host), "its host drains")
+		return p.place(stack, p.stackHosts(&host), "its host drains")
 	case stack.MoveTo != nil:
 		return p.place(stack, []state.HostID{*stack.MoveTo}, "a user asked to move it")
 	}
@@ -332,7 +353,7 @@ func (p *planner) place(stack *state.Stack, hosts []state.HostID, why string) []
 		return []decision{p.choose(stack, chosen[0], why)}
 	}
 	if len(reasons) == 0 {
-		return []decision{{placement: Placement{Stack: stack.ID()}, reason: "no active host"}}
+		return []decision{{placement: Placement{Stack: stack.ID()}, reason: "no active worker"}}
 	}
 	var each []string
 	for _, id := range slices.Sorted(maps.Keys(reasons)) {

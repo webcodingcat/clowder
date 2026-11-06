@@ -33,6 +33,25 @@ variable "hosts" {
   }
 }
 
+variable "roles" {
+  type        = map(string)
+  description = "The roles of a host (clowderd init and join --roles), by its name: a comma-separated list of control-plane, worker and ingress. A host not named has all three. The first host needs control-plane; a joining host's token must allow its roles (clowder host join-token --roles). A host without worker gets no volumes."
+  default     = {}
+  validation {
+    condition = alltrue([
+      for host, roles in var.roles :
+      contains(concat([var.name], var.hosts), host) &&
+      alltrue([for role in split(",", roles) : contains(["control-plane", "worker", "ingress"], role)]) &&
+      length(distinct(split(",", roles))) == length(split(",", roles))
+    ])
+    error_message = "Each key is the first host or one of hosts, and each value lists control-plane, worker and ingress, each at most once, without spaces."
+  }
+  validation {
+    condition     = contains(split(",", lookup(var.roles, var.name, "control-plane")), "control-plane")
+    error_message = "The first host needs the role control-plane."
+  }
+}
+
 variable "join_tokens" {
   type        = map(string)
   description = "A join token (clowder host join-token) per host of hosts that has not joined yet. It opens once and expires: a host made later needs a new one; for one that joined, the token may go."

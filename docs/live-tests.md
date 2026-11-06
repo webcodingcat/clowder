@@ -171,8 +171,9 @@ it compares within a single step.
    the namespace's login can pull the image.
 3. Two hosts join, `clowder1` and `clowder2`, each with a token from `host join-token`.
    The test writes the tokens into `/work/hosts.tfvars` and runs OpenTofu itself (the
-   binary that `up` copies to `/work/bin`). The first joined host waits as `passive`
-   without a vote; once the second joins, all three are active and vote. Each joined host
+   binary that `up` copies to `/work/bin`). The tokens allow all three roles, and every
+   host has them. The first joined host becomes active without a vote; once the second
+   joins, all three vote. Each joined host
    has its `net.json` and reaches the first host's API over the private network. The test
    drains both, keeps their tokens for `TestJoin`, and fetches new credentials from the
    first host. Their endpoints are all three hosts, so a scenario that cuts off the first

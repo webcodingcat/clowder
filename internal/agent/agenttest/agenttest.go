@@ -24,6 +24,7 @@ import (
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/datakey"
 	"github.com/webcodingcat/clowder/internal/docker"
+	"github.com/webcodingcat/clowder/internal/hostrole"
 	"github.com/webcodingcat/clowder/internal/names"
 	"github.com/webcodingcat/clowder/internal/resource"
 	"github.com/webcodingcat/clowder/internal/stackspec"
@@ -425,8 +426,8 @@ func NewCluster(t *testing.T) *Cluster {
 		Keys:        state.ClusterKeys{CACertificate: []byte("ca"), CAKey: state.Encrypted("k"), SealingKey: state.Encrypted("a")},
 		ClusterName: "prod",
 		Host: state.Host{
-			ID: 0, Name: "node0", Underlay: netip.MustParseAddr("10.0.0.2"), PublicAddress: netip.MustParseAddr("198.51.100.2"),
-			ServerID: 40, WGPublicKey: "wg", CertificateSerial: "s0", CertificateNotAfter: time.Now().AddDate(1, 0, 0),
+			ID: 0, Name: "node0", Roles: hostrole.DefaultInit, Underlay: netip.MustParseAddr("10.0.0.2"),
+			PublicAddress: netip.MustParseAddr("198.51.100.2"), ServerID: 40, WGPublicKey: "wg", CertificateSerial: "s0", CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		},
 	})
 	cluster.PutSecretIn(names.System, "hetzner", map[string]string{"token": "t"})
@@ -443,15 +444,15 @@ func NewCluster(t *testing.T) *Cluster {
 	return cluster
 }
 
-// AddHost joins an active host with a token of its own.
+// AddHost joins an active host with every role and a token of its own.
 func (c *Cluster) AddHost(id state.HostID) {
 	c.t.Helper()
 	token := "token-" + strconv.Itoa(int(id))
 	c.Apply(state.KindAddJoinToken, state.CLIActor("admin"), state.AddJoinToken{
-		ID: token, Hash: strings.Repeat("ab", 32), TTL: time.Hour,
+		ID: token, Hash: strings.Repeat("ab", 32), TTL: time.Hour, Roles: hostrole.DefaultInit,
 	})
 	c.Apply(state.KindAddHost, state.LeaderActor, state.AddHost{Token: token, Host: state.Host{
-		ID: id, Name: "node" + strconv.Itoa(int(id)), Underlay: netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
+		ID: id, Name: "node" + strconv.Itoa(int(id)), Roles: hostrole.DefaultInit, Underlay: netip.AddrFrom4([4]byte{10, 0, 0, byte(id + 2)}),
 		PublicAddress: netip.AddrFrom4([4]byte{198, 51, 100, byte(id + 2)}),
 		WGPublicKey:   "wg", CertificateSerial: "s" + strconv.Itoa(int(id)), CertificateNotAfter: time.Now().AddDate(1, 0, 0),
 		ServerID: 40 + int64(id), ServerChecked: true,
