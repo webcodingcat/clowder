@@ -17,7 +17,7 @@ A change that users see also updates their documentation: the README,
 
 ## Commands
 
-All of them run through Docker (Linux, macOS; Git Bash or WSL on Windows). Go and the linters
+All of them run through Docker (Linux, macOS; WSL on Windows). Go and the linters
 are not needed on the host.
 
 | Command | What it does |

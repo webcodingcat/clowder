@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Development commands. Everything runs in pinned Docker images, so the host
-# needs only Bash and Docker (Linux, macOS; Git Bash or WSL on Windows).
+# needs only Bash and Docker (Linux, macOS; WSL on Windows).
 # Usage: bin/dev <command>
 #   lint      golangci-lint (with gofumpt, goimports, the import rule), shellcheck,
 #             shfmt, yamllint, tofu fmt, tofu validate
@@ -40,15 +40,9 @@
 #             clowder-live-image
 #   live release <tag>  live up <tag>, live run, live down
 set -euo pipefail
-# Docker gets Windows paths from pwd -W; Git Bash must not rewrite them. Native
-# tools that take a path (git) are called after a cd instead.
-export MSYS_NO_PATHCONV=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly ROOT
-# The repository as Docker sees it (a Windows path under Git Bash).
-DOCKER_ROOT="$(cd "${ROOT}" && (pwd -W 2>/dev/null || pwd) )"
-readonly DOCKER_ROOT
 
 readonly GO_IMAGE=golang:1.27.3
 readonly LINT_IMAGE=golangci/golangci-lint:v2.15.0
@@ -120,7 +114,7 @@ locked_volume=""
 in_image() {
   local image="$1"
   shift
-  docker run --rm -v "${DOCKER_ROOT}:/src" -w /src -v "${CACHE_VOLUME}:/go" \
+  docker run --rm -v "${ROOT}:/src" -w /src -v "${CACHE_VOLUME}:/go" \
     -e GOFLAGS=-buildvcs=false "${image}" "$@"
 }
 
@@ -178,7 +172,7 @@ cmd_lint() {
 # with the committed lock file only; the providers are cached in Go's cache
 # volume, and OpenTofu's data stays out of the repository.
 tofu_validate() {
-  docker run --rm -v "${DOCKER_ROOT}:/src" -w "/src/$1" -v "${CACHE_VOLUME}:/go" \
+  docker run --rm -v "${ROOT}:/src" -w "/src/$1" -v "${CACHE_VOLUME}:/go" \
     -e TF_PLUGIN_CACHE_DIR=/go/tofu-plugins -e TF_DATA_DIR=/tmp/tofu --entrypoint sh "${TOFU_IMAGE}" \
     -c 'mkdir -p "${TF_PLUGIN_CACHE_DIR}" && tofu init -backend=false -input=false -lockfile=readonly >/dev/null && tofu validate -no-color'
 }
@@ -210,7 +204,7 @@ cmd_test() {
 # drbdadm and docker-compose (the hostname node0 is one of the hosts in the
 # resource files).
 cmd_test_tools() {
-  docker run --rm --cap-add NET_ADMIN --hostname node0 -v "${DOCKER_ROOT}:/src" -w /src \
+  docker run --rm --cap-add NET_ADMIN --hostname node0 -v "${ROOT}:/src" -w /src \
     "${DEBIAN_IMAGE}" sh test/tools/check-golden-files.sh
 }
 
@@ -246,7 +240,7 @@ cmd_package() {
   package_version="$(version)"
   for package in clowder clowderd; do
     # the image's entrypoint is nfpm itself
-    docker run --rm -v "${DOCKER_ROOT}:/src" -w /src -e VERSION="${package_version}" \
+    docker run --rm -v "${ROOT}:/src" -w /src -e VERSION="${package_version}" \
       "${NFPM_IMAGE}" package --config "packaging/${package}.yaml" --packager deb \
       --target dist/
   done
@@ -291,7 +285,7 @@ lab() {
 in_lab() {
   local image="$1"
   shift
-  docker run --rm -i --network "${HLAB_NETWORK}" -v "${DOCKER_ROOT}:/src" -w /src \
+  docker run --rm -i --network "${HLAB_NETWORK}" -v "${ROOT}:/src" -w /src \
     -v "${CACHE_VOLUME}:/go" -v "${work_volume}:/work" -e HCLOUD_ENDPOINT -e HCLOUD_TOKEN \
     -e HLAB_CONTROL -e HLAB_ACME_DIRECTORY -e HLAB_ACME_CA -e GOFLAGS=-buildvcs=false "${image}" "$@"
 }
@@ -357,7 +351,7 @@ live_lab() {
 # Globals:
 #   HLAB_NETWORK, HCLOUD_ENDPOINT, HCLOUD_TOKEN, work_volume (read)
 live_tofu() {
-  docker run --rm --network "${HLAB_NETWORK}" -v "${DOCKER_ROOT}:/src" -w /src/examples/hetzner \
+  docker run --rm --network "${HLAB_NETWORK}" -v "${ROOT}:/src" -w /src/examples/hetzner \
     -v "${CACHE_VOLUME}:/go" -v "${work_volume}:/work" -e HCLOUD_ENDPOINT -e HCLOUD_TOKEN \
     -e TF_DATA_DIR=/work/tofu -e TF_PLUGIN_CACHE_DIR=/go/tofu-plugins -e TF_IN_AUTOMATION=1 \
     --entrypoint sh "${TOFU_IMAGE}" -c "mkdir -p \"\${TF_PLUGIN_CACHE_DIR}\" \

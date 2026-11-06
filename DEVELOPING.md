@@ -28,8 +28,8 @@ files:
 
 ## Getting started
 
-You need Bash and Docker. On Windows, use Git Bash or WSL; Docker Desktop with WSL2 works.
-From PowerShell, call the script through Git's Bash: `& "C:\Program Files\Git\bin\bash.exe" bin/dev test`.
+You need Bash and Docker. On Windows, work in WSL2 with the repository on its Linux file
+system (not under `/mnt/c`); Docker Desktop with WSL integration or Docker Engine in WSL works.
 
 ```bash
 bin/dev test     # unit tests with the race detector, seconds
