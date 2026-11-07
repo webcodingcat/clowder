@@ -13,7 +13,7 @@ and what comes next. What users meet today, gaps included, is in
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values, access and recovery, still on one host | done, passes the live tests |
 | 2 | three hosts: replication, failover with fencing | done, passes the live tests |
-| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 8 done, the final live tests green, the merge next |
+| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | done, passes the live tests |
 | 2c | updates of clowder itself ([below](#phase-2c-updates-of-clowder)) | |
 | 2d | GitOps as a resource ([below](#phase-2d-gitops)) | |
 | 2e | the live tests' tooling in Go ([below](#phase-2e-the-live-tests-tooling)) | |
@@ -32,7 +32,7 @@ endpoints.
 ### How it is built
 
 The phase is one package, without intermediate states: no code exists only to bridge two
-steps. It is built on the branch `phase-2b` and goes to `main` only once it is complete.
+steps. It was built on the branch `phase-2b` and went to `main` once it was complete.
 
 - Each step got its own session, in the order below, with lint and the unit tests green
   and the full review loop (junior and senior) over what it changed.
