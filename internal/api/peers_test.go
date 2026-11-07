@@ -29,6 +29,27 @@ func TestAFollowerCatchesUpWithTheLeadersCommitIndex(t *testing.T) {
 	}
 }
 
+// A leader that has just stepped down answers 503 while the follower still
+// names it; the follower asks again until it learns the next leader.
+func TestAFollowerCatchesUpPastALeaderThatSteppedDown(t *testing.T) {
+	cluster := newTestCluster(t)
+	follower := cluster.clusters[1]
+	follower.mu.Lock()
+	follower.leaderID = workerHost // not the leader: it answers 503
+	follower.mu.Unlock()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		follower.mu.Lock()
+		follower.leaderID = 0
+		follower.mu.Unlock()
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := cluster.peers[1].CatchUpWithLeader(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The leader's refusal stays a refusal through the follower that forwards
 // the command; the caller tells it from a command that did not commit.
 func TestAProposalThroughTheLeaderKeepsItsRefusal(t *testing.T) {

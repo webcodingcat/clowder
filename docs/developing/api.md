@@ -20,6 +20,13 @@ it, and what the CLI does with the answer.
   commits as the leader, or forwards to the leader's `/v1/internal/propose`. A write
   answers with its Raft index (`X-Clowder-Index`). The client sends that index with later
   reads (`X-Clowder-Min-Index`), and the agent waits until it has applied it.
+- **Reads of resources are consistent** (`consistent`), as kube-apiserver's are. The
+  index above reaches only the reads of the same CLI process, so before it lists or gets
+  resources, a follower asks the leader for its commit index and waits until it has
+  applied it (`CatchUpWithLeader`). A command thus sees every write acknowledged before it,
+  through any agent. Such a read needs a leader and gets 503 without one. `status`, the
+  host list and the audit read the agent's own copy, so they answer without a leader; the
+  watch follows a list's index and needs no more.
 - **Waiting for a leader.** During an election, after a peer restarted, or while a new
   leader is still at its barrier, there is no leader. Every path to the leader (a command,
   the batch of an apply, a join, the catch-up) then waits for one (`waitForLeader`)

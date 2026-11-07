@@ -162,6 +162,9 @@ instead of skipping it, but this does not make mixing minor versions safe.
 - An image that needs a registry login is pulled only when its stack starts on a host, as
   that host gets the login only then. So a failover or move of such a stack waits for the
   pull. Images without a login are pulled ahead.
+- `clowder get` needs a leader: it reads what the leader has committed, so that it shows
+  every change applied before it. While there is no leader, `clowder
+  status` and `clowder host list` still answer, from the agent's own copy of the state.
 - A drained host that fails comes back active, not drained.
 - A disabled voter keeps its vote until it is removed.
 - A cluster that loses every control-plane host is lost: the workers cannot go on alone,

@@ -215,18 +215,31 @@ func (p *Peers) Progress(ctx context.Context, host state.HostID) (map[string]int
 func (p *Peers) CatchUpWithLeader(ctx context.Context) error {
 	asking, cancel := context.WithTimeout(ctx, waitTimeout)
 	defer cancel()
-	id, here, err := p.config.waitForLeader(asking)
-	switch {
-	case err != nil:
-		return err
-	case here:
-		return nil // IsLeader is true only once the barrier applied the log (raftnode.Node)
+	for {
+		id, here, err := p.config.waitForLeader(asking)
+		switch {
+		case err != nil:
+			return err
+		case here:
+			return nil // IsLeader is true only once the barrier applied the log (raftnode.Node)
+		}
+		var answer CommitIndex
+		err = p.ask(asking, http.MethodGet, id, "/v1/internal/commit-index", nil, 0, &answer)
+		if err == nil {
+			return p.config.Cluster.WaitCommitted(ctx, answer.Index)
+		}
+		// a leader that has just stepped down answers 503 while this agent
+		// still names it; the next leader is asked within the same budget
+		var statusError *StatusError
+		if !errors.As(err, &statusError) || statusError.Status != http.StatusServiceUnavailable {
+			return fmt.Errorf("ask the leader (host %d) for its commit index: %w", id, err)
+		}
+		select {
+		case <-asking.Done():
+			return fmt.Errorf("ask the leader (host %d) for its commit index: %w", id, err)
+		case <-time.After(leaderPoll):
+		}
 	}
-	var answer CommitIndex
-	if err := p.ask(asking, http.MethodGet, id, "/v1/internal/commit-index", nil, 0, &answer); err != nil {
-		return fmt.Errorf("ask the leader (host %d) for its commit index: %w", id, err)
-	}
-	return p.config.Cluster.WaitCommitted(ctx, answer.Index)
 }
 
 // SecretsOfThisHost returns the secrets that this host may read, by ID

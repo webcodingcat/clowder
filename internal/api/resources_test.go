@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/webcodingcat/clowder/internal/clusterspec"
 	"github.com/webcodingcat/clowder/internal/names"
@@ -226,5 +227,27 @@ func TestARestartGoesThroughAFollowerAndShowsInTheStatus(t *testing.T) {
 	if err := leader.Act(ctx, "/v1/stacks/default/blog/restart", RestartRequest{}, &written); statusOf(err) != http.StatusConflict ||
 		!strings.Contains(err.Error(), "no stack default/blog") {
 		t.Errorf("restart of no stack: %v", err)
+	}
+}
+
+// A read on a follower waits until the follower holds what the leader had
+// committed, so a new CLI process sees the write of the one before it.
+func TestAReadOnAFollowerWaitsForTheLeadersCommits(t *testing.T) {
+	cluster := newTestCluster(t)
+	cluster.clusters[0].setIndex(42)
+	client := cluster.client(cluster.cliCertificate(), testVersion, 1)
+	done := make(chan error, 1)
+	go func() {
+		var list ResourceList
+		done <- client.Get(context.Background(), "/v1/resources/namespace", &list)
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("answered before the follower caught up: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	cluster.clusters[1].setIndex(42) // as replication would
+	if err := <-done; err != nil {
+		t.Errorf("after the follower caught up: %v", err)
 	}
 }

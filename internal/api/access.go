@@ -239,6 +239,25 @@ func (s *Server) waitForMinIndex(r *http.Request) error {
 	return s.config.Cluster.WaitIndex(ctx, index)
 }
 
+// consistent answers a read only once this agent's state holds everything
+// that the leader had committed when the read came in, as kube-apiserver's
+// reads are consistent. A write's index reaches only the reads of the same
+// CLI process (MinIndexHeader); without this, a follower that has not
+// applied a write yet would hide it from the next command. The read then
+// needs a leader. The watch needs no more: it follows a list's index.
+func (s *Server) consistent(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), waitTimeout)
+		err := s.config.Peers.CatchUpWithLeader(ctx)
+		cancel()
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, fmt.Errorf("catch up with the leader before the read: %w", err))
+			return
+		}
+		handler(w, r)
+	}
+}
+
 func identityOf(r *http.Request) pki.Identity {
 	identity, _ := r.Context().Value(identityKey{}).(pki.Identity)
 	return identity

@@ -13,7 +13,7 @@ and what comes next. What users meet today, gaps included, is in
 | 1c | namespaces and resources: `clowder apply`, stacks with a schema of their own, volumes and secrets as resources, still on one host | done, passes the live tests |
 | 1d | encrypted values, access and recovery, still on one host | done, passes the live tests |
 | 2 | three hosts: replication, failover with fencing | done, passes the live tests |
-| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 8 done, the final live tests next |
+| 2b | closer to Kubernetes: access, configuration and secrets, host roles ([below](#phase-2b-closer-to-kubernetes)) | in progress on `phase-2b`: steps 1 to 8 done, the final live tests green, the merge next |
 | 2c | updates of clowder itself ([below](#phase-2c-updates-of-clowder)) | |
 | 2d | GitOps as a resource ([below](#phase-2d-gitops)) | |
 | 2e | the live tests' tooling in Go ([below](#phase-2e-the-live-tests-tooling)) | |
@@ -128,6 +128,21 @@ final run: in `TestRoles`, a worker that gets only the secrets of its stacks (st
 `TestRolesRecover`, a recover after the loss of two control-plane hosts in which the
 workers' stacks and copies stay (step 7). All live tests must be green; a failure goes
 back to the step it came from.
+
+The final run found one fault: `clowder get` on a follower could miss the write of the
+command before it, because a write's index reached only the reads of the same CLI process.
+Reads of resources are now consistent, as kube-apiserver's are: a follower first catches up
+with the leader's commit index, and asks the next leader if the one it knows has just
+stepped down. `clowder get` thus needs a leader; `status` and `host list` do not. After
+that, every scenario was green, in each layout. A run of lab 2's group of `three` lost its
+first host to the load of the lab (no answer from `lvs` nor from the API) and was run again
+alone.
+
+Found in the last review round, for later: a table test that every kind of command that
+any host may propose refuses another host's actor (today each handler checks it, each with
+a test of its own); `state.applyPutVolume` split into named checks, and `sameJSON` made
+explicit about a failed encoding; the lock of `controller.Fencing`'s jobs as a type of its
+own; the depguard lists of `clowderd`'s commands replaced by a test of their imports.
 
 ## Phase 2c: updates of clowder
 
